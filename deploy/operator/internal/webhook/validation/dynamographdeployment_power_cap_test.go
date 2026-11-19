@@ -4,8 +4,6 @@
 package validation_test
 
 import (
-	"fmt"
-
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -129,12 +127,12 @@ func powerCapAdmissionWant(scenario string) (webhookErrs []string, celErr string
 	const topologyErr = `spec.components: Forbidden: component topology is immutable and cannot be modified after creation: `
 	detail := apivalidation.FieldImmutableErrorMsg
 	switch scenario {
-	case "grove", "component", "Completed", "None", "image-and-cap", "migrated-component", "migrated-grove":
+	case "grove", "component", "Pending", "InProgress", "Failed", "Completed", "None", "image-and-cap", "auto-checkpoint",
+		"legacy-v1-component", "legacy-v1-grove", "migrated-component", "migrated-grove",
+		"no-hash-component", "no-hash-grove", "empty-v2-component", "empty-v2-grove":
 		return nil, ""
 	case "type-transition":
 		return nil, `spec.components[1]: Invalid value: type is immutable after it is set`
-	case "Pending", "InProgress", "Failed":
-		detail = fmt.Sprintf("cannot change power cap while rolling update is %s: workers may span generations; resolve the rollout and retry after Completed or None", scenario)
 	case "planner-old", "planner-new":
 		detail += ": live power-cap updates are unsupported for graphs with a planner component"
 	case "multinode-old", "multinode-new":
@@ -143,12 +141,8 @@ func powerCapAdmissionWant(scenario string) (webhookErrs []string, celErr string
 		detail += ": live power-cap updates are unsupported for graphs with LPX components"
 	case "graph-cap-old", "graph-cap-new":
 		detail += ": live power-cap updates are unsupported when spec.annotations sets dynamo.nvidia.com/gpu-power-limit"
-	case "auto-checkpoint":
-		detail += ": live power-cap updates are unsupported for worker worker with automatic checkpoints"
 	case "alpha-service-cap":
 		detail += ": live power-cap updates are unsupported when the v1alpha1 annotations of service inherited set dynamo.nvidia.com/gpu-power-limit"
-	case "legacy-v1-component", "legacy-v1-grove", "no-hash-component", "no-hash-grove", "empty-v2-component", "empty-v2-grove":
-		detail = "cannot change power cap until the operator records nvidia.com/current-worker-hash-v2: the worker hash is initialized or migrated on reconciliation; retry after the DGD is reconciled"
 	}
 	webhookErrs = []string{capPath + detail}
 	switch scenario {

@@ -8,6 +8,8 @@ package powercap
 import (
 	"context"
 	"os"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -86,45 +88,60 @@ func testLivePowerCaps(t *testing.T, provider string) {
 
 	t.Log("Wait for two real CPU-only worker Pods and record their identities and creation templates")
 	pods := waitForPowerCaps(t, ctx, c, dgd, "300")
-	initialUIDs := map[types.UID]bool{}
+	initialRestarts := make(map[types.UID]int32)
 	for _, pod := range pods {
-		initialUIDs[pod.UID] = true
+		initialRestarts[pod.UID] = workerRestartCount(pod)
 	}
 	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
 	initialHash := dgd.Annotations[consts.AnnotationCurrentWorkerHashV2]
 	initialDCDs := workerDCDIdentities(t, ctx, c, dgd)
+	const capKey = consts.KubeAnnotationGPUPowerLimit
 	var templates any
 	if provider == "grove" {
 		pcs := &grovev1alpha1.PodCliqueSet{}
 		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+		for _, clique := range pcs.Spec.Template.Cliques {
+			require.NotContains(t, clique.Annotations, capKey)
+		}
 		templates = pcs.Spec.DeepCopy()
 	} else {
+		dcds := &v1beta1.DynamoComponentDeploymentList{}
+		require.NoError(t, c.List(ctx, dcds, client.InNamespace(namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}))
+		require.Len(t, dcds.Items, 1)
+		require.NotContains(t, dcds.Items[0].Annotations, capKey)
+		require.NotContains(t, dcds.Items[0].Spec.PodTemplate.Annotations, capKey)
 		deployments := &appsv1.DeploymentList{}
 		require.NoError(t, c.List(ctx, deployments, client.InNamespace(namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}))
 		require.Len(t, deployments.Items, 1)
+		require.NotContains(t, deployments.Items[0].Spec.Template.Annotations, capKey)
 		templates = deployments.Items[0].Spec.Template.DeepCopy()
 	}
 
-	t.Log("Edit 300 to 350 W without replacing warm Pods or changing creation templates")
-	previous := dgd.DeepCopy()
-	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-	require.NoError(t, c.Patch(ctx, dgd, client.MergeFrom(previous)))
-	pods = waitForPowerCaps(t, ctx, c, dgd, "350")
-	for _, pod := range pods {
-		require.True(t, initialUIDs[pod.UID], "cap edit must preserve Pod UIDs")
-	}
-	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
-	require.Equal(t, initialHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	requireNoWorkerReplacement(t, ctx, c, dgd, initialDCDs)
-	if provider == "grove" {
-		pcs := &grovev1alpha1.PodCliqueSet{}
-		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
-		require.Equal(t, templates, pcs.Spec.DeepCopy())
-	} else {
-		deployments := &appsv1.DeploymentList{}
-		require.NoError(t, c.List(ctx, deployments, client.InNamespace(namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}))
-		require.Len(t, deployments.Items, 1)
-		require.Equal(t, templates, deployments.Items[0].Spec.Template.DeepCopy())
+	t.Log("Edit the cap repeatedly without replacing warm Pods or changing creation templates")
+	const finalCap = "340"
+	for _, cap := range []string{"350", "325", finalCap} {
+		previous := dgd.DeepCopy()
+		dgd.Spec.Components[0].PodTemplate.Annotations[capKey] = cap
+		require.NoError(t, c.Patch(ctx, dgd, client.MergeFrom(previous)))
+		pods = waitForPowerCaps(t, ctx, c, dgd, cap)
+		for _, pod := range pods {
+			restarts, existed := initialRestarts[pod.UID]
+			require.True(t, existed, "cap edit must preserve Pod UIDs")
+			require.Equal(t, restarts, workerRestartCount(pod), "cap edit must preserve the worker process")
+		}
+		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+		require.Equal(t, initialHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+		requireNoWorkerReplacement(t, ctx, c, dgd, initialDCDs)
+		if provider == "grove" {
+			pcs := &grovev1alpha1.PodCliqueSet{}
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+			require.Equal(t, templates, pcs.Spec.DeepCopy())
+		} else {
+			deployments := &appsv1.DeploymentList{}
+			require.NoError(t, c.List(ctx, deployments, client.InNamespace(namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}))
+			require.Len(t, deployments.Items, 1)
+			require.Equal(t, templates, deployments.Items[0].Spec.Template.DeepCopy())
+		}
 	}
 
 	t.Log("Delete one Pod: a real controller must replace it, retain the survivor and preserve its patched annotation")
@@ -149,7 +166,7 @@ func testLivePowerCaps(t *testing.T, provider string) {
 		}
 		foundSurvivor := false
 		for _, pod := range current.Items {
-			if pod.UID == deleted.UID || pod.Annotations[consts.KubeAnnotationGPUPowerLimit] != "350" {
+			if pod.UID == deleted.UID || pod.Annotations[capKey] != finalCap {
 				return false, nil
 			}
 			foundSurvivor = foundSurvivor || pod.UID == survivor.UID
@@ -194,13 +211,52 @@ func testLivePowerCaps(t *testing.T, provider string) {
 				observed, ok := event.Object.(*corev1.Pod)
 				require.True(t, ok, "expected survivor Pod event")
 				require.Equal(t, survivor.UID, observed.UID)
-				require.Equal(t, "350", observed.Annotations[consts.KubeAnnotationGPUPowerLimit], "Grove must never revert the survivor, even transiently")
+				require.Equal(t, finalCap, observed.Annotations[capKey], "Grove must never revert the survivor, even transiently")
 				barrierSeen = observed.Annotations[barrierKey] == string(deleted.UID)
 			}
 		}
 	}
-	waitForPowerCaps(t, ctx, c, dgd, "350")
+	waitForPowerCaps(t, ctx, c, dgd, finalCap)
 	requireNoWorkerReplacement(t, ctx, c, dgd, initialDCDs)
+
+	t.Log("Change the image and cap together, and verify the replacement workers receive the new cap")
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	before := dgd.DeepCopy()
+	const nextImage = "busybox:1.36"
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = nextImage
+	dgd.Spec.Components[0].PodTemplate.Annotations[capKey] = "325"
+	require.NoError(t, c.Patch(ctx, dgd, client.MergeFrom(before)))
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
+		current := &corev1.PodList{}
+		if err := c.List(ctx, current, client.InNamespace(namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}); err != nil {
+			return false, err
+		}
+		if len(current.Items) != 2 {
+			return false, nil
+		}
+		for _, pod := range current.Items {
+			if !slices.ContainsFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+				return container.Name == consts.MainContainerName && container.Image == nextImage
+			}) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}))
+	waitForPowerCaps(t, ctx, c, dgd, "325")
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	require.NotEqual(t, initialHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+}
+
+func workerRestartCount(pod corev1.Pod) int32 {
+	var count int32
+	for _, container := range pod.Status.ContainerStatuses {
+		if container.Name == consts.MainContainerName {
+			count = container.RestartCount
+			break
+		}
+	}
+	return count
 }
 
 // workerDCDIdentities records every DCD of the graph; Grove graphs legitimately have none.
@@ -229,6 +285,8 @@ func requireNoWorkerReplacement(t *testing.T, ctx context.Context, c client.Clie
 
 func waitForPowerCaps(t *testing.T, ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment, cap string) []corev1.Pod {
 	t.Helper()
+	watts, err := strconv.ParseInt(cap, 10, 64)
+	require.NoError(t, err)
 	var matching []corev1.Pod
 	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
 		pods := &corev1.PodList{}
@@ -251,12 +309,16 @@ func waitForPowerCaps(t *testing.T, ctx context.Context, c client.Client, dgd *v
 			return false, nil
 		}
 
-		// Preservation checks are meaningful only after the workload controller has processed this generation.
+		// Wait for both controllers to observe the desired generation.
 		if current.Status.ObservedGeneration != current.Generation {
 			return false, nil
 		}
 		condition := meta.FindStatusCondition(current.Status.Conditions, "PowerCapPropagationReady")
 		if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != current.Generation {
+			return false, nil
+		}
+		reported := current.Status.Components["worker"].GPUPowerLimitWatts
+		if reported == nil || *reported != watts {
 			return false, nil
 		}
 		matching = pods.Items

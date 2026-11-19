@@ -443,17 +443,5 @@ func livePowerCapUpdateDetail(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeploy
 			return apivalidation.FieldImmutableErrorMsg + ": " + reason
 		}
 	}
-	if oldDGD.Status.RollingUpdate != nil {
-		switch phase := oldDGD.Status.RollingUpdate.Phase; phase {
-		case nvidiacomv1beta1.RollingUpdatePhasePending, nvidiacomv1beta1.RollingUpdatePhaseInProgress, nvidiacomv1beta1.RollingUpdatePhaseFailed:
-			return fmt.Sprintf("cannot change power cap while rolling update is %s: workers may span generations; resolve the rollout and retry after Completed or None", phase)
-		}
-	}
-
-	// Preservation proves a cap-only edit against the recorded v2 worker hash. Without one, a legacy Grove
-	// PodCliqueSet would roll and a v1-only graph has not migrated, so every graph waits for its first record.
-	if oldDGD.Annotations[consts.AnnotationCurrentWorkerHashV2] == "" {
-		return "cannot change power cap until the operator records " + consts.AnnotationCurrentWorkerHashV2 + ": the worker hash is initialized or migrated on reconciliation; retry after the DGD is reconciled"
-	}
 	return ""
 }

@@ -1,16 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package power propagates live GPU power caps from a DynamoGraphDeployment to its running worker Pods.
-// The DGD controller keeps worker templates and identities for cap-only edits; this controller patches
-// the Pods those templates already created and reports the PowerCapPropagationReady condition.
+// Package power delivers GPU power caps from a DynamoGraphDeployment to its live worker Pods
+// and reports annotation convergence through the PowerCapPropagationReady condition.
 package power
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -19,7 +17,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,20 +33,18 @@ const ConditionType = "PowerCapPropagationReady"
 var conditionRank = map[string]int{
 	"PodAnnotationsMatch":   0,
 	"PodAnnotationMismatch": 1,
-	"PodObservationFailed":  2,
-	"PodPatchFailed":        3,
+	"PodPatchFailed":        2,
+	"PodObservationFailed":  3,
 }
 
 // reconciler patches live worker Pod cap annotations for one DGD per request.
 type reconciler struct {
-	client       client.Client
-	groveEnabled bool
+	client client.Client
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
-// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch
 
 // Reconcile observes the DGD's worker Pods, repairs their cap annotations and applies the condition.
 func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -69,38 +64,18 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, applyCondition(ctx, r.client, dgd, nil)
 	}
 
-	// A stored Grove graph without the Grove integration has no observable update state; the DGD
-	// program rejects it as unavailable, so its Pods and condition are left untouched as well.
-	if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "grove" && !r.groveEnabled {
-		return ctrl.Result{}, nil
-	}
-
 	condition, propagationErr := r.propagate(ctx, dgd, caps)
 	applyErr := applyCondition(ctx, r.client, dgd, &condition)
 	return ctrl.Result{}, errors.Join(propagationErr, applyErr)
 }
 
 // propagate reports the observation before writes; a later observation proves convergence.
-// A Grove PodCliqueSet that Grove has not acknowledged or finished defers all Pod reads and writes.
-// dgd must be non-nil and caps non-empty; a Grove graph requires the Grove integration to be enabled.
+// dgd must be non-nil and caps non-empty.
 func (r *reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, caps map[string]string) (metav1.Condition, error) {
-	condition := metav1.Condition{Type: ConditionType, ObservedGeneration: dgd.Generation, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", Message: "No live workers were observed"}
+	condition := metav1.Condition{Type: ConditionType, ObservedGeneration: dgd.Generation, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", Message: "All live worker Pod annotations match"}
+	var observedWorkers bool
 	var failures []error
 	logger := log.FromContext(ctx)
-
-	// Wait for the observed Grove update to finish; the PodCliqueSet watch wakes the next pass.
-	if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "grove" {
-		waiting, err := r.groveUpdatePending(ctx, dgd)
-		if err != nil {
-			logger.Error(err, "Failed to observe the power-cap PodCliqueSet")
-			degrade(&condition, metav1.ConditionUnknown, "PodObservationFailed", err.Error())
-			return condition, err
-		}
-		if waiting {
-			condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, "WaitingForWorkerUpdate", "Worker Pod annotations wait until Grove acknowledges and finishes the PodCliqueSet update"
-			return condition, nil
-		}
-	}
 
 	// The Dynamo graph and component labels associate a Pod with its DGD component; the lowering
 	// hierarchy that created the Pod is irrelevant. Observe each capped component in a stable order.
@@ -118,13 +93,11 @@ func (r *reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDepl
 		slices.SortFunc(pods, func(a, b corev1.Pod) int { return strings.Compare(a.Name, b.Name) })
 		for i := range pods {
 			pod := &pods[i]
-			if terminal(pod) || !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
+			if !liveWorkerPod(pod) {
 				continue
 			}
+			observedWorkers = true
 			if pod.Annotations[consts.KubeAnnotationGPUPowerLimit] == cap {
-				if condition.Status == metav1.ConditionTrue {
-					condition.Message = "All live worker Pod annotations match"
-				}
 				continue
 			}
 			degrade(&condition, metav1.ConditionFalse, "PodAnnotationMismatch", "Worker Pod annotations are converging")
@@ -144,24 +117,16 @@ func (r *reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDepl
 			}
 		}
 	}
+	if !observedWorkers && len(failures) == 0 {
+		condition.Status, condition.Reason, condition.Message = metav1.ConditionUnknown, "NoWorkersObserved", "No live workers were observed"
+	}
 	return condition, errors.Join(failures...)
 }
 
-// groveUpdatePending observes every PodCliqueSet labeled for this graph, regardless of name or owner.
-// dgd must be non-nil.
-func (r *reconciler) groveUpdatePending(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment) (bool, error) {
-	sets := &grovev1alpha1.PodCliqueSetList{}
-	if err := r.client.List(ctx, sets, client.InNamespace(dgd.Namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}); err != nil {
-		return false, fmt.Errorf("list PodCliqueSets for %s: %w", client.ObjectKeyFromObject(dgd), err)
-	}
-
-	// Every matching resource must acknowledge and finish its update.
-	for _, pcs := range sets.Items {
-		if pcs.Status.ObservedGeneration == nil || *pcs.Status.ObservedGeneration != pcs.Generation || (pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil) {
-			return true, nil
-		}
-	}
-	return false, nil
+// liveWorkerPod reports annotation eligibility. pod must be non-nil.
+func liveWorkerPod(pod *corev1.Pod) bool {
+	return pod.DeletionTimestamp.IsZero() && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed &&
+		dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType])
 }
 
 // degrade records an outcome only when it outranks the condition's current reason.

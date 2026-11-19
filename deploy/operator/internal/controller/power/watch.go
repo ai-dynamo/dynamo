@@ -11,13 +11,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -32,21 +28,12 @@ var podMembershipLabels = []string{
 // Setup registers the power-cap propagation controller. The caller registers the
 // podcontroller.ComponentIndex Pod index the controller queries. config and runtimeConfig must be non-nil.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
-	r := &reconciler{client: mgr.GetClient(), groveEnabled: runtimeConfig.Gate.Enabled(features.Grove)}
-
-	// No timed retry covers waiting, so every input that can change the outcome wakes the DGD.
-	b := ctrl.NewControllerManagedBy(mgr).
+	return ctrl.NewControllerManagedBy(mgr).
 		Named("dynamographdeployment-power").
 		For(&v1beta1.DynamoGraphDeployment{}, builder.WithPredicates(dgdPredicate())).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
-		Watches(&corev1.Pod{}, podcontroller.EnqueueOwners(podcontroller.DGDName), builder.WithPredicates(podPredicate()))
-	if r.groveEnabled {
-		b = b.Watches(&grovev1alpha1.PodCliqueSet{}, podcontroller.EnqueueOwners(func(obj client.Object) (string, bool) {
-			name := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-			return name, name != ""
-		}), builder.WithPredicates(podCliqueSetPredicate()))
-	}
-	return b.Complete(r)
+		Watches(&corev1.Pod{}, podcontroller.EnqueueOwners(podcontroller.DGDName), builder.WithPredicates(podPredicate())).
+		Complete(&reconciler{client: mgr.GetClient()})
 }
 
 // dgdPredicate admits DGD changes to desired inputs. A status-only update, including this
@@ -55,7 +42,7 @@ func dgdPredicate() predicate.Predicate {
 	return predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{})
 }
 
-// podPredicate admits Pod changes that can change label membership, the cap or terminality.
+// podPredicate admits changes to Pod membership, the cap, or annotation eligibility.
 func podPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -66,29 +53,7 @@ func podPredicate() predicate.Predicate {
 			}
 			return oldPod.Annotations[consts.KubeAnnotationGPUPowerLimit] != newPod.Annotations[consts.KubeAnnotationGPUPowerLimit] ||
 				slices.ContainsFunc(podMembershipLabels, func(key string) bool { return oldPod.Labels[key] != newPod.Labels[key] }) ||
-				terminal(oldPod) != terminal(newPod)
+				liveWorkerPod(oldPod) != liveWorkerPod(newPod)
 		},
 	}
-}
-
-// podCliqueSetPredicate admits PodCliqueSet changes that can open or close the Grove update barrier.
-func podCliqueSetPredicate() predicate.Predicate {
-	return predicate.Funcs{
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldPCS, oldOK := e.ObjectOld.(*grovev1alpha1.PodCliqueSet)
-			newPCS, newOK := e.ObjectNew.(*grovev1alpha1.PodCliqueSet)
-			if !oldOK || !newOK {
-				return false
-			}
-			return oldPCS.Generation != newPCS.Generation ||
-				oldPCS.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPCS.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
-				!apiequality.Semantic.DeepEqual(oldPCS.Status.ObservedGeneration, newPCS.Status.ObservedGeneration) ||
-				!apiequality.Semantic.DeepEqual(oldPCS.Status.UpdateProgress, newPCS.Status.UpdateProgress)
-		},
-	}
-}
-
-// terminal reports a Pod that will not run again. pod must be non-nil.
-func terminal(pod *corev1.Pod) bool {
-	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 }

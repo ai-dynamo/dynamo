@@ -102,9 +102,8 @@ func applyComponentRuntimeStatus(
 	status.GPUPowerLimitWatts = runtimeStatus.GPUPowerLimitWatts
 }
 
-// applyDesiredPowerCaps reports each live-capped worker's desired cap. A cap-only edit keeps the
-// previous worker template, so the provider-resolved status still shows its cap; the power
-// controller propagates the desired cap to the running Pods. dgd must be non-nil.
+// applyDesiredPowerCaps projects DGD intent after provider-derived status, because
+// generated templates omit managed caps. dgd must be non-nil.
 func applyDesiredPowerCaps(
 	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

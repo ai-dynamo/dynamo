@@ -49,7 +49,7 @@ func startPowerController(t *testing.T, env *operatorenv.TestEnv, restricted str
 	})
 }
 
-// testPod is a labeled worker Pod of the DGD's worker component created from a retained 300 W template.
+// testPod is a labeled worker Pod whose last observed cap is 300 W.
 func testPod(dgd *v1beta1.DynamoGraphDeployment, name string) *corev1.Pod {
 	return &corev1.Pod{Name: name, Namespace: dgd.Namespace, Labels: map[string]string{
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker",
@@ -112,47 +112,30 @@ func TestControllerRepairsLabeledWorkerPods(t *testing.T) {
 	require.Eventually(t, func() bool { return podCapIs(c, moved, "350") }, waitTimeout, waitInterval)
 }
 
-func TestControllerWaitsForGroveUpdate(t *testing.T) {
-	t.Log("Start only the power controller and store a Grove graph edited to 350 W")
+func TestControllerPropagatesDuringGroveUpdate(t *testing.T) {
+	t.Log("Create a Grove graph and an unacknowledged PodCliqueSet")
 	env := sharedEnv.ForTest(t)
 	c := env.Client()
-	startPowerController(t, env, env.Namespace())
 	dgd := testDGD(env.Namespace(), "grove")
 	dgd.UID, dgd.Generation = "", 0
-	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 	require.NoError(t, c.Create(t.Context(), dgd))
-
-	t.Log("Grove has not acknowledged the DGD's PodCliqueSet; its worker Pod still carries 300 W")
 	pcs := &grovev1alpha1.PodCliqueSet{Name: "legacy-pcs", Namespace: env.Namespace(), Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}}
 	require.NoError(t, c.Create(t.Context(), pcs))
 	pod := testPod(dgd, "worker")
 	require.NoError(t, c.Create(t.Context(), pod))
-	require.Eventually(t, func() bool {
-		reason, _, err := conditionReason(c, dgd)
-		return err == nil && reason == "WaitingForWorkerUpdate"
-	}, waitTimeout, waitInterval)
-	require.Never(t, func() bool { return !podCapIs(c, pod, "300") }, 2*time.Second, waitInterval)
+	startPowerController(t, env, env.Namespace())
 
-	t.Log("Grove acknowledges and finishes the update; the PodCliqueSet event releases the repair")
-	// The test CRD has no status subresource, so this update itself advances the generation by one.
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
-	pcs.Status.ObservedGeneration = new(pcs.Generation + 1)
-	require.NoError(t, c.Update(t.Context(), pcs))
-	require.Eventually(t, func() bool { return podCapIs(c, pod, "350") }, waitTimeout, waitInterval)
-
-	t.Log("A new unacknowledged generation waits again, and deleting that PodCliqueSet ends the wait")
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
-	pcs.Spec.Replicas = 2
-	require.NoError(t, c.Update(t.Context(), pcs))
-	require.Eventually(t, func() bool {
-		reason, _, err := conditionReason(c, dgd)
-		return err == nil && reason == "WaitingForWorkerUpdate"
-	}, waitTimeout, waitInterval)
-	require.NoError(t, c.Delete(t.Context(), pcs))
+	t.Log("Change the desired cap during the update and observe delivery without a PodCliqueSet status event")
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
+	before := dgd.DeepCopy()
+	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+	require.NoError(t, c.Patch(t.Context(), dgd, client.MergeFrom(before)))
 	require.Eventually(t, func() bool {
 		reason, present, err := conditionReason(c, dgd)
-		return err == nil && present && reason != "WaitingForWorkerUpdate"
+		return err == nil && present && reason == "PodAnnotationsMatch" && podCapIs(c, pod, "350")
 	}, waitTimeout, waitInterval)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+	require.Nil(t, pcs.Status.ObservedGeneration)
 }
 
 func TestControllerIgnoresFilteredNamespace(t *testing.T) {

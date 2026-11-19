@@ -8,7 +8,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -48,38 +48,6 @@ func TestDGDPredicateIgnoresStatusOutput(t *testing.T) {
 	}
 }
 
-func TestPodCliqueSetPredicateAdmitsStatusOnlyBarrierChanges(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		change func(*grovev1alpha1.PodCliqueSet)
-		want   bool
-	}{
-		{name: "observedGeneration acknowledged", change: func(pcs *grovev1alpha1.PodCliqueSet) { pcs.Status.ObservedGeneration = new(int64(3)) }, want: true},
-		{name: "update started", change: func(pcs *grovev1alpha1.PodCliqueSet) {
-			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Unix(1, 0)}
-		}, want: true},
-		{name: "update ended", change: func(pcs *grovev1alpha1.PodCliqueSet) {
-			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Unix(1, 0), UpdateEndedAt: new(metav1.Unix(2, 0))}
-		}, want: true},
-		{name: "graph label", change: func(pcs *grovev1alpha1.PodCliqueSet) {
-			pcs.Labels = map[string]string{consts.KubeLabelDynamoGraphDeploymentName: "other"}
-		}, want: true},
-		{name: "unrelated status", change: func(pcs *grovev1alpha1.PodCliqueSet) { pcs.Status.Replicas = 2 }},
-		{name: "unrelated metadata", change: func(pcs *grovev1alpha1.PodCliqueSet) { pcs.Labels = map[string]string{"unrelated": "change"} }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Change one PodCliqueSet field while its generation stays fixed, as Grove's status writes do")
-			before := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: "default", Generation: 3, Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(2))}}
-			after := before.DeepCopy()
-			tc.change(after)
-			require.Equal(t, before.Generation, after.Generation)
-
-			t.Log("Only barrier inputs wake the controller")
-			require.Equal(t, tc.want, podCliqueSetPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
-		})
-	}
-}
-
 func TestPodPredicateFollowsLabelsNotOwners(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -90,6 +58,7 @@ func TestPodPredicateFollowsLabelsNotOwners(t *testing.T) {
 		{name: "moved to another graph", change: func(pod *corev1.Pod) { pod.Labels[consts.KubeLabelDynamoGraphDeploymentName] = "other" }, want: true},
 		{name: "component type changed", change: func(pod *corev1.Pod) { pod.Labels[consts.KubeLabelDynamoComponentType] = "frontend" }, want: true},
 		{name: "cap annotation changed", change: func(pod *corev1.Pod) { pod.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350" }, want: true},
+		{name: "deleting", change: func(pod *corev1.Pod) { pod.DeletionTimestamp = new(metav1.Now()) }, want: true},
 		{name: "terminated", change: func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, want: true},
 		{name: "adopted by another owner", change: func(pod *corev1.Pod) {
 			pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "grove.io/v1beta1", Kind: "PodClique", Name: "clique", UID: "clique-uid", Controller: new(true)}}

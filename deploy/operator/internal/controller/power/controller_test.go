@@ -5,6 +5,7 @@ package power
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -18,11 +19,9 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -76,7 +75,7 @@ func testWorkerPod(dgd *v1beta1.DynamoGraphDeployment, provider string) *corev1.
 
 func TestPropagate(t *testing.T) {
 	for _, provider := range []string{"component", "grove"} {
-		for _, scenario := range []string{"repair", "matching", "empty", "terminal", "non-worker", "unlabeled-component", "other-graph", "list-error", "patch-error", "conflict", "deleted"} {
+		for _, scenario := range []string{"repair", "matching", "empty", "pending", "deleting", "terminal", "non-worker", "unlabeled-component", "other-graph", "list-error", "patch-error", "conflict", "deleted"} {
 			t.Run(provider+"/"+scenario, func(t *testing.T) {
 				t.Log("Observe labeled workers after a cap edit to 350 W")
 				dgd := testDGD("default", provider)
@@ -85,6 +84,12 @@ func TestPropagate(t *testing.T) {
 				switch scenario {
 				case "matching":
 					pod.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+				case "pending":
+					pod.Status.Phase = corev1.PodPending
+					delete(pod.Annotations, consts.KubeAnnotationGPUPowerLimit)
+				case "deleting":
+					pod.DeletionTimestamp = new(metav1.Now())
+					pod.Finalizers = []string{"test.example/finalizer"}
 				case "terminal":
 					pod.Status.Phase = corev1.PodSucceeded
 				case "non-worker":
@@ -101,9 +106,7 @@ func TestPropagate(t *testing.T) {
 				ownerReads := 0
 				c := testClient(t).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
 					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-						if _, ok := obj.(*grovev1alpha1.PodCliqueSet); !ok {
-							ownerReads++
-						}
+						ownerReads++
 						return c.Get(ctx, key, obj, opts...)
 					},
 					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -113,6 +116,18 @@ func TestPropagate(t *testing.T) {
 						return c.List(ctx, list, opts...)
 					},
 					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						data, err := patch.Data(obj)
+						require.NoError(t, err)
+						var update struct {
+							Metadata struct {
+								UID             string
+								ResourceVersion string
+							}
+						}
+						require.NoError(t, json.Unmarshal(data, &update))
+						require.Equal(t, string(pod.UID), update.Metadata.UID)
+						require.NotEmpty(t, update.Metadata.ResourceVersion)
+						require.Equal(t, obj.GetResourceVersion(), update.Metadata.ResourceVersion)
 						switch scenario {
 						case "patch-error":
 							return errors.New("patch denied")
@@ -124,7 +139,7 @@ func TestPropagate(t *testing.T) {
 						return c.Patch(ctx, obj, patch, opts...)
 					},
 				}).Build()
-				r := &reconciler{client: c, groveEnabled: true}
+				r := &reconciler{client: c}
 				condition, propagationErr := r.propagate(t.Context(), dgd, dynamo.DesiredWorkerPowerCaps(dgd))
 
 				t.Log("Report the worst Pod outcome and retry only what no watch event will deliver; no owner is ever read")
@@ -146,13 +161,18 @@ func TestPropagate(t *testing.T) {
 				case "deleted":
 					require.Equal(t, "PodAnnotationMismatch", condition.Reason)
 					require.NoError(t, propagationErr)
-				case "non-worker", "unlabeled-component", "other-graph", "terminal":
+				case "non-worker", "unlabeled-component", "other-graph", "terminal", "deleting":
 					t.Log("A Pod outside the label contract or no longer running keeps its annotation")
-					require.Equal(t, metav1.ConditionTrue, condition.Status)
+					require.Equal(t, metav1.ConditionUnknown, condition.Status)
+					require.Equal(t, "NoWorkersObserved", condition.Reason)
 					require.NoError(t, propagationErr)
 					require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
 					require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
-				case "repair":
+				case "empty":
+					require.Equal(t, metav1.ConditionUnknown, condition.Status)
+					require.Equal(t, "NoWorkersObserved", condition.Reason)
+					require.NoError(t, propagationErr)
+				case "repair", "pending":
 					require.Equal(t, "PodAnnotationMismatch", condition.Reason)
 					require.NoError(t, propagationErr)
 					require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
@@ -169,6 +189,35 @@ func TestPropagate(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestPropagateOverlappingWorkerGenerations(t *testing.T) {
+	t.Log("Observe the old and new generations of one worker component during rollout")
+	dgd := testDGD("default", consts.WorkloadProviderGrove)
+	oldPod := testWorkerPod(dgd, consts.WorkloadProviderGrove)
+	oldPod.Labels[consts.KubeLabelDynamoWorkerHash] = "old"
+	newPod := oldPod.DeepCopy()
+	newPod.Name, newPod.UID = "new-worker", "new-uid"
+	newPod.Labels[consts.KubeLabelDynamoWorkerHash] = "new"
+	newPod.Status.Phase = corev1.PodPending
+	const capKey = consts.KubeAnnotationGPUPowerLimit
+	delete(newPod.Annotations, capKey)
+	dgd.Spec.Components[0].PodTemplate.Annotations[capKey] = "350"
+	c := testClient(t).WithObjects(dgd, oldPod, newPod).Build()
+	r := &reconciler{client: c}
+
+	t.Log("Deliver the new cap to both generations and wait for the next observation to report convergence")
+	caps := dynamo.DesiredWorkerPowerCaps(dgd)
+	condition, err := r.propagate(t.Context(), dgd, caps)
+	require.NoError(t, err)
+	require.Equal(t, "PodAnnotationMismatch", condition.Reason)
+	for _, pod := range []*corev1.Pod{oldPod, newPod} {
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+		require.Equal(t, "350", pod.Annotations[capKey])
+	}
+	condition, err = r.propagate(t.Context(), dgd, caps)
+	require.NoError(t, err)
+	require.Equal(t, metav1.ConditionTrue, condition.Status)
 }
 
 func TestPropagateMixedPodOutcomes(t *testing.T) {
@@ -264,129 +313,4 @@ func TestPropagateMultipleCaps(t *testing.T) {
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(second), second))
 	require.Equal(t, "350", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 	require.Equal(t, "325", second.Annotations[consts.KubeAnnotationGPUPowerLimit])
-}
-
-func TestPropagateGroveBarrier(t *testing.T) {
-	for _, state := range []string{"missing-observed-generation", "stale-observed-generation", "update-in-progress", "finished", "unlabeled", "absent", "read-error", "coexisting"} {
-		t.Run(state, func(t *testing.T) {
-			t.Log("Observe graph-labeled PodCliqueSets in the given update state")
-			dgd := testDGD("default", "grove")
-			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-			pod := testWorkerPod(dgd, "grove")
-			pcs := &grovev1alpha1.PodCliqueSet{
-				Name: "legacy-name", Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}, Namespace: dgd.Namespace, UID: "pcs-uid", Generation: 3,
-				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)},
-			}
-			switch state {
-			case "stale-observed-generation":
-				pcs.Status.ObservedGeneration = new(int64(2))
-			case "update-in-progress":
-				pcs.Status.ObservedGeneration = new(int64(3))
-				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
-			case "finished", "unlabeled", "coexisting":
-				pcs.Status.ObservedGeneration = new(int64(3))
-			}
-			if state == "unlabeled" {
-				pcs.Status.ObservedGeneration = nil
-				pcs.Labels = nil
-			}
-			objects := []client.Object{dgd, pod}
-			if state != "absent" {
-				objects = append(objects, pcs)
-			}
-			if state == "coexisting" {
-				other := pcs.DeepCopy()
-				other.Name = "new-name"
-				other.UID = "new-uid"
-				other.Status.ObservedGeneration = nil
-				objects = append(objects, other)
-			}
-			podReads := 0
-			c := testClient(t).WithObjects(objects...).WithStatusSubresource(&grovev1alpha1.PodCliqueSet{}).WithInterceptorFuncs(interceptor.Funcs{
-				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-					if _, ok := list.(*grovev1alpha1.PodCliqueSetList); ok {
-						if state == "read-error" {
-							return errors.New("PodCliqueSet read denied")
-						}
-						return c.List(ctx, list, opts...)
-					}
-					podReads++
-					return c.List(ctx, list, opts...)
-				},
-			}).Build()
-			r := &reconciler{client: c, groveEnabled: true}
-			condition, propagationErr := r.propagate(t.Context(), dgd, dynamo.DesiredWorkerPowerCaps(dgd))
-
-			t.Log("An unfinished update defers all Pod reads; the PodCliqueSet watch, not a timer, wakes the next pass")
-			switch state {
-			case "missing-observed-generation", "stale-observed-generation", "update-in-progress", "coexisting":
-				require.Zero(t, podReads)
-				require.Equal(t, metav1.ConditionFalse, condition.Status)
-				require.Equal(t, "WaitingForWorkerUpdate", condition.Reason)
-				require.NoError(t, propagationErr)
-			case "read-error":
-				require.Zero(t, podReads)
-				require.Equal(t, "PodObservationFailed", condition.Reason)
-				require.Error(t, propagationErr)
-			default:
-				require.Equal(t, 1, podReads)
-				require.NotEqual(t, "WaitingForWorkerUpdate", condition.Reason)
-			}
-		})
-	}
-}
-
-func TestReconcileSkipsUnobservableGraphs(t *testing.T) {
-	for _, scenario := range []string{"no-caps", "grove-disabled"} {
-		t.Run(scenario, func(t *testing.T) {
-			t.Log("Store a worker Pod at 300 W under a graph this controller must not observe")
-			provider := "component"
-			if scenario == "grove-disabled" {
-				provider = "grove"
-			}
-			dgd := testDGD("default", provider)
-			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-			if scenario == "no-caps" {
-				delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
-			}
-			pod := testWorkerPod(dgd, provider)
-			podReads, podPatches, statusApplies := 0, 0, 0
-			c := testClient(t).WithObjects(dgd, pod).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
-				SubResourceApply: func(ctx context.Context, c client.Client, subResourceName string, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
-					statusApplies++
-					return c.SubResource(subResourceName).Apply(ctx, obj, opts...)
-				},
-				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-					if _, ok := list.(*corev1.PodList); ok {
-						podReads++
-					}
-					return c.List(ctx, list, opts...)
-				},
-				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-					if _, ok := obj.(*corev1.Pod); ok {
-						podPatches++
-					}
-					return c.Patch(ctx, obj, patch, opts...)
-				},
-			}).Build()
-
-			t.Log("Reconcile with Grove disabled, as after an operator restart without the Grove integration")
-			result, err := (&reconciler{client: c, groveEnabled: false}).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
-			require.NoError(t, err)
-			require.Zero(t, result.RequeueAfter)
-
-			t.Log("No Pod is read or patched; only a graph out of scope applies the cache-tolerant removal")
-			require.Zero(t, podReads)
-			require.Zero(t, podPatches)
-			wantApplies := 0
-			if scenario == "no-caps" {
-				wantApplies = 1
-			}
-			require.Equal(t, wantApplies, statusApplies)
-			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
-			require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
-			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
-			require.Nil(t, meta.FindStatusCondition(dgd.Status.Conditions, ConditionType))
-		})
-	}
 }

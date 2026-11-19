@@ -10,7 +10,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 )
 
 func TestLivePowerCapSupport(t *testing.T) {
@@ -32,7 +31,7 @@ func TestLivePowerCapSupport(t *testing.T) {
 		{name: "LPX", provider: "grove", component: v1beta1.ComponentTypeLPX, wantReason: "live power-cap updates are unsupported for graphs with LPX components"},
 		{name: "graph-level cap", provider: "grove", graphCap: true, wantReason: "live power-cap updates are unsupported when spec.annotations sets dynamo.nvidia.com/gpu-power-limit"},
 		{name: "v1alpha1 service cap", provider: "grove", alphaCap: true, wantReason: "live power-cap updates are unsupported when the v1alpha1 annotations of service worker set dynamo.nvidia.com/gpu-power-limit"},
-		{name: "automatic checkpoint", provider: "grove", checkpoint: "automatic", wantReason: "live power-cap updates are unsupported for worker worker with automatic checkpoints"},
+		{name: "automatic checkpoint", provider: "grove", checkpoint: "automatic"},
 		{name: "checkpointRef", provider: "component", checkpoint: "ref"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,30 +73,6 @@ func TestLivePowerCapSupport(t *testing.T) {
 			reason, supported := LivePowerCapSupport(dgd)
 			require.Equal(t, tc.wantReason == "", supported)
 			require.Equal(t, tc.wantReason, reason)
-		})
-	}
-}
-
-func TestWorkerSpecsEqualComparesResolvedRuntimeVersions(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		old, new  string
-		wantEqual bool
-	}{
-		{name: "hashed override change", old: "1.5.0", new: "1.6.0"},
-		{name: "unhashed pre-1.5 override change", old: "1.4.0", new: "1.4.1", wantEqual: true},
-		{name: "unchanged override", old: "1.6.0", new: "1.6.0", wantEqual: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Render two custom-image workers that differ only by runtimeVersionOverride")
-			a := &v1beta1.DynamoComponentDeployment{}
-			a.Spec.ComponentName, a.Spec.ComponentType = "worker", consts.ComponentTypeWorker
-			a.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/custom-runtime:dev"}}}}
-			b := a.DeepCopy()
-			a.Spec.RuntimeVersionOverride, b.Spec.RuntimeVersionOverride = tc.old, tc.new
-
-			t.Log("Compare exactly the runtime versions the worker hash includes")
-			require.Equal(t, tc.wantEqual, WorkerSpecsEqual(a, b))
 		})
 	}
 }
