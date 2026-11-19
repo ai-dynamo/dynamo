@@ -17,8 +17,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
+    EngineType, KvTransferTimingMode, MockerConfig, WorkerType,
 };
 use dynamo_mocker::loadgen::Trace;
 use dynamo_mocker::replay::{
@@ -244,38 +245,34 @@ struct Args {
     bench: bool,
 }
 
-fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
-    let mut builder = MockEngineArgs::builder()
-        .engine_type(args.engine_type.into())
-        .block_size(args.block_size)
-        .kv_bytes_per_token(args.kv_bytes_per_token)
-        .kv_transfer_bandwidth(args.kv_transfer_bandwidth)
-        .kv_transfer_timing_mode(args.kv_transfer_timing_mode.into());
-    if args.engine_type == EngineTypeArg::Sglang {
-        builder = builder.sglang(Some(SglangArgs {
-            page_size: Some(args.block_size),
-            ..Default::default()
-        }));
+fn build_engine_args(args: &Args) -> Result<MockerConfig> {
+    let mut rank = serde_json::json!({
+        "backend":EngineType::from(args.engine_type),"block_size":args.block_size,
+        "kv_transfer_bytes_per_token":args.kv_bytes_per_token,
+        "kv_transfer_bandwidth":args.kv_transfer_bandwidth,
+        "kv_transfer_timing_mode":KvTransferTimingMode::from(args.kv_transfer_timing_mode)
+    });
+    for (key, value) in [
+        ("max_num_seqs", args.max_num_seqs),
+        ("num_gpu_blocks", args.num_gpu_blocks),
+        ("max_num_batched_tokens", args.max_num_batched_tokens),
+    ] {
+        if let Some(value) = value {
+            rank[key] = serde_json::json!(value);
+        }
     }
-    if let Some(max_num_seqs) = args.max_num_seqs {
-        builder = builder.max_num_seqs(Some(max_num_seqs));
+    for (key, value) in [
+        ("speedup_ratio", args.speedup_ratio),
+        ("decode_speedup_ratio", args.decode_speedup_ratio),
+    ] {
+        if let Some(value) = value {
+            rank[key] = serde_json::json!(value);
+        }
     }
-    if let Some(num_gpu_blocks) = args.num_gpu_blocks {
-        builder = builder.num_gpu_blocks(num_gpu_blocks);
-    }
-    if let Some(max_num_batched_tokens) = args.max_num_batched_tokens {
-        builder = builder.max_num_batched_tokens(Some(max_num_batched_tokens));
-    }
-    if let Some(speedup_ratio) = args.speedup_ratio {
-        builder = builder.speedup_ratio(speedup_ratio);
-    }
-    if let Some(decode_speedup_ratio) = args.decode_speedup_ratio {
-        builder = builder.decode_speedup_ratio(decode_speedup_ratio);
-    }
-    builder
-        .build()
-        .context("failed to build replay engine args")?
-        .normalized()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": rank
+    }))
+    .context("invalid replay engine config")
 }
 
 fn router_config(args: &Args) -> Result<Option<KvRouterConfig>> {
@@ -309,17 +306,18 @@ fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
     }
 }
 
-fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
+fn canonical_engine_pool_metadata(args: &MockerConfig) -> Result<Value> {
     ensure!(
-        args.planner_profile_data.is_none(),
-        "canonical replay does not support planner_profile_data"
+        !matches!(args.perf_model.as_ref(), PerfModel::Interpolated { .. }),
+        "canonical replay does not support dynamo_profile timing"
     );
     ensure!(
-        args.response_replay_trace_path.is_none(),
+        args.runtime.response_replay_trace_path.is_none(),
         "canonical replay does not support response_replay_trace_path"
     );
+    let ais_config = args.ais_perf_config();
     ensure!(
-        args.ais_backend.is_none() || args.ais_backend_version.is_some(),
+        ais_config.is_none_or(|config| config["backend_version"].as_str().is_some()),
         "canonical AIS replay requires a resolved backend version"
     );
     let mut metadata = serde_json::to_value(args)?;
@@ -329,18 +327,18 @@ fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
     metadata.insert(
         "performance_model".to_string(),
         json!({
-            "kind": if args.ais_backend.is_some() {
+            "kind": if ais_config.is_some() {
                 "ais_callback"
             } else {
                 "builtin_polynomial"
             },
-            "ais": args.ais_perf_config,
+            "ais": ais_config,
         }),
     );
     Ok(Value::Object(metadata.clone()))
 }
 
-fn canonical_engine_config(args: &Args, engine_args: &MockEngineArgs) -> Result<Value> {
+fn canonical_engine_config(args: &Args, engine_args: &MockerConfig) -> Result<Value> {
     match args.serving_mode {
         ServingModeArg::Aggregated => Ok(json!({
             "aggregated": canonical_engine_pool_metadata(engine_args)?,
@@ -360,7 +358,7 @@ fn canonical_engine_config(args: &Args, engine_args: &MockEngineArgs) -> Result<
 
 fn canonical_metadata(
     args: &Args,
-    engine_args: &MockEngineArgs,
+    engine_args: &MockerConfig,
     workload_digest: &str,
 ) -> Result<Value> {
     let router_config = match args.router_mode {
@@ -415,7 +413,7 @@ fn canonical_metadata(
 fn canonical_report(
     report: &TraceSimulationReport,
     args: &Args,
-    engine_args: &MockEngineArgs,
+    engine_args: &MockerConfig,
     workload_digest: &str,
     capture_options: ReplayCaptureOptions,
 ) -> Result<CanonicalReplayRecord> {

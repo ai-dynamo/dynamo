@@ -1,0 +1,18 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Everything about KV cache events: the event types and the [`RouterEvent`](event::RouterEvent)
+//! envelope, the engine ZMQ msgpack codec (`zmq_wire`), the replay cursor, the publisher's
+//! placement helpers, and the residency vocabulary engines publish with their events
+//! (`residency`: storage tiers, residency domains and owners, the reset scope). Both ends of
+//! the KV-event wire depend on this crate: workers and sidecars publish, the router's indexer
+//! ingests.
+//!
+//! No sockets, no tasks, no servers live here; the ZMQ socket helper and the listener that
+//! drives it are `dynamo-kv-router` adapters behind its ZMQ features.
+
+pub mod cursor;
+pub mod event;
+pub mod placement;
+pub mod residency;
+pub mod zmq_wire;

@@ -50,15 +50,64 @@ from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 logger = logging.getLogger(__name__)
 
 
+# OpenCV's own video backend raises this when VideoCapture opens nothing.
+_FAILED_OPEN = "Could not open video stream"
+
+# MPEG-TS packets are 188 bytes. One leading 0x47 is the letter "G".
+_MPEG_TS_PACKET = 188
+
+# ASF Header Object GUID, little-endian. WMV and WMA use this container, and
+# the codec probe does not name their codecs.
+_ASF_HEADER = b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c"
+
+
+def _has_video_container(data: bytes) -> bool:
+    """A container signature, including codecs the probe does not name."""
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return True
+    if data.startswith(b"\x1a\x45\xdf\xa3"):  # EBML: Matroska, WebM
+        return True
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"AVI ":
+        return True
+    if data.startswith(b"OggS"):
+        return True
+    if data.startswith(b"\x00\x00\x01\xba"):  # MPEG program stream
+        return True
+    if data.startswith(b"FLV\x01"):  # FLV version 1, including flv1
+        return True
+    if data.startswith(_ASF_HEADER):
+        return True
+    return (
+        len(data) >= _MPEG_TS_PACKET * 2 + 1
+        and data[0] == 0x47
+        and data[_MPEG_TS_PACKET] == 0x47
+        and data[_MPEG_TS_PACKET * 2] == 0x47
+    )
+
+
+def _is_non_video(content: bytes, codec: str | None) -> bool:
+    """No probed codec and no container signature."""
+    return codec is None and not _has_video_container(content)
+
+
+def _is_failed_open(exc: BaseException) -> bool:
+    return isinstance(exc, ValueError) and str(exc) == _FAILED_OPEN
+
+
+def _unsupported_video_input(url: str, cause: BaseException) -> HttpStatusError:
+    """Client input that is not a video."""
+    # Operators still need the decoder's own text. Clients see this exact
+    # sentence: errors.rs allowlists it as the public message.
+    logger.warning("Rejecting non-video input supplied as video: %s", cause)
+    return HttpStatusError(415, "Unsupported video media", url)
+
+
 def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
     """Identify OpenCV errors without relabeling failures from other video backends."""
     if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
         return True
-    return (
-        isinstance(exc, ValueError)
-        and str(exc) == "Could not open video stream"
-        and (getattr(media_io, "kwargs", None) or {}).get("backend", "opencv")
-        == "opencv"
+    return _is_failed_open(exc) and (
+        (getattr(media_io, "kwargs", None) or {}).get("backend", "opencv") == "opencv"
     )
 
 
@@ -137,7 +186,7 @@ class VideoLoader:
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
-            run_async(self._nixl_connector.initialize)
+            run_async(self._nixl_connector.warmup)
 
     def _get_vllm_media_connector(self) -> Any:
         if self._vllm_media_connector is None:
@@ -179,7 +228,7 @@ class VideoLoader:
                 policy=self._url_policy,
                 max_bytes=max_media_bytes(),
             )
-            return await self._decode_video_bytes(content, media_io)
+            return await self._decode_video_bytes(content, media_io, normalized_url)
 
         # file:// and data: never touch the network, but they still deserve
         # hardware decode: without this they reach only the software decoder,
@@ -189,7 +238,7 @@ class VideoLoader:
         # connector below uses, so this adds no local-read surface.
         if is_local_media_url(normalized_url):
             content = await read_local_media_bytes(normalized_url, self._url_policy)
-            return await self._decode_video_bytes(content, media_io)
+            return await self._decode_video_bytes(content, media_io, normalized_url)
 
         connector = self._get_vllm_media_connector()
         return await connector.load_from_url_async(
@@ -197,12 +246,12 @@ class VideoLoader:
         )
 
     async def _decode_video_bytes(
-        self, content: bytes, media_io: Any
+        self, content: bytes, media_io: Any, source_url: str = ""
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        vLLM ships OpenCV for still images without video backends. Translate
-        its decode failures into install guidance; preserve other backends.
+        Bytes with no codec and no container are a client error. A probed
+        codec, or a known container, stays a missing-decoder error.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -231,12 +280,21 @@ class VideoLoader:
         except ImportError as exc:
             if not _attributable_to_cv2(exc):
                 raise
+            if _is_non_video(content, codec):
+                raise _unsupported_video_input(source_url, exc) from exc
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
         except (OSError, SystemError, ValueError) as exc:
-            # Confirm both the error source and missing video support.
-            if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
+            if not _attributable_to_cv2(exc, media_io):
+                raise
+            # A failed open is "this is not a video" even when a backend exists.
+            # A known container still gets install guidance below.
+            if _is_non_video(content, codec) and (
+                _is_failed_open(exc) or _cv2_lacks_video_backend()
+            ):
+                raise _unsupported_video_input(source_url, exc) from exc
+            if not _cv2_lacks_video_backend():
                 raise
             raise video_decoder_missing(
                 "vllm",
@@ -272,15 +330,24 @@ class VideoLoader:
             )
             if frames.size == 0:
                 raise ValueError(
-                    f"Failed to extract video frames from {video_url}. Decoded clip is empty."
+                    "Failed to extract video frames from "
+                    f"{describe_media_source(video_url)}. Decoded clip is empty."
                 )
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
             raise
-        except (UrlValidationError, HttpStatusError, HttpConfigurationError):
-            # Preserve deliberate client-error verdicts. UrlValidationError is
-            # a ValueError, so the generic handler below would otherwise erase
-            # its type and prevent the frontend from returning a 4xx.
+        except HttpStatusError as exc:
+            # A 415 is the payload, not the URL. Other statuses are the URL.
+            action = (
+                "Unsupported video loading"
+                if exc.status == 415
+                else "URL rejected loading video"
+            )
+            logger.error("%s: '%s'", action, describe_media_source(video_url))
+            raise
+        except (UrlValidationError, HttpConfigurationError):
+            # UrlValidationError is a ValueError, so the generic handler below
+            # would otherwise erase its type and prevent a 4xx response.
             logger.error(
                 "URL rejected loading video: '%s'", describe_media_source(video_url)
             )
@@ -289,11 +356,17 @@ class VideoLoader:
             # Already actionable (names the codec and the install); a missing
             # decoder is deployment configuration, not a bad request, so keep
             # the type instead of degrading it to the ValueError below.
-            logger.error("No decoder available for video: '%s'", video_url)
+            logger.error(
+                "No decoder available for video: '%s'", describe_media_source(video_url)
+            )
             raise
         except Exception as exc:
-            logger.error("Error loading video from %s: %s", video_url, exc)
-            raise ValueError(f"Failed to load video from {video_url}: {exc}") from exc
+            # Bound the URL like the branches above: a signed URL (GCS, S3,
+            # Azure SAS) is a bearer credential, and its signature must reach
+            # neither the log nor the client's error body.
+            source = describe_media_source(video_url)
+            logger.error("Error loading video from %s: %s", source, exc)
+            raise ValueError(f"Failed to load video from {source}: {exc}") from exc
 
     async def _load_decoded_video(
         self, decoded_metadata: Dict[str, Any]
@@ -360,22 +433,46 @@ class VideoLoader:
         video_mm_items: List[Dict[str, Any]],
         media_io_kwargs: Dict[str, Any] | None = None,
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
+        """Load URL or frontend-decoded videos after validating the full batch.
+
+        Raises ``ValueError`` for malformed items or decoded items when frontend
+        decoding is disabled. Validation happens before any load coroutine is
+        created so an invalid item cannot leave earlier loads unawaited.
+        """
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
+        # Validate the whole batch before creating coroutines so an invalid
+        # later item cannot leave earlier load coroutines unawaited.
+        for idx, item in enumerate(video_mm_items):
+            if not isinstance(item, dict) or not (
+                URL_VARIANT_KEY in item or DECODED_VARIANT_KEY in item
+            ):
+                raise ValueError(
+                    f"Invalid video multimodal item at index {idx}. "
+                    "Expected dict with 'Url' or 'Decoded' key."
+                )
+            if (
+                URL_VARIANT_KEY not in item
+                and DECODED_VARIANT_KEY in item
+                and not self._enable_frontend_decoding
+            ):
+                raise ValueError(
+                    "Received decoded video data but enable_frontend_decoding=False. "
+                    "Enable frontend decoding to transfer decoded video frames via NIXL."
+                )
+
         for item in video_mm_items:
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+            if URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 video_futures.append(self.load_video(url, media_io_kwargs))
-                logger.debug("Preparing to load video from URL: %s...", url[:80])
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if self._enable_frontend_decoding:
-                    metadata = item[DECODED_VARIANT_KEY]
-                    video_futures.append(self._load_decoded_video(metadata))
-                else:
-                    raise ValueError(
-                        "Received decoded video data but enable_frontend_decoding=False. "
-                        "Enable frontend decoding to transfer decoded video frames via NIXL."
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load video from URL: %s",
+                        describe_media_source(url),
                     )
+            else:
+                metadata = item[DECODED_VARIANT_KEY]
+                video_futures.append(self._load_decoded_video(metadata))
 
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
@@ -388,10 +485,12 @@ class VideoLoader:
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
-                source = media_item.get(URL_VARIANT_KEY, "decoded")
-                logger.error("Failed to load video from %s...: %s", source[:80], result)
+                source = describe_media_source(
+                    media_item.get(URL_VARIANT_KEY, "decoded")
+                )
+                logger.error("Failed to load video from %s: %s", source, result)
                 collective_exceptions.append(
-                    f"Failed to load video from {source[:80]}...: {result}\n"
+                    f"Failed to load video from {source}: {result}\n"
                 )
                 if status_error is None and isinstance(result, HttpStatusError):
                     status_error = result

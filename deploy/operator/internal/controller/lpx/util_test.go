@@ -20,7 +20,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -52,7 +51,7 @@ func TestGetPodCliqueScalingGroups(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Observe the expected groups under PCS ordinal zero and establish ownership once")
-			pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: "pcs", Namespace: "default", UID: "pcs-uid"}}
+			pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: "default", UID: "pcs-uid"}
 			pcs.Spec.Template.PodCliqueScalingGroupConfigs = make([]grovev1alpha1.PodCliqueScalingGroupConfig, tc.templates)
 			for index := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
 				pcs.Spec.Template.PodCliqueScalingGroupConfigs[index].Name = "engines"
@@ -61,12 +60,10 @@ func TestGetPodCliqueScalingGroups(t *testing.T) {
 				}
 			}
 			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "pcs-0-engines", Namespace: pcs.Namespace,
-					Labels:          map[string]string{grovecommon.LabelPartOfKey: pcs.Name},
-					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: tc.replicas},
+				Name: "pcs-0-engines", Namespace: pcs.Namespace,
+				Labels:          map[string]string{grovecommon.LabelPartOfKey: pcs.Name},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
+				Spec:            grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: tc.replicas},
 			}
 			if tc.previousPCS {
 				pcsg.OwnerReferences[0].UID = "previous-pcs"
@@ -92,10 +89,9 @@ func TestGetPodCliqueScalingGroups(t *testing.T) {
 				{Namespace: pcs.Namespace, Name: "pcs-1-engines"},
 				{Namespace: "other", Name: pcsg.Name},
 			} {
-				objects = append(objects, &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{
+				objects = append(objects, &grovev1alpha1.PodCliqueScalingGroup{
 					Name: key.Name, Namespace: key.Namespace,
-					Labels: map[string]string{grovecommon.LabelPartOfKey: pcs.Name},
-				}})
+					Labels: map[string]string{grovecommon.LabelPartOfKey: pcs.Name}})
 			}
 			lists := 0
 			listError := errors.New("group observation unavailable")
@@ -164,21 +160,19 @@ func TestGetPodCliques(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Observe owned cliques and ignore cliques outside this PCS and namespace")
-			pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: "pcs", Namespace: "test"}}
-			pcsg := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "pcs-0-workload", Namespace: pcs.Namespace, UID: "group"}}
+			pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: "test"}
+			pcsg := &grovev1alpha1.PodCliqueScalingGroup{Name: "pcs-0-workload", Namespace: pcs.Namespace, UID: "group"}
 			pclq := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: pcsg.Name + "-0-agent", Namespace: pcs.Namespace,
-					Labels:          map[string]string{grovecommon.LabelPartOfKey: pcs.Name, grovecommon.LabelPodCliqueScalingGroup: pcsg.Name, grovecommon.LabelPodCliqueSetReplicaIndex: "0"},
-					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))},
-				},
-				Spec: grovev1alpha1.PodCliqueSpec{RoleName: "agent", Replicas: 4},
+				Name: pcsg.Name + "-0-agent", Namespace: pcs.Namespace,
+				Labels:          map[string]string{grovecommon.LabelPartOfKey: pcs.Name, grovecommon.LabelPodCliqueScalingGroup: pcsg.Name, grovecommon.LabelPodCliqueSetReplicaIndex: "0"},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))},
+				Spec:            grovev1alpha1.PodCliqueSpec{RoleName: "agent", Replicas: 4},
 			}
 			if tc.foreign {
 				pclq.OwnerReferences[0].UID = "foreign"
 			}
 			if tc.deleting {
-				pclq.DeletionTimestamp, pclq.Finalizers = ptr.To(metav1.Now()), []string{"test"}
+				pclq.DeletionTimestamp, pclq.Finalizers = new(metav1.Now()), []string{"test"}
 			}
 			otherPCS, otherNamespace, otherPCSReplica := pclq.DeepCopy(), pclq.DeepCopy(), pclq.DeepCopy()
 			otherPCS.Name, otherPCS.Labels[grovecommon.LabelPartOfKey] = "unrelated", "other-pcs"
@@ -318,9 +312,8 @@ func TestLPXDeletingSourcePreservesPublishedWorkload(t *testing.T) {
 
 func TestLPXDeletionUsesSnapshotPreconditions(t *testing.T) {
 	t.Log("Observe the PCS before a concurrent update")
-	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
-		Name: "pcs", Namespace: "default", UID: "pcs-uid", ResourceVersion: "1",
-	}}
+	pcs := &grovev1alpha1.PodCliqueSet{
+		Name: "pcs", Namespace: "default", UID: "pcs-uid", ResourceVersion: "1"}
 	cl := newLPXTestClient(t, pcs)
 	changed := pcs.DeepCopy()
 	changed.Labels = map[string]string{"example.com/concurrent": "update"}
@@ -360,8 +353,8 @@ func TestScalePodCliqueScalingGroup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Use an already-owned group observation without rendering a workload")
 			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: "default", ResourceVersion: "7"},
-				Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 9},
+				Name: "group", Namespace: "default", ResourceVersion: "7",
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 9},
 			}
 			observed := pcsg.DeepCopy()
 			updates := 0
@@ -409,15 +402,15 @@ func TestScalePodCliques(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Supply already-owned cliques under a two-replica group")
 			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "test"},
-				Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2},
+				Name: "workload", Namespace: "test",
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2},
 			}
 			pclqs := make(map[string]*grovev1alpha1.PodClique)
 			want := make(map[string]*grovev1alpha1.PodClique)
 			for _, name := range []string{"workload-0-worker", "workload-1-worker"} {
 				pclq := &grovev1alpha1.PodClique{
-					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: pcsg.Namespace, ResourceVersion: "7", Generation: 1},
-					Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+					Name: name, Namespace: pcsg.Namespace, ResourceVersion: "7", Generation: 1,
+					Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				}
 				pclqs[name] = pclq
 				want[name] = pclq.DeepCopy()

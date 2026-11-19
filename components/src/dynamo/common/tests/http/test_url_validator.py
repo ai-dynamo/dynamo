@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from dynamo.common.http import url_validator
+from dynamo.common.http import HttpStatusError, url_validator
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -232,6 +232,22 @@ async def test_validate_url_http_allowed_when_opted_in() -> None:
     await validate_url("http://example.com/x.png", policy)
 
 
+@pytest.mark.parametrize(
+    "url", ["https://example.com/x.png", "http://example.com/x.png"]
+)
+async def test_validate_url_rejects_remote_when_disabled(url: str) -> None:
+    policy = UrlValidationPolicy(
+        allow_http=True, allow_private_ips=True, allow_remote_urls=False
+    )
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS=0"):
+        await validate_url(url, policy)
+
+
+async def test_validate_url_accepts_data_url_when_remote_disabled() -> None:
+    policy = UrlValidationPolicy(allow_remote_urls=False)
+    await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", policy)
+
+
 # ---------------------------------------------------------------------------
 # validate_url() — IP literal handling
 # ---------------------------------------------------------------------------
@@ -408,11 +424,19 @@ def test_validate_local_path_missing_prefix(tmp_path) -> None:
 def test_policy_from_env_defaults(monkeypatch) -> None:
     monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
     monkeypatch.delenv("DYN_MM_LOCAL_PATH", raising=False)
+    monkeypatch.delenv("DYN_MM_ALLOW_REMOTE_URLS", raising=False)
 
     policy = UrlValidationPolicy.from_env()
     assert policy.allow_http is False
     assert policy.allow_private_ips is False
     assert policy.allowed_local_path is None
+    assert policy.allow_remote_urls is True
+
+
+@pytest.mark.parametrize("raw, expected", [("0", False), ("on", True), ("", True)])
+def test_policy_from_env_allow_remote_urls(monkeypatch, raw, expected) -> None:
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", raw)
+    assert UrlValidationPolicy.from_env().allow_remote_urls is expected
 
 
 def test_policy_from_env_allow_internal(monkeypatch) -> None:
@@ -564,12 +588,40 @@ def test_describe_media_source_bounds_data_uri_metadata() -> None:
         assert f"({len(source)} chars" in label  # true size stays visible
 
 
-def test_describe_media_source_keeps_an_ordinary_data_uri_intact() -> None:
-    """Control: a real media type is short and must survive the new bound."""
-    label = describe_media_source("data:image/png;base64," + "A" * 50_000)
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_describe_media_source_elides_data_uri_payload(scheme) -> None:
+    label = describe_media_source(scheme + ":image/png;base64," + "A" * 50_000)
 
     assert label.startswith("data:image/png (")
     assert "payload elided" in label
+
+
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_malformed_inline_source_label_elides_payload(scheme) -> None:
+    source = scheme + "://[;base64,private-inline-payload"
+
+    label = describe_media_source(source)
+
+    assert "private-inline-payload" not in label
+    assert len(label) < 200
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            "https://user:private-password@example.com/ref.png?sig=private-token#private-fragment",
+            "https://example.com/ref.png",
+        ),
+        ("http://example.com/ref.png?sig=private-token", "http://example.com/ref.png"),
+        (
+            "https://user:private-password@[::1]:1234/ref.png?sig=private-token",
+            "https://[::1]:1234/ref.png",
+        ),
+    ],
+)
+def test_http_source_label_redacts_credentials(source, expected) -> None:
+    assert describe_media_source(source) == expected
 
 
 def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
@@ -594,6 +646,7 @@ async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
         "https:///" + "A" * 200_000,  # no host component
         "A" * 200_000 + "://x",  # scheme is client-supplied too
     ],
+    ids=["missing-host", "oversized-scheme"],
 )
 async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
     """These messages became client-visible once the diffusion handlers
@@ -611,11 +664,13 @@ async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
     long_hop = "https://example.com/" + "A" * 200_000
 
     class _Client(HttpClient):
-        async def _fetch_simple(self, url, timeout, *, max_bytes=None, policy=None):
+        async def _fetch_simple(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
             raise AssertionError("unused")
 
         async def _fetch_body_or_redirect(
-            self, url, timeout, *, max_bytes=None, policy=None
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
         ):
             return None, long_hop
 
@@ -674,3 +729,41 @@ def test_describe_error_detail_bounds_from_both_ends() -> None:
     assert label.startswith("head-of-the-message")
     assert label.endswith("tail-of-the-message")
     assert str(len(detail)) in label  # true size stays visible
+
+
+def test_describe_error_detail_redacts_a_presigned_url_in_the_text() -> None:
+    signature = "0123456789abcdef" * 16
+    url = (
+        "https://bucket.s3.amazonaws.com/clip.wav?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Expires=900&X-Amz-Signature={signature}"
+    )
+    for detail in (url, f"Invalid URL: '{url}'", f"Bad request to {url} (closed)"):
+        label = describe_error_detail(detail)
+
+        assert signature not in label
+        assert "X-Amz" not in label
+        assert "bucket.s3.amazonaws.com/clip.wav" in label
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[2606:4700::1111]/img.png",
+        "https://bucket.s3.amazonaws.com/a(1)/img.png",
+        "https://bucket.example/o'reilly/img.png",
+    ],
+    ids=["ipv6_host", "parenthesis_in_path", "apostrophe_in_path"],
+)
+def test_presigned_url_with_brackets_stays_out_of_http_errors(url) -> None:
+    """A bracketed IPv6 host, a parenthesis or an apostrophe in the path must
+    not end the match early and leave the query unredacted."""
+    signed = f"{url}?X-Amz-Expires=900&X-Amz-Signature={'0123456789abcdef' * 16}"
+    error = HttpStatusError(400, f"Connection error loading image: '{signed}'", signed)
+
+    for text in (
+        describe_error_detail(f"Invalid URL: {signed}"),
+        str(error),
+        error.message,
+    ):
+        assert "0123456789abcdef" not in text
+        assert "X-Amz" not in text

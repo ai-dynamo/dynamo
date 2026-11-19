@@ -9,114 +9,10 @@ import (
 	"testing"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
-
-const testPart11Path = "part-11"
-
-func TestProjectModelV2LocalPartitions(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name            string
-		pipeline        Pipeline
-		selection       *dynamov1beta1.LPXLocalPartitions
-		wantErr         string
-		wantAgents      int
-		wantCompilerIDs []int64
-		wantConnectors  int
-		wantRuntimeIDs  string
-		wantLocalIDs    []int
-	}{
-		{
-			name: "independent partition runs locally", pipeline: PipelineLPX,
-			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{11}},
-			wantAgents: 9, wantCompilerIDs: []int64{7, 8}, wantConnectors: 1,
-			wantRuntimeIDs: "7", wantLocalIDs: []int{11},
-		},
-		{
-			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
-			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{7}},
-			wantAgents: 8, wantCompilerIDs: []int64{11}, wantConnectors: 0,
-			wantRuntimeIDs: "11", wantLocalIDs: []int{7},
-		},
-		{
-			name: "every partition runs locally", pipeline: PipelineLPX,
-			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
-			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: 0,
-			wantRuntimeIDs: "", wantLocalIDs: []int{7, 11},
-		},
-		{
-			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
-			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{8}},
-			wantErr:   "localPartitions references partition 8 of the prop-sync chain that starts at partition 7; select 7",
-		},
-		{
-			name: "unknown partition", pipeline: PipelineLPX,
-			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{99}},
-			wantErr:   "localPartitions references partition 99, which the build does not contain",
-		},
-		{
-			name: "unsupported mode", pipeline: PipelineLPX,
-			selection: &dynamov1beta1.LPXLocalPartitions{Mode: "Roles"},
-			wantErr:   `localPartitions has unsupported mode "Roles"`,
-		},
-		{
-			name: "LPU-only pipeline has no Cyborg GPU", pipeline: PipelineSingle,
-			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{11}},
-			wantErr:   "unsupported LPX runtime: localPartitions requires a hybrid build with a Cyborg conductor",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			t.Log("Create a hybrid build with chain 7-8 and an independent partition 11")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-			build := normalized.build
-			build.CompilationMode = BuildCompilationModeHybrid
-			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
-			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
-			third := build.Partitions[1]
-			third.SourcePartitionID = 11
-			third.PartPath = testPart11Path
-			build.Partitions = append(build.Partitions, third)
-			build.SelectedPropSyncChains = [][]int{{7, 8}}
-
-			t.Log("Project the build with the selected local partitions")
-			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: test.pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
-				LocalPartitions: test.selection,
-			})
-			if test.wantErr != "" {
-				require.EqualError(t, err, test.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			projection := projections[0]
-
-			t.Log("Request LPU placement only for the remote physical partitions")
-			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
-			compilerIDs := make([]int64, 0, len(spec.Partitions))
-			for ordinal, partition := range spec.Partitions {
-				require.Equal(t, int64(ordinal), partition.Ordinal)
-				compilerIDs = append(compilerIDs, partition.CompilerPartitionID)
-			}
-			require.Equal(t, test.wantCompilerIDs, compilerIDs)
-			require.Len(t, spec.PropSyncConnectors, test.wantConnectors)
-			require.Equal(t, test.wantAgents, projection.AgentReplicas())
-
-			t.Log("Publish only remote runtime partitions to Agents and Cyborg")
-			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
-			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
-
-			t.Log("Change the workload digest when partitions move to the GPU")
-			baseline := projectTestBuild(t, normalized, PipelineLPX)
-			require.NotEqual(t, baseline.Digest(), projection.Digest())
-		})
-	}
-}
 
 func TestApplyLocalPartitionIDs(t *testing.T) {
 	t.Parallel()
@@ -130,11 +26,11 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		{
 			name:    "no local partitions removes authored values",
 			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
-			wantEnv: []corev1.EnvVar{{Name: "OTHER", Value: "kept"}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}, {Name: "OTHER", Value: "kept"}},
 		},
 		{
 			name:    "no local partitions shadows envFrom sources",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
 			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}},
 		},
 		{
@@ -161,7 +57,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		},
 		{
 			name:    "envFrom shadow precedes dependent values",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
 			env: []corev1.EnvVar{
 				{Name: "FIRST", Value: "kept"},
 				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
@@ -211,18 +107,17 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Project a hybrid build with chain 7-8 and an independent partition 11")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-			build := normalized.build
-			build.CompilationMode = BuildCompilationModeHybrid
-			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
-			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
-			third := build.Partitions[1]
-			third.SourcePartitionID = 11
-			third.PartPath = testPart11Path
-			build.Partitions = append(build.Partitions, third)
-			build.SelectedPropSyncChains = [][]int{{7, 8}}
-			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+			normalized, err := acquireTestUnitBundle(t, testUnitBundle{
+				architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: true,
+				partitions: testUnitPartitions(7, 8, 11),
+				units: []testLPUUnit{
+					{Reservations: []testLPUReservation{testNodesReservation(1, 7), testNodesReservation(8, 8)}, Connectors: []testLPUConnector{{}}},
+					{Reservations: []testLPUReservation{testNodesReservation(8, 11)}},
+				},
+			})
+			require.NoError(t, err)
+			projections, err := projectModels(ModelProjectionInput{
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
@@ -257,26 +152,29 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 	}
 }
 
-func TestProjectModelV2LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create a hybrid build with one more physical partition than the LPX limit")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
-	build.SelectedPropSyncChains = nil
-	template := build.Partitions[0]
-	build.Partitions = make([]BuildPartition, 0, maxLPXPartitions+1)
-	for id := range maxLPXPartitions + 1 {
-		partition := template
-		partition.SourcePartitionID = id
-		build.Partitions = append(build.Partitions, partition)
+func TestUnitProjectionBoundsPartitions(t *testing.T) {
+	t.Log("Compile one more single-reservation unit than a projection may carry")
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp30, devicesPerNode: 16, hybrid: true}
+	for id := uint32(0); id <= maxLPXPartitions; id++ {
+		bundle.partitions = append(bundle.partitions, testUnitPartition{id: id})
+		bundle.units = append(bundle.units, testSingleUnits(testHXReservation(1, 1, 1, id))...)
 	}
+	build, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
 
-	t.Log("Reject the oversized build even when every partition runs locally")
-	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
-		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
-	})
-	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
+	for _, test := range []struct {
+		name      string
+		selection *dynamov1beta1.LPXLocalPartitions
+	}{
+		{name: "every unit stays on LPUs"},
+		{name: "every unit runs on the Cyborg GPU", selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Reject the projection whose remote reservations and local units exceed the limit")
+			_, err := projectModels(ModelProjectionInput{
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: build, LocalPartitions: test.selection,
+			})
+			require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
+		})
+	}
 }

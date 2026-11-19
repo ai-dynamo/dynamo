@@ -56,7 +56,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -64,6 +64,8 @@ spec:
                 - dynamo.frontend
                 - --dyn-chat-processor
                 - vllm
+                - --kv-cache-block-size
+                - "128"
                 - --model-name
                 - Motif-Technologies/Motif-3-NVFP4
                 - --trust-remote-code
@@ -106,7 +108,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.2
               imagePullPolicy: IfNotPresent
               command: [python3, -m, dynamo.vllm]
               args:

@@ -12,6 +12,11 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/common.sh"
+
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -33,6 +38,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both SGLang engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                         Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON                 Python with SGLang installed (default: python3)"
             echo "  SGLANG_WORKER1_GPU            First GPU assignment (default: 0)"
@@ -42,10 +48,10 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1              First sidecar system port override (default: DYN_SYSTEM_PORT)"
             echo "  DYN_SYSTEM_PORT2              Second sidecar system port (default: 8082)"
             echo "  SGLANG_WORKER1_HTTP_PORT      First SGLang HTTP port (default: 30000)"
-            echo "  SGLANG_WORKER1_GRPC_PORT      First SGLang gRPC port (default: 30001)"
+            echo "  SGLANG_WORKER1_GRPC_PORT      First SGLang gRPC port (default: 30010)"
             echo "  SGLANG_WORKER1_KV_EVENT_PORT  First SGLang KV-event port (default: 5557)"
-            echo "  SGLANG_WORKER2_HTTP_PORT      Second SGLang HTTP port (default: 30010)"
-            echo "  SGLANG_WORKER2_GRPC_PORT      Second SGLang gRPC port (default: 30011)"
+            echo "  SGLANG_WORKER2_HTTP_PORT      Second SGLang HTTP port (default: 30020)"
+            echo "  SGLANG_WORKER2_GRPC_PORT      Second SGLang gRPC port (default: 30030)"
             echo "  SGLANG_WORKER2_KV_EVENT_PORT  Second SGLang KV-event port (default: 5567)"
             echo "  SGLANG_PAGE_SIZE              KV-event block size (default: 16)"
             echo "  MAX_MODEL_LEN                 Maximum model length (default: 4096)"
@@ -59,23 +65,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar sglang SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
 SGLANG_WORKER1_GPU="${SGLANG_WORKER1_GPU:-0}"
 SGLANG_WORKER2_GPU="${SGLANG_WORKER2_GPU:-1}"
-SGLANG_WORKER1_HTTP_PORT="${SGLANG_WORKER1_HTTP_PORT:-30000}"
-SGLANG_WORKER1_GRPC_PORT="${SGLANG_WORKER1_GRPC_PORT:-30001}"
-SGLANG_WORKER1_KV_EVENT_PORT="${SGLANG_WORKER1_KV_EVENT_PORT:-5557}"
-SGLANG_WORKER2_HTTP_PORT="${SGLANG_WORKER2_HTTP_PORT:-30010}"
-SGLANG_WORKER2_GRPC_PORT="${SGLANG_WORKER2_GRPC_PORT:-30011}"
-SGLANG_WORKER2_KV_EVENT_PORT="${SGLANG_WORKER2_KV_EVENT_PORT:-5567}"
+SGLANG_WORKER1_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_WORKER1_HTTP_PORT:-30000}")
+SGLANG_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_WORKER1_GRPC_PORT:-30010}")
+SGLANG_WORKER1_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${SGLANG_WORKER1_KV_EVENT_PORT:-5557}")
+SGLANG_WORKER2_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${SGLANG_WORKER2_HTTP_PORT:-30020}")
+SGLANG_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${SGLANG_WORKER2_GRPC_PORT:-30030}")
+SGLANG_WORKER2_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${SGLANG_WORKER2_KV_EVENT_PORT:-5567}")
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}}"
 SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
+SGLANG_LISTENERS=$(sglang_listener_count "${EXTRA_ARGS[@]}")
+sglang_check_listener_ports "$SGLANG_WORKER1_HTTP_PORT" "$SGLANG_WORKER1_GRPC_PORT" "$SGLANG_LISTENERS"
+sglang_check_listener_ports "$SGLANG_WORKER2_HTTP_PORT" "$SGLANG_WORKER2_GRPC_PORT" "$SGLANG_LISTENERS"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
@@ -120,11 +131,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

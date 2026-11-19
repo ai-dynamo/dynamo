@@ -10,6 +10,7 @@
  * the same defect, copy-pasted -- and pinning both to one helper is what stops
  * the next edit from fixing only one of them.
  */
+import { meetingsInMonth } from "./community-meeting";
 import { GENERATED_ON, PAST_EVENTS, UPCOMING_EVENTS } from "./events.generated";
 
 export interface CalendarDate {
@@ -109,8 +110,8 @@ function monthOfEvent(event: {
 /**
  * The month the grids should display.
  *
- * Today's month wins whenever it actually has events, so the marker and the
- * grid agree. Otherwise the grid follows the nearest event -- the soonest
+ * Today's month wins whenever it actually has events -- the weekly community
+ * meeting included -- so the marker and the grid agree. Otherwise the grid follows the nearest event -- the soonest
  * upcoming one, else the most recent past one -- because events are announced
  * weeks ahead, so "the next event is next month" is the ordinary case rather
  * than an edge case. Pinning hard to today's month would render an empty grid
@@ -120,14 +121,14 @@ export function resolveCalendarMonth(): CalendarMonth {
   const today = resolveToday();
 
   if (today) {
-    const hasEventsThisMonth = [...UPCOMING_EVENTS, ...PAST_EVENTS].some(
-      (event) => {
+    const hasEventsThisMonth =
+      meetingsInMonth(today.year, today.month).length > 0 ||
+      [...UPCOMING_EVENTS, ...PAST_EVENTS].some((event) => {
         const eventMonth = monthOfEvent(event);
         return (
           eventMonth?.year === today.year && eventMonth?.month === today.month
         );
-      },
-    );
+      });
     if (hasEventsThisMonth) return { year: today.year, month: today.month };
   }
 

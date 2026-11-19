@@ -55,6 +55,8 @@ const (
 	requestTimeout                  = 5 * time.Second
 	dialTimeout                     = 3 * time.Second
 	tlsHandshakeTimeout             = 3 * time.Second
+	metricsIdleConnTimeout          = 90 * time.Second
+	metricsMaxIdleConns             = 100
 	CloudProviderGCP                = "gcp"
 	CloudProviderAWS                = "aws"
 	CloudProviderAKS                = "aks"
@@ -86,23 +88,24 @@ const (
 
 // --- GPU model tokens ---
 const (
-	tokenGB200  = "GB200"
-	tokenGB10   = "GB10"
-	tokenB300   = "B300"
-	tokenB200   = "B200"
-	tokenH200   = "H200"
-	tokenH100   = "H100"
-	tokenA100   = "A100"
-	tokenA30    = "A30"
-	tokenL40S   = "L40S"
-	tokenL40    = "L40"
-	tokenL4     = "L4"
-	tokenV100   = "V100"
-	tokenT4     = "T4"
-	tokenMI300  = "MI300"
-	tokenMI250  = "MI250"
-	tokenMI200  = "MI200"
-	LabelNVLink = "nvlink"
+	tokenVRNVL72 = "VRNVL72"
+	tokenGB200   = "GB200"
+	tokenGB10    = "GB10"
+	tokenB300    = "B300"
+	tokenB200    = "B200"
+	tokenH200    = "H200"
+	tokenH100    = "H100"
+	tokenA100    = "A100"
+	tokenA30     = "A30"
+	tokenL40S    = "L40S"
+	tokenL40     = "L40"
+	tokenL4      = "L4"
+	tokenV100    = "V100"
+	tokenT4      = "T4"
+	tokenMI300   = "MI300"
+	tokenMI250   = "MI250"
+	tokenMI200   = "MI200"
+	LabelNVLink  = "nvlink"
 )
 
 // awsInstanceTypePrefixes matches known GPU/accelerator instance families on EKS. See: https://aws.amazon.com/ec2/instance-types/
@@ -121,15 +124,19 @@ var gcpMachineSeries = []string{
 }
 
 type gpuRule struct {
-	token     string
-	sxmSKU    nvidiacomv1beta1.GPUSKUType
-	pcieSKU   nvidiacomv1beta1.GPUSKUType
-	singleSKU nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
+	token        string
+	boundedToken bool // require a complete model token instead of a substring match
+	sxmSKU       nvidiacomv1beta1.GPUSKUType
+	pcieSKU      nvidiacomv1beta1.GPUSKUType
+	singleSKU    nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
 }
 
 var gpuRules = []gpuRule{
+	// Vera Rubin
+	{token: tokenVRNVL72, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72},
+
 	// Blackwell
-	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+	{token: tokenGB200, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB200},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
 	{token: tokenB300, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
@@ -140,7 +147,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
-	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
+	{token: tokenA30, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -159,20 +166,28 @@ var gpuRules = []gpuRule{
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	NodeName         string                      // Name of the node with this GPU configuration
-	GPUsPerNode      int                         // Maximum GPUs per node found in the cluster
-	NodesWithGPUs    int                         // Number of nodes that have GPUs
-	Model            string                      // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU       int                         // VRAM in MiB per GPU
-	System           nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
-	MIGEnabled       bool                        // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
-	MIGProfiles      map[string]int              // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
-	CloudProvider    string                      // aws | gcp | aks | other | unknown
-	RDMAEnabled      bool                        // Indicates whether RDMA is enabled for this node (e.g., via InfiniBand, RoCE, or similar high-speed networking)
-	RDMAType         string                      // Type of RDMA transport detected (e.g., "infiniband", "roce", "rdma", "sriov", or "none")
-	Interconnect     string                      // Primary GPU-to-GPU interconnect technology used within the node (e.g., "nvlink" for high-bandwidth links or "pcie" for standard bus-based communication)
-	InterconnectTier string                      // Qualitative or platform-specific classification of the interconnect (e.g., NVLink generation, topology tier, or vendor-defined performance level)
-	NVLinkLinks      int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
+	NodeName          string                      // Name of the node with this GPU configuration
+	GPUsPerNode       int                         // Maximum GPUs per node with the selected SKU
+	NodesWithGPUs     int                         // Number of discovered nodes with the selected SKU
+	TotalGPUs         int                         // Sum of GPUs across discovered nodes with the selected SKU, before any budget cap
+	SelectedShapeGPUs int                         // Sum of GPUs on nodes matching the selected SKU, GPU count, and VRAM per GPU
+	Model             string                      // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU        int                         // VRAM in MiB per GPU
+	System            nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	MIGEnabled        bool                        // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
+	MIGProfiles       map[string]int              // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
+	CloudProvider     string                      // aws | gcp | aks | other | unknown
+	RDMAEnabled       bool                        // Indicates whether RDMA is enabled for this node (e.g., via InfiniBand, RoCE, or similar high-speed networking)
+	RDMAType          string                      // Type of RDMA transport detected (e.g., "infiniband", "roce", "rdma", "sriov", or "none")
+	Interconnect      string                      // Primary GPU-to-GPU interconnect technology used within the node (e.g., "nvlink" for high-bandwidth links or "pcie" for standard bus-based communication)
+	InterconnectTier  string                      // Qualitative or platform-specific classification of the interconnect (e.g., NVLink generation, topology tier, or vendor-defined performance level)
+	NVLinkLinks       int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
+
+	// OtherModels lists the GPU models of the nodes that unfiltered discovery left out because
+	// their SKU differs from System. Discovery selects the node with the most GPUs, so a non-empty
+	// list means System is a choice among several GPU types, not a fact about the cluster. It is
+	// empty for a filtered discovery and for a cluster of one SKU.
+	OtherModels []string
 }
 
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
@@ -252,7 +267,10 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered. When empty, the best node is selected first (highest GPU count,
-// then VRAM) and then only nodes with the same SKU are counted.
+// then VRAM). Each node with the selected GPU type contributes once to NodesWithGPUs,
+// and its GPU count is summed into TotalGPUs. Known types are grouped by SKU; unknown
+// types are grouped by normalized model name. SelectedShapeGPUs counts only the nodes
+// that also match the selected GPU count and VRAM per GPU.
 //
 // The function performs the following:
 //
@@ -264,8 +282,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //  6. Selects the "best" GPU node (filtered by SKU when set) based on:
 //     - Highest GPU count
 //     - Highest VRAM per GPU (tie-breaker)
-//  7. Counts only nodes matching the selected SKU for NodesWithGPUs.
-//  8. Caches the result per SKU for a short duration to avoid repeated scraping.
+//  7. Caches the result per SKU for a short duration to avoid repeated scraping.
 //
 // Behavior Notes:
 //
@@ -273,7 +290,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //     load-balancing ambiguity in multi-node clusters.
 //   - If at least one pod is successfully scraped, partial failures are tolerated.
 //   - If all pods fail to scrape, an aggregated error is returned.
-//   - Assumes DCGM exporter runs as a DaemonSet (one pod per GPU node).
+//   - Multiple exporters on one node use the report with the highest GPU count,
+//     then highest VRAM, for both node selection and aggregation.
 //
 // Returns:
 //   - *GPUInfo for the selected node
@@ -346,6 +364,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		nodeName string
 	}
 	allNodes := make([]nodeInfo, 0, len(dcgmPods))
+	nodeIndexes := make(map[string]int)
 	var scrapeErrors []error
 
 	for _, pod := range dcgmPods {
@@ -359,7 +378,18 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 			continue
 		}
 
-		allNodes = append(allNodes, nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName})
+		// Running pods have a scheduled node name; keep its strongest report in first-seen node order.
+		n := nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName}
+		if index, seen := nodeIndexes[n.nodeName]; seen {
+			previous := allNodes[index].info
+			if info.GPUsPerNode > previous.GPUsPerNode ||
+				(info.GPUsPerNode == previous.GPUsPerNode && info.VRAMPerGPU > previous.VRAMPerGPU) {
+				allNodes[index] = n
+			}
+			continue
+		}
+		nodeIndexes[n.nodeName] = len(allNodes)
+		allNodes = append(allNodes, n)
 	}
 
 	if len(allNodes) == 0 {
@@ -373,7 +403,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -392,18 +422,21 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
 
-	// Count only nodes with the same SKU as the selected best node,
+	// Count nodes and GPUs with the same SKU as the selected best node,
 	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
+	totalGPUs := 0
+	selectedShapeGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
-		if n.sku != bestSKU {
+		if !matchesSelectedGPUType(n.sku, bestSKU, n.info.Model, bestNode.Model) {
 			continue
 		}
 		nodesWithGPUs++
+		totalGPUs, selectedShapeGPUs = accumulateGPUCapacity(totalGPUs, selectedShapeGPUs, n.info, bestNode)
 		if !rdmaDetected {
 			rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.nodeName)
 			if rdma {
@@ -425,9 +458,13 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	if err != nil {
 		cloudProvider = CloudProviderUnknown
 	}
+	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, bestNode.Model, len(allNodes),
+		func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return allNodes[i].sku, allNodes[i].info.Model })
 	bestNode.System = bestSKU
 	bestNode.CloudProvider = cloudProvider
 	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.TotalGPUs = totalGPUs
+	bestNode.SelectedShapeGPUs = selectedShapeGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
@@ -539,19 +576,31 @@ func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Reader) ([
 // This function does not implement retries or fallback logic.
 // Error handling and multi-pod aggregation are managed by the caller.
 func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	return scrapeMetricsEndpoint(ctx, metricsHTTPClient, endpoint)
+}
+
+// metricsHTTPClient is shared by all scrapes so their connections go back to
+// one bounded, idle-timed pool instead of a new transport per call.
+var metricsHTTPClient = newMetricsHTTPClient(metricsIdleConnTimeout)
+
+func newMetricsHTTPClient(idleConnTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   dialTimeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: tlsHandshakeTimeout,
+			IdleConnTimeout:     idleConnTimeout,
+			MaxIdleConns:        metricsMaxIdleConns,
+		},
+	}
+}
+
+func scrapeMetricsEndpoint(ctx context.Context, client *http.Client, endpoint string) (*GPUInfo, error) {
 	// Set a timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	// Create a custom HTTP client with transport-level timeouts
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   dialTimeout,      // Dial timeout
-				KeepAlive: 30 * time.Second, // Keep-alive for connections
-			}).DialContext,
-			TLSHandshakeTimeout: tlsHandshakeTimeout, // TLS handshake timeout
-		},
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)
@@ -781,7 +830,9 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered for selection and counting. When empty, the best node is selected
-// first and then only nodes with the same SKU are counted.
+// first and then only nodes of the same GPU type are counted. Known types are grouped
+// by SKU; unknown types are grouped by normalized model name. SelectedShapeGPUs counts
+// only nodes that also match the selected GPU count and VRAM per GPU.
 //
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
@@ -829,7 +880,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -849,16 +900,19 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
 
-	// Count only nodes with the same SKU as the selected best node,
+	// Count nodes and GPUs with the same SKU as the selected best node,
 	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
+	totalGPUs := 0
+	selectedShapeGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
-		if n.sku == bestSKU {
+		if matchesSelectedGPUType(n.sku, bestSKU, n.info.Model, bestNode.Model) {
 			nodesWithGPUs++
+			totalGPUs, selectedShapeGPUs = accumulateGPUCapacity(totalGPUs, selectedShapeGPUs, n.info, bestNode)
 			if !rdmaDetected {
 				rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.info.NodeName)
 				if rdma {
@@ -877,20 +931,40 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 		rdmaDetected = true
 	}
 
+	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, bestNode.Model, len(allNodes),
+		func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return allNodes[i].sku, allNodes[i].info.Model })
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.TotalGPUs = totalGPUs
+	bestNode.SelectedShapeGPUs = selectedShapeGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestNode.GPUsPerNode,
 		"nodesWithGPUs", bestNode.NodesWithGPUs,
-		"totalGpus", bestNode.GPUsPerNode*bestNode.NodesWithGPUs,
+		"totalGpus", bestNode.TotalGPUs,
+		"selectedShapeGpus", bestNode.SelectedShapeGPUs,
 		"model", bestNode.Model,
 		"vram", bestNode.VRAMPerGPU,
 		"system", bestNode.System,
 		"rdma", bestNode.RDMAEnabled,
 		"rdmaType", bestNode.RDMAType)
 	return bestNode, nil
+}
+
+func accumulateGPUCapacity(total, selected int, node, selectedShape *GPUInfo) (int, int) {
+	total += node.GPUsPerNode
+	if node.GPUsPerNode == selectedShape.GPUsPerNode && node.VRAMPerGPU == selectedShape.VRAMPerGPU {
+		selected += node.GPUsPerNode
+	}
+	return total, selected
+}
+
+func matchesSelectedGPUType(discoveredSKU, selectedSKU nvidiacomv1beta1.GPUSKUType, discoveredModel, selectedModel string) bool {
+	if discoveredSKU != selectedSKU {
+		return false
+	}
+	return selectedSKU != "" || normalize(discoveredModel) == normalize(selectedModel)
 }
 
 // extractGPUInfoFromNode extracts GPU information from a single node's labels.
@@ -956,7 +1030,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
-		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+		if rule.boundedToken && !containsModelToken(gpuProduct, rule.token) {
 			continue
 		}
 
@@ -976,7 +1050,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 			}
 			// Token matched but no form factor indicator was present in the string
 			// (e.g. "NVIDIA H200" from DCGM has no SXM/HGX/DGX suffix). If the GPU
-			// has no PCIe variant it must be SXM-only (H200, B200, GB200).
+			// has no PCIe variant it must be SXM-only (H200, B200).
 			if rule.sxmSKU != "" {
 				return rule.sxmSKU
 			}
@@ -984,6 +1058,16 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	}
 
 	return ""
+}
+
+// matchesDiscoveredSKU keeps the deprecated GB200 selector compatible without rewriting it.
+func matchesDiscoveredSKU(filterSKU, discoveredSKU nvidiacomv1beta1.GPUSKUType) bool {
+	if filterSKU == "" || filterSKU == discoveredSKU {
+		return true
+	}
+
+	//nolint:staticcheck // SA1019: Existing selectors must continue to match GB200 nodes.
+	return filterSKU == nvidiacomv1beta1.GPUSKUTypeGB200SXM && discoveredSKU == nvidiacomv1beta1.GPUSKUTypeGB200
 }
 
 // normalize standardizes a GPU product string to simplify matching.
@@ -999,18 +1083,29 @@ func normalize(input string) string {
 
 func containsModelToken(input, token string) bool {
 	upper := strings.ToUpper(input)
-	for start := 0; start < len(upper); {
-		idx := strings.Index(upper[start:], token)
-		if idx < 0 {
-			return false
+	token = normalize(token)
+	for start := 0; start < len(upper); start++ {
+		if start > 0 && isASCIIAlphaNum(upper[start-1]) {
+			continue
 		}
-		idx += start
-		end := idx + len(token)
-		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
-			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+
+		inputIndex := start
+		tokenIndex := 0
+		for inputIndex < len(upper) && tokenIndex < len(token) {
+			if upper[inputIndex] == ' ' || upper[inputIndex] == '-' {
+				inputIndex++
+				continue
+			}
+			if upper[inputIndex] != token[tokenIndex] {
+				break
+			}
+			inputIndex++
+			tokenIndex++
+		}
+		if tokenIndex == len(token) &&
+			(inputIndex == len(upper) || !isASCIIAlphaNum(upper[inputIndex])) {
 			return true
 		}
-		start = idx + 1
 	}
 	return false
 }

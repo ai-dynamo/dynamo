@@ -71,6 +71,7 @@ pub(crate) fn server_info() -> pb::ServerInfo {
             sleep_mode_enabled: true,
             draft_weight_updates_enabled: true,
         }),
+        proto_version: pb::VERSION.to_string(),
     }
 }
 
@@ -90,11 +91,18 @@ pub(crate) fn sequence_response(
             ranks: logprobs.then_some(vec![1]).unwrap_or_default(),
             candidate_tokens: logprobs
                 .then_some(vec![pb::CandidateTokenInfo {
-                    tokens: vec![pb::candidate_token_info::TokenInfo {
-                        id: 43,
-                        logprob: -0.5,
-                        rank: 2,
-                    }],
+                    tokens: vec![
+                        pb::candidate_token_info::TokenInfo {
+                            id: 42,
+                            logprob: -0.25,
+                            rank: 1,
+                        },
+                        pb::candidate_token_info::TokenInfo {
+                            id: 43,
+                            logprob: -0.5,
+                            rank: 2,
+                        },
+                    ],
                 }])
                 .unwrap_or_default(),
             finish_info: terminal.then_some(pb::FinishInfo {
@@ -103,7 +111,9 @@ pub(crate) fn sequence_response(
                 stop_reason: Some(pb::finish_info::StopReason::StopTokenId(2)),
                 kv_transfer_params,
                 ec_transfer_params: None,
+                num_cached_tokens: None,
             }),
+            ..Default::default()
         }),
     }
 }
@@ -152,7 +162,9 @@ pub(crate) fn encode_response(
                 stop_reason: None,
                 kv_transfer_params: None,
                 ec_transfer_params,
+                num_cached_tokens: None,
             }),
+            ..Default::default()
         }),
     }
 }

@@ -19,12 +19,6 @@ const (
 	// role's podTemplate as the root for compiled model artifacts.
 	ModelStorageVolumeName = "model-storage"
 
-	// AnnotationExtraResourcesHash records an opaque content hash of the role's
-	// generated immutable runtime ConfigMap on PodClique templates
-	// (PodCliqueSet.spec.template.cliques[].annotations). Grove propagates it to
-	// PodClique and Pod metadata.
-	AnnotationExtraResourcesHash = "nvidia.com/extra-resources-hash"
-
 	// LPXReadyCondition reports if LPXGraphDeployment object is ready.
 	// Note: This condition type is defined to ensure consistent naming of conditions across objects.
 	// Please use object specific variants of this condition which provides more details for each context where
@@ -46,6 +40,7 @@ type LPXGraphDeploymentSpec struct {
 	// inputRevision hashes only effective LPX inputs, including its selected
 	// restart token. Unrelated component edits do not create an LPX revision.
 	// +kubebuilder:validation:Pattern="^sha256:[a-f0-9]{64}$"
+	// +required
 	InputRevision string `json:"inputRevision"`
 }
 
@@ -80,6 +75,11 @@ type LPXGraphDeploymentStatus struct {
 	// modelDownload retains the existing remote-build download progress.
 	// +optional
 	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
+	// checkpointDownload retains download progress for the checkpoints that
+	// resolved hybrid workloads project into their Cyborg conductors. Its
+	// presence also records that the deployment adopts build checkpoints.
+	// +optional
+	CheckpointDownload *CheckpointDownloadStatus `json:"checkpointDownload,omitempty"`
 }
 
 // ModelDownloadStatus contains the status of remote LPU model downloads.
@@ -94,6 +94,18 @@ type ModelDownloadStatus struct {
 	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
 }
 
+// CheckpointDownloadStatus contains the status of Cyborg checkpoint downloads.
+type CheckpointDownloadStatus struct {
+	// checkpoints is the sorted set of checkpoints, as `<model>@<revision>`,
+	// that were successfully downloaded into model-storage.
+	// +optional
+	Checkpoints []string `json:"checkpoints,omitempty"`
+
+	// lastCheckedAt is the oldest Model Express confirmation of the listed checkpoints.
+	// +optional
+	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
@@ -102,12 +114,14 @@ type ModelDownloadStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // LPXGraphDeployment is generated and owned by the Dynamo operator, not authored
-// by users. It owns one LPX PCS and its build/placement resources.
+// by users. It owns one LPX PCS and its Services.
 // It serves only v1alpha1 and has no conversion contract.
 type LPXGraphDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              LPXGraphDeploymentSpec `json:"spec"`
+	// +required
+	Spec LPXGraphDeploymentSpec `json:"spec"`
 	// +optional
 	Status LPXGraphDeploymentStatus `json:"status,omitempty"`
 }

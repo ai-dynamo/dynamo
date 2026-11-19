@@ -76,7 +76,7 @@ spec:
     - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
       value: "0"
     - name: DYN_LOG
-      value: info,dynamo_kv_router=debug,dynamo_llm::kv_router=debug
+      value: info,dynamo_kv_router=debug,dynamo_scheduler=debug,dynamo_kv_indexer=debug,dynamo_slot_tracker=debug,dynamo_session_affinity=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_kv_hints=debug,dynamo_kv_events=debug,dynamo_llm::kv_router=debug
     - name: NCCL_CUMEM_ENABLE
       value: "1"
     - name: NCCL_NVLS_ENABLE
@@ -220,7 +220,7 @@ spec:
                     --mamba-cache-mode align \
                     --mamba-ssm-cache-dtype bfloat16 \
                     --mamba-backend triton \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
                     --dyn-tool-call-parser qwen3_coder \
                     --dyn-reasoning-parser nemotron3 \
                     --reasoning-parser-plugin "${PLUGIN}" \
@@ -385,7 +385,7 @@ spec:
                     --mamba-cache-mode align \
                     --mamba-ssm-cache-dtype bfloat16 \
                     --mamba-backend triton \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
                     --dyn-tool-call-parser qwen3_coder \
                     --dyn-reasoning-parser nemotron3 \
                     --reasoning-parser-plugin "${PLUGIN}" \

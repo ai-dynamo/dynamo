@@ -3,11 +3,15 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
+    dynamo_priority_to_trtllm,
+    orig_elapsed_s,
     request_cache_salt,
+    request_trtllm_priority,
     stored_event_cache_salt,
 )
 
@@ -86,22 +90,69 @@ def test_stored_event_cache_salt_rejects_conflicting_blocks() -> None:
         stored_event_cache_salt(data)
 
 
-def test_visible_stop_tokens_disable_engine_stopping() -> None:
+def test_visible_stop_tokens_stop_in_engine_and_stay_in_output() -> None:
     sampling_params = SimpleNamespace(
         ignore_eos=False,
         min_tokens=None,
-        stop_token_ids=[200, 300],
+        stop_token_ids=[300],
+        include_stop_str_in_output=False,
     )
 
     apply_stop_conditions_to_sampling_params(
         sampling_params,
         {
             "stop_token_ids_visible": [200],
+            "stop_token_ids_hidden": [100],
+        },
+    )
+
+    assert sampling_params.ignore_eos is False
+    assert sampling_params.include_stop_str_in_output is True
+    assert set(sampling_params.stop_token_ids) == {100, 200, 300}
+
+
+def test_min_tokens_keeps_visible_stop_tokens_on_frontend() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+        include_stop_str_in_output=False,
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {
+            "stop_token_ids_visible": [200],
+            "stop_token_ids_hidden": [100],
+            "min_tokens": 8,
+        },
+    )
+
+    assert sampling_params.ignore_eos is True
+    assert sampling_params.include_stop_str_in_output is False
+    assert sampling_params.min_tokens == 8
+    assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+def test_ignore_eos_leaves_visible_stop_tokens_to_frontend() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+        include_stop_str_in_output=False,
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {
+            "ignore_eos": True,
+            "stop_token_ids_visible": [200],
             "stop_token_ids_hidden": [100, 200],
         },
     )
 
     assert sampling_params.ignore_eos is True
+    assert sampling_params.include_stop_str_in_output is False
     assert set(sampling_params.stop_token_ids) == {100, 300}
 
 
@@ -142,3 +193,97 @@ def test_no_stop_trim_leaves_stopping_to_frontend() -> None:
     # TRT-LLM maps ignore_eos to end_id=-1 and an empty executor stop-word list.
     assert sampling_params.ignore_eos is True
     assert sampling_params.min_tokens == 2
+
+
+INT32_MIN = -(2**31)
+INT32_MAX = 2**31 - 1
+PRIORITY_LIMIT = 2**22
+PRIORITY_STEP = 2**-24
+
+
+def _as_trtllm_float(priority: int) -> np.float32:
+    """TRT-LLM stores request priority as a C++ float."""
+    return np.float32(dynamo_priority_to_trtllm(priority))
+
+
+def test_dynamo_priority_zero_maps_to_trtllm_default():
+    assert dynamo_priority_to_trtllm(0) == 0.5
+
+
+@pytest.mark.parametrize(
+    "priorities",
+    [
+        range(-1000, 1001),
+        range(PRIORITY_LIMIT - 1000, PRIORITY_LIMIT + 1),
+        range(-PRIORITY_LIMIT, -PRIORITY_LIMIT + 1001),
+    ],
+)
+def test_dynamo_priority_mapping_is_strict_in_float32(priorities):
+    mapped = [_as_trtllm_float(p) for p in priorities]
+    assert all(a < b for a, b in zip(mapped, mapped[1:]))
+    assert all(
+        value == dynamo_priority_to_trtllm(p) for p, value in zip(priorities, mapped)
+    )
+
+
+@pytest.mark.parametrize(
+    ("priority", "expected"),
+    [
+        (INT32_MAX, 0.75),
+        (PRIORITY_LIMIT + 1, 0.75),
+        (INT32_MIN, 0.25),
+        (-PRIORITY_LIMIT - 1, 0.25),
+    ],
+)
+def test_dynamo_priority_saturates_below_health_check(priority, expected):
+    assert _as_trtllm_float(priority) == expected
+    assert _as_trtllm_float(priority) < np.float32(1.0)
+
+
+@pytest.mark.parametrize(
+    ("request_body", "engine_orders_by_priority", "expected"),
+    [
+        ({"priority": 1.0, "routing": {"priority": -5}}, True, 1.0),
+        ({"priority": 1.0}, False, 1.0),
+        ({"routing": {"priority": 1}}, True, 0.5 + PRIORITY_STEP),
+        ({"routing": {"priority": -1}}, True, 0.5 - PRIORITY_STEP),
+        ({"routing": {"priority": 1}}, False, 0.5),
+        ({"routing": {"priority": None}}, True, 0.5),
+        ({"routing": None}, True, 0.5),
+        ({}, True, 0.5),
+    ],
+    ids=[
+        "top-level-wins",
+        "top-level-without-priority-queue",
+        "routing-mapped",
+        "routing-mapped-negative",
+        "fcfs-queue-keeps-default",
+        "no-routing-priority",
+        "null-routing",
+        "no-routing",
+    ],
+)
+def test_request_trtllm_priority(request_body, engine_orders_by_priority, expected):
+    assert (
+        request_trtllm_priority(
+            request_body,
+            default=0.5,
+            engine_orders_by_priority=engine_orders_by_priority,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_body", "expected"),
+    [
+        ({"elapsed_since_arrival_ms": 1500.0}, 1.5),
+        ({"elapsed_since_arrival_ms": 0.0}, 0.0),
+        ({"elapsed_since_arrival_ms": None}, None),
+        ({}, None),
+    ],
+)
+def test_orig_elapsed_s_converts_frontend_stamp(
+    request_body: dict, expected: float | None
+) -> None:
+    assert orig_elapsed_s(request_body) == expected

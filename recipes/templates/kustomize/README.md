@@ -393,18 +393,20 @@ The replacement remains a YAML string. Replace only the text inside the
 existing single quotes; for example:
 
 ```yaml
-value: &kv-transfer-config '{"key":"value"}'
+value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 ```
 
 Keeping the outer quotes prevents YAML from converting the JSON text into a
 mapping before it reaches the environment variable.
 
-All three files set the hook on both canonical worker roles:
+All three files set the hook on both canonical worker roles. In the vLLM patches, replace
+`your-prefill-kv-transfer-config` with a `kv_producer` configuration and
+`your-decode-kv-transfer-config` with a `kv_consumer` configuration:
 
 | File | Select when |
 | --- | --- |
-| `patches/vllm-kv-transfer-config.yaml` | The vLLM disaggregated base, whose workers define `KV_TRANSFER_CONFIG` with the common beta default `{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}`. |
-| `patches/vllm-compute-domain-kv-transfer-config.yaml` | The vLLM ComputeDomain base uses the minimal default `{"kv_connector":"NixlConnector","kv_role":"kv_both"}`. |
+| `patches/vllm-kv-transfer-config.yaml` | The vLLM disaggregated base, whose workers define `KV_TRANSFER_CONFIG` with `kv_buffer_device=cuda`. |
+| `patches/vllm-compute-domain-kv-transfer-config.yaml` | The vLLM ComputeDomain base uses a minimal NIXL configuration. |
 | `patches/sglang-nixl-backend.yaml` | The SGLang disaggregated base, whose workers define `SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX`. |
 
 For example:

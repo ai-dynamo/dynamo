@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.benchmarks/
+build/
+dist/
+.venv/
+*.egg-info/
+.DS_Store
+
+# Generated reports, benchmark outputs, and locally supplied traces.
+*.jsonl
+*.jsonl.gz
+runs/
+artifacts/
+planner_reports/
+data/
+analysis/

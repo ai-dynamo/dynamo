@@ -36,6 +36,7 @@ ARG SCCACHE_REGION=""
 # selection service uses for KV-event and replica-sync sockets.
 # python3 runs container/compliance/cargo_sbom.py in the build RUN below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     protobuf-compiler \
     libprotobuf-dev \
     libclang-dev \
@@ -117,6 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libstdc++6 \
     libzmq5 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /

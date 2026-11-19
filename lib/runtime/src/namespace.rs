@@ -19,6 +19,22 @@ pub enum NamespaceFilter {
     Prefix(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespacePrefixMode {
+    Literal,
+    WorkerGeneration,
+}
+
+impl NamespacePrefixMode {
+    pub fn from_env() -> Self {
+        if crate::config::env_is_truthy("DYN_NAMESPACE_PREFIX_STRICT") {
+            Self::WorkerGeneration
+        } else {
+            Self::Literal
+        }
+    }
+}
+
 impl NamespaceFilter {
     /// Create a NamespaceFilter from optional namespace and namespace_prefix.
     /// If prefix is provided, it takes precedence over exact namespace.
@@ -53,9 +69,50 @@ impl NamespaceFilter {
         }
     }
 
+    /// Match operator worker generations when requested, preserving exact and global scopes.
+    pub fn matches_with_prefix_mode(&self, namespace: &str, mode: NamespacePrefixMode) -> bool {
+        match (self, mode) {
+            (NamespaceFilter::Prefix(prefix), NamespacePrefixMode::WorkerGeneration) => {
+                if namespace == prefix {
+                    return true;
+                }
+                let Some(suffix) = namespace
+                    .strip_prefix(prefix.as_str())
+                    .and_then(|rest| rest.strip_prefix('-'))
+                else {
+                    return false;
+                };
+                // The operator uses `legacy` while migrating pre-generation workers.
+                suffix == "legacy"
+                    || (suffix.len() == 8
+                        && suffix
+                            .bytes()
+                            .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')))
+            }
+            _ => self.matches(namespace),
+        }
+    }
+
     /// Returns true if this is global namespace filtering (no filtering).
     pub fn is_global(&self) -> bool {
         matches!(self, NamespaceFilter::Global)
+    }
+
+    /// The discovery query for the model cards this filter can match: only the namespace's
+    /// cards for an exact filter, so discovery reads and watches just that namespace, and all
+    /// cards otherwise, because a namespace prefix is not a discovery path. Callers still
+    /// apply the filter to what the query returns.
+    pub fn model_query(&self) -> crate::discovery::DiscoveryQuery {
+        match self {
+            NamespaceFilter::Exact(namespace) => {
+                crate::discovery::DiscoveryQuery::NamespacedModels {
+                    namespace: namespace.clone(),
+                }
+            }
+            NamespaceFilter::Global | NamespaceFilter::Prefix(_) => {
+                crate::discovery::DiscoveryQuery::AllModels
+            }
+        }
     }
 }
 
@@ -66,6 +123,24 @@ pub fn is_global_namespace(namespace: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::DiscoveryQuery;
+
+    #[test]
+    fn model_query_reads_only_an_exact_namespace() {
+        assert!(matches!(
+            NamespaceFilter::Exact("pool-7".into()).model_query(),
+            DiscoveryQuery::NamespacedModels { namespace } if namespace == "pool-7"
+        ));
+        // A prefix is not a discovery path, so it and the global filter list every card.
+        assert!(matches!(
+            NamespaceFilter::Prefix("pool".into()).model_query(),
+            DiscoveryQuery::AllModels
+        ));
+        assert!(matches!(
+            NamespaceFilter::Global.model_query(),
+            DiscoveryQuery::AllModels
+        ));
+    }
 
     #[test]
     fn test_from_namespace_and_prefix_global() {
@@ -132,5 +207,63 @@ mod tests {
         assert!(NamespaceFilter::Global.is_global());
         assert!(!NamespaceFilter::Exact("ns".to_string()).is_global());
         assert!(!NamespaceFilter::Prefix("ns".to_string()).is_global());
+    }
+
+    #[test]
+    fn operator_prefix_excludes_sibling_deployments() {
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        for namespace in ["default-foo", "default-foo-1a2b3c4d", "default-foo-legacy"] {
+            assert!(
+                literal.matches_with_prefix_mode(namespace, NamespacePrefixMode::WorkerGeneration),
+                "{namespace}"
+            );
+        }
+        for namespace in [
+            "default-foo-bar",
+            "default-foo-bar-1a2b3c4d",
+            "default-foobar",
+            "default-foo-DEADBEEF",
+            "default-foo-1a2b3c4g",
+            "default-foo-1a2b3c4",
+        ] {
+            assert!(literal.matches(namespace), "manual prefix: {namespace}");
+            assert!(
+                !literal.matches_with_prefix_mode(namespace, NamespacePrefixMode::WorkerGeneration),
+                "operator prefix: {namespace}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_prefix_preserves_exact_and_global_scopes() {
+        for (namespace, prefix) in [
+            (None, None),
+            (Some("default-foo"), None),
+            (None, Some("dynamo")),
+            (None, Some("")),
+        ] {
+            let filter = NamespaceFilter::from_namespace_and_prefix(namespace, prefix);
+            for candidate in ["default-foo", "default-foo-1a2b3c4d", "default-foo-bar"] {
+                assert_eq!(
+                    filter
+                        .matches_with_prefix_mode(candidate, NamespacePrefixMode::WorkerGeneration),
+                    filter.matches(candidate)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_mode_uses_canonical_environment_flag() {
+        for (value, expected) in [
+            (None, NamespacePrefixMode::Literal),
+            (Some("false"), NamespacePrefixMode::Literal),
+            (Some(" TRUE "), NamespacePrefixMode::WorkerGeneration),
+            (Some("on"), NamespacePrefixMode::WorkerGeneration),
+        ] {
+            temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", value, || {
+                assert_eq!(NamespacePrefixMode::from_env(), expected);
+            });
+        }
     }
 }

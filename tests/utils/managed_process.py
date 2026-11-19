@@ -18,8 +18,8 @@ import requests
 
 from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.http_checks import check_health_ready as check_health_ready
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_port, deallocate_port
-from tests.utils.test_output import resolve_test_output_path
 
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):

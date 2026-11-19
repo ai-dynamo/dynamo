@@ -71,7 +71,7 @@ spec:
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.97 \
               --disaggregation-mode prefill \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
           env:
           - name: HF_HOME
@@ -140,7 +140,7 @@ spec:
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.95 \
               --disaggregation-mode decode \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
           env:
           - name: HF_HOME

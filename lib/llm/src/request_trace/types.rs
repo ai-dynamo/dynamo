@@ -26,6 +26,8 @@ pub struct RequestTraceRecord {
     pub tool: Option<RequestTraceToolEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<RequestTracePayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<RequestTraceRouterSelection>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +48,8 @@ pub enum RequestTraceEventType {
     ToolError,
     #[serde(rename = "request_payload")]
     RequestPayload,
+    #[serde(rename = "router_selection")]
+    RouterSelection,
 }
 
 impl RequestTraceEventType {
@@ -69,6 +73,22 @@ pub struct RequestTracePayload {
     pub payload_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_drop_reason: Option<String>,
+}
+
+/// Per-candidate costs for one router worker selection, emitted when the
+/// scheduler chose a worker. Each candidate is a `[worker_id, dp_rank, cost]`
+/// triple; candidates are sorted by ascending cost. `candidate_count` is the
+/// number of eligible workers scored before top-k truncation; the dispatched
+/// worker is always among the candidates and is identified by the matching
+/// `request_end` row's worker id. Costs are in the policy's units
+/// (scheduler-tracked KV blocks for the builtin policy) at full precision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RequestTraceRouterSelection {
+    pub request_id: String,
+    pub worker_type: String,
+    pub pinned: bool,
+    pub candidate_count: u64,
+    pub candidates: Vec<(u64, u32, f64)>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +245,10 @@ pub struct ToolCallMetadata {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Set only when the endpoint returns the tool's namespace separately from
+    /// `name`, as `/v1/responses` does for namespaced tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -288,6 +312,7 @@ impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
             request: None,
             tool: Some(ingress.tool),
             payload: None,
+            selection: None,
         }
     }
 }
@@ -341,6 +366,7 @@ mod tests {
                 finish_reason_metadata: None,
             }),
             tool: None,
+            selection: None,
             payload: None,
         };
 
@@ -383,6 +409,7 @@ mod tests {
             agent_context: None,
             request: None,
             tool: None,
+            selection: None,
             payload: Some(RequestTracePayload {
                 request_id: "req-1".to_string(),
                 endpoint: "openai.chat_completion".to_string(),
@@ -423,6 +450,7 @@ mod tests {
             agent_context: None,
             request: None,
             tool: None,
+            selection: None,
             payload: Some(RequestTracePayload {
                 request_id: "req-h".to_string(),
                 endpoint: "openai.chat_completion".to_string(),
@@ -458,6 +486,40 @@ mod tests {
         }
         let value = serde_json::to_value(&bare).unwrap();
         assert!(value["payload"].get("http_request_headers").is_none());
+    }
+
+    #[test]
+    fn router_selection_record_serializes_candidate_triples() {
+        let record = RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RouterSelection,
+            event_time_unix_ms: 1_100,
+            event_source: Some(RequestTraceEventSource::Dynamo),
+            agent_context: None,
+            request: None,
+            tool: None,
+            payload: None,
+            selection: Some(RequestTraceRouterSelection {
+                request_id: "req-1".to_string(),
+                worker_type: "decode".to_string(),
+                pinned: false,
+                candidate_count: 40,
+                candidates: vec![(7, 0, 1.5), (9, 1, 1.5), (3, 0, 2.25)],
+            }),
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["event_type"], "router_selection");
+        assert!(value.get("request").is_none());
+        assert_eq!(value["selection"]["request_id"], "req-1");
+        assert_eq!(value["selection"]["candidate_count"], 40);
+        assert_eq!(
+            value["selection"]["candidates"],
+            serde_json::json!([[7, 0, 1.5], [9, 1, 1.5], [3, 0, 2.25]])
+        );
+
+        let roundtrip: RequestTraceRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip.selection, record.selection);
     }
 
     #[test]

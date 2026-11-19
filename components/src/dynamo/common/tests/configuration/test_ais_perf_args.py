@@ -177,3 +177,31 @@ def test_legacy_router_selector_normalizes_at_cli_boundary():
         ).router_prefill_load_model
         == "ais"
     )
+
+
+@pytest.mark.parametrize("replacement", [None, "perf_model in each --pools entry"])
+def test_help_points_to_the_input_the_component_reads(replacement):
+    parser = argparse.ArgumentParser()
+    AisPerfArgGroup(replacement=replacement).add_arguments(parser)
+    # argparse has no public list of a parser's options.
+    texts = {
+        option: action.help for option, action in parser._option_string_actions.items()
+    }
+    new_input = replacement or "--ais-perf-model"
+
+    # One old input of each kind: its help names what replaces it.
+    for flag in ("--ais-perf-config", "--ais-backend", "--ais-nextn"):
+        assert texts[flag].startswith(
+            f"{flag} is deprecated and will be removed in v1.9; use {new_input}. "
+        )
+    assert texts["--router-prefill-load-worker-type"].startswith(
+        f"Worker type whose config the router takes from {new_input}; "
+    )
+    if replacement is not None:
+        assert replacement in texts["--ais-perf-model"]
+        # No text sends the reader to the flag the component does not read.
+        assert not [flag for flag, text in texts.items() if "--ais-perf-model" in text]
+    else:
+        # The flag is not registered with env_var=; its help is where --help
+        # names the variable.
+        assert "DYN_AIS_PERF_MODEL" in texts["--ais-perf-model"]

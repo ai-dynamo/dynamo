@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import errno
 import logging
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
@@ -33,6 +39,16 @@ def _permissive_http_policy() -> UrlValidationPolicy:
         allow_http=True,
         allow_private_ips=True,
     )
+
+
+# A presigned URL is a bearer credential for its lifetime: its signature must
+# reach neither the worker log nor the error body returned to the client.
+_SIGNATURE = "0123456789abcdef" * 16
+_SIGNED_URL = (
+    "https://bucket.s3.amazonaws.com/{name}?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
+)
 
 
 @pytest.mark.asyncio
@@ -186,6 +202,115 @@ async def test_load_audio_batch_prioritizes_typed_client_error(client_error):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        RuntimeError("Error opening <_io.BytesIO>: Format not recognised."),
+        (np.array([], dtype=np.float32), 16000.0),
+    ],
+    ids=["undecodable", "empty_waveform"],
+)
+async def test_load_audio_batch_preserves_invalid_audio_value_error(bad_result):
+    """Bad client audio must stay a ValueError through the batch: the bindings
+    map ValueError to InvalidArgument (4xx), the generic aggregate to Unknown."""
+    good = (np.zeros(8000, dtype=np.float32), 16000.0)
+
+    async def _fetch(url):
+        """Return valid audio or simulate a decoder failure."""
+        if url.endswith("good.wav"):
+            return good
+        if isinstance(bad_result, Exception):
+            raise bad_result
+        return bad_result
+
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    loader._load_audio_with_vllm = _fetch  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="Failed to"):
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/good.wav"},
+                {"Url": "https://example.com/bad.wav"},
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_value_error_outranks_generic_failure():
+    """Invalid audio stays a client error even when another item fails."""
+    loader = AudioLoader()
+    value_error = ValueError("Decoded waveform is empty.")
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("nixl read failed"), value_error]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/one.wav"},
+                {"Url": "https://example.com/empty.wav"},
+            ]
+        )
+
+    assert exc_info.value is value_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        HttpTimeoutError("Timeout loading https://example.com/bad.wav"),
+        HttpConnectionError("Connection error loading https://example.com/bad.wav"),
+        "vllm_missing",
+    ],
+    ids=["fetch_timeout", "connection_error", "vllm_missing"],
+)
+async def test_load_audio_batch_server_failure_is_not_client_error(
+    monkeypatch, failure
+):
+    """A failed fetch or a missing vLLM says nothing about the audio: it must
+    not take the ValueError branch, which the bindings map to InvalidArgument."""
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    if failure == "vllm_missing":
+        monkeypatch.setattr(audio_loader_module, "AudioMediaIO", None)
+    else:
+        monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: object())
+        monkeypatch.setattr(
+            audio_loader_module, "fetch_bytes", AsyncMock(side_effect=failure)
+        )
+
+    with pytest.raises(Exception) as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
+
+    assert type(exc_info.value) is Exception
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MemoryError("Out of memory"),
+        OSError(errno.ENOMEM, "Cannot allocate memory"),
+        OSError(errno.EMFILE, "Too many open files"),
+        OSError(errno.ENFILE, "Too many open files in system"),
+    ],
+    ids=["memory_error", "enomem", "emfile", "enfile"],
+)
+async def test_load_audio_batch_resource_failure_is_not_client_error(failure):
+    """Host resource exhaustion must remain a server error in a batch."""
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=failure
+    )
+
+    with pytest.raises(Exception, match="Failed to load audio") as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
+
+    assert type(exc_info.value) is Exception
+    assert str(failure) in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_load_audio_batch_rejects_decoded_variant_without_frontend_decoding():
     loader = AudioLoader(enable_frontend_decoding=False)
 
@@ -280,3 +405,46 @@ async def test_load_audio_preserves_a_configuration_error(monkeypatch):
         await loader.load_audio("https://example.com/a.wav")
 
     assert not isinstance(excinfo.value, ValueError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        RuntimeError("Error opening <_io.BytesIO>: Format not recognised."),
+        (np.array([], dtype=np.float32), 16000.0),
+    ],
+    ids=["decode_error", "empty_waveform"],
+)
+async def test_load_audio_failure_keeps_signed_url_out(result, caplog):
+    url = _SIGNED_URL.format(name="clip.wav")
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    mock = AsyncMock(side_effect=result) if isinstance(result, Exception) else None
+    loader._load_audio_with_vllm = mock or AsyncMock(  # type: ignore[method-assign]
+        return_value=result
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as exc_info:
+        await loader.load_audio(url)
+
+    assert _SIGNATURE not in str(exc_info.value)
+    assert _SIGNATURE not in caplog.text
+    assert "bucket.s3.amazonaws.com/clip.wav" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_failure_keeps_signed_url_out(caplog):
+    url = _SIGNED_URL.format(name="clip.wav")
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("Format not recognised.")
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception) as exc_info:
+        await loader.load_audio_batch([{"Url": url}])
+
+    # The old batch line cut the URL at 80 characters, which kept the start of
+    # the query; the signature itself sits further along.
+    for text in (str(exc_info.value), caplog.text):
+        assert _SIGNATURE not in text
+        assert "X-Amz-" not in text
