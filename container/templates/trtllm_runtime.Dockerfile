@@ -449,12 +449,10 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # - certifi (CA bundle) and Pillow: no required dependencies, so each moves
 #   exactly one distribution.
 # - transformers: past the exact pin that tensorrt-llm declares (==5.5.4).
-#   5.13.1 declares the same tokenizers and huggingface-hub requirements as
-#   5.5.4, so the solve moves no other distribution. 5.13.0 is the first release
-#   with huggingface/transformers#46618: 5.10.x-5.12.x resolve a Hub cache
-#   snapshot's remote-code file into blobs/, so relative imports such as Kimi
-#   K2.5's configuration_deepseek.py are not found. The bounds of its checks
-#   must hold the pin (tests/dependencies/test_system_site_pins.py).
+#   5.13.0 fixed Hub-cache remote-code imports (huggingface/transformers#46618).
+#   5.13.1 shares 5.5.4's tokenizers and huggingface-hub requirements, moving no other
+#   distribution. The bounds of its checks must hold the pin
+#   (tests/dependencies/test_system_site_pins.py).
 # - jupyter-server, jupyterlab, notebook, urllib3: the upstream developer stack.
 # - datasets, fsspec, filelock, pyasn1, soupsieve, onnx, multidict, werkzeug:
 #   datasets 4.7.0 caps fsspec at 2026.2.0, so datasets moves to 5.1.0.
