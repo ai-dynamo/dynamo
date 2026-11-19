@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn local_statuses_distinguish_overload_from_unavailable() {
-        assert_eq!(SanitizedError::Overloaded.status(), overload_status_code());
+        assert_eq!(SanitizedError::Overloaded.status().as_u16(), 529);
         assert_eq!(
             SanitizedError::Unavailable.status(),
             StatusCode::SERVICE_UNAVAILABLE
@@ -402,11 +402,7 @@ mod tests {
 
     #[test]
     fn triage_keeps_only_retry_bearing_5xx_on_the_status_line() {
-        // A configured non-5xx overload status is covered by the overload branch, not here.
         for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
-            if !status.is_server_error() {
-                continue;
-            }
             assert_eq!(
                 BackendStatusAction::triage(status),
                 BackendStatusAction::Sanitize(SanitizedError::PreserveServerError(status)),
@@ -417,12 +413,8 @@ mod tests {
 
     #[test]
     fn triage_coerces_other_5xx_and_reports_the_asserted_status() {
-        // A configured overload status keeps its status line, so skip it.
         for code in [500u16, 501, 502, 504, 507, 599] {
             let status = StatusCode::from_u16(code).unwrap();
-            if status == overload_status_code() {
-                continue;
-            }
             assert_eq!(
                 BackendStatusAction::triage(status),
                 BackendStatusAction::CoerceToInternal(status),
@@ -433,16 +425,14 @@ mod tests {
 
     #[test]
     fn triage_leaves_client_errors_and_cancellation_alone() {
-        // A configured non-5xx overload status is sanitized as overload, so skip it.
-        for status in [StatusCode::BAD_REQUEST, StatusCode::UNSUPPORTED_MEDIA_TYPE] {
-            if status == overload_status_code() {
-                continue;
-            }
-            assert_eq!(
-                BackendStatusAction::triage(status),
-                BackendStatusAction::ForwardClientError
-            );
-        }
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::BAD_REQUEST),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            BackendStatusAction::ForwardClientError
+        );
         assert_eq!(
             BackendStatusAction::triage(StatusCode::from_u16(499).unwrap()),
             BackendStatusAction::Sanitize(SanitizedError::Cancelled)
