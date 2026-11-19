@@ -550,6 +550,80 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  # ============================================================================
+  # ADVISORY FRONTEND REPLAY
+  # Replays the public DeepSeek V4.1 traces through this run's frontend image,
+  # with a CPU token worker in place of an engine (no GPU, no weights). It is
+  # advisory: a failed replay never fails the nightly. See
+  # tests/frontend/trace_replay/README.md.
+  # ============================================================================
+  frontend-replay:
+    name: frontend-replay (advisory)
+    needs: [compute-release-mode, resolve-source-sha, frontend-build]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    continue-on-error: true
+    runs-on: prod-tester-amd-v2
+    timeout-minutes: 20
+    container:
+      # The image frontend-build pushed in this run (tag scheme in shared-build-image.yml).
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
+      env:
+        # Same ARC uid workaround as the mypy job in dynamo-pipeline.yml.
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    env:
+      REPLAY_CORPUS: tests/frontend/trace_replay/fixtures/deepseek_v41/manifest.json
+      REPLAY_ASSETS: frontend-replay-assets
+      REPLAY_OUTPUT: frontend-replay-output
+      DYN_REPLAY_HARNESS_REVISION: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      DYN_REPLAY_IMAGE: ${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
+    steps:
+      - name: Checkout the harness at the image's source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Prepare sealed tokenizer assets
+        shell: bash
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}" /opt/dynamo/venv/bin/python3 \
+            -m tests.frontend.trace_replay prepare-assets \
+            --corpus "${REPLAY_CORPUS}" \
+            --model-dir "${GITHUB_WORKSPACE}/${REPLAY_ASSETS}"
+
+      - name: Replay both frontend boundaries
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}" /opt/dynamo/venv/bin/python3 \
+            -m tests.frontend.trace_replay run \
+            --corpus "${REPLAY_CORPUS}" \
+            --model-dir "${GITHUB_WORKSPACE}/${REPLAY_ASSETS}" \
+            --output-dir "${GITHUB_WORKSPACE}/${REPLAY_OUTPUT}" \
+            --modes unary,sse \
+            --concurrency 1
+
+      - name: Record an infrastructure result if the replay left none
+        if: always()
+        shell: bash
+        run: |
+          PYTHONPATH="${GITHUB_WORKSPACE}" /opt/dynamo/venv/bin/python3 \
+            -m tests.frontend.trace_replay report \
+            --output-dir "${GITHUB_WORKSPACE}/${REPLAY_OUTPUT}"
+          cat "${REPLAY_OUTPUT}/summary.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload replay evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: frontend-replay-${{ github.run_attempt }}
+          path: ${{ env.REPLAY_OUTPUT }}
+          if-no-files-found: warn
+          retention-days: 30
+
   deepseek-v4-pro-agg-perf:
     name: Recipe tests
     needs: [compute-release-mode, resolve-source-sha, vllm-build, vllm-copy-to-acr]

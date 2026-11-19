@@ -13,6 +13,23 @@ from .contract import ReplayError, dumps, write_json
 from .runner import RunOptions, _write_junit, prepare_assets, run
 
 
+def ensure_report(directory: Path) -> None:
+    """Give a replay that never wrote its own result an infrastructure result."""
+    reason = "replay did not complete"
+    if not (directory / "summary.json").is_file():
+        write_json(
+            directory / "summary.json",
+            {
+                "schema": "dynamo-frontend-replay-result/v1",
+                "status": "infra_error",
+                "exit_code": 2,
+                "infrastructure_errors": [reason],
+            },
+        )
+    if not (directory / "junit.xml").is_file():
+        _write_junit(directory / "junit.xml", [], [reason])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tests.frontend.trace_replay")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -33,7 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     execute.add_argument("--concurrency", type=int, default=4)
     execute.add_argument("--baseline", type=Path)
     execute.add_argument("--request-timeout", type=float, default=60)
+    report = commands.add_parser(
+        "report", help="record an infrastructure result when run left none"
+    )
+    report.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "report":
+        ensure_report(args.output_dir)
+        return 0
     try:
         if args.command == "prepare-assets":
             print(dumps({"assets": prepare_assets(args.corpus, args.model_dir)}))

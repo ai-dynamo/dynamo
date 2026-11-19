@@ -500,11 +500,7 @@ def _baseline(
         # CLI preflight failures cannot compute an identity or coverage yet.
         if (
             type(summary.get("exit_code")) is int and summary["exit_code"] == 2
-        ) or summary.get("status") in (
-            "infra_error",
-            "target_unavailable",
-            "provenance_rejected",
-        ):
+        ) or summary.get("status") == "infra_error":
             return "baseline_incomplete", {}
         raise ReplayError("baseline summary requires an identity object")
     if not same_json(summary.get("identity"), identity):
@@ -873,7 +869,7 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
         "identity": identity,
         "build": build,
         "harness_revision": os.environ.get("DYN_REPLAY_HARNESS_REVISION"),
-        "image_digest": os.environ.get("DYN_REPLAY_IMAGE_DIGEST"),
+        "image": os.environ.get("DYN_REPLAY_IMAGE"),
         "coverage": {
             "corpus_cases": corpus.total_cases,
             "selected_cases": len(corpus.cases),

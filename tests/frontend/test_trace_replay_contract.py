@@ -65,18 +65,23 @@ def first_fixture_case() -> dict[str, Any]:
     return loads((FIXTURES / "cases.jsonl").read_bytes().splitlines()[0])
 
 
-@pytest.mark.parametrize(
-    "status", ["infra_error", "target_unavailable", "provenance_rejected"]
-)
-def test_publication_failure_status_without_identity_is_an_incomplete_baseline(
-    tmp_path: Path, status: str
-) -> None:
-    # Publication report generation is independently covered by its stdlib CI hook.
-    write_json(tmp_path / "summary.json", {"status": status, "executions": 0})
-    assert _baseline(tmp_path, {"harness": "current"}, set()) == (
+def test_unfinished_replay_report_is_an_incomplete_baseline(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    assert main(["report", "--output-dir", str(output)]) == 0
+    summary = loads((output / "summary.json").read_bytes())
+    assert summary["status"] == "infra_error"
+    assert summary["exit_code"] == 2
+    assert ET.parse(output / "junit.xml").getroot().get("errors") == "1"
+    assert _baseline(output, {"harness": "current"}, set()) == (
         "baseline_incomplete",
         {},
     )
+    # A replay's own result is kept; only a missing JUnit file is filled in.
+    write_json(output / "summary.json", {"executions": 20})
+    (output / "junit.xml").unlink()
+    assert main(["report", "--output-dir", str(output)]) == 0
+    assert loads((output / "summary.json").read_bytes()) == {"executions": 20}
+    assert (output / "junit.xml").is_file()
 
 
 def test_startup_failure_is_a_junit_error_even_with_zero_executions(
