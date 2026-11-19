@@ -16,6 +16,12 @@
  * rounds of 8 prompts x 8 samples, two engines, and one weight version per
  * sync, starting at v1. Keep them in step with the tutorial.
  *
+ * The frontend routes with KV-aware routing, which the tutorial's DGD doesn't
+ * turn on; the page says so next to the widget. Each engine's 4 x 2 grid
+ * shows which of the round's 8 prompts it holds in its KV cache. ROUTING is
+ * illustrative, with one prompt split across both engines each round, as the
+ * router does when an engine gets busy. A weight reload empties the caches.
+ *
  * WHY "use client": it keeps playback state and runs a timer. Only effects
  * and event handlers touch window or document, so the server renders the
  * idle round.
@@ -32,9 +38,10 @@ import { SlimeIntegrationMapStyles } from "./SlimeIntegrationMapStyles";
 
 type Owner = "dynamo" | "slime" | "kuberay";
 type NodeId = "slime" | "trainer" | "frontend" | "engine0" | "engine1";
-type WireId = "generate" | "route0" | "route1" | "batch" | "control" | "write" | "load";
+type WireId = "generate" | "route0" | "route1" | "kv" | "batch" | "control" | "write" | "load";
 type StepId = "generate" | "score" | "train" | "write" | "reload";
 type Tone = "green" | "amber";
+type Chip = "CPU" | "GPU";
 type Point = readonly [number, number];
 
 /** The tutorial runs 10 rounds (--num-rollout 10). */
@@ -43,6 +50,23 @@ const ROUNDS = 10;
 const STEP_MS = 5000;
 /** Seconds for a packet to travel one wire. */
 const TRAVEL_S = 1.8;
+
+/**
+ * Which engine served each of a round's 8 prompts: "0" or "1", or "b" when
+ * the router split the prompt's samples across both engines. Illustrative.
+ */
+const ROUTING = [
+  "01b01101",
+  "1001b011",
+  "0b101001",
+  "10b10110",
+  "0110100b",
+  "b1001011",
+  "100b1010",
+  "01101b01",
+  "1b010110",
+  "0101b100",
+] as const;
 
 const OWNER_NAMES: Record<Owner, string> = {
   dynamo: "Dynamo",
@@ -61,7 +85,7 @@ const OWNERS: ReadonlyArray<{
     id: "dynamo",
     num: "01",
     role: "Serves the rollouts",
-    text: "The Dynamo operator runs the frontend and the SGLang engine Pods from a DynamoGraphDeployment. The frontend routes each rollout request to an engine.",
+    text: "The Dynamo operator runs the frontend and the SGLang engine Pods from a DynamoGraphDeployment. The frontend's KV-aware router sends each rollout request to an engine, by what the engine has cached and how busy it is.",
     flow: ["Frontend", "⇉", "SGLang engines"],
   },
   {
@@ -89,12 +113,14 @@ const NODES: ReadonlyArray<{
   h: number;
   title: string;
   sub: readonly string[];
+  /** What the part computes on. */
+  chip: Chip;
 }> = [
-  { id: "slime", owner: "slime", x: 30, y: 80, w: 214, h: 76, title: "Slime", sub: ["rollouts · rewards · weight sync"] },
-  { id: "trainer", owner: "slime", x: 30, y: 200, w: 214, h: 76, title: "Megatron-LM", sub: ["Slime's trainer · 1 GPU"] },
-  { id: "frontend", owner: "dynamo", x: 362, y: 80, w: 150, h: 76, title: "Frontend", sub: ["Dynamo · port 8000", "round-robin"] },
-  { id: "engine0", owner: "dynamo", x: 566, y: 98, w: 194, h: 72, title: "Engine 0", sub: ["SGLang + Dynamo sidecar"] },
-  { id: "engine1", owner: "dynamo", x: 566, y: 194, w: 194, h: 72, title: "Engine 1", sub: ["SGLang + Dynamo sidecar"] },
+  { id: "slime", owner: "slime", x: 30, y: 80, w: 214, h: 76, title: "Slime", sub: ["rollouts · rewards · weight sync"], chip: "CPU" },
+  { id: "trainer", owner: "slime", x: 30, y: 200, w: 214, h: 76, title: "Megatron-LM", sub: ["Slime's trainer"], chip: "GPU" },
+  { id: "frontend", owner: "dynamo", x: 362, y: 80, w: 150, h: 76, title: "Frontend", sub: ["Dynamo · port 8000", "KV-aware router"], chip: "CPU" },
+  { id: "engine0", owner: "dynamo", x: 566, y: 94, w: 194, h: 80, title: "Engine 0", sub: ["SGLang + Dynamo sidecar"], chip: "GPU" },
+  { id: "engine1", owner: "dynamo", x: 566, y: 190, w: 194, h: 80, title: "Engine 1", sub: ["SGLang + Dynamo sidecar"], chip: "GPU" },
 ];
 
 type WireLabel = {
@@ -121,6 +147,13 @@ const WIRE_SPECS: ReadonlyArray<{
   },
   { id: "route0", points: [[512, 110], [566, 132]], tone: "green" },
   { id: "route1", points: [[512, 126], [566, 226]], tone: "green" },
+  {
+    id: "kv",
+    points: [[552, 246], [437, 246], [437, 156]],
+    tone: "green",
+    dashed: true,
+    label: { text: "KV events", x: 501, y: 238, anchor: "middle", on: "dgd" },
+  },
   {
     id: "batch",
     points: [[137, 156], [137, 200]],
@@ -193,12 +226,13 @@ const STEPS: ReadonlyArray<{
     label: "Generate",
     owners: ["slime", "dynamo"],
     nodes: ["slime", "frontend", "engine0", "engine1"],
-    wires: ["generate", "route0", "route1"],
+    wires: ["generate", "route0", "route1", "kv"],
     text: (round) => (
       <>
-        Slime sends 64 requests to the Dynamo frontend, 8 samples for each of 8 GSM8K prompts. The frontend
-        alternates them between the two engines, which generate with weights v{round} and stream back tokens and
-        log-probabilities.
+        Slime sends 64 requests to the Dynamo frontend, 8 samples for each of 8 GSM8K prompts. The KV-aware router
+        sends each request to the engine that already has more of its prompt in its KV cache, unless that engine is
+        busier, so a prompt&apos;s samples can land on both engines. The engines report what they cache as
+        KV events, generate with weights v{round}, and stream back tokens and log-probabilities.
       </>
     ),
   },
@@ -247,8 +281,9 @@ const STEPS: ReadonlyArray<{
     text: (round) => (
       <>
         Slime pauses each engine through its own Service on port 30000, has it load the checkpoint with{" "}
-        <code>/update_weights_from_disk</code>, and resumes it. The frontend isn't on this path. The next round
-        generates with weights v{round + 1}.
+        <code>/update_weights_from_disk</code>, and resumes it. The frontend isn't on this path. Loading new weights
+        empties each engine&apos;s KV cache, because the cached prompts were computed with the old weights. The next
+        round generates with weights v{round + 1}.
       </>
     ),
   },
@@ -256,7 +291,7 @@ const STEPS: ReadonlyArray<{
 
 const PACKETS: Record<
   StepId,
-  ReadonlyArray<{ wire: WireId; tone: Tone | "return"; reverse?: boolean; at: readonly number[] }>
+  ReadonlyArray<{ wire: WireId; tone: Tone | "return" | "event"; reverse?: boolean; at: readonly number[] }>
 > = {
   generate: [
     { wire: "generate", tone: "green", at: [0, 0.6, 1.2] },
@@ -265,6 +300,7 @@ const PACKETS: Record<
     { wire: "route0", tone: "return", reverse: true, at: [0.9] },
     { wire: "route1", tone: "return", reverse: true, at: [0.15] },
     { wire: "generate", tone: "return", reverse: true, at: [0.45, 1.35] },
+    { wire: "kv", tone: "event", at: [0.6, 1.5] },
   ],
   score: [],
   train: [{ wire: "batch", tone: "amber", at: [0, 0.6, 1.2] }],
@@ -372,6 +408,11 @@ export function SlimeIntegrationMap() {
   const reloading = step?.id === "reload";
   const version = reloading ? `loading v${round + 1}` : `weights v${done ? round + 1 : round}`;
   const showRewards = step?.id === "score" || step?.id === "train";
+  // Each engine holds this round's prompts from Generate until the reload
+  // flushes its KV cache.
+  const routing = ROUTING[(round - 1) % ROUTING.length];
+  const cacheFull = phase >= 0 && phase < STEPS.length - 1;
+  const filling = step?.id === "generate";
   const weightChip =
     step?.id === "write" || reloading ? `weight-updates/${checkpoint(round + 1)}/` : "weight-updates/";
   const chips = [
@@ -450,7 +491,7 @@ export function SlimeIntegrationMap() {
             className="slmap-svg"
             viewBox="0 0 800 398"
             role="img"
-            aria-label="The Ray head Pod runs Slime and its Megatron-LM trainer. The DynamoGraphDeployment runs the Dynamo frontend and two SGLang engines. Slime sends rollouts through the frontend, sends control calls straight to each engine, and passes new weights through the shared volume."
+            aria-label="The Ray head Pod runs Slime on CPU and its Megatron-LM trainer on a GPU. The DynamoGraphDeployment runs the Dynamo frontend on CPU and two SGLang engines on a GPU each. Slime sends rollouts through the frontend, whose KV-aware router uses the engines' KV events, sends control calls straight to each engine, and passes new weights through the shared volume."
           >
             <rect
               className={`slmap-zone slmap-zone--ray${focus === "kuberay" ? " is-focus" : ""}`}
@@ -539,6 +580,12 @@ export function SlimeIntegrationMap() {
                 <text className="slmap-node__title" x={node.x + 12} y={node.y + 23}>
                   {node.title}
                 </text>
+                <g className={`slmap-hw slmap-hw--${node.chip.toLowerCase()}`}>
+                  <rect x={node.x + node.w - 42} y={node.y + 9} width={30} height={16} rx={4} />
+                  <text x={node.x + node.w - 27} y={node.y + 20.5} textAnchor="middle">
+                    {node.chip}
+                  </text>
+                </g>
                 {node.sub.map((line, index) => (
                   <text key={line} className="slmap-node__sub" x={node.x + 12} y={node.y + 40 + index * 16}>
                     {line}
@@ -573,14 +620,32 @@ export function SlimeIntegrationMap() {
                 {node.id === "engine0" || node.id === "engine1" ? (
                   <>
                     <g className={`slmap-version${reloading ? " is-loading" : ""}`}>
-                      <rect x={node.x + 12} y={node.y + 47} width={chipWidth(version) - 4} height={17} rx={8.5} />
-                      <text x={node.x + 18} y={node.y + 59}>
+                      <rect x={node.x + 12} y={node.y + 52} width={chipWidth(version) - 4} height={17} rx={8.5} />
+                      <text x={node.x + 18} y={node.y + 64}>
                         {version}
                       </text>
                     </g>
-                    <text className="slmap-node__sub" x={node.x + node.w - 12} y={node.y + 59} textAnchor="end">
-                      1 GPU
-                    </text>
+                    <g className={`slmap-cache${filling ? " is-filling" : ""}`}>
+                      <title>The round&apos;s 8 prompts: filled squares are the ones in this engine&apos;s KV cache.</title>
+                      <text className="slmap-cache__label" x={node.x + 140} y={node.y + 64} textAnchor="end">
+                        cache
+                      </text>
+                      {Array.from(routing).map((served, slot) => {
+                        const held = cacheFull && (served === "b" || served === node.id.slice(-1));
+                        return (
+                          <rect
+                            key={slot}
+                            className={held ? "is-held" : undefined}
+                            x={node.x + 146 + (slot % 4) * 9}
+                            y={node.y + 52 + Math.floor(slot / 4) * 9}
+                            width={7}
+                            height={7}
+                            rx={1.5}
+                            style={held && filling ? { animationDelay: `${300 + slot * 140}ms` } : undefined}
+                          />
+                        );
+                      })}
+                    </g>
                   </>
                 ) : null}
               </g>
@@ -636,7 +701,8 @@ export function SlimeIntegrationMap() {
           <p className="slmap-status__text">{text}</p>
         </div>
         <p className="slmap-footnote">
-          Simplified from the tutorial's validated run: {ROUNDS} rounds on three GPUs. Not drawn to time.
+          Simplified from the tutorial&apos;s validated run: {ROUNDS} rounds on three GPUs, not drawn to time. That run
+          used round-robin routing; this one shows KV-aware routing, with illustrative cache contents.
         </p>
       </section>
     </div>

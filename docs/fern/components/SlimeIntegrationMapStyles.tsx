@@ -664,6 +664,66 @@ const SLIME_INTEGRATION_MAP_CSS = `
   font-weight: 700;
 }
 
+.slmap-hw--cpu rect,
+.slmap-hw--gpu rect {
+  fill: var(--slmap-panel);
+  stroke: var(--slmap-faint);
+  stroke-width: 1;
+}
+
+.slmap-hw--cpu text,
+.slmap-hw--gpu text {
+  fill: var(--slmap-muted);
+  font-family: RobotoMono, ui-monospace, monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.slmap-node[data-owner="slime"] .slmap-hw--gpu rect {
+  fill: var(--slmap-amber);
+  stroke: var(--slmap-amber);
+}
+
+.slmap-node[data-owner="dynamo"] .slmap-hw--gpu rect {
+  fill: var(--slmap-green);
+  stroke: var(--slmap-green);
+}
+
+.slmap-hw--gpu text {
+  fill: #000000;
+}
+
+.slmap-cache rect {
+  fill: var(--slmap-surface);
+  stroke: var(--slmap-faint);
+  stroke-width: 1;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill 0.6s ease, stroke 0.6s ease;
+}
+
+.slmap-cache rect.is-held {
+  fill: var(--slmap-green);
+  stroke: var(--slmap-green);
+}
+
+.slmap-cache.is-filling rect.is-held {
+  animation: slmap-pop 0.35s ease-out both;
+}
+
+.slmap-cache__label {
+  fill: var(--slmap-muted);
+  font-family: RobotoMono, ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.slmap-packet--event {
+  fill: var(--slmap-surface);
+  stroke: var(--slmap-green);
+  stroke-width: 2;
+}
+
 @keyframes slmap-pop {
   from {
     opacity: 0;
@@ -723,8 +783,13 @@ const SLIME_INTEGRATION_MAP_CSS = `
 
   .slmap-reward,
   .slmap-progress,
-  .slmap-version.is-loading rect {
+  .slmap-version.is-loading rect,
+  .slmap-cache.is-filling rect.is-held {
     animation: none;
+  }
+
+  .slmap-cache rect {
+    transition: none;
   }
 }
 `;
