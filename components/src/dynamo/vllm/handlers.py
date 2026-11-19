@@ -238,9 +238,11 @@ def _rl_init_weights_timeout_s() -> float:
 
 
 # How often pause() asks a preparing vLLM engine for its checkpoint state,
-# and how long it waits for the engine to become prepared.
+# how long it waits for the engine to become prepared, and how long a single
+# read of the engine state may take.
 _CHECKPOINT_STATE_POLL_INTERVAL_SEC = 0.1
 _CHECKPOINT_PREPARE_TIMEOUT_SEC = 300.0
+_ENGINE_STATE_READ_TIMEOUT_SEC = 30.0
 
 
 class VllmEnginePauseController:
@@ -328,41 +330,47 @@ class VllmEnginePauseController:
 
     async def _prepare_checkpoint(self) -> None:
         # vLLM releases the KV cache itself and refuses an engine that sleeps,
-        # so the engine is not put to sleep first.
-        refusal = await self._engine_client.checkpoint_prepare()
-        if refusal:
-            raise RuntimeError(
-                f"vLLM refused to prepare for a process checkpoint: {refusal}"
-            )
-        # Preparing completes once the engine has drained.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _CHECKPOINT_PREPARE_TIMEOUT_SEC
-        while True:
-            state, error = await self._engine_client.checkpoint_state()
-            if state == "prepared":
-                return
-            if state != "preparing":
-                raise RuntimeError(
-                    f"vLLM checkpoint prepare ended in state {state}: {error}"
-                )
-            if loop.time() >= deadline:
-                raise TimeoutError(
-                    "vLLM checkpoint prepare did not finish within "
-                    f"{_CHECKPOINT_PREPARE_TIMEOUT_SEC} s"
-                )
-            await asyncio.sleep(_CHECKPOINT_STATE_POLL_INTERVAL_SEC)
+        # so the engine is not put to sleep first. One deadline covers the
+        # prepare call and the wait, including engine calls that stall.
+        try:
+            async with asyncio.timeout(_CHECKPOINT_PREPARE_TIMEOUT_SEC):
+                refusal = await self._engine_client.checkpoint_prepare()
+                if refusal:
+                    raise RuntimeError(
+                        f"vLLM refused to prepare for a process checkpoint: {refusal}"
+                    )
+                # Preparing completes once the engine has drained.
+                while True:
+                    state, error = await self._engine_client.checkpoint_state()
+                    if state == "prepared":
+                        return
+                    if state != "preparing":
+                        raise RuntimeError(
+                            f"vLLM checkpoint prepare ended in state {state}: {error}"
+                        )
+                    await asyncio.sleep(_CHECKPOINT_STATE_POLL_INTERVAL_SEC)
+        except TimeoutError:
+            raise TimeoutError(
+                "vLLM checkpoint prepare did not finish within "
+                f"{_CHECKPOINT_PREPARE_TIMEOUT_SEC} s"
+            ) from None
 
+    # The two reads below decide only whether generation may resume, so any
+    # failure, a timeout included, counts as "no". vLLM reports a failed
+    # engine call as a plain Exception, so the catch cannot be narrower.
     async def _is_awake(self) -> bool:
         try:
-            # Raises when data-parallel ranks disagree.
-            return not await self._engine_client.is_sleeping()
+            async with asyncio.timeout(_ENGINE_STATE_READ_TIMEOUT_SEC):
+                # Raises when data-parallel ranks disagree.
+                return not await self._engine_client.is_sleeping()
         except Exception:
             logger.exception("Failed to read whether the vLLM engine sleeps")
             return False
 
     async def _is_running(self) -> bool:
         try:
-            state, _ = await self._engine_client.checkpoint_state()
+            async with asyncio.timeout(_ENGINE_STATE_READ_TIMEOUT_SEC):
+                state, _ = await self._engine_client.checkpoint_state()
         except Exception:
             logger.exception("Failed to read the vLLM checkpoint state")
             return False

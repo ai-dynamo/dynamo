@@ -309,6 +309,27 @@ async def test_snapshot_with_checkpoint_lifecycle_prepare_times_out(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_stalled_engine_calls_time_out(
+    monkeypatch,
+):
+    """A prepare call or a state read that never returns is bounded too."""
+    monkeypatch.setattr("dynamo.vllm.handlers._CHECKPOINT_PREPARE_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr("dynamo.vllm.handlers._ENGINE_STATE_READ_TIMEOUT_SEC", 0.05)
+    engine_client, controller = _lifecycle_controller()
+
+    async def stall(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    engine_client.checkpoint_prepare.side_effect = stall
+    engine_client.checkpoint_state.side_effect = stall
+
+    with pytest.raises(TimeoutError, match="did not finish"):
+        await controller.pause(None)
+
+    await _assert_prepare_failure_keeps_generation_paused(engine_client, controller)
+
+
+@pytest.mark.asyncio
 async def test_wake_up_passes_explicit_tags_from_request():
     handler = _make_handler()
     await handler._pause_controller.pause(1)
