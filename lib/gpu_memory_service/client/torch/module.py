@@ -106,6 +106,16 @@ def _is_read_only_property(obj: object, name: str) -> bool:
     return isinstance(attr, property) and attr.fset is None
 
 
+def _same_contents(value: torch.Tensor, published: torch.Tensor) -> bool:
+    """``torch.equal``, except that a NaN matches a NaN in the same position."""
+    if torch.equal(value, published):
+        return True
+    # torch.equal is false for a tensor that holds a NaN, even against itself.
+    return value.shape == published.shape and bool(
+        ((value == published) | (value.isnan() & published.isnan())).all()
+    )
+
+
 def _resolve_module_attr(
     root: torch.nn.Module, qualified_name: str
 ) -> Tuple[torch.nn.Module, str]:
@@ -238,7 +248,7 @@ def materialize_module_from_gms(
         if not (
             torch.is_tensor(value)
             and (value.device, value.dtype) == (tensor.device, tensor.dtype)
-            and torch.equal(value, tensor)
+            and _same_contents(value, tensor)
         ):
             raise RuntimeError(
                 f"[GMS] Read-only property {name!r} does not match its published value"

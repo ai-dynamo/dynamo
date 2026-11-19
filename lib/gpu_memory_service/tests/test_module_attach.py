@@ -74,6 +74,53 @@ def test_attach_refuses_a_read_only_property_whose_source_is_not_attached(
         )
 
 
+_NAN = float("nan")
+
+
+def test_attach_accepts_a_nan_behind_a_read_only_property(monkeypatch):
+    """A NaN is not equal to itself, but the property still returns what the
+    writer published."""
+    model = _Experts()
+
+    _attach(
+        monkeypatch,
+        model,
+        [
+            ("expert_map", "tensor_attr", torch.tensor([0.0, _NAN, 2.0, 3.0])),
+            ("_expert_map", "buffer", torch.tensor([0.0, _NAN, 2.0, 3.0])),
+        ],
+    )
+
+    assert torch.isnan(model.expert_map[1])
+    assert model.expert_map[[0, 2, 3]].tolist() == [0.0, 2.0, 3.0]
+
+
+@pytest.mark.parametrize(
+    ("published", "source"),
+    [
+        pytest.param([0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0, 4.0], id="another-number"),
+        pytest.param(
+            [0.0, _NAN, 2.0, 3.0], [0.0, _NAN, 2.0, 4.0], id="another-number-by-a-nan"
+        ),
+        pytest.param(
+            [0.0, 1.0, 2.0, 3.0], [0.0, 1.0, _NAN, 3.0], id="nan-for-a-number"
+        ),
+    ],
+)
+def test_attach_refuses_a_read_only_property_with_other_contents(
+    monkeypatch, published, source
+):
+    with pytest.raises(RuntimeError, match="'expert_map' does not match"):
+        _attach(
+            monkeypatch,
+            _Experts(),
+            [
+                ("expert_map", "tensor_attr", torch.tensor(published)),
+                ("_expert_map", "buffer", torch.tensor(source)),
+            ],
+        )
+
+
 class _Settable(torch.nn.Module):
     def __init__(self):
         super().__init__()
