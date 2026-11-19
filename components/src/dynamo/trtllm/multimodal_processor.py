@@ -17,7 +17,6 @@ import asyncio
 import dataclasses
 import logging
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlparse
@@ -243,8 +242,6 @@ class MultimodalRequestProcessor:
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
-        # Used for streaming delta computation in create_response_chunk()
-        self.previous_decoded_text = ""
 
         # Initialize tokenizer ONCE at startup to avoid per-request overhead
         if tokenizer is not None:
@@ -507,8 +504,6 @@ class MultimodalRequestProcessor:
         }
 
         """
-        self.previous_decoded_text = ""
-
         multi_modal_data = request.get("multi_modal_data")
         audio_items = (
             multi_modal_data.get("audio_url", [])
@@ -934,48 +929,3 @@ class MultimodalRequestProcessor:
             processed_inputs["expanded_prompt_len"] = expanded_len
 
         return processed_inputs
-
-    def create_response_chunk(
-        self,
-        output: Any,
-        num_output_tokens_so_far: int,
-        request_id: str,
-        model_name: str,
-    ) -> Dict[str, Any]:
-        """Creates a response chunk for multimodal streaming."""
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer must be provided for creating response chunks.")
-
-        all_tokens = output.token_ids
-        current_text = self.tokenizer.decode(
-            all_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True
-        )
-        if num_output_tokens_so_far == 0:
-            # First chunk: use all decoded text
-            delta_text = current_text
-            # Store for next iteration
-            self.previous_decoded_text = current_text
-        else:
-            # Incremental chunk: extract delta using cached previous text
-            delta_text = current_text[len(self.previous_decoded_text) :]
-            # Update cache for next iteration
-            self.previous_decoded_text = current_text
-        # Assemble the delta payload for the response chunk.
-        delta = {"content": delta_text if delta_text else ""}
-        if num_output_tokens_so_far == 0:
-            # The first chunk must include the "assistant" role.
-            delta["role"] = "assistant"
-        choice = {
-            "index": 0,
-            "delta": delta,
-            "finish_reason": output.finish_reason,
-        }
-        # Wrap the choice in the final response chunk following the OpenAI
-        # streaming format.
-        return {
-            "id": request_id,
-            "model": model_name,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "choices": [choice],
-        }

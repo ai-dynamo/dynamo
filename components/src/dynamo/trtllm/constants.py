@@ -47,15 +47,3 @@ class Modality(Enum):
             True if the modality is VIDEO_DIFFUSION.
         """
         return modality in (cls.VIDEO_DIFFUSION, cls.IMAGE_DIFFUSION)
-
-    @classmethod
-    def is_llm(cls, modality: "Modality") -> bool:
-        """Check if a modality is an LLM modality.
-
-        Args:
-            modality: The modality to check.
-
-        Returns:
-            True if the modality is TEXT or MULTIMODAL.
-        """
-        return modality in (cls.TEXT, cls.MULTIMODAL)

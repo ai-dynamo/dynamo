@@ -367,17 +367,6 @@ class HandlerBase(BaseGenerativeHandler):
         self._pause_controller = TRTLLMEnginePauseController(config.engine)
         self._reject_new_requests = False
 
-    def check_error(self, result: dict) -> bool:
-        """
-        Check if there is an error in the result.
-        """
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            return result["finish_reason"] == "error"
-        else:
-            return (
-                result["finish_reason"] == "stop" or result["finish_reason"] == "error"
-            )
-
     # ------------------------------------------------------------------
     # In-flight request tracking (used by sleep/wake)
     # ------------------------------------------------------------------

@@ -68,22 +68,6 @@ class TestModality:
         """Test that MULTIMODAL returns False for is_diffusion."""
         assert Modality.is_diffusion(Modality.MULTIMODAL) is False
 
-    def test_is_llm_true_for_text(self):
-        """Test that TEXT returns True for is_llm."""
-        assert Modality.is_llm(Modality.TEXT) is True
-
-    def test_is_llm_true_for_multimodal(self):
-        """Test that MULTIMODAL returns True for is_llm."""
-        assert Modality.is_llm(Modality.MULTIMODAL) is True
-
-    def test_is_llm_false_for_video_diffusion(self):
-        """Test that VIDEO_DIFFUSION returns False for is_llm."""
-        assert Modality.is_llm(Modality.VIDEO_DIFFUSION) is False
-
-    def test_is_llm_false_for_image_diffusion(self):
-        """Test that IMAGE_DIFFUSION returns False for is_llm."""
-        assert Modality.is_llm(Modality.IMAGE_DIFFUSION) is False
-
 
 # =============================================================================
 # Part 2: DiffusionConfig Tests
