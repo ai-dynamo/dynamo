@@ -6,6 +6,7 @@ use crate::kv_router::{
     FindBestMatchAdmission,
     routing_host::{kv_selection::SelectionOutcome, request_guard::RouteObservation},
 };
+use crate::local_model::runtime_config::TOPOLOGY_TAINT_PREFIX;
 
 impl RoutingHost {
     #[allow(clippy::too_many_arguments)]
@@ -148,6 +149,7 @@ impl RoutingHost {
         let (mut selection, affinity) = match select().await {
             Ok(selection) => selection,
             Err(error) => {
+                let error = self.decode_domain_unreachable(request, error);
                 if let Some(mut lifecycle) = lifecycle.take() {
                     if let Some(classifier_error) = classification_failure(&error) {
                         lifecycle.abort(Some(classifier_abort_error(classifier_error)));
@@ -687,5 +689,76 @@ impl RoutingHost {
             stream,
             booking,
         })
+    }
+
+    /// A decode leg that carries staged KV, when its prefill worker's required KV-transfer domain
+    /// has no available decode worker, fails as `WorkerUnavailable` rather than an internal or
+    /// retries-exhausted error. The prefill worker is excluded from a migration retry, which would
+    /// otherwise pick it again, and the prefill hop cancels a still-running bootstrap prefill, whose
+    /// KV no decode worker will pull.
+    pub(super) fn decode_domain_unreachable(
+        &self,
+        request: &PreprocessedRequest,
+        error: Error,
+    ) -> Error {
+        // Only "no worker to choose" outcomes: none matched, or a retry's exclusions left none.
+        // Cancellation, deadlines and invalid requests keep their own class.
+        let no_candidate = error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<KvSchedulerError>(),
+                Some(KvSchedulerError::NoEndpoints)
+            )
+        }) || match_error_chain(error.as_ref(), &[ErrorType::Unavailable], &[]);
+        // A classifier failure keeps its own response and aborts the lifecycle.
+        if !request.staged_kv_cleanup || !no_candidate || classification_failure(&error).is_some() {
+            return error;
+        }
+        let Some(constraints) = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.routing_constraints.as_ref())
+            .filter(|constraints| {
+                constraints
+                    .required_taints
+                    .iter()
+                    .any(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+            })
+        else {
+            return error;
+        };
+        // Judge the domain itself, ignoring migration exclusions: a retry whose own exclusions
+        // empty the candidate set must still be reported here.
+        let available = self.inner.client.available_instance_ids();
+        let domain_has_decode =
+            self.kv_router()
+                .workers_with_configs
+                .borrow()
+                .iter()
+                .any(|(worker_id, config)| {
+                    available.as_ref().is_none_or(|ids| ids.contains(worker_id))
+                        && constraints.is_compatible_with_worker_taints(&config.taints)
+                });
+        if domain_has_decode {
+            return error;
+        }
+        tracing::warn!(
+            error = %error,
+            "No decode worker in the prefill worker's KV-transfer domain; failing the decode leg as unavailable"
+        );
+        let unavailable = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message(format!(
+                "no available decode worker in the prefill worker's required KV-transfer domain: {error}"
+            ))
+            .build();
+        if let Some(state) = request.migration_state.as_ref()
+            && let Some(prefill_worker_id) = request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.prefill_worker_id)
+        {
+            state.record_failure(prefill_worker_id, Some(unavailable.clone()));
+        }
+        unavailable.into()
     }
 }

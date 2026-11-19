@@ -88,7 +88,7 @@ The prefill router builds the decode constraint before dispatching prefill when 
 required_taints = {"dynamo.topology/zone=us-east-1a"}
 ```
 
-Decode workers without that taint are ineligible. If no eligible decode worker exists, routing returns no endpoint for that request.
+Decode workers without that taint are ineligible. If no eligible decode worker exists when decode is routed, the request fails with `WorkerUnavailable` (HTTP 503) instead of an internal error, and a prefill still running in the background (bootstrap handoff, as SGLang uses) is cancelled. When `--migration-limit` is above 0, request migration can retry the request.
 
 ### Preferred
 
@@ -177,7 +177,7 @@ For KVCR, use `required`. If each host is its own RDMA island, set `labelKey: ku
 
 - Prefill-to-decode constraints apply only to disaggregated deployments. KV fetch hints also apply to aggregated workers, so configure topology there when workers fetch KV from peers, for example with KVCR.
 - Keep `DYN_ROUTER_MODE=kv` on the frontend so the prefill and decode routing paths use the KV router.
-- Make sure every prefill domain has enough decode capacity when using `required`; otherwise the router can legitimately fail requests in domains without decode workers.
+- Make sure every prefill domain has enough decode capacity when using `required`; otherwise requests whose prefill runs in a domain without decode workers fail with HTTP 503 unless request migration retries them successfully.
 - Use `preferred` during incremental rollouts when same-domain transfer is a latency preference rather than a hard placement requirement.
 - Transport health is separate from topology selection. Topology-aware routing chooses a better peer, but RDMA, EFA, UCX, or libfabric still need to be configured correctly for NIXL KV transfer.
 
@@ -186,7 +186,7 @@ For KVCR, use `required`. If each host is its own RDMA island, set `labelKey: ku
 | Symptom | Likely cause | Check |
 |---------|--------------|-------|
 | Worker exits during startup | `DYN_KV_TRANSFER_DOMAIN` missing, or topology file never populated. | Worker logs and contents of `DYN_TOPOLOGY_MOUNT_PATH`. |
-| Required policy returns no endpoint | No decode worker has the selected prefill worker's generated topology taint. | Worker `ModelRuntimeConfig` topology metadata and decode worker placement. |
+| Required policy fails requests with HTTP 503 | No decode worker has the selected prefill worker's generated topology taint. | Worker `ModelRuntimeConfig` topology metadata and decode worker placement. |
 | Preferred policy still routes cross-domain | Matching domain is overloaded or unavailable, or weight is too low relative to load. | Increase `preferredWeight`, add same-domain decode capacity, or switch to `required`. |
 | Router sees no topology metadata | Worker did not publish topology fields. | Backend startup logs and runtime config metrics/discovery data. |
 | KV fetch hints stop after enabling topology | No source with a longer prefix is in the target's island, or sources have no value for the transfer domain. | Worker `topology_domains` and placement of the workers that hold the cache. |
