@@ -184,6 +184,7 @@ func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDepl
 func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	if err := (&DynamoModelReconciler{
 		Client:         mgr.GetClient(),
+		PodReader:      mgr.GetAPIReader(),
 		Recorder:       mgr.GetEventRecorder("dynamomodel"),
 		EndpointClient: opts.modelEndpointClient(),
 		Config:         opts.Config,

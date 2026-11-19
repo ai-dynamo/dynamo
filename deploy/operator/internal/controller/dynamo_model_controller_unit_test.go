@@ -22,9 +22,15 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 )
 
@@ -203,4 +209,28 @@ func TestWithPodIdentityUsesActualPodReadiness(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEndpointCandidatesReadUnlabeledPodOutsideCache(t *testing.T) {
+	t.Log("Reference an unlabeled external Pod from a model EndpointSlice")
+	model := &v1alpha1.DynamoModel{Namespace: "inference", Spec: v1alpha1.DynamoModelSpec{ModelName: "adapter", BaseModelName: "base", ModelType: "lora"}}
+	pod := &corev1.Pod{Name: "external-worker", Namespace: model.Namespace, Status: corev1.PodStatus{
+		Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+	}}
+	slice := &discoveryv1.EndpointSlice{Name: "external", Namespace: model.Namespace,
+		Labels:    map[string]string{consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("base"), discoveryv1.LabelServiceName: "external"},
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Name: pod.Name}}},
+		Ports:     []discoveryv1.EndpointPort{{Port: ptr.To(int32(consts.DynamoSystemPort))}},
+	}
+	reconciler := &DynamoModelReconciler{
+		Client:    fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(slice).Build(),
+		PodReader: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(pod).Build(),
+	}
+
+	t.Log("Discover the ready endpoint even though its Pod is absent from the workload cache")
+	candidates, _, err := reconciler.getEndpointCandidates(t.Context(), model)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, pod.Name, candidates[0].PodName)
+	require.True(t, candidates[0].KubernetesReady)
 }

@@ -5,7 +5,7 @@ PYTHON ?= python3
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply ./internal/dgdrrunpublisher
+ENVTEST_PACKAGES ?= ./internal/podcache ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply ./internal/dgdrrunpublisher
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...

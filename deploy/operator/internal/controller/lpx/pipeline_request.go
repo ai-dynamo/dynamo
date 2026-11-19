@@ -319,9 +319,10 @@ func (r *graphReconciler) removeReleasedAgentPods(ctx context.Context, pcsgs map
 
 // removeReleasedAgentPod requires a valid journal reference and owned scaling groups.
 func (r *graphReconciler) removeReleasedAgentPod(ctx context.Context, pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup, ref lpxv1alpha1.ObjectReference) error {
-	// Cache misses must retry: this controller does not watch Pod cache arrivals.
+	// Journal references can identify Agent Pods excluded from the workload cache.
+	// Read them directly; missing observations still retry without a Pod watch.
 	pod := &corev1.Pod{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, pod); err != nil {
+	if err := r.apiReader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, pod); err != nil {
 		return fmt.Errorf("observe released Agent Pod %q: %w", ref.Name, err)
 	}
 	if pod.UID != types.UID(ref.UID) {

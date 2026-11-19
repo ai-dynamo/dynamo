@@ -63,6 +63,9 @@ SPDX-License-Identifier: Apache-2.0
 
 - Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
+- Released Agent Pod identities from the cleanup journal use the API reader:
+  these Pods may be outside the filtered Pod informer. Keep ownership and UID
+  validation unchanged; do not generalize this exception to cache-miss fallback.
 - Cyborg GPU resolution is a validation-only exception to dependency watches.
   Do not add ResourceClaim, ResourceClaimTemplate, or DeviceClass watches for it:
   the resolved count does not affect the rendered workload. Lookup failures use
