@@ -53,6 +53,20 @@ no summary while any active request is prefilling or lacks a valid observation.
 Use the budget as a raw-token upper bound. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
 for fields and missing-data behavior.
 
+## Use the shipped weight policy
+
+For manual traffic shares, select `dynamo-manual-weighted` with
+[`manual-weighted.yaml`](../manual-weighted.yaml). It ships with the standard frontend and
+starts every worker at weight 1. The admin API changes individual weights in memory.
+Aggregated, prefill, and decode pools have independent state.
+
+The [picker implementation](../../../lib/router-plugins/builtin/src/manual_weighted.rs)
+shows `WorkerPicker::worker_weights`: it returns actor-owned `WorkerWeights` for membership
+reconciliation and control updates, then reads typed weights during selection. It performs no
+configuration I/O or configuration locking in `pick`. The
+[API contract](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#per-worker-traffic-weights)
+describes revisions, zero weights, and the process-local scope.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |

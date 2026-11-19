@@ -47,6 +47,7 @@ pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
     available_worker_ids: Option<&'a WorkerIdSet>,
+    disabled_worker_ids: Option<&'a HashSet<WorkerId>>,
     pinned_worker: Option<WorkerWithDpRank>,
     affinity_target: Option<WorkerAffinityTarget>,
     routing_constraints: &'a RoutingConstraints,
@@ -65,6 +66,7 @@ impl<'a> RoutingEligibility<'a> {
             allowed_worker_ids,
             overloaded_worker_ids,
             available_worker_ids: None,
+            disabled_worker_ids: None,
             pinned_worker,
             affinity_target: None,
             routing_constraints,
@@ -113,10 +115,19 @@ impl<'a> RoutingEligibility<'a> {
         self
     }
 
+    pub(crate) fn with_disabled_workers(mut self, ids: Option<&'a HashSet<WorkerId>>) -> Self {
+        self.disabled_worker_ids = ids;
+        self
+    }
+
     #[inline]
     pub fn is_worker_available(&self, worker_id: WorkerId) -> bool {
-        self.available_worker_ids
-            .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
+        !self
+            .disabled_worker_ids
+            .is_some_and(|ids| ids.contains(&worker_id))
+            && self
+                .available_worker_ids
+                .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
     }
 
     #[inline]

@@ -93,7 +93,10 @@ pub enum SelectionFailure {
 
 impl From<WorkerSelectionPolicyError> for SelectionFailure {
     fn from(error: WorkerSelectionPolicyError) -> Self {
-        Self::Policy(error)
+        match error {
+            WorkerSelectionPolicyError::NoEligibleWorkers => Self::AllFiltered,
+            error => Self::Policy(error),
+        }
     }
 }
 
@@ -232,6 +235,30 @@ impl WorkerSelectionPolicy {
         }
     }
 
+    /// Apply worker-weight control between selections. A picker must explicitly opt in.
+    pub fn control_worker_weights(
+        &mut self,
+        members: &[dynamo_router_protocol::worker::WorkerId],
+        update: Option<crate::WorkerWeightUpdate>,
+    ) -> Result<crate::WorkerWeightConfig, RuntimePolicyError> {
+        let weights = self
+            .worker_weights()
+            .ok_or(RuntimePolicyError::Unsupported)?;
+        weights.reconcile(members);
+        match update {
+            Some(update) => weights.update(update),
+            None => Ok(weights.snapshot()),
+        }
+    }
+
+    fn worker_weights(&mut self) -> Option<&mut crate::WorkerWeights> {
+        match &mut self.state {
+            WorkerSelectionPolicyState::Composed(state) => state.get_mut().picker.worker_weights(),
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => None,
+        }
+    }
+
     /// Ask the host to constrain selection to an eligible affinity target.
     /// Explicit request pins remain mandatory regardless of this option.
     pub fn with_exclusive_affinity(mut self, exclusive: bool) -> Self {
@@ -241,7 +268,8 @@ impl WorkerSelectionPolicy {
 
     /// Opt in to runtime parameter updates with a pure replacement builder.
     /// The initial parameters define the patchable keys and reset values. Replacements must
-    /// require no new worker-input groups and preserve affinity behavior; queue and tracking state are retained.
+    /// require no new worker-input groups and preserve affinity and weight-control capabilities.
+    /// Worker weights, their revision, and queue and tracking state are retained.
     pub fn with_runtime_config(
         mut self,
         parameters: serde_json::Map<String, serde_json::Value>,
@@ -283,6 +311,15 @@ impl WorkerSelectionPolicy {
             return Err(RuntimePolicyError::InvalidParameters(
                 "replacement changes routing requirements".into(),
             ));
+        }
+        match (self.worker_weights(), replacement.worker_weights()) {
+            (Some(current), Some(next)) => *next = std::mem::take(current),
+            (None, None) => {}
+            _ => {
+                return Err(RuntimePolicyError::InvalidParameters(
+                    "replacement changes worker-weight control capability".into(),
+                ));
+            }
         }
         let response = state.config();
         replacement.runtime = Some(Box::new(state));

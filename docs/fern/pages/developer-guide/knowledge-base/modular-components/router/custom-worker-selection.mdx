@@ -767,6 +767,23 @@ previously used zero device credit to suppress all cache inputs despite explicit
 weights. Set all four cache-scoring weights to zero to keep such a policy load-only. Plain
 disaggregated decode always resolves all four weights to zero and skips cache inputs.
 
+## In-memory worker weights
+
+A picker can opt in to worker-weight control by owning a `WorkerWeights` value and returning
+`Some(&mut self.weights)` from `WorkerPicker::worker_weights`. The scheduler calls this hook
+outside selection to reconcile discovered membership and apply admin updates. `weight(worker_id)`
+reads a typed in-memory value and returns 1 for an unspecified worker. Do not use request-specific
+candidate lists to retire overrides. A missing candidate can still belong to the discovered pool.
+
+The host serializes updates with selection, rejects workers outside the pool, and publishes
+zero-weight exclusions to queue eligibility. The picker must also skip zero-weight candidates,
+including pinned candidates. Return `WorkerSelectionPolicyError::NoEligibleWorkers` when no
+candidate remains to classify the outcome as unavailable. Weights are process-local and volatile.
+The [manual-weighted implementation](https://github.com/ai-dynamo/dynamo/blob/main/lib/router-plugins/builtin/src/manual_weighted.rs)
+uses this capability without file I/O, watchers, or a configuration lock in its picker.
+See [Per-worker traffic weights](configuration-and-tuning.md#per-worker-traffic-weights) for
+the frontend HTTP contract and aggregated, prefill, and decode scope.
+
 ## Runtime Configuration
 
 Policies can opt in to process-local configuration updates with
@@ -782,9 +799,11 @@ The [runtime policy API](configuration-and-tuning.md#runtime-policy-updates) def
 patch, and reset semantics.
 
 Updates run between selection calls. A replacement cannot add worker-input groups beyond those
-declared at startup, change the worker label, or change exclusive-affinity behavior. Queues,
+declared at startup, change the worker label, change exclusive-affinity behavior, or enable or
+disable worker-weight control. Parameter patches and resets preserve the complete `WorkerWeights`
+state, including overrides, discovered membership, and its independent revision. Queues,
 worker discovery, cache indexes, and host accounting are retained. The replacement's filters,
-scorers, and picker are new instances, so state the previous instances held, such as a cursor,
+scorers, and picker are new instances, so other state the previous instances held, such as a cursor,
 does not carry over. A cancelled control request still waiting in the actor queue is skipped.
 
 The [simple-filter-score-pick example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/simple-filter-score-pick/src/lib.rs)

@@ -118,6 +118,7 @@ link no catalog and reject a configured policy type at startup.
 | `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-manual-weighted` | Distributes new requests by manually assigned worker weights. All workers start at 1. Update individual weights through the frontend admin API. Weights apply per worker, regardless of DP-rank count. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
 
 Name the policy type under each worker role in the same YAML file that `--router-policy-config`
@@ -835,6 +836,62 @@ resets use these effective values; host-owned cache accounting settings are unch
 | `415` | Request is not sent as `application/json`. |
 | `422` | Unknown request fields, missing revision, unsupported policy, unknown parameter, invalid value, or a change requiring unavailable worker signals. No parameters are changed. |
 | `503` | The scheduler targeted by a PATCH stopped or did not respond within five seconds. Query its state before retrying an update. |
+
+### Per-worker traffic weights
+
+**Experimental.** `dynamo-manual-weighted` supports `GET` and `PATCH /router_policy/{router_id}/worker_weights` on the frontend admin listener. It accepts no
+startup parameters. Use `--router-mode kv` to expose its scheduler control through the admin API. Each worker starts at weight 1. The plugin keeps non-default overrides
+in memory and performs no configuration I/O during selection.
+
+```yaml
+worker_selection:
+  aggregated: dynamo-manual-weighted
+```
+
+For disaggregated serving, select the policy independently for `prefill` and `decode`:
+
+```yaml
+worker_selection:
+  prefill: dynamo-manual-weighted
+  decode: dynamo-manual-weighted
+```
+
+`GET /router_policy` identifies each router by model, namespace, component, endpoint, and
+worker type. The weights endpoint returns that metadata, a `revision`, and a `weights` map
+of current worker IDs to effective weights. Worker IDs are decimal strings in JSON objects.
+Use the returned revision to update only the workers named in `updates`:
+
+```bash
+curl -X PATCH "http://localhost:8002/router_policy/${ROUTER_ID}/worker_weights" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_revision": 1, "updates": {"103": 0.2, "104": 0}}'
+```
+
+A finite, non-negative value changes that worker's relative share. `null` removes its
+override and restores weight 1. Omitted workers keep their weights. The scheduler validates
+an entire batch before applying it. A successful response returns the applied weights and
+new revision. Membership changes also advance the revision. Read the current revision before
+retrying a `409` response. Empty updates, workers outside the pool, and invalid weights return
+`422`. A policy without weight control returns `422`. An unknown router returns `404`.
+A control timeout returns `503`. Read the current state before retrying a timed-out update.
+
+The picker uses weighted random selection among eligible workers. A worker with four eligible
+DP ranks receives the same total share as an equally weighted worker with one eligible rank.
+The selected worker's eligible ranks break ties uniformly. This policy ignores KV overlap and
+load when ranking candidates. Existing eligibility checks and queue busy thresholds still apply.
+A zero-weight worker is excluded from both selection and queue capacity checks. If no eligible
+worker has positive weight, selection returns unavailable. Exact worker pins remain exact and
+fail when their worker has weight zero. Existing requests and already selected prefill and
+decode targets retain their workers.
+
+Weights affect request counts, not token volume, rate, or concurrency. Relative shares hold
+in expectation while the candidate set stays fixed. Use queueing and busy thresholds to protect
+capacity. New worker identities start at 1. Observed removals clear departed workers' overrides.
+An aggregated update affects its full-request pool. Prefill and decode updates affect separate
+pools. State is local to one router instance and is lost on a frontend restart. Update each
+frontend directly. The standalone Python router does not expose the frontend admin HTTP API.
+
+![Proposed worker traffic-weight control and pool boundaries](../../../../../assets/img/worker-traffic-weights.png)
 
 ### Busy Thresholds
 

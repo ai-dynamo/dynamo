@@ -31,6 +31,7 @@ mod runtime;
 mod selection_config;
 mod shared_cache;
 mod trace;
+mod weights;
 
 pub use conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicy,
@@ -68,6 +69,7 @@ pub use selection_config::{
 };
 pub use shared_cache::SharedCacheHits;
 pub use trace::{SelectionTrace, SelectionTraceRow, SelectionTraceSpec};
+pub use weights::{WorkerWeightConfig, WorkerWeightUpdate, WorkerWeights};
 
 /// Adds one finite cost contribution to each eligible worker.
 ///
@@ -120,6 +122,11 @@ pub trait WorkerFilter: Send + Sync {
 /// One instance may be called from several threads at once, and successive calls may run on
 /// different threads. Keep any state that changes between calls thread-safe.
 pub trait WorkerPicker: Send + Sync {
+    /// Opt in to actor-owned traffic-weight control. Called only outside selection.
+    fn worker_weights(&mut self) -> Option<&mut WorkerWeights> {
+        None
+    }
+
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
