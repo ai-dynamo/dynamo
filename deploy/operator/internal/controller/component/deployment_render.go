@@ -22,10 +22,16 @@ func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, 
 		template.Labels = make(map[string]string)
 	}
 	template.Labels[consts.KubeLabelDynamoSelector] = dcd.Name
+
+	// Own the replica value while preserving Kubernetes defaulting when unspecified.
+	replicas := dcd.Spec.Replicas
+	if replicas != nil {
+		replicas = new(*replicas)
+	}
 	return &appsv1.Deployment{
 		ObjectMeta: metadata,
 		Spec: appsv1.DeploymentSpec{
-			Replicas: dcd.Spec.Replicas,
+			Replicas: replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{consts.KubeLabelDynamoSelector: dcd.Name}},
 			Template: *template,
 			Strategy: *strategy.DeepCopy(),
