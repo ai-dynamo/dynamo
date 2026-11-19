@@ -99,7 +99,7 @@ Overpack still met its TTFT target on every request, which a single run can show
 
 ### Cost per 1M Output Tokens at Fixed Traffic per Model
 
-When each model's traffic is set by its users, not by how fast the GPU can serve it, every configuration produces the same output tokens per model. Cost then depends only on how many models share each GPU. This table prices one model's traffic at 0.1 req/s with 256 output tokens per request, or 92,160 output tokens per hour, at a normalized \$1.00 per GPU-hour. Multiply the $/1M column by your GPU-hour price to get your cost; the percentage columns do not depend on the price.
+When each model's traffic is set by its users, not by how fast the GPU can serve it, every configuration produces the same output tokens per model. Cost then depends only on how many models share each GPU. This table prices one model's traffic at 0.1 req/s with 256 output tokens per request, or 92,160 output tokens per hour, at a normalized \$1.00 per GPU-hour. Multiply the \$/1M column by your GPU-hour price to get your cost; the percentage columns do not depend on the price.
 
 | Configuration | Models per GPU | GPUs for 30 models | $/1M output tokens | vs Baseline | vs Naive | Meets requirements |
 |---|---:|---:|---:|---:|---:|---|
@@ -166,7 +166,7 @@ In the green region above the dashed line, a packed GPU produces more output tok
 
 ### Cost per 1M Output Tokens Across Concurrency
 
-This table prices the closed-loop runs for a fleet of 30 models, each holding the same concurrency: 30 GPUs for the baseline, 15 for naive, 6 for optimal, and 5 for overpack. As above, GPUs are priced at a normalized $1.00 per GPU-hour. Every GPU in a configuration carries the same packing, so $/1M is the GPU-hour price divided by one GPU's output tokens per hour, scaled to one million tokens. Only output tokens are counted.
+This table prices the closed-loop runs for a fleet of 30 models, each holding the same concurrency: 30 GPUs for the baseline, 15 for naive, 6 for optimal, and 5 for overpack. As above, GPUs are priced at a normalized \$1.00 per GPU-hour. Every GPU in a configuration carries the same packing, so \$/1M is the GPU-hour price divided by one GPU's output tokens per hour, scaled to one million tokens. Only output tokens are counted.
 
 ![Line chart of cost per 1M output tokens as a percentage of the baseline, against concurrency per model from 1 to 32 on a log scale, with a dashed line at 100%; the region below the line is tinted green and the region above it red. Optimal and overpack start near 74% at concurrency 1 and rise above 100% at 32, to 110% and 124%. Naive starts at 78% and stays below 100%, ending at 95%.](../../../assets/img/optimal-packing-sweep-cost.svg)
 

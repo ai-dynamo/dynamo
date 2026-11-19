@@ -135,7 +135,7 @@ Sharing a GPU between two distinct models always costs throughput. Capping each 
 
 ### Cost per 1M Output Tokens
 
-This table compares the cost of serving 16 models when each model receives the same traffic. Serving 16 models with one model per GPU requires leasing two 8× A100 nodes, while GPU fractions serves all 16 on one node. The baseline is extrapolated from the 8-model run by doubling its throughput. Both configurations are priced at a normalized $1.00 per node-hour; multiply the $/1M columns by your node-hour price to get your cost. The percentage column does not depend on the price.
+This table compares the cost of serving 16 models when each model receives the same traffic. Serving 16 models with one model per GPU requires leasing two 8× A100 nodes, while GPU fractions serves all 16 on one node. The baseline is extrapolated from the 8-model run by doubling its throughput. Both configurations are priced at a normalized \$1.00 per node-hour; multiply the \$/1M columns by your node-hour price to get your cost. The percentage column does not depend on the price.
 
 Unlike the tables above, rows here are matched on concurrency per model, not requests per GPU.
 
