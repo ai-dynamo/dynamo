@@ -29,7 +29,7 @@ pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or
 /// `DYN_METRICS_PREFIX`. HTTP services use it when constructing
-/// `http::service::metrics::Metrics`; gRPC mode also exposes the prefix through
+/// `dynamo_http_server::metrics::Metrics`; gRPC mode also exposes the prefix through
 /// the existing `LocalModel::metrics_prefix()` compatibility accessor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetricsConfig {

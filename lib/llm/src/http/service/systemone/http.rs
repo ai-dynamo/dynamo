@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::{OpenApiRouteKind, RouteDoc, metrics::ErrorType};
+use super::super::{OpenApiRouteKind, RouteDoc};
 use super::*;
 use axum::{
     Router,
@@ -11,6 +11,7 @@ use axum::{
     routing::post,
 };
 use dynamo_decisions::{Route, parse_request};
+use dynamo_http_server::metrics::ErrorType;
 
 const BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 

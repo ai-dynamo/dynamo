@@ -12,7 +12,6 @@ use anyhow::{Error, Result};
 use futures::{Stream, stream::StreamExt};
 
 use crate::{
-    http::service::metrics::Metrics,
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
@@ -25,6 +24,7 @@ use crate::{
     },
     session_affinity::explicit_target,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
@@ -1034,11 +1034,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
+    use dynamo_http_server::metrics::Metrics;
     use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;

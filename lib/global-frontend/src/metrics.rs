@@ -15,7 +15,7 @@ use std::time::Instant;
 use axum::http::StatusCode;
 use dynamo_global_router::affinity::{AffinityStats, CacheStats};
 use dynamo_global_router::{InFlightTracker, Pool};
-use dynamo_llm::http::service::metrics::generate_log_buckets;
+use dynamo_http_server::metrics::generate_log_buckets;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 use prometheus::{
     Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry,

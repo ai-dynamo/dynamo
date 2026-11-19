@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::body::Body;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::http::Response;
-use futures::StreamExt;
+use http_body::{Frame, SizeHint};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -190,9 +192,75 @@ pub fn track_inflight_response(response: Response<Body>, permit: InflightPermit)
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
     // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(
+        parts,
+        Body::new(InflightResponseBody {
+            body,
+            _permit: permit,
+        }),
+    )
+}
+
+/// Preserve framing metadata and trailers while holding the response's admission.
+struct InflightResponseBody {
+    body: Body,
+    _permit: InflightPermit,
+}
+
+impl HttpBody for InflightResponseBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header;
+
+    #[tokio::test]
+    async fn inflight_body_preserves_trailers_and_holds_admission() {
+        use http_body_util::{BodyExt, StreamBody};
+
+        let observer = Arc::new(ServiceObserver::default());
+        let trailers = axum::http::HeaderMap::from_iter([(
+            header::HeaderName::from_static("x-checksum"),
+            header::HeaderValue::from_static("done"),
+        )]);
+        let frames = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
+            Ok(Frame::trailers(trailers.clone())),
+        ]);
+        let mut body = InflightResponseBody {
+            body: Body::new(StreamBody::new(frames)),
+            _permit: observer.acquire_inflight(),
+        };
+
+        assert_eq!(body.size_hint().exact(), None);
+        assert!(!body.is_end_stream());
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), "data");
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_trailers().unwrap(), trailers);
+        assert!(body.frame().await.is_none());
+        assert_eq!(observer.inflight_count(), 1);
+        drop(body);
+        assert_eq!(observer.inflight_count(), 0);
+    }
 }
