@@ -12,6 +12,8 @@ You can provide multimodal inputs in the following ways:
 
 > **Note:** You should provide **either image URLs or embedding file paths** in a single request.
 
+The TRT-LLM worker converts images to RGB as TensorRT-LLM does: it pastes an RGBA image on a white background, and converts other modes with Pillow. The encode worker of the E/P/D flow does the same.
+
 ## Support Matrix
 
 | Modality | Input Format | Aggregated | Disaggregated | Notes |

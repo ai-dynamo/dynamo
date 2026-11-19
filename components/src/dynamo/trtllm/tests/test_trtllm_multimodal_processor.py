@@ -7,6 +7,7 @@ None."""
 
 import base64
 import http.server
+import io
 import json
 import threading
 import time
@@ -67,7 +68,55 @@ def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
     image_loader.assert_called_once_with(
         enable_frontend_decoding=False,
         max_bytes=200 * 1024 * 1024,
+        to_rgb=mmp._trtllm_rgb,
     )
+
+
+def _encode_png(image: Image.Image, **save_kwargs) -> str:
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", **save_kwargs)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _ink_on_transparent(mode: str) -> Image.Image:
+    """2x1 image: black ink in the left pixel, the right pixel fully transparent."""
+    image = Image.new(mode, (2, 1))
+    image.putpixel((0, 0), (0, 255) if mode == "LA" else (0, 0, 0, 255))
+    return image
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        # TensorRT-LLM pastes RGBA on white, so the ink stays readable.
+        pytest.param(
+            _encode_png(_ink_on_transparent("RGBA")),
+            [(0, 0, 0), (255, 255, 255)],
+            id="rgba",
+        ),
+        # Other modes go through convert("RGB") in TensorRT-LLM too.
+        pytest.param(
+            _encode_png(_ink_on_transparent("LA")),
+            [(0, 0, 0), (0, 0, 0)],
+            id="grey_alpha",
+        ),
+    ],
+)
+async def test_image_loader_converts_transparency_like_trtllm(url, expected) -> None:
+    from tensorrt_llm.inputs.utils import load_image
+
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=200,
+        tokenizer=MagicMock(),
+    )
+    loaded = await processor.image_loader.load_image(url)
+    trtllm = load_image(url, format="pil")
+
+    pixels = [loaded.getpixel((x, 0)) for x in range(2)]
+    assert pixels == [trtllm.getpixel((x, 0)) for x in range(2)] == expected
 
 
 @pytest.mark.asyncio
