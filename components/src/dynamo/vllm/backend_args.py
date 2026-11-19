@@ -354,6 +354,22 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
+        add_argument(
+            g,
+            flag_name="--worker-start-method",
+            env_var="DYN_VLLM_WORKER_START_METHOD",
+            default="spawn",
+            choices=["spawn", "fork"],
+            help=(
+                "How vLLM starts its EngineCore and GPU worker processes "
+                "(sets VLLM_WORKER_MULTIPROC_METHOD). 'fork' skips their Python "
+                "start-up: Dynamo then builds the engine before it starts its own "
+                "runtime, and refuses to start if CUDA is already initialized, "
+                "another Python thread is running or the runtime's threads exist. "
+                "Supported for aggregated, prefill and decode workers."
+            ),
+        )
+
         # Benchmark / self-profiling
         add_argument(
             g,
@@ -648,6 +664,8 @@ class DynamoVllmConfig(ConfigBase):
     # GMS shadow mode
     gms_shadow_mode: bool = False
 
+    worker_start_method: str = "spawn"
+
     # Extra served names beyond the primary, parsed from --served-model-name.
     # None (not []) since ConfigBase copies class defaults by reference.
     served_model_aliases: Optional[List[str]] = None
@@ -701,6 +719,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
         self._validate_freeze_gc_after_init()
+        self._validate_worker_start_method()
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
@@ -1042,6 +1061,36 @@ class DynamoVllmConfig(ConfigBase):
                 "--freeze-gc-after-init is not supported with "
                 "--disaggregation-mode=encode."
             )
+
+    def _validate_worker_start_method(self) -> None:
+        """Fork needs the engine built before the runtime.
+
+        Only the aggregated, prefill and decode paths are wired to take such an
+        engine; headless mode never builds one here.
+        """
+        # The environment variable is not held to the flag's choices.
+        if self.worker_start_method not in ("spawn", "fork"):
+            raise ValueError(
+                "--worker-start-method must be spawn or fork, got "
+                f"{self.worker_start_method!r}."
+            )
+        if self.worker_start_method != "fork":
+            return
+        for enabled, option in (
+            (self.headless, "--headless"),
+            (self.embedding_worker, "--embedding-worker"),
+            (self.classify_worker, "--classify-worker"),
+            (self.realtime, "--endpoint-types realtime"),
+            (self.transcription_worker, "--transcription-worker"),
+            (
+                self.disaggregation_mode == DisaggregationMode.ENCODE,
+                "--disaggregation-mode=encode",
+            ),
+        ):
+            if enabled:
+                raise ValueError(
+                    f"--worker-start-method fork cannot be combined with {option}."
+                )
 
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""

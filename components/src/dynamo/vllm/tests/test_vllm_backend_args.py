@@ -897,6 +897,67 @@ class TestEmbeddingWorkerProcesses:
             config._validate_embedding_worker_processes()
 
 
+class TestWorkerStartMethod:
+    """--worker-start-method defaults to spawn; fork is rejected where it cannot run."""
+
+    def test_spawn_unless_the_flag_or_env_selects_fork(self, monkeypatch):
+        monkeypatch.delenv("DYN_VLLM_WORKER_START_METHOD", raising=False)
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).worker_start_method == "spawn"
+        assert DynamoVllmConfig.worker_start_method == "spawn"
+        args = parser.parse_args(["--worker-start-method", "fork"])
+        assert args.worker_start_method == "fork"
+
+        monkeypatch.setenv("DYN_VLLM_WORKER_START_METHOD", "fork")
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+        assert parser.parse_args([]).worker_start_method == "fork"
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.PREFILL,
+        ],
+    )
+    def test_fork_accepted_for_workers_that_build_the_engine_first(self, mode):
+        config = create_config()
+        config.worker_start_method = "fork"
+        config.disaggregation_mode = mode
+        config._validate_worker_start_method()
+
+    @pytest.mark.parametrize(
+        "field, value, option",
+        [
+            ("embedding_worker", True, "--embedding-worker"),
+            ("classify_worker", True, "--classify-worker"),
+            ("realtime", True, "realtime"),
+            ("transcription_worker", True, "--transcription-worker"),
+            ("disaggregation_mode", DisaggregationMode.ENCODE, "encode"),
+            ("headless", True, "--headless"),
+        ],
+    )
+    def test_fork_rejected_where_the_engine_is_not_built_first(
+        self, field, value, option
+    ):
+        config = create_config()
+        config.worker_start_method = "fork"
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, field, value)
+        with pytest.raises(ValueError, match=option):
+            config._validate_worker_start_method()
+
+    @pytest.mark.parametrize("value", ["forkserver", "Fork", ""])
+    def test_env_value_outside_the_choices_is_rejected(self, value):
+        config = create_config()
+        config.worker_start_method = value
+        with pytest.raises(ValueError, match="must be spawn or fork"):
+            config._validate_worker_start_method()
+
+
 class TestFreezeGcAfterInit:
     """--freeze-gc-after-init is opt-in and rejected where it cannot run."""
 

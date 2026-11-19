@@ -23,12 +23,17 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.utils.platform_utils import cuda_is_initialized
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
-from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.model_fetch import (
+    fetch_model,
+    fetch_model_in_subprocess,
+    needs_local_model_path,
+)
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -60,9 +65,9 @@ from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
-from dynamo.vllm.worker_factory import WorkerFactory
+from dynamo.vllm.worker_factory import WorkerFactory, shutdown_unserved_engine
 
-from . import envs
+from . import envs, fork_safety
 from .args import (
     Config,
     _uses_dynamo_connector,
@@ -256,10 +261,17 @@ async def worker(argv: list[str] | None = None) -> None:
     # vllm will attempt to download the model again, but find it in the HF cache.
     # NGC metadata was resolved before constructing engine_args; fetch weights
     # after validation even with ModelExpress so its native fallback can load them.
+    # With fork, fetch in a subprocess: fetching here starts Dynamo's runtime
+    # threads in the process vLLM is about to fork.
+    fetch = (
+        fetch_model_in_subprocess
+        if config.worker_start_method == "fork"
+        else fetch_model
+    )
     if needs_local_model_path(config.model):
-        config.engine_args.model = await fetch_model(config.model)
+        config.engine_args.model = await fetch(config.model)
     elif not embedding_process_child and should_prefetch_model(config):
-        await fetch_model(config.model)
+        await fetch(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
     # runtime connections when CRIU captures GPU state.
@@ -284,36 +296,61 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
-    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-        await initialize_configured_artifact_runtime()
+    # vLLM forks its EngineCore from this process. Build the engine before the
+    # runtime (and the artifact runtime's executor thread) exist: a forked child
+    # keeps only the forking thread, so locks held by any other stay held.
+    # Until the engine is loaded there is no system status server and no signal
+    # handler yet.
+    prebuilt_engine = None
+    if snapshot_controller is None and config.worker_start_method == "fork":
+        stat_logger_factory = StatLoggerFactory(endpoint=None)
+        prebuilt_engine = (
+            setup_vllm_engine(config, stat_logger_factory),
+            stat_logger_factory,
+        )
 
-    shutdown_event = asyncio.Event()
-    state_agent_lifecycle = StateAgentLifecycle()
+    try:
+        if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+            await initialize_configured_artifact_runtime()
 
-    async def close_worker_resources() -> None:
-        await _close_worker_resources(state_agent_lifecycle)
+        shutdown_event = asyncio.Event()
+        state_agent_lifecycle = StateAgentLifecycle()
 
-    runtime, loop = create_runtime(
-        discovery_backend=config.discovery_backend,
-        request_plane=config.request_plane,
-        event_plane=config.event_plane,
-        response_plane=config.response_plane,
-    )
+        async def close_worker_resources() -> None:
+            await _close_worker_resources(state_agent_lifecycle)
 
-    if snapshot_controller is not None:
-        # The flock lives on the open fd, not on any Python reference; the
-        # kernel releases it when the process exits.
-        await elect_and_wake(snapshot_controller.pause_controller, runtime)
+        runtime, loop = create_runtime(
+            discovery_backend=config.discovery_backend,
+            request_plane=config.request_plane,
+            event_plane=config.event_plane,
+            response_plane=config.response_plane,
+        )
 
-    # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
-    # there
-    install_signal_handlers(
-        loop,
-        runtime,
-        shutdown_endpoints,
-        shutdown_event,
-        pre_shutdown_callback=close_worker_resources,
-    )
+        if snapshot_controller is not None:
+            # The flock lives on the open fd, not on any Python reference; the
+            # kernel releases it when the process exits.
+            await elect_and_wake(snapshot_controller.pause_controller, runtime)
+
+        # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
+        # there
+        install_signal_handlers(
+            loop,
+            runtime,
+            shutdown_endpoints,
+            shutdown_event,
+            pre_shutdown_callback=close_worker_resources,
+        )
+    except BaseException:
+        # No worker owns the engine built above yet. EngineCore is a non-daemon
+        # child: left running, it can block this process's exit. (A snapshot
+        # engine is not shut down here.)
+        if prebuilt_engine is not None:
+            try:
+                shutdown_unserved_engine(prebuilt_engine)
+            except Exception:
+                # Logged only: the startup error below is the one to report.
+                logger.exception("Failed to shut down the engine after startup failed")
+        raise
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     try:
@@ -332,6 +369,7 @@ async def worker(argv: list[str] | None = None) -> None:
             shutdown_event,
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
+            prebuilt_engine=prebuilt_engine,
         )
     finally:
         try:
@@ -673,6 +711,41 @@ def setup_fpm_relay(
     return relays if relays else None
 
 
+# Thread name prefix of Dynamo's runtime (tokio) workers.
+RUNTIME_THREAD_PREFIX = "tokio-"
+
+
+def check_fork_safe() -> None:
+    """Refuse to fork vLLM's processes from a state the child cannot inherit.
+
+    A child keeps only the forking thread: a lock another Python thread holds
+    stays locked in it, and Dynamo's runtime would exist there without its
+    threads. A child of a process with a CUDA context cannot use the GPU, and
+    vLLM would silently switch to spawn instead. Other native threads are not
+    checked.
+    """
+    others = fork_safety.wait_for_python_threads(fork_safety.THREAD_SETTLE_SECONDS)
+    problems = []
+    if cuda_is_initialized():
+        problems.append("CUDA is already initialized in this process")
+    if others:
+        problems.append(f"Python threads are running: {', '.join(others)}")
+    os_threads = fork_safety.os_thread_names()
+    runtime_threads = sum(n.startswith(RUNTIME_THREAD_PREFIX) for n in os_threads)
+    if runtime_threads:
+        problems.append(f"Dynamo's runtime is running ({runtime_threads} threads)")
+    if problems:
+        raise RuntimeError(
+            "--worker-start-method fork is unsafe here: "
+            + "; ".join(problems)
+            + ". Use --worker-start-method spawn."
+        )
+    logger.info(
+        "Forking vLLM's engine processes from a process with %d OS thread(s)",
+        len(os_threads),
+    )
+
+
 def setup_vllm_engine(
     config: Config,
     stat_logger: Optional[StatLoggerFactory] = None,
@@ -722,7 +795,7 @@ def setup_vllm_engine(
             stat_logger.component_gauges = component_gauges
 
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = config.worker_start_method
     # Before EngineCore spawns: a false NIXL_TELEMETRY_ENABLE vetoes capture.
     allow_nixl_telemetry_capture()
 
@@ -821,6 +894,9 @@ def setup_vllm_engine(
     if stat_logger:
         factory.append(stat_logger)
 
+    if config.worker_start_method == "fork":
+        check_fork_safe()
+
     # Time engine initialization
     start_time = time.time()
     embedding_process_group = None
@@ -846,6 +922,16 @@ def setup_vllm_engine(
             disable_log_stats=engine_args.disable_log_stats,
         )
     load_time = time.time() - start_time
+
+    # vLLM overrides the method itself in cases Dynamo does not check (for
+    # example --numa-bind); it only logs a warning of its own.
+    start_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+    if start_method != config.worker_start_method:
+        logger.warning(
+            "vLLM started its processes with %s, not --worker-start-method %s",
+            start_method,
+            config.worker_start_method,
+        )
 
     # Record model load time. ``component_gauges`` is None on the
     # embedding-worker path -- pooling engines have no chat-shaped gauges

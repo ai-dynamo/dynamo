@@ -203,7 +203,7 @@ async def _sync_fpm_worker_id_or_shutdown(
 ) -> None:
     """``_sync_fpm_worker_id``, shutting the engine down on failure.
 
-    For realtime and prefill, which have no lifecycle owning the engine yet.
+    For realtime and transcription, which have no lifecycle owning the engine.
     """
     try:
         await _sync_fpm_worker_id(engine_client, vllm_config, new_worker_id)
@@ -216,6 +216,15 @@ async def _sync_fpm_worker_id_or_shutdown(
                 "sync failed"
             )
         raise
+
+
+def shutdown_unserved_engine(engine: SnapshotEngineSetupResult) -> None:
+    """Shut down an engine built before the runtime that no worker took over.
+
+    For a startup failure before a worker's lifecycle owns the engine.
+    """
+    (engine_client, vllm_config, *_), _stat_logger = engine
+    engine_client.shutdown(timeout=_engine_shutdown_timeout(vllm_config))
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -1829,8 +1838,13 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        """Create the appropriate worker based on config flags."""
+        """Create the appropriate worker based on config flags.
+
+        ``prebuilt_engine`` is an engine built before the runtime existed; unlike
+        ``snapshot_engine`` it has not been through failover election.
+        """
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -1882,6 +1896,7 @@ class WorkerFactory:
                 shutdown_event,
                 shutdown_endpoints,
                 snapshot_engine=snapshot_engine,
+                prebuilt_engine=prebuilt_engine,
             )
         else:
             # AGGREGATED or DECODE
@@ -1891,6 +1906,7 @@ class WorkerFactory:
                 shutdown_event,
                 shutdown_endpoints,
                 snapshot_engine=snapshot_engine,
+                prebuilt_engine=prebuilt_engine,
             )
         return
 
@@ -2494,6 +2510,7 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
@@ -2506,6 +2523,7 @@ class WorkerFactory:
                     shutdown_event,
                     shutdown_endpoints,
                     snapshot_engine=snapshot_engine,
+                    prebuilt_engine=prebuilt_engine,
                     lifecycle=lifecycle,
                 )
             finally:
@@ -2519,8 +2537,16 @@ class WorkerFactory:
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult],
         lifecycle: _WorkerLifecycle,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize and serve a decode worker."""
+
+        # An engine built before the runtime (checkpoint mode, or the fork start
+        # method) is already running: the lifecycle owns it from here, so a
+        # failure while the endpoints are set up shuts it down too.
+        ready_engine = snapshot_engine or prebuilt_engine
+        if ready_engine is not None:
+            lifecycle.engine_client, lifecycle.vllm_config = ready_engine[0][:2]
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -2561,15 +2587,17 @@ class WorkerFactory:
                 ]
             )
 
-        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it
+        # (an engine built before the runtime is already loaded by now).
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
 
-        # Use pre-created engine if provided (checkpoint mode), otherwise create new
+        # Use the engine built before the runtime if there is one (checkpoint
+        # mode, or the fork start method), otherwise create it now.
         fpm_worker_id = str(generate_endpoint.connection_id())
-        if snapshot_engine is not None:
-            engine_setup, factory = snapshot_engine
+        if ready_engine is not None:
+            engine_setup, factory = ready_engine
             (
                 engine_client,
                 vllm_config,
@@ -2593,10 +2621,10 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
-        # Sync after the lifecycle owns the engine, so a failure shuts it down.
-        lifecycle.engine_client = engine_client
-        lifecycle.vllm_config = vllm_config
-        if snapshot_engine is not None:
+            lifecycle.engine_client = engine_client
+            lifecycle.vllm_config = vllm_config
+        # The lifecycle owns the engine by now, so a failed sync shuts it down.
+        if ready_engine is not None:
             await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
 
@@ -2821,6 +2849,7 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
             try:
@@ -2830,6 +2859,7 @@ class WorkerFactory:
                     shutdown_event,
                     shutdown_endpoints,
                     snapshot_engine=snapshot_engine,
+                    prebuilt_engine=prebuilt_engine,
                     lifecycle=lifecycle,
                 )
             finally:
@@ -2843,7 +2873,14 @@ class WorkerFactory:
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult],
         lifecycle: _WorkerLifecycle,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
+        # As in the decode worker: the lifecycle owns an engine built before the
+        # runtime from here, so a failure in endpoint setup shuts it down too.
+        ready_engine = snapshot_engine or prebuilt_engine
+        if ready_engine is not None:
+            lifecycle.engine_client, lifecycle.vllm_config = ready_engine[0][:2]
+
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -2867,15 +2904,17 @@ class WorkerFactory:
                 f"{config.namespace}.{config.component}.list_loras"
             )
 
-        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it
+        # (an engine built before the runtime is already loaded by now).
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
 
-        # Use pre-created engine if provided (checkpoint mode), otherwise create new
+        # Use the engine built before the runtime if there is one (checkpoint
+        # mode, or the fork start method), otherwise create it now.
         fpm_worker_id = str(generate_endpoint.connection_id())
-        if snapshot_engine is not None:
-            engine_setup, factory = snapshot_engine
+        if ready_engine is not None:
+            engine_setup, factory = ready_engine
             (
                 engine_client,
                 vllm_config,
@@ -2886,9 +2925,8 @@ class WorkerFactory:
             factory.bind_endpoint(generate_endpoint)
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
 
-            await _sync_fpm_worker_id_or_shutdown(
-                engine_client, vllm_config, fpm_worker_id
-            )
+            # The lifecycle owns this engine, so a failed sync shuts it down.
+            await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
         else:
             factory = StatLoggerFactory(endpoint=generate_endpoint)
             (
@@ -2898,10 +2936,8 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
-        # Owned only after the snapshot sync, which shuts the engine down itself
-        # on failure; from here on any exit shuts it down through the lifecycle.
-        lifecycle.engine_client = engine_client
-        lifecycle.vllm_config = vllm_config
+            lifecycle.engine_client = engine_client
+            lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         _, dp_size = get_dp_range_for_worker(vllm_config)
