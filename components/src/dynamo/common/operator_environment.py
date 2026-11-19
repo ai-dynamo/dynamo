@@ -7,7 +7,6 @@ Values of None are generated, opaque and inert, not empty literals. The shared
 operator_environment.json corpus checks this projection against rendered Go pods.
 """
 
-import posixpath
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -98,18 +97,11 @@ def component_backend(dgd: Mapping[str, Any], component: Mapping[str, Any]) -> s
         main = _main(template)
         command, args = main.get("command") or [], main.get("args") or []
         launch = " ".join([*command, *args])
-        if (
-            command
-            and "$(" not in command[0]
-            and posixpath.basename(posixpath.normpath(command[0])) == "vllm-rs"
-        ):
-            detected = ["vllm"]
-        else:
-            detected = [
-                name
-                for name, pattern in _BACKEND_PATTERNS.items()
-                if pattern.search(launch)
-            ]
+        detected = [
+            name
+            for name, pattern in _BACKEND_PATTERNS.items()
+            if pattern.search(launch)
+        ]
         if len(detected) > 1:
             if not explicit:
                 raise ValueError("multiple backend frameworks detected from command")

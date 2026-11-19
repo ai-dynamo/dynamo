@@ -22,13 +22,25 @@
     "bindings": {"POD_IP": null, "VLLM_DP_MASTER_IP": null}
   },
   {
-    "name": "direct-vllm-rs-overrides-authored-cycle",
+    "name": "direct-vllm-rs-without-backend-preserves-authored-host",
+    "component": {"multinode": {"nodeCount": 2}},
+    "main": {
+      "command": ["/usr/local/bin/vllm-rs"],
+      "env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "custom"}]
+    },
+    "role": "leader",
+    "backend": "noop",
+    "bindings": {"DYNAMO_RANK": null, "DYNAMO_LEADER_ADDRESS": null},
+    "preserved": ["VLLM_NIXL_SIDE_CHANNEL_HOST"]
+  },
+  {
+    "name": "direct-vllm-rs-with-explicit-backend-overrides-authored-cycle",
     "component": {"multinode": {"nodeCount": 2}},
     "main": {
       "command": ["/usr/local/bin/vllm-rs"],
       "env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "$(USER)"}]
     },
-    "graph": {"env": [{"name": "USER", "value": "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}]},
+    "graph": {"backendFramework": "vllm", "env": [{"name": "USER", "value": "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}]},
     "role": "leader",
     "backend": "vllm",
     "bindings": {"DYNAMO_RANK": null, "DYNAMO_LEADER_ADDRESS": null, "VLLM_NIXL_SIDE_CHANNEL_HOST": null}
