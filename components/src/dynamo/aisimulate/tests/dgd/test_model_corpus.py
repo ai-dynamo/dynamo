@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from dynamo.aisimulate.tests.dgd.comparison import run_cases
-from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden
+from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden, repository_root
 
 pytestmark = [
     pytest.mark.integration,
@@ -17,7 +17,10 @@ pytestmark = [
     pytest.mark.timeout(240),
 ]
 
-_SUITE = Path(__file__).resolve().parent / "comparison/testsuite-issue-8469.yaml"
+_SUITE = (
+    repository_root()
+    / "components/src/dynamo/aisimulate/tests/dgd/comparison/testsuite-issue-8469.yaml"
+)
 _GOLDEN_ROOT = run_cases.default_suite_output_root(_SUITE)
 _CASES = tuple(entry for entry in run_cases.load_suite(_SUITE) if entry.automatic)
 assert _CASES, f"no automatic comparison cases found in {_SUITE}"

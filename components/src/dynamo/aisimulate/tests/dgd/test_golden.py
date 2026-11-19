@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden
+from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden, repository_root
 
 pytestmark = [
     pytest.mark.unit,
@@ -22,6 +22,14 @@ metadata:
   name: expected
 """
 _CHANGED = _EXPECTED.replace("expected", "changed")
+
+
+def test_repository_root_prefers_github_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+
+    assert repository_root() == tmp_path.resolve()
 
 
 def test_yaml_golden_accepts_parsed_yaml_equivalence(tmp_path: Path) -> None:
