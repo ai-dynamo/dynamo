@@ -13,12 +13,14 @@ import yaml
 
 
 def repository_root() -> Path:
+    candidates = [Path.cwd()]
     if workspace := os.environ.get("GITHUB_WORKSPACE"):
-        return Path(workspace).resolve()
+        candidates.append(Path(workspace))
 
-    cwd = Path.cwd().resolve()
-    if (cwd / "components/src/dynamo/aisimulate").is_dir():
-        return cwd
+    for candidate in candidates:
+        root = candidate.resolve()
+        if (root / "components/src/dynamo/aisimulate").is_dir():
+            return root
 
     return Path(__file__).resolve().parents[6]
 
