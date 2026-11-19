@@ -88,6 +88,7 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
     agentic_snapshot: dict[str, Any] | None
     agentic_warmup: bool
+    agentic_warmup_policy: Literal["repeated_prefixes", "live_trajectory_v1"] | None
     agentic_profile: dict[str, Any] | None
     execution_model: str | None
     weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
@@ -402,6 +403,7 @@ def run_trace_replay(
     agentic_lanes=None,
     agentic_snapshot=None,
     agentic_warmup=False,
+    agentic_warmup_policy=None,
     agentic_profile=None,
     conversation_affinity=None,
     replay_mode="offline",
@@ -447,9 +449,9 @@ def run_trace_replay(
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
 
-    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
-    workload controls on the existing offline trace path. Native validation owns
-    their schemas and lifecycle constraints.
+    ``agentic_snapshot``, ``agentic_warmup``, ``agentic_warmup_policy`` and
+    ``agentic_profile`` use AISimulate workload controls on the existing offline
+    trace path. Native validation owns their schemas and lifecycle constraints.
 
     ``conversation_affinity`` enables native hard binding for AgentX conversations:
     ``{"mode": "session" | "sibling_group", "ttl_seconds": 300}``. It requires
@@ -492,6 +494,7 @@ def run_trace_replay(
         "agentic_lanes": agentic_lanes,
         "agentic_snapshot": agentic_snapshot,
         "agentic_warmup": agentic_warmup,
+        "agentic_warmup_policy": agentic_warmup_policy,
         "agentic_profile": agentic_profile,
         "conversation_affinity": conversation_affinity,
         "replay_mode": replay_mode,
