@@ -342,6 +342,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      issues: write  # Comment reactions
       pull-requests: write
     concurrency:
       group: rerun-ci-${{ github.event.issue.number }}

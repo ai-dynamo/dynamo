@@ -38,6 +38,10 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
     return;
   }
 
+  await github.rest.reactions.createForIssueComment({
+    ...repo, comment_id: comment.id, content: '+1',
+  });
+
   const pullArgs = { ...repo, pull_number: issue.number };
   const { data: pull } = await github.rest.pulls.get(pullArgs);
   if (pull.state !== 'open') {
