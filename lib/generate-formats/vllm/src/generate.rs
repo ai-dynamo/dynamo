@@ -505,6 +505,7 @@ fn append_completion_logprobs_from_output(
             convert_backend_top_logprobs(backend_top_logprobs, &token, *token_id, logprob, true);
         for entry in &mut top_logprobs {
             entry.logprob = clamp_vllm_logprob(entry.logprob);
+            entry.token_id = None;
         }
         content.push(ChatCompletionTokenLogprob {
             bytes: token_to_utf8_bytes(&token),
