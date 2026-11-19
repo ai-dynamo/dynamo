@@ -144,6 +144,56 @@ def test_auto_detects_mooncake(tmp_path):
     )
 
 
+def test_mooncake_upstream_field_aliases_match_canonical_names(tmp_path):
+    records = [_rec(0, 100, 10), _rec(5_000, 300, 30), _rec(35_000, 500, 50)]
+    canonical = _write_trace(tmp_path, records)
+    aliased = _write_trace(
+        tmp_path,
+        [
+            {
+                "created_time": r["timestamp"],
+                "input_tokens": r["input_length"],
+                "output_tokens": r["output_length"],
+            }
+            for r in records
+        ],
+        name="aliased.jsonl",
+    )
+
+    assert detect_trace_format(aliased) == "mooncake"
+    assert extract_traffic_observations_from_trace(
+        aliased, 10
+    ) == extract_traffic_observations_from_trace(canonical, 10)
+    assert extract_metrics_from_trace(aliased, 10) == extract_metrics_from_trace(
+        canonical, 10
+    )
+    assert extract_metrics_from_mooncake(aliased, 10) == extract_metrics_from_mooncake(
+        canonical, 10
+    )
+
+
+def test_mooncake_rows_may_mix_canonical_names_and_aliases(tmp_path):
+    mixed = _write_trace(
+        tmp_path,
+        [{"timestamp": 0, "input_tokens": 100, "output_length": 10}],
+    )
+    canonical = _write_trace(tmp_path, [_rec(0, 100, 10)], name="plain.jsonl")
+
+    assert detect_trace_format(mixed) == "mooncake"
+    assert extract_metrics_from_trace(mixed, 10) == extract_metrics_from_trace(
+        canonical, 10
+    )
+
+
+def test_mooncake_field_set_under_both_names_is_rejected(tmp_path):
+    path = _write_trace(tmp_path, [{**_rec(0, 100, 10), "input_tokens": 999}])
+
+    with pytest.raises(
+        ValueError, match="input_length and its alias input_tokens are both set"
+    ):
+        extract_metrics_from_trace(path, 10)
+
+
 def test_dynamo_v1_matches_lowered_mooncake_windows(tmp_path):
     mooncake_path = _write_trace(
         tmp_path,
