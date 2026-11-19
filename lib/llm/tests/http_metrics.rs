@@ -1131,6 +1131,52 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
     .await;
 }
 
+/// The KServe gRPC frontend builds its own HTTP service for /metrics. Given a
+/// runtime, that service's registry must be attached to the DRT tree too, so
+/// OTLP exports the same frontend families; dropping the service detaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_kserve_frontend_metrics_reach_the_otlp_export_path() {
+    use dynamo_llm::grpc::service::kserve::KserveService;
+    use dynamo_runtime::metrics::MetricsHierarchy;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let drt_metrics = drt.get_metrics_registry().clone();
+
+        let service = KserveService::builder()
+            .runtime(Some(drt.clone()))
+            .build()
+            .unwrap();
+        let own = family_names(&service.http_service().prometheus_registry().gather());
+        assert!(
+            own.contains("dynamo_frontend_metrics_start_time_seconds"),
+            "{own:?}"
+        );
+        let exported = otlp_export_families(&drt_metrics);
+        let not_exported: Vec<_> = own.difference(&exported).collect();
+        assert!(
+            not_exported.is_empty(),
+            "in the KServe HTTP service's registry but not exported: {not_exported:?}"
+        );
+
+        drop(service);
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(
+            !exported.contains("dynamo_frontend_metrics_start_time_seconds"),
+            "a dropped KServe service's metrics are still exported"
+        );
+
+        drt.shutdown();
+    })
+    .await;
+}
+
 // Integration tests that require distributed runtime with etcd
 #[cfg(feature = "integration")]
 mod integration_tests {
