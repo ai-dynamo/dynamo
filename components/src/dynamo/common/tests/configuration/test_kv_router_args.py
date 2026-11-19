@@ -1230,7 +1230,8 @@ def test_router_yaml_applies_before_frontend_validation(tmp_path):
         )
     )
     with pytest.raises(
-        ValueError, match="AIS perf config requires backend, system, model"
+        ValueError,
+        match=r"--router-prefill-load-model=ais requires an AIS perf model",
     ):
         config.validate()
 
