@@ -41,7 +41,12 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    HttpError,
+    InvalidArgument,
+    RoutedEngineError,
+    WorkerUnavailable,
+)
 from dynamo.vllm.errors import vllm_client_error_to_public_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -163,7 +168,7 @@ def _chat_choice_logprobs(
 
     Each record has ``token_id``, ``logprob``, and ``top``. ``top`` is the
     raw per-position list of ``{rank, token_id, token, logprob, bytes}``,
-    including the sampled token. The content entry keeps the sampled token.
+    which may omit the sampled token. The content entry keeps the sampled token.
     ``top_logprobs`` on the entry is the rank-sorted prefix of length
     ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
     ``return_tokens_as_token_ids`` formats every token and its bytes as
@@ -653,6 +658,16 @@ def _inject_routing_metadata(
         target["mm_routing_info"] = mm_routing_info
 
 
+def _request_cache_salt(request: dict[str, Any]) -> str | None:
+    """Match the public precedence of Rust's ``request_cache_salt``."""
+    nvext = request.get("nvext")
+    salt = nvext.get("cache_salt") if isinstance(nvext, dict) else None
+    if isinstance(salt, str) and salt:
+        return salt
+    salt = request.get("cache_salt")
+    return salt if isinstance(salt, str) and salt else None
+
+
 async def _build_engine_inputs(
     renderer: Any,
     engine_prompt: dict[str, Any],
@@ -964,6 +979,11 @@ class VllmProcessor:
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Preprocess a chat request and yield responses from the routed engine.
+
+        Local vLLM processing handles tokenization and response assembly, while
+        routing metadata and worker arguments carry request settings to inference.
+        """
         request_id = random_uuid()
 
         _reject_unsupported_chat_logprobs(
@@ -1059,6 +1079,7 @@ class VllmProcessor:
         # below. Prefer the OpenAI-compatible root-level field, fall back to the
         # legacy nvext passthrough.
         thinking_token_budget = resolve_thinking_token_budget(request)
+        cache_salt = _request_cache_salt(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed
@@ -1069,7 +1090,7 @@ class VllmProcessor:
                 self.input_processor.renderer,
                 engine_prompt,
                 tokens,
-                cache_salt=request_for_sampling.cache_salt,
+                cache_salt=cache_salt,
                 mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
                 defer_multimodal_processing=mm_uuids is not None,
             )
@@ -1127,6 +1148,16 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if cache_salt is not None:
+            # The router and worker must use the same public namespace. The
+            # worker adds the internal KV-event tag when it builds its prompt.
+            dynamo_preproc["routing"] = {
+                **(dynamo_preproc["routing"] or {}),
+                "cache_salt": cache_salt,
+            }
+            dynamo_preproc.setdefault("extra_args", {})["nvext"] = {
+                "cache_salt": cache_salt
+            }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         sampling_passthrough = {
@@ -1135,7 +1166,9 @@ class VllmProcessor:
             if request.get(key) is not None
         }
         if sampling_passthrough:
-            dynamo_preproc["extra_args"] = {"sampling_options": sampling_passthrough}
+            dynamo_preproc.setdefault("extra_args", {})[
+                "sampling_options"
+            ] = sampling_passthrough
         if reasoning_metadata.engine_reasoning_ended is not None:
             dynamo_preproc[
                 "reasoning_ended"
@@ -1582,6 +1615,10 @@ class VllmProcessor:
             # that 503 into a 500; let the binding restore the class instead.
             raise
         except InvalidArgument:
+            raise
+        except RoutedEngineError:
+            # Keep the worker's error class (for example CapacityExhausted, HTTP 529);
+            # an error envelope would turn it into a 500.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

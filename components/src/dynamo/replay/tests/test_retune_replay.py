@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
+    "aisim.replay",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
@@ -808,6 +808,7 @@ _IGNORED = {  # no effect on a candidate's engine or score
     "trace_shared_prefix_ratio",  # other trace formats only
     "trace_num_prefix_groups",
     "weka_nested_timestamp_basis",
+    "agentic_warmup_policy",  # only with agentic_warmup, which retune rejects
 }
 
 

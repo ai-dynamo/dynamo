@@ -426,6 +426,14 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
+    fn custom_part(&self) -> Option<&dynamo_protocols::types::CustomModalityPart> {
+        match self {
+            Self::User(ChatCompletionRequestUserMessageContentPart::Custom(part))
+            | Self::Tool(ChatCompletionRequestToolMessageContentPart::Custom(part)) => Some(part),
+            _ => None,
+        }
+    }
+
     fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
         match self {
             Self::User(part) => match *part {
@@ -755,6 +763,9 @@ struct ChoiceReasoningState {
 struct ReasoningUsageEstimator {
     total: u32,
     active_choices: HashSet<u32>,
+    // Tokens of empty chunks for a choice still in reasoning, settled by its next
+    // release: a tool call drops them, since `glm47` emits a call only once complete.
+    held: HashMap<u32, u32>,
 }
 
 impl ReasoningUsageEstimator {
@@ -771,31 +782,60 @@ impl ReasoningUsageEstimator {
             .choices
             .iter()
             .any(|choice| choice.delta.reasoning_content.is_some());
-        let active_without_visible_output = chunk.inner.choices.iter().any(|choice| {
-            self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
-        });
+        let held_choice = chunk
+            .inner
+            .choices
+            .iter()
+            .find(|choice| {
+                self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
+            })
+            .map(|choice| choice.index);
         let usage_chunk_while_reasoning =
             chunk.inner.choices.is_empty() && !self.active_choices.is_empty();
 
-        if token_count > 0
-            && (has_reasoning || active_without_visible_output || usage_chunk_while_reasoning)
-        {
-            self.total = self.total.saturating_add(token_count);
+        if token_count > 0 {
+            if has_reasoning || usage_chunk_while_reasoning {
+                self.total = self.total.saturating_add(token_count);
+            } else if let Some(index) = held_choice {
+                let held = self.held.entry(index).or_default();
+                *held = held.saturating_add(token_count);
+            }
         }
 
         for choice in &chunk.inner.choices {
             if choice.delta.reasoning_content.is_some() {
+                self.settle_held(choice.index, true);
                 self.active_choices.insert(choice.index);
             } else if choice_has_visible_output(choice) {
+                let released_tool_call = choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                self.settle_held(choice.index, !released_tool_call);
                 self.active_choices.remove(&choice.index);
             }
+        }
+    }
+
+    fn settle_held(&mut self, index: u32, was_reasoning: bool) {
+        if let Some(held) = self.held.remove(&index)
+            && was_reasoning
+        {
+            self.total = self.total.saturating_add(held);
         }
     }
 
     fn annotate(&self, usage: &mut dynamo_protocols::types::CompletionUsage) {
         let details = usage.completion_tokens_details.get_or_insert_default();
         if details.reasoning_tokens.unwrap_or(0) == 0 {
-            details.reasoning_tokens = Some(self.total);
+            // Text still held when usage arrives was never released as anything
+            // else, so it stays reasoning.
+            let unsettled = self
+                .held
+                .values()
+                .fold(0u32, |sum, held| sum.saturating_add(*held));
+            details.reasoning_tokens = Some(self.total.saturating_add(unsettled));
         }
     }
 }
@@ -1766,12 +1806,61 @@ fn attach_image_cache_scope_from_context(
     }
 }
 
+/// Start the tracker's arrival age from the time a gateway reports it held the request, so a
+/// backend that orders admission by arrival counts the wait in front of this process too.
+fn apply_upstream_elapsed(context: &PipelineContext<()>, tracker: Option<&RequestTracker>) {
+    use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
+
+    if let Some(tracker) = tracker
+        && let Ok(upstream_elapsed) =
+            context.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+    {
+        tracker.set_upstream_elapsed(*upstream_elapsed);
+    }
+}
+
 fn attach_request_context_metadata(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
 ) {
     attach_agent_context_from_context(request, context);
     attach_image_cache_scope_from_context(request, context);
+}
+
+fn validate_custom_kind(kind: &str) -> Result<()> {
+    if matches!(
+        kind,
+        "text" | "image_url" | "video_url" | "audio_url" | "input_audio"
+    ) {
+        return Err(custom_transport_error(
+            "Custom kind is reserved for built-in content",
+        ));
+    }
+    Ok(())
+}
+
+fn custom_transport_error(message: &'static str) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_details(PublicDetails::Message {
+            message: message.into(),
+        })
+        .build()
+        .into()
+}
+
+pub(crate) const CUSTOM_CONTENT_UNSUPPORTED: &str = "Selected workers do not support custom JSON multimodal content; use an aggregated Python vLLM worker with --enable-multimodal";
+
+pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
+    request
+        .typed_messages()
+        .unwrap_or_default()
+        .iter()
+        .any(|message| {
+            multimodal_content_parts(message)
+                .is_some_and(|mut parts| parts.any(|part| part.custom_part().is_some()))
+        })
 }
 
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
@@ -4135,8 +4224,9 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Replace inline `data:` URLs with empty strings in message content parts.
-    /// Preserves HTTP(S) URLs, text content, and overall message structure.
+    /// Replace inline `data:` URLs with empty strings and drop custom `fields` in
+    /// message content parts. Preserves HTTP(S) URLs, text content, and overall
+    /// message structure.
     fn strip_inline_data_urls(messages: &mut serde_json::Value) {
         let Some(arr) = messages.as_array_mut() else {
             return;
@@ -4149,6 +4239,11 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for part in parts {
+                if part.get("type").and_then(serde_json::Value::as_str) == Some("custom")
+                    && let Some(part) = part.as_object_mut()
+                {
+                    part.remove("fields");
+                }
                 for key in ["image_url", "video_url", "audio_url"] {
                     if let Some(media) = part.get_mut(key)
                         && let Some(url) = media.get_mut("url")
@@ -4228,7 +4323,7 @@ impl OpenAIPreprocessor {
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
 
-        let mut media_map: MultimodalDataMap = HashMap::new();
+        let mut media_map = MultimodalDataMap::new();
         let mut uuid_map: MultimodalUuidMap = HashMap::new();
         let mut media_order: Vec<MultimodalItemRef> = Vec::new();
         let mut has_user_uuid = false;
@@ -4285,6 +4380,23 @@ impl OpenAIPreprocessor {
             };
             for content_part in content_parts {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
+                    if let Some(part) = content_part.custom_part() {
+                        if !self.runtime_config.runtime_flag_enabled(
+                            crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                        ) {
+                            return Err(custom_transport_error(CUSTOM_CONTENT_UNSUPPORTED));
+                        }
+                        validate_custom_kind(&part.kind)?;
+                        let payload = serde_json::Value::Object(part.fields.clone());
+                        media_map
+                            .entry(part.kind.clone())
+                            .or_default()
+                            .push(MultimodalData::Json(payload));
+                        #[cfg(feature = "mm-routing")]
+                        {
+                            exact_mm_routing_eligible = false;
+                        }
+                    }
                     continue;
                 };
 
@@ -8680,6 +8792,7 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());
+        apply_upstream_elapsed(&context, tracker.as_deref());
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
@@ -8901,6 +9014,7 @@ impl
         let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
+        apply_upstream_elapsed(&context, tracker.as_deref());
         // convert the chat completion request to a common completion request
         let mut builder = self.builder_with_lora(
             &request,
@@ -12556,6 +12670,129 @@ responses_tools: None,
     }
 
     #[tokio::test]
+    async fn reasoning_usage_excludes_a_held_tool_call() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use crate::protocols::openai::chat_completions::unified_parser;
+        let thought = ["The user", " wants", " a file", ".</think>"];
+        let call = format!(
+            "<tool_call>write<arg_key>content</arg_key><arg_value>{}</arg_value></tool_call>",
+            "x".repeat(40)
+        );
+        let pieces: Vec<String> = thought
+            .iter()
+            .map(|piece| piece.to_string())
+            .chain(
+                call.as_bytes()
+                    .chunks(4)
+                    .map(|piece| String::from_utf8(piece.to_vec()).unwrap()),
+            )
+            .collect();
+        let mut chunks: Vec<_> = pieces
+            .iter()
+            .map(|piece| reasoning_usage_chunk(None, Some(piece), 1))
+            .collect();
+        chunks
+            .last_mut()
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap()
+            .inner
+            .choices[0]
+            .finish_reason = Some(FinishReason::ToolCalls);
+        chunks.push(reasoning_usage_trailer(pieces.len() as u32, None));
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "write".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"content": {"type": "string"}}
+            })),
+            strict: None,
+        }];
+        let raw = unified_parser::apply_stream_with_constraint(
+            stream::iter(chunks),
+            Some(tools),
+            GuidedToolConstraint::None,
+            dynamo_parsers_v2::UnifiedParserStartingState::Reasoning,
+            "glm47",
+            true,
+        );
+        let output =
+            OpenAIPreprocessor::apply_unified_response_policies(Box::pin(raw), true, false, false)
+                .collect::<Vec<_>>()
+                .await;
+
+        assert!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .flat_map(|chunk| &chunk.inner.choices)
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the parser must emit the held call"
+        );
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(thought.len() as u32),
+            "only the thought chunks are reasoning, not the chunks of the held call"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_settles_held_tokens_per_choice() {
+        let on_choice = |index: u32, mut chunk: Annotated<NvCreateChatCompletionStreamResponse>| {
+            chunk.data.as_mut().unwrap().inner.choices[0].index = index;
+            chunk
+        };
+        let mut tool_call = on_choice(1, reasoning_usage_chunk(None, None, 1));
+        tool_call.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls = Some(vec![
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("call-1".to_string()),
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some("write".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
+                custom: None,
+            },
+        ]);
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            on_choice(0, reasoning_usage_chunk(Some("a"), None, 1)),
+            on_choice(1, reasoning_usage_chunk(Some("b"), None, 1)),
+            on_choice(0, reasoning_usage_chunk(None, None, 1)),
+            on_choice(1, reasoning_usage_chunk(None, None, 1)),
+            tool_call,
+            reasoning_usage_trailer(5, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3),
+            "choice 0's unreleased token stays reasoning; choice 1's call drops only its own"
+        );
+    }
+
+    #[tokio::test]
     async fn disabled_unified_reasoning_keeps_interleaved_text_order_in_stream_and_batch() {
         use crate::protocols::openai::GuidedToolConstraint;
         use crate::protocols::openai::chat_completions::unified_parser;
@@ -16013,6 +16250,23 @@ responses_tools: None,
             .output_options(crate::protocols::common::OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn upstream_elapsed_in_the_context_starts_the_tracker_from_it() {
+        use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
+        use std::time::Duration;
+
+        let mut context = PipelineContext::new(());
+        let untouched = RequestTracker::new();
+        apply_upstream_elapsed(&context, Some(&untouched));
+        assert!(untouched.elapsed_since_arrival() < Duration::from_secs(1));
+
+        context.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, Duration::from_secs(40));
+        let tracker = RequestTracker::new();
+        apply_upstream_elapsed(&context, Some(&tracker));
+        assert!(tracker.elapsed_since_arrival() >= Duration::from_secs(40));
+        apply_upstream_elapsed(&context, None);
     }
 
     #[test]
@@ -21257,5 +21511,180 @@ mod beam_route_tests {
         let mut omitted = history_request(None);
         preprocessor.apply_preserve_thinking(&mut omitted).unwrap();
         assert!(omitted.chat_template_args.is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_content_template_tests {
+    use super::*;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    // Consumer-owned template; these marker spellings are confined to tests.
+    const CUSTOM_TEMPLATE: &str = include_str!("../tests/data/custom_modality_chat_template.jinja");
+
+    fn custom_preprocessor(template: &str) -> OpenAIPreprocessor {
+        let mut card = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                true,
+            )
+            .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(card).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(
+                serde_json::from_value(serde_json::json!({"chat_template":template})).unwrap(),
+                dynamo_renderer::ContextMixins::default(),
+                true,
+            )
+            .unwrap();
+        preprocessor.formatter = formatter;
+        preprocessor
+    }
+
+    #[tokio::test]
+    async fn custom_positions_match_rendered_markers_and_ordered_worker_payloads() {
+        let preprocessor = custom_preprocessor(CUSTOM_TEMPLATE);
+        for role in ["user", "tool"] {
+            let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            let first =
+                serde_json::json!({"data_base64":"SECRET_ONE", "metadata":[null, false, 0]});
+            let second = serde_json::json!({"data_base64":"SECRET_TWO", "other":{"preserve":true}});
+            let biology = serde_json::json!({"metadata":"SECRET_BIO"});
+            let mut message = serde_json::json!({"role":role, "content":[
+                {"type":"text", "text":"Does this structure "},
+                {"type":"custom", "kind":"chemistry", "fields":first},
+                {"type":"text", "text":" match the diagram?"},
+                {"type":"image_url", "image_url":{"url":image}},
+                {"type":"custom", "kind":"biology", "fields":biology},
+                {"type":"custom", "kind":"chemistry", "fields":second},
+                {"type":"audio_url", "audio_url":{"url":"https://example.org/audio.wav"}},
+                {"type":"video_url", "video_url":{"url":"https://example.org/video.mp4"}}
+            ]});
+            let metadata_key = if role == "user" {
+                "name"
+            } else {
+                "tool_call_id"
+            };
+            let metadata = if role == "user" { "alice" } else { "call_7" };
+            message[metadata_key] = metadata.into();
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":[message], "add_generation_prompt":false
+                }))
+                .unwrap();
+            let expected = format!(
+                "<|{role}|>[{metadata}]Does this structure <|chem_projected|> match the diagram?<|image_1|><|bio_projected|><|chem_projected|><|audio|><|video|><|end|>"
+            );
+            assert_eq!(
+                preprocessor
+                    .apply_template(&request)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+            let (result, _, _) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            let media = result.multi_modal_data.unwrap();
+            let chemistry: Vec<_> = media["chemistry"]
+                .iter()
+                .map(|part| match part {
+                    MultimodalData::Json(value) => value.clone(),
+                    other => panic!("expected custom JSON, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(chemistry, [first, second]);
+            assert!(
+                matches!(&media["biology"][0], MultimodalData::Json(value) if value == &biology)
+            );
+            assert!(
+                matches!(&media["image_url"][0], MultimodalData::Url(url) if url.as_str() == image)
+            );
+            assert_eq!(
+                expected.matches("<|chem_projected|>").count(),
+                chemistry.len()
+            );
+            let extra = result.extra_args.unwrap();
+            assert_eq!(extra["formatted_prompt"], expected);
+            assert_eq!(extra["messages"][0][metadata_key], metadata);
+            let parts = extra["messages"][0]["content"].as_array().unwrap();
+            assert_eq!(parts.len(), 8);
+            assert_eq!(
+                parts[1],
+                serde_json::json!({"type":"custom", "kind":"chemistry"})
+            );
+            assert_eq!(
+                parts[4],
+                serde_json::json!({"type":"custom", "kind":"biology"})
+            );
+            assert_eq!(parts[5], parts[1]);
+            for secret in ["SECRET_ONE", "SECRET_TWO", "SECRET_BIO", "data_base64"] {
+                assert!(!extra.to_string().contains(secret));
+                assert!(!expected.contains(secret));
+            }
+            // Preprocessing must not mutate the original payload-bearing HTTP input.
+            let original = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                original["messages"][0]["content"][1]["fields"],
+                chemistry[0]
+            );
+            assert_eq!(
+                original["messages"][0]["content"][5]["fields"],
+                chemistry[1]
+            );
+        }
+    }
+
+    #[test]
+    fn custom_content_preserves_custom_tool_history_during_rendering() {
+        let template = concat!(
+            "{% for message in messages %}",
+            "{% for call in message.tool_calls or [] %}",
+            "{{ call.function.name }}={{ call.function.arguments.input }};{% endfor %}",
+            "{% if message.content is not string %}{% for part in message.content or [] %}",
+            "{% if part.type == 'custom' %}{% if part.fields is defined %}",
+            "{{ raise_exception('custom payload reached template') }}{% endif %}",
+            "<{{ part.kind }}>{% endif %}{% endfor %}{% endif %}{% endfor %}",
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "messages":[
+                {"role":"assistant", "tool_calls":[{
+                    "id":"call_1", "type":"custom",
+                    "custom":{"name":"patch", "input":"change x"}
+                }]},
+                {"role":"user", "content":[{
+                    "type":"custom", "kind":"chemistry",
+                    "fields":{"data_base64":"SECRET"}
+                }]}
+            ],
+            "tools":[{"type":"custom", "custom":{"name":"patch"}}],
+            "add_generation_prompt":false
+        }))
+        .unwrap();
+        for normalize_tool_call_args in [false, true] {
+            let mut preprocessor = custom_preprocessor(template);
+            preprocessor.normalize_tool_call_args = normalize_tool_call_args;
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), "patch=change x;<chemistry>");
+        }
+    }
+
+    #[test]
+    fn custom_kinds_reserve_builtin_wire_names() {
+        for kind in ["text", "image_url", "video_url", "audio_url", "input_audio"] {
+            assert!(validate_custom_kind(kind).is_err());
+        }
+        // Engine names are distinct from the wire tags and retain the existing
+        // downstream collision checks when mixed with built-in media.
+        assert!(validate_custom_kind("image").is_ok());
+        assert!(validate_custom_kind("chemistry").is_ok());
     }
 }

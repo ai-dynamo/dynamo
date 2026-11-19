@@ -6,19 +6,27 @@ SPDX-License-Identifier: Apache-2.0
 # Dynamo Offline Replay Adapters
 
 The deterministic event loop, Generalized Mocker Engine driver, logical-worker
-lifecycle, and report collector live in `aisimulate_core::replay`. This directory
+lifecycle, and report collector live in `aisim_core::replay`. This directory
 contains only Dynamo-owned compatibility entrypoints and Router/Planner
 composition:
 
 - `entrypoints.rs` converts canonical `MockerConfig` and workload inputs into
-  a canonical `ReplaySpec`, then calls `aisimulate_core::replay::Replayer`.
+  a canonical `ReplaySpec`, then calls `aisim_core::replay::Replayer`.
 - `extensions/kv_router` adapts Dynamo's existing `PlacementPolicy`-based
   Router implementation to the Replay composition boundary.
 - `extensions/kv_events` converts neutral engine KV observations into the
   event batch consumed by the Dynamo Router policy.
 
-See the [`aisimulate-core` crate](https://crates.io/crates/aisimulate-core) for the
+See the [`aisim-core` crate](https://crates.io/crates/aisim-core) for the
 virtual-time runtime and its liveness contract.
+
+## Worker-selection policies
+
+Each worker pool runs the worker-selection policy the router config selects for its role,
+resolved from `ReplayScope::router_plugins` (the policies Dynamo ships when unset). The policy
+is built by its registered factory, so the replay seed does not reach it and a policy that
+reads the clock reads wall time. Conversation affinity pins a session's worker under every
+policy. `request_classifier` plugins are not supported.
 
 ## Reproducibility
 
