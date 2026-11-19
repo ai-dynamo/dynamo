@@ -1,235 +1,130 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Build On Demand
+name: Temporary rerun-ci live check
 
 on:
   workflow_dispatch:
     inputs:
-      build_vllm:
-        description: 'Build and push vllm image, tagged with branch name'
-        type: boolean
-        default: false
-      build_sglang:
-        description: 'Build and push sglang image, tagged with branch name'
-        type: boolean
-        default: false
-      build_trtllm:
-        description: 'Build and push trtllm image, tagged with branch name'
-        type: boolean
-        default: false
-      build_triton:
-        description: 'Build and push triton image, tagged with branch name'
-        type: boolean
-        default: false
-      build_operator:
-        description: 'Build and push operator image, tagged with branch name'
-        type: boolean
-        default: false
+      pr_number:
+        description: Temporary fixture PR number
+        required: true
+        type: string
+      comment_id:
+        description: First real command comment
+        required: true
+        type: string
+      duplicate_comment_id:
+        description: Second real command comment
+        required: true
+        type: string
 
-env:
-  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+permissions:
+  contents: read
+  actions: write
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: rerun-ci-${{ inputs.pr_number }}
+  cancel-in-progress: false
 
 jobs:
-
-  init:
-    runs-on: ubuntu-slim
-    outputs:
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-      sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
+  live-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-      - name: Sanitize ref name for container tags
-        id: sanitize-ref
-        shell: bash
-        run: |
-          sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
-          echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
-
-  # ============================================================================
-  # FRAMEWORK PIPELINES (build-only)
-  # ============================================================================
-
-  vllm-build:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_vllm
-    uses: $/.github/workflows/shared-build-image.yml
-    with:
-      framework: vllm
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  sglang-build:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_sglang
-    uses: $/.github/workflows/shared-build-image.yml
-    with:
-      framework: sglang
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  trtllm-build:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_trtllm
-    uses: $/.github/workflows/shared-build-image.yml
-    with:
-      framework: trtllm
-      target: runtime
-      cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  triton-build:
-    name: triton-runtime # This name overlaps with other triton jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_triton
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: triton
-      target: runtime
-      cuda_version: '[""]'
-      platform: 'linux/amd64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  vllm-copy-to-acr:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: $/.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      copy_timeout_minutes: 20
-    secrets: inherit
-
-  sglang-copy-to-acr:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
-    uses: $/.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      copy_timeout_minutes: 20
-    secrets: inherit
-
-  trtllm-copy-to-acr:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
-    uses: $/.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      copy_timeout_minutes: 20
-    secrets: inherit
-
-  # Triton images are published to AWS ECR only (no Azure ACR mirror), so there
-  # is no triton-copy-to-acr job.
-
-  # ============================================================================
-  # OPERATOR (build-only)
-  # ============================================================================
-
-  operator:
-    needs: [init]
-    if: inputs.build_operator
-    name: Operator
-    runs-on: dynamo-cpu-4gi-amd64
-    env:
-      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-      ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Initialize Dynamo Builder
-        uses: $/.github/actions/init-dynamo-builder
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          builder_name: ${{ needs.init.outputs.builder_name }}
-          flavor: general
-          arch: 'linux/amd64,linux/arm64'
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-      - name: Docker Login
-        uses: $/.github/actions/docker-login
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          COMMENT_ID: ${{ inputs.comment_id }}
+          DUPLICATE_COMMENT_ID: ${{ inputs.duplicate_comment_id }}
         with:
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build and push Container
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${ACR_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
-            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
-          )
-
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-          # deploy/operator/Dockerfile's licenses stage does `COPY --from=compliance`,
-          # which resolves as an image unless the named build context is supplied.
-          # Without this the build fails pulling docker.io/library/compliance.
-          # .github/actions/build-deploy-component passes the same flag.
-          docker buildx build --push \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/ \
-              --build-context compliance=../../container/compliance \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-          echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
-
-  # ============================================================================
-  # CLEANUP
-  # ============================================================================
-
-  clean-k8s-builder:
-    name: Clean K8s builder if exists
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, triton-build, operator]
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Create K8s builders (skip bootstrap)
-      uses: $/.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: ${{ needs.init.outputs.builder_name }}
-        buildkit_worker_addresses: ''
-        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ needs.init.outputs.builder_name }} || true
+          script: |
+            const assert = require('node:assert/strict');
+            const crypto = require('node:crypto');
+            const fs = require('node:fs');
+            const expectedBranch = 'codex/ops-9297-live-check';
+            assert.equal(context.ref, `refs/heads/${expectedBranch}`);
+            const handlerBytes = fs.readFileSync('.github/scripts/rerun-ci.js');
+            assert.equal(crypto.createHash('sha256').update(handlerBytes).digest('hex'), 'bf19231db1673b4e54f84b363cf1e4822e3b76dd450b26370e9293ebe22a5ef6');
+            const repo = context.repo;
+            const number = Number(process.env.PR_NUMBER);
+            const commentIds = [Number(process.env.COMMENT_ID), Number(process.env.DUPLICATE_COMMENT_ID)];
+            assert.ok(Number.isSafeInteger(number) && number > 0);
+            assert.ok(commentIds.every(value => Number.isSafeInteger(value) && value > 0));
+            const { data: pull } = await github.rest.pulls.get({ ...repo, pull_number: number });
+            assert.equal(pull.state, 'open');
+            assert.equal(pull.head.ref, expectedBranch);
+            assert.equal(pull.head.sha, context.sha);
+            const { data: issue } = await github.rest.issues.get({ ...repo, issue_number: number });
+            const comments = [];
+            for (const comment_id of commentIds) {
+              const { data: comment } = await github.rest.issues.getComment({ ...repo, comment_id });
+              assert.equal(comment.issue_url, `https://api.github.com/repos/${repo.owner}/${repo.repo}/issues/${number}`);
+              assert.equal(comment.body.trim(), '/rerun ci');
+              comments.push(comment);
+            }
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              ...repo, head_sha: pull.head.sha, per_page: 100,
+            });
+            const expected = [
+              { path: '.github/workflows/pr.yaml', branch: `pull-request/${number}`, event: 'push', failed: true },
+              { path: '.github/workflows/pr-xpu.yaml', branch: `pull-request/${number}`, event: 'push', failed: false },
+              { path: '.github/workflows/pre-merge.yml', branch: expectedBranch, event: 'pull_request', failed: true },
+            ];
+            const before = [];
+            for (const specification of expected) {
+              const run = runs.filter(run => run.path === specification.path && run.head_branch === specification.branch && run.event === specification.event)
+                .sort((a, b) => b.id - a.id)[0];
+              assert.ok(run, `Missing ${specification.path}`);
+              assert.equal(run.status, 'completed');
+              assert.equal(run.run_attempt, 1);
+              assert.equal(run.conclusion, specification.failed ? 'failure' : 'success');
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...repo, run_id: run.id, filter: 'all', per_page: 100 });
+              const independent = jobs.find(job => job.name === 'independent');
+              assert.equal(independent.conclusion, 'success');
+              if (specification.failed) {
+                assert.equal(jobs.find(job => job.name === 'flaky').conclusion, 'failure');
+                assert.equal(jobs.find(job => job.name === 'dependent').conclusion, 'skipped');
+              }
+              before.push({ ...specification, run, jobs });
+            }
+            const rerun = require('./.github/scripts/rerun-ci.js');
+            const replay = comment => ({ repo, eventName: 'issue_comment', payload: { action: 'created', issue, comment } });
+            await rerun({ github, context: replay(comments[0]), core });
+            await rerun({ github, context: replay(comments[0]), core });
+            await rerun({ github, context: replay(comments[1]), core });
+            const deadline = Date.now() + 6 * 60 * 1000;
+            let after;
+            while (Date.now() < deadline) {
+              after = [];
+              for (const item of before) {
+                const { data: run } = await github.rest.actions.getWorkflowRun({ ...repo, run_id: item.run.id });
+                after.push({ ...item, afterRun: run });
+              }
+              if (after.every(item => item.afterRun.run_attempt === (item.failed ? 2 : 1) && item.afterRun.status === 'completed')) break;
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            const evidence = [];
+            for (const item of after) {
+              assert.equal(item.afterRun.status, 'completed');
+              assert.equal(item.afterRun.run_attempt, item.failed ? 2 : 1);
+              assert.equal(item.afterRun.conclusion, 'success');
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...repo, run_id: item.run.id, filter: 'all', per_page: 100 });
+              const independent = jobs.filter(job => job.name === 'independent');
+              assert.equal(independent.length, 1);
+              assert.equal(independent[0].id, item.jobs.find(job => job.name === 'independent').id);
+              if (item.failed) {
+                assert.equal(jobs.find(job => job.name === 'flaky' && job.run_attempt === 2).conclusion, 'success');
+                assert.equal(jobs.find(job => job.name === 'dependent' && job.run_attempt === 2).conclusion, 'success');
+              }
+              evidence.push({ workflow: item.path, run: item.run.html_url, attemptBefore: 1, attemptAfter: item.afterRun.run_attempt,
+                jobs: jobs.map(job => ({ id: job.id, name: job.name, attempt: job.run_attempt, conclusion: job.conclusion })) });
+            }
+            core.info(JSON.stringify(evidence, null, 2));
+            await core.summary.addHeading('Live retry check passed').addRaw('Unchanged production handler; real comments and GitHub APIs. Only the issue_comment delivery was replayed.').addCodeBlock(JSON.stringify(evidence, null, 2), 'json').write();
