@@ -9,7 +9,7 @@ GPU fractions pays off for one kind of fleet: several **distinct** models that e
 
 ![Four questions in order. Keeps a whole GPU busy: dedicated GPUs. Copies or LoRA adapters of one model: one engine per base model. Needs hard isolation: MIG. Needs per-model caps while running concurrently: MPS v3 GPU fractions. Otherwise: time-slicing or HAMi.](../../../assets/img/gpu-sharing-decision.svg)
 
-</Step>
+<Steps toc={true}>
 <Step title="Check that the models are distinct" id="check-that-the-models-are-distinct">
 
 ![Two replicas of model X on one GPU: avoid. One engine holding one copy of model X and batching both requests: use this for replicas. Two distinct models, A and B, on one GPU: a good fit for MPS.](../../../assets/img/gpu-sharing-replicas-vs-distinct.svg)
