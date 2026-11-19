@@ -24,9 +24,10 @@ rules:
   - ""
   resources:
   - nodes
-  - pods/log
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -36,6 +37,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ""
@@ -51,12 +53,28 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -146,6 +164,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - disaggregatedset.x-k8s.io
+  resources:
+  - disaggregatedsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - discovery.k8s.io
   resources:
   - endpointslices
@@ -196,6 +226,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - grove.io
+  resources:
+  - podcliquesets/finalizers
+  verbs:
+  - update
 - apiGroups:
   - inference.networking.k8s.io
   resources:
@@ -254,6 +290,8 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - dynamoworkermetadatas
+  - lpxgraphdeployments
   verbs:
   - create
   - delete
@@ -267,18 +305,25 @@ rules:
   resources:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
+  - dynamographdeploymentruns/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - dynamopoolrelays/finalizers
+  - lpxgraphdeployments/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentcandidates/status
   - dynamographdeploymentrequests/status
+  - dynamographdeploymentruns/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - dynamopoolrelays/status
+  - lpxgraphdeployments/status
   verbs:
   - get
   - patch
@@ -286,8 +331,11 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - podsnapshots
+  - dynamographdeploymentcandidates
+  - dynamographdeploymentruns
+  - snapshotjobs
   verbs:
+  - create
   - delete
   - get
   - list
@@ -296,9 +344,16 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - snapshotjobs
+  - dynamopoolrelays
   verbs:
-  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
   - delete
   - get
   - list
@@ -321,6 +376,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -331,6 +387,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -355,21 +412,19 @@ rules:
   - update
   - watch
 - apiGroups:
+  - scheduling.lpu.nvidia.com
+  resources:
+  - lpupipelinerequests
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - scheduling.run.ai
   resources:
   - queues
   verbs:
   - get
   - list
-- apiGroups:
-  - scheduling.volcano.sh
-  resources:
-  - podgroups
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch

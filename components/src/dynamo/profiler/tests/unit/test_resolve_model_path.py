@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for resolve_model_path() and the rapid.py / thorough.py call
-sites that feed its result into aiconfigurator."""
+sites that feed its result into aisimulate."""
 
 import asyncio
 import copy
@@ -261,7 +261,7 @@ class TestResolveModelPath:
 
 
 class TestRapidResolvesModelPath:
-    """rapid.py call sites pass resolve_model_path()'s result to aiconfigurator."""
+    """rapid.py call sites pass resolve_model_path()'s result to aisimulate."""
 
     @staticmethod
     def _execute_return(chosen="disagg"):

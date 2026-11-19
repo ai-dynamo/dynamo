@@ -10,14 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.backend.logprobs import (
-    DYN_SGL_ALLOW_TOP_LOGPROBS_ENV,
     build_sglang_logprob_kwargs,
     extract_from_completion_output,
     extract_from_sglang_meta,
     extract_prompt_logprobs_from_completion_output,
     extract_prompt_logprobs_from_sglang_meta,
     parse_logprob_options,
-    sglang_top_logprobs_allowed,
 )
 
 pytestmark = [
@@ -308,21 +306,37 @@ def test_prompt_logprobs_sglang_preserves_engine_bos_none():
     ]
 
 
-def test_prompt_logprobs_sglang_merges_input_top_logprobs():
+@pytest.mark.parametrize(
+    "count,actual_token,expected_tokens",
+    [
+        (None, 7, {"7", "70", "71"}),
+        (0, 70, {"70"}),
+        (1, 7, {"7"}),
+        (1, 70, {"7", "70"}),
+        (3, 99, {"7", "70", "71", "99"}),
+    ],
+)
+def test_prompt_logprobs_sglang_merges_input_top_logprobs(
+    count, actual_token, expected_tokens
+):
     meta = {
         "input_token_logprobs": [
             (None, 6, None),
-            (-0.5, 7, "a"),
+            (-0.7, actual_token, "actual"),
         ],
         "input_top_logprobs": [
             None,
-            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+            [(-0.5, 7, "a"), (-1.5, 70, "A"), (-2.5, 71, "b")],
         ],
     }
-    payload = extract_prompt_logprobs_from_sglang_meta(meta)
-    assert payload[1] == {
-        "7": {"logprob": -0.5, "decoded_token": "a"},
-        "70": {"logprob": -1.5, "decoded_token": "A"},
+    payload = extract_prompt_logprobs_from_sglang_meta(
+        meta, prompt_logprobs_count=count
+    )
+    assert payload[0] is None
+    assert set(payload[1]) == expected_tokens
+    assert payload[1][str(actual_token)] == {
+        "logprob": -0.7,
+        "decoded_token": "actual",
     }
 
 
@@ -343,29 +357,30 @@ def test_prompt_logprobs_sglang_handles_missing_decoded_token():
 
 
 def test_sglang_kwargs_empty_when_no_options():
-    assert build_sglang_logprob_kwargs({}, allow_top_logprobs=True) == {}
+    assert build_sglang_logprob_kwargs({}) == {}
 
 
-def test_sglang_kwargs_logprobs_zero_allowed_without_gate():
-    # The default gate forbids logprobs >= 1; logprobs=0 always works.
-    kwargs = build_sglang_logprob_kwargs({"logprobs": 0}, allow_top_logprobs=False)
+def test_sglang_kwargs_logprobs_zero():
+    kwargs = build_sglang_logprob_kwargs({"logprobs": 0})
     assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
 
 
-def test_sglang_kwargs_top_logprobs_rejected_without_gate():
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        build_sglang_logprob_kwargs({"logprobs": 2}, allow_top_logprobs=False)
-
-
-def test_sglang_kwargs_top_logprobs_allowed_with_gate():
-    kwargs = build_sglang_logprob_kwargs({"logprobs": 2}, allow_top_logprobs=True)
+def test_sglang_kwargs_top_logprobs_allowed_by_default():
+    kwargs = build_sglang_logprob_kwargs({"logprobs": 2})
     assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
 
 
+def test_sglang_kwargs_top_prompt_logprobs_allowed_by_default():
+    kwargs = build_sglang_logprob_kwargs({"prompt_logprobs": 2})
+    assert kwargs == {
+        "return_logprob": True,
+        "top_logprobs_num": 2,
+        "logprob_start_len": 0,
+    }
+
+
 def test_sglang_kwargs_prompt_logprobs_sets_start_len_zero():
-    kwargs = build_sglang_logprob_kwargs(
-        {"prompt_logprobs": 0}, allow_top_logprobs=False
-    )
+    kwargs = build_sglang_logprob_kwargs({"prompt_logprobs": 0})
     assert kwargs == {
         "return_logprob": True,
         "top_logprobs_num": 0,
@@ -374,20 +389,9 @@ def test_sglang_kwargs_prompt_logprobs_sets_start_len_zero():
 
 
 def test_sglang_kwargs_both_set_picks_max():
-    kwargs = build_sglang_logprob_kwargs(
-        {"logprobs": 3, "prompt_logprobs": 5}, allow_top_logprobs=True
-    )
+    kwargs = build_sglang_logprob_kwargs({"logprobs": 3, "prompt_logprobs": 5})
     assert kwargs["top_logprobs_num"] == 5
     assert kwargs["logprob_start_len"] == 0
-
-
-def test_sglang_gate_reads_env(monkeypatch):
-    monkeypatch.setenv(DYN_SGL_ALLOW_TOP_LOGPROBS_ENV, "1")
-    assert sglang_top_logprobs_allowed() is True
-    monkeypatch.setenv(DYN_SGL_ALLOW_TOP_LOGPROBS_ENV, "0")
-    assert sglang_top_logprobs_allowed() is False
-    monkeypatch.delenv(DYN_SGL_ALLOW_TOP_LOGPROBS_ENV, raising=False)
-    assert sglang_top_logprobs_allowed() is False
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +431,37 @@ def test_sglang_extract_with_top():
             {"rank": 1, "token_id": 101, "token": "a", "logprob": -0.1},
             {"rank": 2, "token_id": 102, "token": "b", "logprob": -0.2},
         ]
+    ]
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, None])
+def test_sglang_extract_limits_completion_alternatives(count):
+    candidates = [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")]
+    meta = {
+        "output_token_logprobs": [(-0.4, 104, "d"), (-0.5, 105, "e")],
+        "output_top_logprobs": [None, candidates],
+    }
+
+    log_probs, top_logprobs = extract_from_sglang_meta(
+        meta, top_logprobs_num=count, return_tokens_as_token_ids=True
+    )
+
+    assert log_probs == [-0.4, -0.5]
+    assert top_logprobs == [
+        [],
+        [
+            {
+                "rank": rank,
+                "token_id": token_id,
+                "token": f"token_id:{token_id}",
+                "logprob": lp,
+            }
+            for rank, (lp, token_id, _) in enumerate(candidates[:count], start=1)
+        ],
+    ]
+    assert meta["output_top_logprobs"] == [
+        None,
+        [(-0.1, 101, "a"), (-0.2, 102, "b"), (-0.3, 103, "c")],
     ]
 
 
@@ -513,16 +548,13 @@ def test_sglang_extract_handler_matches_shared():
 
 
 @pytest.mark.sglang
-def test_sglang_kwargs_handler_matches_shared(monkeypatch):
+def test_sglang_kwargs_handler_matches_shared():
     pytest.importorskip("sglang", reason="SGLang not installed", exc_type=ImportError)
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
-    # Gate off — both must reject logprobs >= 1 identically.
-    monkeypatch.delenv(DYN_SGL_ALLOW_TOP_LOGPROBS_ENV, raising=False)
-    request = {"output_options": {"logprobs": 0, "prompt_logprobs": 0}}
+    request = {"output_options": {"logprobs": 2, "prompt_logprobs": 2}}
 
     wrapper_kwargs = DecodeWorkerHandler._build_logprob_kwargs(request)
-    direct_kwargs = build_sglang_logprob_kwargs(
-        request["output_options"], allow_top_logprobs=False
-    )
+    direct_kwargs = build_sglang_logprob_kwargs(request["output_options"])
     assert wrapper_kwargs == direct_kwargs
+    assert wrapper_kwargs["top_logprobs_num"] == 2

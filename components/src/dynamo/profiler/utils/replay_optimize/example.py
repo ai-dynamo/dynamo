@@ -69,9 +69,11 @@ def _build_workload(
 
 def _engine_args(worker_type: str) -> dict[str, object]:
     return {
-        "block_size": 512,
-        "enable_prefix_caching": True,
-        "worker_type": worker_type,
+        "engine": {
+            "block_size": 512,
+            "enable_prefix_caching": True,
+            "worker_type": worker_type,
+        },
     }
 
 

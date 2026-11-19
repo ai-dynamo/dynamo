@@ -24,6 +24,7 @@ from tests.utils.port_utils import allocate_port, deallocate_ports
 # Customized utils for migration tests
 from .utils import (
     DynamoFrontendProcess,
+    expected_ongoing_migrations,
     managed_processes_concurrently,
     run_migration_test,
     wait_for_endpoint_instances,
@@ -304,10 +305,11 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(["--disaggregation-mode", "decode"])
 
         if is_prefill is not None:
+            nixl_role = "kv_producer" if is_prefill else "kv_consumer"
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    json.dumps({"kv_connector": "NixlConnector", "kv_role": nixl_role}),
                 ]
             )
 
@@ -443,7 +445,9 @@ def test_request_migration_vllm_aggregated(
                 use_chat_completion=(request_api == "chat"),
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
             )
 
 
@@ -532,7 +536,9 @@ def test_request_migration_vllm_kv_transfer(
                 max_tokens=KV_TRANSFER_MAX_TOKENS,
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
             )
 
 
@@ -617,5 +623,7 @@ def test_request_migration_vllm_decode(
                 stream=True,
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
             )

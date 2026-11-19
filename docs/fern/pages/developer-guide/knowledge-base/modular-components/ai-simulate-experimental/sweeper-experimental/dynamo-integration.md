@@ -14,28 +14,35 @@ sweep configuration providers and `DynamoReplayRunnerFactory`.
 
 ## Install
 
-AISimulate requires Python 3.11 through 3.13. The `ai-dynamo` package remains installable on Python
-3.10, but the AISimulate dependency and CLI are not installed there.
+AISimulate requires Python 3.11 through 3.13.
 
-The supported prebuilt environment is the `dynamo-planner` image. The image stages and installs the
-published `aisimulate==0.12.0` wheel alongside the Dynamo wheels. Dynamo's Rust workspace
-resolves `aisimulate-core==0.12.0` from crates.io.
+For a prebuilt environment, use a released `dynamo-planner` image with its bundled Dynamo and
+AISimulate artifacts. The AISimulate Python wheel and Rust crate must come from the same source
+revision.
 
-For Dynamo source development, install the published AISimulate wheel and build the matching
-Dynamo bindings:
+For source development, start at the Dynamo checkout root in an activated Python environment with
+the [source-build prerequisites](../../../../advanced-customizations/building-from-source.md).
+Install the AISimulate dependency declared by that checkout and rebuild Dynamo's bindings:
 
 ```bash
 python3 -m pip install pip "maturin[patchelf]"
+python3 -m pip install -r container/deps/requirements.aisimulate.txt
 cd lib/bindings/python
-maturin develop --uv --release --features aic-forward-pass
+maturin develop --uv --release --features ais-forward-pass
 cd ../../..
 python3 -m pip install --no-deps -e .
-python3 -m pip install "aisimulate==0.12.0"
 python3 -m pip install -r container/deps/requirements.planner.txt
+python3 tests/frontend/router_ais_image_smoke.py
 ```
 
-On supported Python versions, `ai-dynamo` declares the exact AISimulate release as a base
-dependency. No `ai-dynamo[simulation]` extra is required.
+The final command verifies that the installed Python wheel and embedded Rust estimator work
+together. A Git-pinned dependency builds AISimulate from source and requires its Rust build
+toolchain. Such development pins do not imply that a matching release wheel or crate is published;
+container builds require the published pair and matching release pins.
+
+On supported Python versions, `ai-dynamo` declares AISimulate as a base dependency. Keep that pin,
+`container/deps/requirements.aisimulate.txt`, and the `aisim-core` Cargo pins aligned when
+upgrading. No `ai-dynamo[simulation]` extra is required.
 
 ## Run the Unified CLI
 
@@ -54,10 +61,10 @@ The `ai-dynamo` distribution registers:
 
 | Entry-point group | Name | Purpose |
 |---|---|---|
-| `aisimulate.runner_factories` | `dynamo` | Execute a complete replay through Dynamo composition |
-| `aisimulate.config_adapters` | `dynamo.router` | Validate and materialize the public `router` section |
-| `aisimulate.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
-| `aisimulate.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
+| `aisim.runner_factories` | `dynamo` | Execute a complete replay through Dynamo composition |
+| `aisim.config_adapters` | `dynamo.router` | Validate and materialize the public `router` section |
+| `aisim.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
+| `aisim.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
 
 ## Use the Python SDK
 
@@ -65,7 +72,7 @@ Call the retained Sweeper Python API only when an application needs the legacy `
 contract and explicit runner injection:
 
 ```python
-from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from aisim.sweeper import SmartSearchConfig, Sweeper
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 
 config = SmartSearchConfig.from_yaml("smart_sweep.yaml")

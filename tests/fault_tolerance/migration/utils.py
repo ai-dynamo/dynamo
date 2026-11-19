@@ -250,7 +250,7 @@ def wait_for_endpoint_instances(
     while time.monotonic() < deadline:
         try:
             response = requests.get(
-                f"http://localhost:{frontend_port}/health",
+                f"http://localhost:{frontend_port}/health?instances=true",
                 timeout=1,
             )
             response.raise_for_status()
@@ -298,7 +298,7 @@ def wait_for_endpoint_instance_reduction(
     while time.monotonic() < deadline:
         try:
             response = requests.get(
-                f"http://localhost:{frontend_port}/health",
+                f"http://localhost:{frontend_port}/health?instances=true",
                 timeout=1,
             )
             response.raise_for_status()
@@ -439,6 +439,17 @@ def _parse_migration_max_seq_len_exceeded_metric(
     pattern = rf'dynamo_frontend_model_migration_max_seq_len_exceeded_total\{{[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
     match = re.search(pattern, metrics_text)
     return int(match.group(1)) if match else 0
+
+
+def expected_ongoing_migrations(
+    migration_limit: int, migration_max_seq_len: int | None
+) -> int:
+    """Permitted retries expected after one mid-stream worker fault.
+
+    The frontend counts a migration when a permitted retry begins.
+    A disabled limit or an exceeded seq-len cap (the cases use a cap of 1) gives 0.
+    """
+    return 1 if migration_limit > 0 and migration_max_seq_len != 1 else 0
 
 
 def verify_migration_metrics(
@@ -696,14 +707,13 @@ def run_migration_test(
 
     # Step 6: Verify that migration behaved as expected via the frontend's
     # Prometheus metrics (a stable structured surface) instead of asserting on
-    # log strings. `ongoing_request` counts an error from an established
-    # stream, including an attempt that cannot retry because migration_limit is
-    # zero. It is the structured equivalent of the old "Stream disconnected,
-    # recreating stream" log assertion. `max_seq_len_exceeded` records hitting
-    # the migration seq-len cap.
+    # log strings. `ongoing_request` counts permitted retries after a
+    # stream error; `max_seq_len_exceeded` counts hits on the migration seq-len cap.
     exact_metric_counts = expected_ongoing_request_count is not None
     if expected_ongoing_request_count is None:
-        expected_ongoing_request_count = 1 if migration_limit > 0 else 0
+        expected_ongoing_request_count = expected_ongoing_migrations(
+            migration_limit, migration_max_seq_len
+        )
 
     verify_migration_metrics(
         frontend.frontend_port,

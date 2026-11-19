@@ -6,9 +6,46 @@
 import argparse
 import os
 import re
+import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Deprecated:
+    """Opt-in CLI/env deprecation; declare the replacement and removal release once."""
+
+    replacement: str
+    remove_in: str
+
+    def message(self, name: str) -> str:
+        return (
+            f"{name} is deprecated and will be removed in {self.remove_in}; "
+            f"use {self.replacement}."
+        )
+
+    def warn(self, name: str) -> None:
+        warnings.warn(self.message(name), FutureWarning, stacklevel=3)
+
+
+@dataclass
+class ArgEnv:
+    """The env of another process, for registering that process's arguments.
+
+    Argument groups read their env defaults from ``os.environ`` and warn
+    about deprecated or removed settings. A process that parses another
+    process's configuration (the planner reads its frontend's from the
+    DynamoGraphDeployment spec) passes an ``ArgEnv`` instead: env defaults
+    come from ``environ`` only, deprecation and removal notices are skipped
+    because they belong to the process that runs with that env, and
+    ``env_dests`` records the env var -> dest of every argument registered.
+    """
+
+    environ: Mapping[str, str]
+    env_dests: dict[str, str] = field(default_factory=dict)
 
 
 def parse_bool(value: str) -> bool:
@@ -45,6 +82,8 @@ def env_or_default(
     env_var: str,
     default: T,
     value_type: Optional[Union[type, Callable[..., Any]]] = None,
+    *,
+    env: Optional[ArgEnv] = None,
 ) -> T:
     """
     Get value from environment variable or return default.
@@ -57,11 +96,12 @@ def env_or_default(
         value_type: If provided, use this type to convert the env value. If None, the type
         is taken from type(default). Use value_type when default is None but you still
         want the env value coerced (e.g. env_or_default("DYN_FOO", None, value_type=int)).
+        env: Read ``env.environ`` instead of ``os.environ``.
 
     Returns:
         Environment variable value (type-converted) or default
     """
-    value = os.environ.get(env_var)
+    value = (os.environ if env is None else env.environ).get(env_var)
     if value is None:
         return default
 
@@ -109,6 +149,8 @@ def add_argument(
     obsolete_flag: Optional[str] = None,
     arg_type: Optional[Union[type, Callable[..., Any]]] = str,
     env_value_type: Optional[Union[type, Callable[..., Any]]] = None,
+    deprecated: Optional[Deprecated] = None,
+    env: Optional[ArgEnv] = None,
     **kwargs: Any,
 ) -> None:
     """
@@ -126,6 +168,8 @@ def add_argument(
         choices: Optional list of valid values for the argument.
         arg_type: Type for the argument (default: str)
         env_value_type: Optional parser used only for the environment value
+        deprecated: Warn on explicit CLI/env use and show the migration in help.
+        env: Another process's env (see ``ArgEnv``); skips ``deprecated``.
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     value_type_for_env = env_value_type
@@ -133,7 +177,12 @@ def add_argument(
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
-    default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)
+    default_with_env = env_or_default(
+        env_var, default, value_type=value_type_for_env, env=env
+    )
+    if env is not None:
+        env.env_dests[env_var] = arg_dest
+        deprecated = None
 
     names = [flag_name]
 
@@ -141,7 +190,11 @@ def add_argument(
         # Accept obsolete flag as an alias (still show deprecation note in help)
         names.append(obsolete_flag)
 
-    env_help = _build_help_message(help, env_var, default, obsolete_flag)
+    env_help = (
+        argparse.SUPPRESS
+        if help == argparse.SUPPRESS
+        else _build_help_message(help, env_var, default, obsolete_flag)
+    )
 
     add_arg_opts = {
         "dest": arg_dest,
@@ -151,6 +204,25 @@ def add_argument(
     if arg_type is not None:
         add_arg_opts["type"] = arg_type
     kwargs.update(add_arg_opts)
+
+    if deprecated is not None:
+        if env_var in os.environ:
+            deprecated.warn(env_var)
+        if help != argparse.SUPPRESS:
+            kwargs["help"] = deprecated.message(flag_name) + " " + env_help
+        # Resolve registered actions as argparse does, preserving boolean negative
+        # forms, aliases, append/count actions, and custom action behavior.
+        action = kwargs.get("action", "store")
+        action_type = parser._registry_get("action", action, action)
+        warn = deprecated.warn
+
+        def warn_and_call(self, parser, namespace, values, option_string=None):
+            warn(option_string or self.dest)
+            action_type.__call__(self, parser, namespace, values, option_string)
+
+        kwargs["action"] = type(
+            "DeprecatedAction", (action_type,), {"__call__": warn_and_call}
+        )
 
     parser.add_argument(*names, **kwargs)
 
@@ -165,6 +237,8 @@ def add_negatable_bool_argument(
     dest: Optional[str] = None,
     obsolete_flag: Optional[str] = None,
     env_value_type: Optional[Callable[..., bool]] = None,
+    deprecated: Optional[Deprecated] = None,
+    env: Optional[ArgEnv] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -178,6 +252,7 @@ def add_negatable_bool_argument(
         dest: Optional destination name for the parsed value
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
         env_value_type: Optional strict parser for the environment value
+        env: Another process's env (see ``ArgEnv``)
     """
     add_argument(
         parser,
@@ -190,6 +265,8 @@ def add_negatable_bool_argument(
         arg_type=None,
         env_value_type=env_value_type,
         action=argparse.BooleanOptionalAction,
+        deprecated=deprecated,
+        env=env,
     )
 
 

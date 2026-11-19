@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+containers:
+- command:
+  - /ate/ko-app/ate-env-guest
+  - -workspace
+  - /
+  env:
+  - name: PORT
+    value: '80'
+  image: registry.example.com/harbor-substrate/astropy-pi@sha256:REPLACE
+  name: guest
+  volumeMounts:
+  - mountPath: /ate
+    name: guest
+  wakeupProbe:
+    httpGet:
+      path: /readyz
+      port: 80
+  securityContext:
+    capabilities:
+      add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+metadata:
+  name: swe-astropy-12907-pi
+  atespace: ate-env
+resources:
+  limits:
+    cpuMillicores: '1000'
+    memoryBytes: '4294967296'
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  goldenSnapshotConfig:
+    mode: GOLDEN_SNAPSHOT_MODE_DISABLED
+volumes:
+- image:
+    reference: registry.example.com/harbor-substrate/env-guest@sha256:REPLACE
+  name: guest
+workerSelector:
+  matchLabels:
+    demo.harbor.dev/sandbox: gvisor
+    demo.harbor.dev/arch: amd64

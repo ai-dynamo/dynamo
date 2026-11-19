@@ -26,7 +26,6 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -45,13 +44,11 @@ func TestDGDEPPReconciler_deleteOwnedLegacyEPPConfigMap(t *testing.T) {
 		ctx := context.Background()
 		scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 		dgd := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "my-model", Namespace: "default", UID: uuid.NewUUID()},
+			Name: "my-model", Namespace: "default", UID: uuid.NewUUID(),
 		}
 		owned := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      epp.GetConfigMapName(dgd.Name),
-				Namespace: dgd.Namespace,
-			},
+			Name:      epp.GetConfigMapName(dgd.Name),
+			Namespace: dgd.Namespace,
 		}
 		g.Expect(controllerutil.SetControllerReference(dgd, owned, scheme)).To(gomega.Succeed())
 
@@ -69,18 +66,16 @@ func TestDGDEPPReconciler_deleteOwnedLegacyEPPConfigMap(t *testing.T) {
 		ctx := context.Background()
 		scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 		dgd := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "my-model", Namespace: "default", UID: uuid.NewUUID()},
+			Name: "my-model", Namespace: "default", UID: uuid.NewUUID(),
 		}
 		// A user's own ConfigMap -- referenced via eppConfig.configMapRef
 		// while this DGD was still on legacy Go EPP -- that happens to be
 		// named exactly what the operator would have generated
 		// (<dgd>-epp-config). It carries no owner reference to this DGD.
 		foreign := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      epp.GetConfigMapName(dgd.Name),
-				Namespace: dgd.Namespace,
-			},
-			Data: map[string]string{"do-not-delete-me": "user data"},
+			Name:      epp.GetConfigMapName(dgd.Name),
+			Namespace: dgd.Namespace,
+			Data:      map[string]string{"do-not-delete-me": "user data"},
 		}
 
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, foreign).Build()
@@ -99,7 +94,7 @@ func TestDGDEPPReconciler_deleteOwnedLegacyEPPConfigMap(t *testing.T) {
 		ctx := context.Background()
 		scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 		dgd := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "my-model", Namespace: "default", UID: uuid.NewUUID()},
+			Name: "my-model", Namespace: "default", UID: uuid.NewUUID(),
 		}
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd).Build()
 		reconciler := newDGDEPPReconciler(newDGDResourceSyncer(fakeClient, nil), nil, nil, nil)

@@ -69,4 +69,4 @@ spec:
             - --disaggregation-mode
             - prefill
             - --kv-transfer-config
-            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'

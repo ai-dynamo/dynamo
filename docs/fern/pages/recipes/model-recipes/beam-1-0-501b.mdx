@@ -1,0 +1,457 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Beam-1.0-501B-A23B
+subtitle: Serve Beam-1.0-501B-A23B with NVIDIA Dynamo on H200, B200, B300, GB200, or GB300.
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Deploy Beam-1.0-501B-A23B with NVIDIA Dynamo on H200, B200, B300, GB200, or GB300.
+Choose your framework, GPU, and serving topology; the summary and commands
+update to match. SGLang and vLLM provide aggregated and disaggregated serving
+on all five GPU types, with KV-aware routing and NIXL prefill/decode transfer.
+All profiles enable DFlash2 with block length 8 and FP8 KV cache.
+H200 uses FP8 weights; B200, B300, GB200, and GB300 use NVFP4 weights.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Framework</span>
+<input type="radio" id="recipe-framework-sglang" name="recipe-framework" value="sglang" defaultChecked />
+<label htmlFor="recipe-framework-sglang">SGLang</label>
+<input type="radio" id="recipe-framework-vllm" name="recipe-framework" value="vllm" />
+<label htmlFor="recipe-framework-vllm">vLLM</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" defaultChecked />
+<label htmlFor="recipe-sku-h200">H200</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200">B200</label>
+<input type="radio" id="recipe-sku-b300" name="recipe-sku" value="b300" />
+<label htmlFor="recipe-sku-b300">B300</label>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" />
+<label htmlFor="recipe-sku-gb300">GB300</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
+<span><b>Precision</b> FP8 + FP8 KV</span>
+<span><b>GPUs</b> 8x H200, one worker</span>
+<span><b>Parallelism</b> 1 × TP8</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
+<span><b>Precision</b> FP8 + FP8 KV</span>
+<span><b>GPUs</b> 16x H200, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP8 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B200, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B200, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b300" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B300, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b300" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B300, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB200, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB200, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB300, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB300, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
+<span><b>Precision</b> FP8 + FP8 KV</span>
+<span><b>GPUs</b> 8x H200, one worker</span>
+<span><b>Parallelism</b> 1 × TP8</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8">reflection/Beam-1.0-501B-A23B-FP8</a></span>
+<span><b>Precision</b> FP8 + FP8 KV</span>
+<span><b>GPUs</b> 16x H200, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP8 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B200, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B200, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B300, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x B300, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB200, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB200, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="agg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB300, two workers</span>
+<span><b>Parallelism</b> 2 × TP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg">
+<span><b>Checkpoint</b> <a href="https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4">reflection/Beam-1.0-501B-A23B-NVFP4</a></span>
+<span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>GPUs</b> 8x GB300, one prefill + one decode</span>
+<span><b>Parallelism</b> 1P1D, TP4 per role</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+</div>
+
+## Prerequisites
+
+- Install the [Dynamo Kubernetes Platform](../../kubernetes/getting-started/quickstart.mdx)
+  with the `nvidia.com/v1beta1` CRD and the GPUs shown above.
+- The manifests use Dynamo 1.6.0 and NVIDIA's Beam runtime images:
+  `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-beam-1.0-501b-dev.1` or
+  `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-beam-1.0-501b-dev.1`.
+- Prepare the `shared-model-cache` PVC and Hugging Face checkpoints using the
+  [model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam-1.0-501b/README.md#2-stage-the-model-and-drafter).
+  Configure storage, registry access, and GPU placement for your cluster.
+
+Stage the [FP8 checkpoint](https://huggingface.co/reflection/Beam-1.0-501B-A23B-FP8)
+for H200 or the [NVFP4 checkpoint](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4)
+for B200, B300, GB200, and GB300, plus the
+[DFlash2 drafter](https://huggingface.co/reflection/Beam-1.0-501B-A23B-DFlash2) for every target.
+
+<div data-variant="disagg">
+
+Provide RDMA device access and a working NIXL/UCX path between the prefill and
+decode workers. Set the device-plugin resources and `UCX_NET_DEVICES` for your
+cluster, and allow the runtime's transport ports between workers. SGLang uses
+bootstrap port `8998`; vLLM uses NIXL side-channel port `5600` at each worker's
+pod IP. Both roles must use the same checkpoint, KV-cache format, and DFlash2 settings.
+
+</div>
+
+## Deploy
+
+From the repository root, set the profile for your selected target:
+
+<div data-recipe-framework="sglang" data-sku="h200" data-variant="agg">
+
+```bash
+export PROFILE=sglang/agg-h200
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="h200" data-variant="disagg">
+
+```bash
+export PROFILE=sglang/disagg-h200
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="b200" data-variant="agg">
+
+```bash
+export PROFILE=sglang/agg-b200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="b200" data-variant="disagg">
+
+```bash
+export PROFILE=sglang/disagg-b200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="b300" data-variant="agg">
+
+```bash
+export PROFILE=sglang/agg-b300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="b300" data-variant="disagg">
+
+```bash
+export PROFILE=sglang/disagg-b300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
+
+```bash
+export PROFILE=sglang/agg-gb200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+
+```bash
+export PROFILE=sglang/disagg-gb200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+
+```bash
+export PROFILE=sglang/agg-gb300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb300" data-variant="disagg">
+
+```bash
+export PROFILE=sglang/disagg-gb300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+
+```bash
+export PROFILE=vllm/agg-h200
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+
+```bash
+export PROFILE=vllm/disagg-h200
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+
+```bash
+export PROFILE=vllm/agg-b200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+
+```bash
+export PROFILE=vllm/disagg-b200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b300" data-variant="agg">
+
+```bash
+export PROFILE=vllm/agg-b300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
+
+```bash
+export PROFILE=vllm/disagg-b300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+
+```bash
+export PROFILE=vllm/agg-gb200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+
+```bash
+export PROFILE=vllm/disagg-gb200-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb300" data-variant="agg">
+
+```bash
+export PROFILE=vllm/agg-gb300-nvfp4
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg">
+
+```bash
+export PROFILE=vllm/disagg-gb300-nvfp4
+```
+
+</div>
+
+Before deploying, follow the
+[model-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/beam-1.0-501b/README.md#2-stage-the-model-and-drafter)
+for your selected `PROFILE`. Use the namespace containing that staged model cache.
+Use your cluster overlay for GPU and CPU-architecture placement when nodes differ.
+On a cluster with matching hardware, apply the portable manifest below:
+
+```bash
+export NAMESPACE=beam
+PROFILE_TARGET=${PROFILE#*/}
+PROFILE_TARGET=${PROFILE_TARGET%-nvfp4}
+export DEPLOYMENT="beam-${PROFILE%%/*}-${PROFILE_TARGET#*-}-${PROFILE_TARGET%%-*}"
+kubectl apply -n "$NAMESPACE" -f "recipes/beam-1.0-501b/$PROFILE/deploy.yaml"
+kubectl wait -n "$NAMESPACE" --for=condition=Ready "dgd/$DEPLOYMENT" --timeout=7200s
+kubectl port-forward -n "$NAMESPACE" "svc/$DEPLOYMENT-frontend" 8000:8000
+```
+
+## Smoke Test
+
+In another terminal, send a streaming request through the Dynamo frontend:
+
+```bash
+curl --fail-with-body -N http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Beam-1.0-501B-A23B","messages":[{"role":"user","content":"What is 2 + 2?"}],"max_tokens":256,"temperature":0,"stream":true}'
+```
+
+## Configurations
+
+SGLang and vLLM share these defaults and deployment layouts. Blackwell includes
+B200, B300, GB200, and GB300; P/D means prefill/decode.
+
+| Shared setting | Default |
+| --- | --- |
+| Context | Up to 1,048,576 tokens |
+| KV cache dtype | `fp8_e4m3` |
+| KV page / block size | 64 tokens |
+| DFlash2 | Enabled, block length 8 |
+| Routing | KV-aware |
+
+| Setting | H200 aggregated | H200 disaggregated | Blackwell aggregated | Blackwell disaggregated |
+| --- | --- | --- | --- | --- |
+| Weight precision | FP8 | FP8 | NVFP4 | NVFP4 |
+| TP per worker | 8 | 8 | 4 | 4 |
+| Worker replicas | 1 | 1 P + 1 D | 2 | 1 P + 1 D |
+| Total GPUs | 8 | 16 | 8 | 8 |
+| KV transfer | — | NIXL | — | NIXL |
+
+The selected `deploy.yaml` contains the attention and MoE backends, batching,
+cache, and memory settings. Measured performance results are not included.
+
+## Related Feature Benchmarks
+
+Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx)
+for KV-routing, disaggregation, and speculative-decoding studies.
+
+## Source
+
+[Beam-1.0-501B-A23B recipe and manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/beam-1.0-501b)

@@ -111,6 +111,7 @@ async def test_superseding_adapter_target_releases_old_latch_after_propagation()
     deployment, pods = _deployment(), _pods()
     connector = _connector(deployment, pods)
     await connector.set_component_replicas(_decode_target(1), blocking=False)
+    connector.kube_api._test_scale_targets["d"] = 3
     connector.kube_api.get_service_replica_target = Mock(return_value=3)
 
     # The new DGDSA target has not reached the DGD. Even an unrelated observed

@@ -61,6 +61,38 @@ pub trait TokenizerFactory: Clone + Send + Sync + 'static {
     fn create_worker(&self) -> Result<Self::Worker>;
 }
 
+/// A worker created on its first encode, so an export whose turns all carry usage loads no
+/// tokenizer.
+pub struct LazyTokenizer<F: TokenizerFactory> {
+    factory: F,
+    worker: Option<F::Worker>,
+}
+
+impl<F: TokenizerFactory> LazyTokenizer<F> {
+    pub fn new(factory: F) -> Self {
+        Self {
+            factory,
+            worker: None,
+        }
+    }
+}
+
+impl<F: TokenizerFactory> TokenizerWorker for LazyTokenizer<F> {
+    fn encode(&mut self, text: &str) -> Result<Vec<u32>> {
+        if self.worker.is_none() {
+            let worker = self
+                .factory
+                .create_worker()
+                .context("failed to initialize tokenizer")?;
+            self.worker = Some(worker);
+        }
+        self.worker
+            .as_mut()
+            .expect("tokenizer worker was created")
+            .encode(text)
+    }
+}
+
 impl TokenizerFactory for HfTokenizerFactory {
     type Worker = HfTokenizerWorker;
 

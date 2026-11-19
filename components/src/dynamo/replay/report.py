@@ -30,9 +30,15 @@ class PlannerReplayDetails:
     lifecycle_operations: list[dict[str, Any]] = field(default_factory=list)
     total_ticks: int = 0
     html_report_path: str | None = None
+    # One record per planner retune decision (``RetuneDecision.to_dict()``);
+    # ``None`` when the planner has no retune configured.
+    retune_events: list[dict[str, Any]] | None = None
+    # Advisory planners only: scaling the planner recommended but did not
+    # apply (``scaling_events`` stays empty); ``None`` when not advisory.
+    recommended_scaling_events: list[Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "metadata": _to_primitive(self.metadata),
             "ticks": _to_primitive(self.ticks),
             "scaling_events": _to_primitive(self.scaling_events),
@@ -40,6 +46,15 @@ class PlannerReplayDetails:
             "total_ticks": self.total_ticks,
             "html_report_path": self.html_report_path,
         }
+        # Replays without retune keep their top-level keys. Their captured
+        # ticks gain only ``runtime_decision.router_parameters``.
+        if self.retune_events is not None:
+            payload["retune_events"] = _to_primitive(self.retune_events)
+        if self.recommended_scaling_events is not None:
+            payload["recommended_scaling_events"] = _to_primitive(
+                self.recommended_scaling_events
+            )
+        return payload
 
 
 @dataclass

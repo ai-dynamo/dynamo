@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.global_planner.capacity_manager import PoolSpec
+from dynamo.global_planner.gpu_cost import GpuCostConfig, GpuCostResolver
 from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.errors import GPUShapeUnavailableError
@@ -39,6 +40,23 @@ def _component(name, replicas, gpu=1, ctype=None, node_count=None):
     return component
 
 
+def _with_operator_gpu_status(components):
+    statuses = {}
+    for component in components:
+        main = component["podTemplate"]["spec"]["containers"][0]
+        gpu = main.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
+        status = {}
+        if gpu is not None:
+            total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
+            status = {"gpusPerEngine": total_gpu, "gpusPerReplica": total_gpu}
+        statuses[component["name"]] = status
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": components},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
+
+
 def _dgd_spec(
     prefill_replicas,
     decode_replicas,
@@ -47,27 +65,23 @@ def _dgd_spec(
     prefill_node_count=None,
 ):
     """A v1beta1 DGD spec with typed prefill and decode components."""
-    return {
-        "spec": {
-            "components": [
-                _component(
-                    "prefill-svc",
-                    prefill_replicas,
-                    gpu=prefill_gpu,
-                    ctype="prefill",
-                    node_count=prefill_node_count,
-                ),
-                _component(
-                    "decode-svc", decode_replicas, gpu=decode_gpu, ctype="decode"
-                ),
-            ]
-        }
-    }
+    return _with_operator_gpu_status(
+        [
+            _component(
+                "prefill-svc",
+                prefill_replicas,
+                gpu=prefill_gpu,
+                ctype="prefill",
+                node_count=prefill_node_count,
+            ),
+            _component("decode-svc", decode_replicas, gpu=decode_gpu, ctype="decode"),
+        ]
+    )
 
 
 def _worker_dgd_spec(replicas, gpu=1, name="worker-svc", ctype="worker"):
     """A v1beta1 DGD spec with a single generic worker component."""
-    return {"spec": {"components": [_component(name, replicas, gpu=gpu, ctype=ctype)]}}
+    return _with_operator_gpu_status([_component(name, replicas, gpu=gpu, ctype=ctype)])
 
 
 def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
@@ -296,6 +310,50 @@ def test_observe_generic_worker_keyed_by_name_then_role_hint():
     pools = cm.observe()["default/w"]
     assert "worker-svc" not in pools
     assert pools["decode"].component_name == "worker-svc"
+
+
+def test_generic_worker_cost_uses_component_identity_before_and_after_role_hint():
+    cm = KubernetesCapacityManager(
+        "default",
+        gpu_cost=GpuCostResolver(
+            GpuCostConfig(
+                pools=[
+                    {"selector": "default/w/worker-svc", "gpu_per_replica": 4},
+                    {"selector": "default/w/other-svc", "gpu_per_replica": 2},
+                    {"selector": "default/w/decode", "gpu_per_replica": 9},
+                ]
+            )
+        ),
+    )
+    deployment = _with_operator_gpu_status(
+        [
+            _component("worker-svc", 2, gpu=None, ctype="worker"),
+            _component("other-svc", 1, gpu=None, ctype="worker"),
+        ]
+    )
+    deployment["status"]["components"] = {
+        "worker-svc": {"gpusPerEngine": 0, "gpusPerReplica": 0},
+        "other-svc": {"gpusPerEngine": 0, "gpusPerReplica": 0},
+    }
+    _install_connector(cm, "default/w", deployment)
+
+    pools = cm.observe(require_complete=True)["default/w"]
+    assert pools["worker-svc"].gpu_per_replica == 4
+    assert pools["other-svc"].gpu_per_replica == 2
+
+    cm.remember_roles(
+        "default/w",
+        [
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name="worker-svc",
+                desired_replicas=2,
+            )
+        ],
+    )
+    pools = cm.observe(require_complete=True)["default/w"]
+    assert pools["decode"].gpu_per_replica == 4
+    assert pools["other-svc"].gpu_per_replica == 2
 
 
 def test_observe_untyped_worker_with_gpu_counts_toward_budget():

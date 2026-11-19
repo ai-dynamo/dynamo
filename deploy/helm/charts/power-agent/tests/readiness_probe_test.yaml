@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Readiness probe wiring (DEP #14767). The probe values are hard-coded in the
+# template on purpose (rationale: templates/daemonset.yaml); these assertions
+# keep them from drifting into values.yaml.
+
+suite: readiness probe wiring
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  - it: DaemonSet exposes the readyz container port
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.3.0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: readyz
+            containerPort: 8081
+            protocol: TCP
+
+  - it: DaemonSet renders the readiness probe against /readyz
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.3.0
+    asserts:
+      # The probe targets the PORT NAME, not the literal 8081, so the port
+      # declaration above is the single place the number appears.
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.initialDelaySeconds
+          value: 15
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 10
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.failureThreshold
+          value: 3
+
+  - it: DaemonSet passes the pod IP so the agent listens on the probed family
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.3.0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+
+  - it: DaemonSet declares no liveness probe
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.3.0
+    asserts:
+      # Deliberate: a non-enforcing agent must keep reconciling, since it can
+      # recover, while a restart drops in-memory GPU ownership.
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe
+
+  - it: metrics port is unchanged alongside the new readyz port
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.3.0
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9100
+            protocol: TCP

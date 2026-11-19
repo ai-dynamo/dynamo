@@ -168,8 +168,35 @@ server token counts, seed 42, and `ignore_eos:true`. Benchmark artifacts are wri
 `shared-model-cache` PVC.
 
 See the [benchmark asset guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md)
-for the source files. Performance and release-review evidence are maintained outside the recipe
-source tree.
+for the source files.
+
+## Expected Performance
+
+Each profile was benchmarked at the reference concurrency listed in the [Profiles](#profiles)
+table above, on the agentic Moontrace replay. `User output tok/s` is Gen TPS/user p50 from AIPerf;
+`System output tok/s/GPU` is aggregate output TPS divided by GPU count. SLA: P50 TTFT under 5 s and
+P50 output at or above 50 tok/s/user. All twelve profiles below meet it.
+
+| GPU | Context | Topology | MTP | Concurrency | User output tok/s | System output tok/s/GPU | TTFT p50 (ms) |
+|---|---:|---|---|---:|---:|---:|---:|
+| B200 | 256K | Aggregated (2W) | 5-token | 94 | 50.89 | 637.41 | 526 |
+| B200 | 1M | Aggregated (2W) | none | 46 | 52.00 | 255.95 | 180 |
+| GB200 | 256K | Aggregated (2W) | 5-token | 96 | 51.15 | 665.95 | 612 |
+| GB200 | 1M | Aggregated (2W) | none | 48 | 51.21 | 269.55 | 274 |
+| H200 | 256K | Aggregated (2W) | 5-token | 64 | 51.94 | 203.58 | 565 |
+| H200 | 1M | Aggregated (2W) | none | 32 | 53.02 | 81.50 | 215 |
+| B200 | 256K | Disaggregated (1P2D) | none | 144 | 52.08 | 510.82 | 3681 |
+| B200 | 1M | Disaggregated (1P1D) | none | 38 | 53.57 | 223.49 | 1294 |
+| GB200 | 256K | Disaggregated (1P2D) | none | 140 | 55.47 | 534.82 | 3343 |
+| GB200 | 1M | Disaggregated (1P1D) | none | 48 | 50.55 | 270.93 | 1696 |
+| H200 | 256K | Disaggregated (1P2D) | none | 72 | 56.30 | 136.96 | 4576 |
+| H200 | 1M | Disaggregated (1P1D) | none | 30 | 60.71 | 88.13 | 4309 |
+
+At 256K, disaggregated profiles trail aggregated on both metrics: system output tok/s/GPU is 20%
+lower on B200 and GB200 and 33% lower on H200, and TTFT p50 is 5–8× higher. The aggregated 256K
+profiles also run 5-token MTP, which the disaggregated profiles do not. At 1M, disaggregated system
+output tok/s/GPU is 13% behind aggregated on B200, level on GB200, and 8% ahead on H200, while TTFT
+p50 is 6–20× higher on every SKU.
 
 ## Known limitations
 

@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: units-gpt-oss
+  namespace: test
+spec:
+  components:
+  - name: lpu
+    type: lpx
+    replicas: 1
+    lpx:
+      buildId: units-gpt-oss
+      experimental:
+        localPartitions:
+          mode: IDs
+          ids: [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    roles:
+    - name: conductor
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            image: example.invalid/dynamo-sidecar:test
+            restartPolicy: Always
+            args: [lpx, --model-path, $(LPX_MODEL_PATH)/tokenizer]
+            volumeMounts:
+            - name: model-storage
+              mountPath: /nfs
+          resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: decode-gpu
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            image: example.invalid/cyborg:test
+            volumeMounts:
+            - name: model-storage
+              mountPath: /nfs
+            env:
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            resources:
+              claims:
+              - name: gpu
+    - name: agent
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            image: example.invalid/hydra:test
+            volumeMounts:
+            - name: model-storage
+              mountPath: /nfs
+            env:
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            resources:
+              limits:
+                lpu.nvidia.com/devices: '1'

@@ -16,8 +16,10 @@ use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-pub(crate) use dynamo_sidecar_common::v14::status_to_dynamo;
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument};
+pub(crate) use dynamo_sidecar_common::v14::{status_to_dynamo, stream_status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::{
+    engine_shutdown, invalid_argument, startup_deadline, stream_incomplete,
+};
 
 use crate::proto as pb;
 
@@ -30,9 +32,8 @@ pub(crate) struct VllmClient {
 }
 
 impl VllmClient {
-    /// `bootstrap`: see `GrpcChannelPool::connect`. True from the
-    /// `bootstrap_discover` call site (before the tracing subscriber is
-    /// installed), false from `LLMEngine::start` (after it).
+    /// `bootstrap`: see `GrpcChannelPool::connect`. True for pre-logging
+    /// synchronous constructors; false for deferred discovery and engine start.
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
@@ -54,6 +55,10 @@ impl VllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn health_channel(&self) -> Channel {
+        self.pool.next_channel()
     }
 
     pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
@@ -176,7 +181,7 @@ impl VllmClient {
             .generate_stream(request)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("GenerateStream", status))
+            .map_err(|status| stream_status_to_dynamo("GenerateStream", status))
     }
 
     pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
@@ -189,6 +194,27 @@ impl VllmClient {
             .map(tonic::Response::into_inner)
             .map(|response| response.sources)
             .map_err(|status| status_to_dynamo("GetKvEventSources", status))
+    }
+
+    /// Abort by caller request ID. vLLM's GenerateStream producer does not
+    /// watch for a closed client stream, so dropping the stream alone leaves a
+    /// queued request in the engine until a slot frees up.
+    pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        let mut client = self.control_client();
+        tokio::time::timeout(
+            ABORT_RPC_DEADLINE,
+            client.abort(pb::AbortRequest {
+                request_ids: vec![request_id],
+            }),
+        )
+        .await
+        .map_err(|_| {
+            dynamo_sidecar_common::connection_timeout(format!(
+                "Abort did not respond within {ABORT_RPC_DEADLINE:?}"
+            ))
+        })?
+        .map(|_| ())
+        .map_err(|status| status_to_dynamo("Abort", status))
     }
 
     pub(crate) async fn load_lora(
@@ -227,20 +253,42 @@ impl VllmClient {
     }
 }
 
-pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
-    Instant::now().checked_add(duration).ok_or_else(|| {
-        invalid_argument(format!(
-            "gRPC startup deadline {duration:?} exceeds the supported monotonic clock range"
-        ))
-    })
-}
-
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("vLLM", message)
 }
 
+/// Follows vLLM's overall gRPC health (`""`) until vLLM stops serving, and
+/// returns why. vLLM changes it only on engine failure or shutdown, never while
+/// paused or asleep.
+pub(crate) async fn watch_health(channel: Channel, open_timeout: Duration) -> String {
+    let request = HealthCheckRequest {
+        service: String::new(),
+    };
+    let mut stream =
+        match tokio::time::timeout(open_timeout, HealthClient::new(channel).watch(request)).await {
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(status)) => return format!("health watch failed: {status}"),
+            Err(_) => return format!("health watch did not open in {open_timeout:?}"),
+        };
+    loop {
+        match stream.message().await {
+            Ok(Some(response)) => {
+                let status =
+                    ServingStatus::try_from(response.status).unwrap_or(ServingStatus::Unknown);
+                if status != ServingStatus::Serving {
+                    return format!("health reported {}", status.as_str_name());
+                }
+            }
+            Ok(None) => return "health stream ended".to_string(),
+            Err(status) => return format!("health stream failed: {status}"),
+        }
+    }
+}
+
 // Bound how long a stalled RPC can hold the lifecycle lock.
 pub(crate) const LORA_RPC_DEADLINE: Duration = Duration::from_secs(60);
+
+const ABORT_RPC_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoraRpcError {

@@ -4,5 +4,9 @@ source: kustomize/base
 nameTemplate: "${variant}"
 matrix:
   variant:
-    - name: generic
-      components: []
+    # InfiniBand fabric attachment is pre-injected; do not add your own on top.
+    # Review kustomize/components/ib before applying -- the RDMA resource name
+    # and UCX_TLS value are cluster-specific.
+    - name: ib
+      components:
+        - kustomize/components/ib

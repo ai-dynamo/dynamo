@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import os
 
-from dynamo._internal.aic import DEFAULT_BACKEND_VERSIONS
+from dynamo._internal.ais import DEFAULT_BACKEND_VERSIONS
 
-AIC_BACKEND_VERSIONS = {
+AIS_BACKEND_VERSIONS = {
     backend: DEFAULT_BACKEND_VERSIONS[backend] for backend in ("vllm", "sglang")
 }
 

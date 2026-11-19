@@ -20,30 +20,24 @@ package v1alpha1
 import (
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 func TestDCD_DivergedLegacyCarrierDoesNotOverrideSparseSpokeSave(t *testing.T) {
 	savedNamespace := "saved"
 	data, err := marshalDCDSpokeSpec(&DynamoComponentDeploymentSpec{
-		DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-			DynamoNamespace: &savedNamespace,
-		},
+		DynamoNamespace: &savedNamespace,
 	}, false)
 	if err != nil {
 		t.Fatalf("marshal DCD spoke spec: %v", err)
 	}
 
 	hub := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcd",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				annDCDSpec:                        string(data),
-				"nvidia.com/dcd-dynamo-namespace": "stale",
-			},
+		Name:      "dcd",
+		Namespace: "ns",
+		Annotations: map[string]string{
+			annDCDSpec:                        string(data),
+			"nvidia.com/dcd-dynamo-namespace": "stale",
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
