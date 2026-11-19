@@ -237,6 +237,10 @@ class PreprocessError(Exception):
 # multimodal data dict sent to the backend handler.
 _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 
+# Inline ``input_audio`` formats mapped to the MIME subtype of the ``audio_url``
+# data URL they become. Matches the Rust preprocessor (``mp3`` -> ``mpeg``).
+_INPUT_AUDIO_MIME_SUBTYPES = {"wav": "wav", "mp3": "mpeg"}
+
 
 def extract_mm_urls(
     messages: list[dict[str, Any]],
@@ -252,6 +256,10 @@ def extract_mm_urls(
 
     The UUID map is ``None`` when no user UUID is present. A media content part
     with neither a URL nor UUID is rejected instead of being silently dropped.
+
+    A user ``input_audio`` part becomes an ``audio_url`` entry whose URL is
+    ``data:audio/{wav|mpeg};base64,<data>`` with a ``None`` UUID slot, matching
+    the Rust preprocessor. Tool messages have no ``input_audio`` part type.
     """
     mm_data: dict[str, list[dict[str, str]]] = {}
     mm_uuids: dict[str, list[str | None]] = {}
@@ -267,6 +275,28 @@ def extract_mm_urls(
             if not isinstance(part, dict):
                 continue
             part_type = part.get("type")
+            if part_type == "input_audio" and msg.get("role") == "user":
+                input_audio = part.get("input_audio")
+                if not isinstance(input_audio, dict):
+                    input_audio = {}
+                data = input_audio.get("data")
+                audio_format = input_audio.get("format")
+                subtype = (
+                    _INPUT_AUDIO_MIME_SUBTYPES.get(audio_format)
+                    if isinstance(audio_format, str)
+                    else None
+                )
+                if not isinstance(data, str) or not data or subtype is None:
+                    raise ValueError(
+                        "input_audio part must contain non-empty data and "
+                        "format 'wav' or 'mp3'"
+                    )
+                mm_data.setdefault("audio_url", []).append(
+                    {"Url": f"data:audio/{subtype};base64,{data}"}
+                )
+                # Rust has no UUID for input_audio; any `uuid` key is ignored.
+                mm_uuids.setdefault("audio_url", []).append(None)
+                continue
             if part_type not in _MEDIA_CONTENT_TYPES:
                 continue
 
