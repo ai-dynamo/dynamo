@@ -378,6 +378,8 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     reader.close()
 
 
+# Well under a second on a GPU; the bound is for a stalled lock or socket.
+@pytest.mark.timeout(60)
 def test_bulk_import_and_remap_map_each_allocation_at_its_own_address(
     running_gms, monkeypatch
 ):
