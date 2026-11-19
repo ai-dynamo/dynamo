@@ -1380,6 +1380,22 @@ kubectl get dgdr my-model -n $NAMESPACE \
 - The relationship is tracked via labels: `dgdr.nvidia.com/name` and `dgdr.nvidia.com/namespace`.
 - Additional resources (planner ConfigMaps) are created in the same namespace and labeled with `dgdr.nvidia.com/name`.
 
+## Rerun a v1beta2 request
+
+Set `spec.rerun.reason` when the search inputs remain unchanged but you need a fresh Run. Changing
+the reason advances the Request generation. The Request controller cancels the active immutable Run,
+retains it in history, and creates a replacement Run containing the same search input and the new
+reason.
+
+```bash
+kubectl patch dgdr qwen3-search --type merge \
+  --patch '{"spec":{"rerun":{"reason":"repeat after catalog refresh"}}}'
+```
+
+Change the reason again to request another Run. Reapplying the same reason does not change the spec
+or create a generation. This control always creates a replacement Run; it does not retry execution
+within the same Run.
+
 ## Replay a recorded trace (v1beta2)
 
 <Warning>

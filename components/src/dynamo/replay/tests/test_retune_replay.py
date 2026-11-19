@@ -815,6 +815,7 @@ _IGNORED = {  # no effect on a candidate's engine or score
     "trace_shared_prefix_ratio",  # other trace formats only
     "trace_num_prefix_groups",
     "weka_nested_timestamp_basis",
+    "agentic_warmup_policy",  # only with agentic_warmup, which retune rejects
 }
 # The outer replay resolves these into the pinned engine fields.
 _RESOLVED_BY_OUTER_REPLAY = {
