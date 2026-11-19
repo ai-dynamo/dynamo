@@ -1457,6 +1457,8 @@ pub struct ResponseParams {
     pub preserve_tool_spelling: bool,
     /// Retain raw backend reasoning for the Kimi/GLM Responses contract.
     pub emit_backend_reasoning: bool,
+    /// Opt in to writing the legacy base64 replay payload.
+    pub legacy_reasoning_replay: bool,
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -1525,23 +1527,28 @@ impl ResponseParams {
             .is_some_and(|include| include.contains(&IncludeEnum::ReasoningEncryptedContent))
     }
 
+    fn reasoning_replay_enabled(&self) -> bool {
+        self.legacy_reasoning_replay && self.reasoning_encrypted_content_requested()
+    }
+
+    fn reasoning_summary_requested(&self) -> bool {
+        self.reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.summary)
+            .is_some()
+    }
+
     fn reasoning_plaintext_enabled(&self) -> bool {
-        !self.reasoning_encrypted_content_requested()
-            || self
-                .reasoning
-                .as_ref()
-                .and_then(|reasoning| reasoning.summary)
-                .is_some()
+        !self.reasoning_encrypted_content_requested() || self.reasoning_summary_requested()
     }
 
     fn reasoning_output_enabled(&self) -> bool {
-        self.emit_backend_reasoning
-            || self.reasoning_encrypted_content_requested()
-            || self
-                .reasoning
-                .as_ref()
-                .and_then(|reasoning| reasoning.summary)
-                .is_some()
+        self.reasoning_summary_requested()
+            || if self.reasoning_encrypted_content_requested() {
+                self.legacy_reasoning_replay
+            } else {
+                self.emit_backend_reasoning
+            }
     }
 
     /// Borrow the retained history-aware map, or rebuild from current tool definitions
@@ -1703,7 +1710,7 @@ pub fn chat_completion_to_response(
             && params.reasoning_output_enabled()
         {
             let encrypted_content = params
-                .reasoning_encrypted_content_requested()
+                .reasoning_replay_enabled()
                 .then(|| reasoning_replay::encode(&reasoning_text));
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
@@ -1865,7 +1872,7 @@ pub fn chat_completion_to_response(
                         );
                         if params.reasoning_output_enabled() && !reasoning.is_empty() {
                             let encrypted_content = params
-                                .reasoning_encrypted_content_requested()
+                                .reasoning_replay_enabled()
                                 .then(|| reasoning_replay::encode(&reasoning));
                             output.push(OutputItem::Reasoning(ReasoningItem {
                                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
@@ -4951,13 +4958,13 @@ mod tests {
     }
 
     #[test]
-    fn kimi_replay_restores_dropped_namespace_unless_model_used_a_bare_name() {
+    fn kimi_replay_preserves_historical_tool_identity() {
         let marked = template_tools::encode_kimi_bare_call_id("call_1");
         for (id, name, expected) in [
-            ("call_1", "exec", "functions.exec"),
+            ("call_1", "exec", "exec"),
             (marked.as_str(), "exec", "exec"),
             ("call_1_bare", "functions.exec", "functions.exec"),
-            ("call_1_bare", "exec", "functions.exec"),
+            ("call_1_bare", "exec", "exec"),
             ("dynamo_kimi_bare_v1_!", "functions.exec", "functions.exec"),
         ] {
             let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
@@ -4967,7 +4974,7 @@ mod tests {
             }))
             .unwrap();
             let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
-            chat.normalize_kimi_replay().unwrap();
+            chat.normalize_kimi_replay();
             chat.normalize_responses_history_phases(false);
             chat.normalize_responses_tools(true).unwrap();
             let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
@@ -5022,7 +5029,7 @@ mod tests {
             body["input"] = serde_json::json!([item]);
             let replay: NvCreateResponse = serde_json::from_value(body).unwrap();
             let mut chat: NvCreateChatCompletionRequest = replay.try_into().unwrap();
-            chat.normalize_kimi_replay().unwrap();
+            chat.normalize_kimi_replay();
             chat.normalize_responses_tools(true).unwrap();
             let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
                 panic!("missing assistant");
@@ -5040,6 +5047,7 @@ mod tests {
     fn encoded_reasoning_round_trips_without_readable_content() {
         let text = " exact\n工具 ";
         let params = ResponseParams {
+            legacy_reasoning_replay: true,
             include: Some(vec![IncludeEnum::ReasoningEncryptedContent]),
             ..Default::default()
         };

@@ -328,46 +328,15 @@ impl NvCreateChatCompletionRequest {
     }
 
     /// Preserve Kimi call spelling and result binding when agent history is replayed.
-    pub(crate) fn normalize_kimi_replay(&mut self) -> anyhow::Result<()> {
-        self.inner.messages = super::request_compat::kimi_history(&self.inner.messages)?;
+    pub(crate) fn normalize_kimi_replay(&mut self) {
+        self.inner.messages =
+            super::request_compat::kimi_history(std::mem::take(&mut self.inner.messages));
         if let Some(context) = &mut self.responses_tools {
             context.kimi_replay = true;
-            for (call_id, spellings) in &mut context.history_tool_names {
-                if is_kimi_bare_call_id(call_id) {
-                    continue;
-                }
-                for spelling in spellings {
-                    let (namespace, leaf) = context.names.decode(spelling);
-                    if namespace.is_some() {
-                        continue;
-                    }
-                    let mut owners = Vec::new();
-                    let mut bare_declared = false;
-                    for tool in &context.tools {
-                        match &tool.inner {
-                            Tool::Function(tool) if tool.name == leaf => bare_declared = true,
-                            Tool::Custom(tool) if tool.name == leaf => bare_declared = true,
-                            Tool::Namespace(namespace)
-                                if namespace
-                                    .tools
-                                    .iter()
-                                    .any(|member| namespace_member_name(member) == leaf) =>
-                            {
-                                owners.push(namespace.name.as_str());
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !bare_declared && owners.len() == 1 {
-                        *spelling = format!("{}.{}", owners[0], leaf);
-                    }
-                }
-            }
-            if let Some(history) = &mut context.legacy_history {
-                *history = super::request_compat::kimi_history(history)?;
-            }
+            // Responses conversion has already selected the legacy view as the
+            // active history. Keep the normalized view when phases are disabled.
+            context.legacy_history = None;
         }
-        Ok(())
     }
 
     /// Phase replay is a model capability, independent of namespace rendering.

@@ -1694,6 +1694,21 @@ async fn input_tokens_accepts_tool_call_conversation_items() {
             body["input_tokens"].as_u64().unwrap() > 0,
             "tool-call items should contribute to the count, got {body}"
         );
+
+        let extended = json!({
+            "model": "dynamo/deepseek-ai/deepseek-v4-pro-sglang",
+            "instructions": "You are a careful filesystem assistant.",
+            "input": [
+                {"type": "additional_tools", "tools": [tool("list_directory")]},
+                {"role": "user", "content": "List /tmp"},
+                {"type": "function_call", "call_id": "call_1", "name": "list_directory",
+                    "arguments": r#"{"path":"/tmp"}"#},
+                {"type": "custom_tool_call_output", "call_id": "call_1", "output": r#"["a.txt"]"#}
+            ]
+        });
+        let counted = post_input_tokens(&svc, &extended).await;
+        assert_eq!(counted.status(), reqwest::StatusCode::OK);
+        assert_eq!(counted.json::<Value>().await.unwrap(), body);
         svc.shutdown().await;
     })
     .await;

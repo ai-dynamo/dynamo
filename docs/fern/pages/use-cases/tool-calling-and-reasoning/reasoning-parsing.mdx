@@ -114,11 +114,14 @@ Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before 
 
 ## Responses Reasoning Replay
 
-For Responses requests, `include: ["reasoning.encrypted_content"]` without
-`reasoning.summary` returns replay data without plaintext reasoning in `content`
-or `response.reasoning_text.*` events. Setting `reasoning.summary` returns the
-**full reasoning text** in the reasoning item's `content` as `reasoning_text`
-parts. The `summary` array stays empty: Dynamo does not generate a summary.
+Set `DYN_RESPONSES_LEGACY_REASONING_REPLAY=1` on the frontend to enable the
+TensorRT-LLM-compatible replay format below. With this setting,
+`include: ["reasoning.encrypted_content"]` returns replay data.
+Without this setting, Dynamo omits the replay field. Requests that include only
+the replay field receive no reasoning text.
+
+Setting `reasoning.summary` returns the full reasoning text as `reasoning_text`
+parts in the item's `content`. The `summary` array stays empty.
 
 The replay payload is `trtllm-reasoning-v1:` followed by standard base64 of the
 exact UTF-8 reasoning text. For example, `hello` becomes
@@ -132,22 +135,17 @@ reasoning. Store, transmit, and log it with the same protections as plaintext
 reasoning.
 </Warning>
 
-On replay, nonempty readable `content` takes precedence. Otherwise Dynamo
-decodes the recognized prefix, returning HTTP 400 for malformed base64 or
+On replay, nonempty readable `content` takes precedence. Dynamo accepts this
+format even when replay output is disabled. It returns HTTP 400 for malformed base64 or
 invalid UTF-8. If no readable content or recognized payload is available,
 Dynamo falls back to readable `summary` text. Other providers' opaque encodings
 are not decoded or forwarded as reasoning to the backend; do not rely on them
 to preserve conversation reasoning.
 
 Without either `reasoning.summary` or the encrypted-content include, Dynamo
-returns backend reasoning as raw text only for these configured selectors:
-
-- Tool parser: `kimi_k3`, its alias `kimi-k3`, or `glm47`.
-- Reasoning parser: `kimi_k3`, its alias `kimi-k3`, or `glm45`.
-
-Either match enables this behavior. Kimi K2 profiles are excluded. Other profiles
-require an explicit reasoning output request. The returned text is the model's
-full reasoning, rather than a generated summary.
+returns the model's reasoning text for the unified Kimi K3 and GLM 4.7 parser
+families, as well as the split `kimi_k3` and `glm47` tool parsers and the split
+`kimi_k3` and `glm45` reasoning parsers. The `kimi-k3` alias also applies.
 
 ## Deployment-Level Thinking Default
 

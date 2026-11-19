@@ -130,6 +130,9 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
+static LEGACY_REASONING_REPLAY: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_RESPONSES_LEGACY_REASONING_REPLAY));
+
 use dynamo_error::http::{
     BackendStatusAction, ClientErrorAction, HttpError, SanitizedError,
     find_canonical_error_in_chain, http_action_for_error, overload_status_code,
@@ -4940,7 +4943,9 @@ async fn handler_responses_input_tokens(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let request: CountInputTokensRequest = parse_json_request("responses input_tokens", &body)?;
+    let body = normalize_responses_input("responses input_tokens", &body)?;
+    let request: CountInputTokensRequest =
+        serde_json::from_value(body).map_err(json_deserialize_error)?;
     Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
 }
 
@@ -4968,6 +4973,16 @@ fn apply_responses_body_affinity(
     request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent);
 }
 
+fn normalize_responses_input(
+    endpoint: &'static str,
+    body: &[u8],
+) -> Result<serde_json::Value, ErrorResponse> {
+    let UniqueJsonValue(mut body_value) = parse_json_request(endpoint, body)?;
+    crate::protocols::openai::responses::request_compat::normalize_input(&mut body_value)
+        .map_err(|error| responses_conversion_error_response(error.into()))?;
+    Ok(body_value)
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -4977,22 +4992,7 @@ async fn handler_responses(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let UniqueJsonValue(mut body_value) = parse_json_request("responses", &body)?;
-    // Custom tool results share function-result conversion and media policy.
-    if let Some(items) = body_value
-        .get_mut("input")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for item in items {
-            if item.get("type").and_then(serde_json::Value::as_str)
-                == Some("custom_tool_call_output")
-            {
-                item["type"] = serde_json::json!("function_call_output");
-            }
-        }
-    }
-    crate::protocols::openai::responses::request_compat::hoist_additional_tools(&mut body_value)
-        .map_err(|error| responses_conversion_error_response(error.into()))?;
+    let body_value = normalize_responses_input("responses", &body)?;
     let body_affinity =
         crate::protocols::openai::responses::request_compat::body_affinity(&body_value)
             .map(str::to_owned);
@@ -5172,6 +5172,7 @@ async fn responses(
             .map(|tool| tool.inner)
             .collect();
     let mut response_params = ResponseParams {
+        legacy_reasoning_replay: *LEGACY_REASONING_REPLAY,
         preserve_tool_spelling: false,
         emit_backend_reasoning: false,
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
@@ -5267,25 +5268,22 @@ async fn responses(
             err_response
         })?;
 
-    if matches!(
-        parsing_options.tool_call_parser.as_deref(),
-        Some("kimi_k3" | "kimi-k3")
-    ) {
-        chat_request.normalize_kimi_replay().map_err(|error| {
-            let response = responses_conversion_error_response(error);
-            inflight_guard.mark_error(extract_error_type_from_response(&response));
-            response
-        })?;
+    use crate::protocols::openai::chat_completions::unified_parser;
+    let tool_parser = parsing_options.tool_call_parser.as_deref();
+    let reasoning_parser = parsing_options.reasoning_parser.as_deref();
+    let unified_family = unified_parser::selected_family(tool_parser, reasoning_parser);
+    let kimi_replay = unified_family == Some(unified_parser::KIMI_K3_UNIFIED_FAMILY)
+        || matches!(tool_parser, Some("kimi_k3" | "kimi-k3"));
+    if kimi_replay {
+        chat_request.normalize_kimi_replay();
     }
 
     // Match the Kimi/GLM Responses contract without exposing other models' private channels.
-    response_params.emit_backend_reasoning = matches!(
-        parsing_options.tool_call_parser.as_deref(),
-        Some("kimi_k3" | "kimi-k3" | "glm47")
-    ) || matches!(
-        parsing_options.reasoning_parser.as_deref(),
-        Some("kimi_k3" | "kimi-k3" | "glm45")
-    );
+    response_params.emit_backend_reasoning = kimi_replay
+        || unified_family == Some(unified_parser::GLM47_UNIFIED_FAMILY)
+        || matches!(tool_parser, Some("glm47"))
+        || matches!(reasoning_parser, Some("kimi_k3" | "kimi-k3" | "glm45"));
+    response_params.preserve_tool_spelling = kimi_replay;
 
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {
@@ -5303,10 +5301,6 @@ async fn responses(
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
-    response_params.preserve_tool_spelling = matches!(
-        parsing_options.tool_call_parser.as_deref(),
-        Some("kimi_k3" | "kimi-k3")
-    );
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
@@ -7038,7 +7032,7 @@ mod tests {
         for (header, explicit, expected, expected_parent) in [
             (None, false, "body", Some("header")),
             (Some("x-session-id"), false, "header", None),
-            (Some("x-session-id"), true, "body", None),
+            (Some("x-session-id"), true, "body", Some("header")),
             (Some("x-dynamo-session-id"), true, "body", Some("header")),
         ] {
             let mut headers = HeaderMap::new();

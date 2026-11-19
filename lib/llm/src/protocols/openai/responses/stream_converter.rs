@@ -49,6 +49,8 @@ pub struct ResponseStreamConverter {
     model: String,
     params: ResponseParams,
     reasoning_plaintext_enabled: bool,
+    reasoning_output_enabled: bool,
+    reasoning_replay_enabled: bool,
     tool_names: super::ToolNameMap,
     allowed_names: Option<HashSet<String>>,
     /// Preserved Responses API-specific request context for faithful response reconstruction.
@@ -175,6 +177,8 @@ impl ResponseStreamConverter {
             tool_names,
             allowed_names,
             reasoning_plaintext_enabled: params.reasoning_plaintext_enabled(),
+            reasoning_output_enabled: params.reasoning_output_enabled(),
+            reasoning_replay_enabled: params.reasoning_replay_enabled(),
             params,
             api_context: None,
             created_at,
@@ -432,7 +436,7 @@ impl ResponseStreamConverter {
                 state.completed_item(
                     output_status,
                     self.reasoning_plaintext_enabled,
-                    self.params.reasoning_encrypted_content_requested(),
+                    self.reasoning_replay_enabled,
                 ),
             )
         };
@@ -741,7 +745,7 @@ impl ResponseStreamConverter {
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
                 && !self.message_started
-                && self.params.reasoning_output_enabled()
+                && self.reasoning_output_enabled
             {
                 self.append_reasoning_delta(reasoning, events);
             }
@@ -1285,7 +1289,7 @@ impl ResponseStreamConverter {
                 OutputItem::Reasoning(reasoning.completed_item(
                     output_status,
                     self.reasoning_plaintext_enabled,
-                    self.params.reasoning_encrypted_content_requested(),
+                    self.reasoning_replay_enabled,
                 )),
             ));
         }
@@ -1880,8 +1884,22 @@ mod tests {
 
     #[test]
     fn requested_encoded_reasoning_matches_done_and_terminal_snapshot() {
+        let params = ResponseParams {
+            emit_backend_reasoning: true,
+            include: Some(vec![super::super::IncludeEnum::ReasoningEncryptedContent]),
+            ..Default::default()
+        };
+        let mut converter = ResponseStreamConverter::new("m".into(), params);
+        assert!(
+            converter
+                .process_chunk(&reasoning_chunk("private reasoning"))
+                .is_empty()
+        );
+        assert!(converter.completed_output().is_empty());
+
         for failure in [false, true] {
             let params = ResponseParams {
+                legacy_reasoning_replay: true,
                 include: Some(vec![super::super::IncludeEnum::ReasoningEncryptedContent]),
                 ..Default::default()
             };
@@ -1945,6 +1963,7 @@ mod tests {
     #[test]
     fn encrypted_reasoning_with_requested_summary_keeps_visible_reasoning() {
         let mut params = reasoning_params();
+        params.legacy_reasoning_replay = true;
         params.include = Some(vec![super::super::IncludeEnum::ReasoningEncryptedContent]);
         let mut converter = ResponseStreamConverter::new("m".into(), params);
         let mut events = converter.process_chunk(&reasoning_chunk("visible summary"));
