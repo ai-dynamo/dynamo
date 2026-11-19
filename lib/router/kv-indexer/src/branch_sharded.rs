@@ -928,16 +928,6 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         sizes
     }
 
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        // Collect per-node edge lengths from each shard backend.
-        // In-process `ThreadPoolIndexer` shards delegate to the underlying
-        // trie; remote shard handles return an empty `Vec` for this call.
-        self.shards
-            .iter()
-            .flat_map(|shard| shard.as_ref().node_edge_lengths())
-            .collect()
-    }
-
     fn timing_report(&self) -> String {
         #[cfg(not(feature = "bench"))]
         {

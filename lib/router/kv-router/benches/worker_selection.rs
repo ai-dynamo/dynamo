@@ -699,10 +699,11 @@ fn worker_projection(c: &mut Criterion) {
             let mut projections = FxHashMap::default();
             group.bench_function(BenchmarkId::new("reuse", count), |b| {
                 b.iter(|| {
-                    slots.bench_project_worker_loads_into(
+                    slots.project_worker_loads_into(
                         request.token_seq.as_deref(),
                         now,
                         &mut projections,
+                        None,
                     );
                     black_box(&projections);
                 })
