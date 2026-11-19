@@ -61,9 +61,9 @@ logger = logging.getLogger(__name__)
 
 def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
     try:
-        perf_database = importlib.import_module("aisimulate_core.sdk.perf_database")
+        perf_database = importlib.import_module("aisim_core.sdk.perf_database")
     except ModuleNotFoundError as e:
-        if e.name != "aisimulate_core":
+        if e.name != "aisim_core":
             raise
         return None
     return perf_database.get_latest_database_version

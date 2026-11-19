@@ -372,7 +372,6 @@ impl ConcurrentRadixTreeCompressed {
     // apply_event dispatch
     // ------------------------------------------------------------------
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn apply_event(
         &self,
         lookup: &mut LaneLookup,
