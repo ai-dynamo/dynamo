@@ -27,9 +27,14 @@ _CHANGED = _EXPECTED.replace("expected", "changed")
 def test_repository_root_prefers_github_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    workspace = tmp_path / "workspace"
+    (workspace / "components/src/dynamo/aisimulate").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(workspace))
 
-    assert repository_root() == tmp_path.resolve()
+    assert repository_root() == workspace.resolve()
 
 
 def test_yaml_golden_accepts_parsed_yaml_equivalence(tmp_path: Path) -> None:
