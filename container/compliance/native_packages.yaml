@@ -87,10 +87,11 @@ packages:
     version: "4.3.4"
     license: LGPL-3.0-only
     source: https://github.com/zeromq/libzmq
-    license_text_path: /opt/compliance/licenses/libzmq/COPYING.LESSER
+    license_text_path: licenses/libzmq/COPYING.LESSER
     images:
       - dynamo-frontend
       - dynamo-planner
+      - dynamo-sidecar
       - vllm-runtime
       - vllm-runtime-efa
       - sglang-runtime

@@ -237,10 +237,12 @@ RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \
     --mount=type=bind,from=sidecar-builder,source=/out/rust-licenses,target=/tmp/rust-licenses \
     mkdir -p /legal \
     && python3 -m compliance.generators \
-        --ecosystem rust,dpkg \
+        --ecosystem rust,dpkg,native \
         --site-packages /tmp/sidecar-site \
         --dpkg-root /tmp/runtime-root \
         --rust-licenses-dir /tmp/rust-licenses \
+        --native-yaml /src/container/compliance/native_packages.yaml \
+        --native-image dynamo-sidecar \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
         --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
