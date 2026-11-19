@@ -832,7 +832,12 @@ def test_worker_model_path_does_not_claim_operator_owned_pod_ip():
 
 
 @pytest.mark.parametrize("role_templates", [False, True], ids=["vllm-rs", "roles"])
-def test_detected_backend_bindings_break_authored_environment_cycles(role_templates):
+@pytest.mark.parametrize(
+    "explicit_backend", [False, True], ids=["implicit-noop", "explicit-vllm"]
+)
+def test_native_backend_bindings_require_explicit_backend(
+    role_templates, explicit_backend
+):
     main = {
         "name": "main",
         "command": ["/usr/local/bin/vllm-rs"],
@@ -861,12 +866,22 @@ def test_detected_backend_bindings_break_authored_environment_cycles(role_templa
         component,
         planner(),
         env=[{"name": "USER", "value": "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}],
+        **({"backendFramework": "vllm"} if explicit_backend else {}),
     )
     deployment["metadata"]["annotations"] = {
         "nvidia.com/dynamo-operator-origin-version": "1.8.0"
     }
     report = evaluate(deployment)
-    assert report.p4_ok, report.reasons
+    if explicit_backend:
+        assert report.p4_ok, report.reasons
+    else:
+        assert not report.p4_ok
+        assert any(
+            "environment dependency/order conflict" in reason
+            and "USER" in reason
+            and "VLLM_NIXL_SIDE_CHANNEL_HOST" in reason
+            for reason in report.reasons
+        )
 
 
 @pytest.mark.parametrize(
