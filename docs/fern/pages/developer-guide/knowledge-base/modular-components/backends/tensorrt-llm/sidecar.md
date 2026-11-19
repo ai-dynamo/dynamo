@@ -102,8 +102,10 @@ need 1.4.0rc1 or later. Worker `main` containers run `sshd` for the MPI launch a
 no probes: the leader waits for `sshd`, and losing `sshd` or a rank aborts `mpirun` and
 restarts the leader. The release images ship no `sshd`, so the examples install
 `openssh-server` at start. The worker runs `sshd` as the container user on port `2222`
-with its config and host key under `$HOME`. Root workers use PAM account and session
-checks; non-root workers disable PAM. Both accept only public-key authentication.
+with its config, host key, and session environment in the account home from the passwd
+database. Workers reuse an existing host key when restarted. Root workers use PAM
+account and session checks and enforce SSH file permissions; non-root workers disable
+PAM and allow group-writable homes. Both accept only public-key authentication.
 The leader preserves full Kubernetes hostnames when launching MPI ranks.
 The examples export the container
 environment to `sshd` sessions so Triton JIT on the worker finds CUDA. TensorRT-LLM

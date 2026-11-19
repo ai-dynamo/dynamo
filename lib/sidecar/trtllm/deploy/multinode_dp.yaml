@@ -189,17 +189,27 @@ spec:
             - |
               set -euo pipefail
               command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
-              install -Dm600 /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
-              ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/ssh_host_ed25519_key"
+              # sshd reads the session environment from the passwd home, not $HOME.
+              SSH_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+              install -Dm600 /ssh-pk/private.key.pub "$SSH_HOME/.ssh/authorized_keys"
+              if [ ! -f "$SSH_HOME/.ssh/ssh_host_ed25519_key" ]; then
+                ssh-keygen -q -t ed25519 -N '' -f "$SSH_HOME/.ssh/ssh_host_ed25519_key"
+              fi
               # Root needs PAM for locked accounts; non-root sshd cannot use PAM.
               SSH_USE_PAM=no
-              if [ "$(id -u)" = 0 ]; then mkdir -p /run/sshd; SSH_USE_PAM=yes; fi
-              # StrictModes no: the Dynamo runtime image's home is group 0 and may be group-writable.
-              printf '%s\n' 'Port 2222' "HostKey $HOME/.ssh/ssh_host_ed25519_key" "PidFile $HOME/.ssh/sshd.pid" \
-                "AuthorizedKeysFile $HOME/.ssh/authorized_keys" 'PasswordAuthentication no' \
+              SSH_STRICT_MODES=no
+              if [ "$(id -u)" = 0 ]; then
+                mkdir -p /run/sshd
+                SSH_USE_PAM=yes
+                SSH_STRICT_MODES=yes
+              fi
+              # Non-root homes in runtime images can be group-writable.
+              printf '%s\n' 'Port 2222' "HostKey $SSH_HOME/.ssh/ssh_host_ed25519_key" "PidFile $SSH_HOME/.ssh/sshd.pid" \
+                "AuthorizedKeysFile $SSH_HOME/.ssh/authorized_keys" 'PasswordAuthentication no' \
                 'KbdInteractiveAuthentication no' "UsePAM $SSH_USE_PAM" \
-                'StrictModes no' 'PermitUserEnvironment yes' > "$HOME/.ssh/sshd_config"
-              env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$HOME/.ssh/environment"
-              exec /usr/sbin/sshd -D -e -f "$HOME/.ssh/sshd_config"
+                "StrictModes $SSH_STRICT_MODES" 'PermitUserEnvironment yes' > "$SSH_HOME/.ssh/sshd_config"
+              env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$SSH_HOME/.ssh/environment"
+              chmod 600 "$SSH_HOME/.ssh/environment"
+              exec /usr/sbin/sshd -D -e -f "$SSH_HOME/.ssh/sshd_config"
             volumeMounts: *engineMounts
           volumes: *engineVolumes
