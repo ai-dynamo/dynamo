@@ -377,7 +377,7 @@ fn described<'a>(routers: impl Iterator<Item = &'a RouterReplica>) -> Vec<String
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use dynamo_global_common::{Capacity, PoolLocation, RouterReplicaId};
+    use dynamo_global_common::{PoolLocation, RouterReplicaId};
     use reqwest::StatusCode;
 
     use super::*;
@@ -517,11 +517,11 @@ mod tests {
     struct FakePools(Arc<Mutex<Option<PoolsResponse>>>);
 
     impl FakePools {
-        /// Lists each pool as `(DGD name, workers)`.
+        /// Lists each pool as `(DGD name, version)`.
         fn answer(&self, complete: bool, pools: &[(&str, u32)]) {
             let pools = pools
                 .iter()
-                .map(|&(name, workers)| pool(name, workers))
+                .map(|&(name, version)| pool(name, version))
                 .collect();
             *self.0.lock().unwrap() = Some(PoolsResponse { pools, complete });
         }
@@ -545,7 +545,8 @@ mod tests {
         }
     }
 
-    fn pool(name: &str, workers: u32) -> PoolListing {
+    /// A listing whose model, `m<version>`, tells its versions apart.
+    fn pool(name: &str, version: u32) -> PoolListing {
         PoolListing {
             key: PoolKey::new("aws-west", "dynamo", name).unwrap(),
             location: PoolLocation {
@@ -553,22 +554,20 @@ mod tests {
                 availability_zone: None,
                 datacenter: None,
             },
-            model: Some("Qwen/Qwen3-0.6B".to_owned()),
-            capabilities: Vec::new(),
+            model: Some(format!("m{version}")),
             frontends: Vec::new(),
-            capacity: vec![Capacity {
-                sku: "H100".to_owned(),
-                workers,
-            }],
             relay_identities: Vec::new(),
         }
     }
 
-    /// Each pool as `name=workers`, sorted.
-    fn pool_workers(pools: &HashMap<PoolKey, PoolListing>) -> Vec<String> {
+    /// Each pool as `name=version`, sorted.
+    fn pool_versions(pools: &HashMap<PoolKey, PoolListing>) -> Vec<String> {
         let mut pools = pools
             .values()
-            .map(|pool| format!("{}={}", pool.key.dgd_name(), pool.capacity[0].workers))
+            .map(|pool| {
+                let model = pool.model.as_deref().unwrap();
+                format!("{}={}", pool.key.dgd_name(), &model[1..])
+            })
             .collect::<Vec<_>>();
         pools.sort();
         pools
@@ -579,7 +578,7 @@ mod tests {
             .await
             .expect("the pools did not change")
             .unwrap();
-        pool_workers(&pools.borrow_and_update())
+        pool_versions(&pools.borrow_and_update())
     }
 
     fn spawn_pool_cache(source: &FakePools) -> PoolCache {
@@ -655,7 +654,7 @@ mod tests {
 
         source.fail();
         tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(pool_workers(&pools.borrow()), ["a=8"]);
+        assert_eq!(pool_versions(&pools.borrow()), ["a=8"]);
         assert_eq!(
             cache.freshness(),
             Freshness::Stale(
@@ -692,7 +691,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(cache.freshness(), Freshness::Current);
         assert!(!pools.has_changed().unwrap());
-        assert_eq!(pool_workers(&pools.borrow()), ["a=8", "b=8"]);
+        assert_eq!(pool_versions(&pools.borrow()), ["a=8", "b=8"]);
     }
 
     #[tokio::test(start_paused = true)]

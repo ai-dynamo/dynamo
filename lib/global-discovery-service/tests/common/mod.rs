@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use dynamo_global_common::{PoolKey, PoolLocation};
 use dynamo_global_discovery_service::pool_discovery::{
-    Capacity, Lease, PoolDirectory, PoolEvent, PoolListing, PoolRegistration, WatchEvent,
-    WatchStream,
+    Lease, PoolDirectory, PoolEvent, PoolListing, PoolRegistration, WatchEvent, WatchStream,
 };
 use url::Url;
 
@@ -32,8 +31,7 @@ pub fn key(cluster: &str, namespace: &str, dgd: &str) -> PoolKey {
     PoolKey::new(cluster, namespace, dgd).unwrap()
 }
 
-/// A registration with the capabilities and capacity the memory store's own
-/// tests use, deliberately not in sorted order.
+/// A registration whose frontends are deliberately not in sorted order.
 pub fn registration(
     cluster: &str,
     namespace: &str,
@@ -49,21 +47,10 @@ pub fn registration(
             datacenter: None,
         },
         model: model.to_owned(),
-        capabilities: vec!["prefill".to_owned(), "decode".to_owned()],
         frontends: frontends
             .iter()
             .map(|frontend| Url::parse(frontend).unwrap())
             .collect(),
-        capacity: vec![
-            Capacity {
-                sku: "H100".to_owned(),
-                workers: 8,
-            },
-            Capacity {
-                sku: "B200".to_owned(),
-                workers: 4,
-            },
-        ],
     }
 }
 
@@ -156,39 +143,24 @@ pub mod conformance {
         );
     }
 
-    /// A pool lists with its lists sorted and deduplicated, and no relay.
+    /// A pool lists with its frontends sorted and deduplicated, and no relay.
     pub async fn a_registered_pool_is_listed_normalised(
         registrar: Arc<dyn PoolRegistrar>,
         pools: Arc<PoolDirectory>,
         _clock: ClockHandle,
     ) {
         let mut sent = mocker("mocker", "m1");
-        sent.capabilities.push("decode".to_owned());
         sent.frontends
             .push(Url::parse("http://10.43.1.2:8000/").unwrap());
         let _ = registrar.register(sent).await.unwrap();
 
         let listing = find(&*pools, "mocker").await.expect("listed");
         assert_eq!(listing.model.as_deref(), Some("m1"));
-        assert_eq!(listing.capabilities, ["decode", "prefill"]);
         assert_eq!(
             listing.frontends,
             [
                 Url::parse("http://10.43.1.2:8000/").unwrap(),
                 Url::parse("http://10.43.1.3:8000/").unwrap()
-            ]
-        );
-        assert_eq!(
-            listing.capacity,
-            [
-                Capacity {
-                    sku: "B200".to_owned(),
-                    workers: 4
-                },
-                Capacity {
-                    sku: "H100".to_owned(),
-                    workers: 8
-                }
             ]
         );
         assert!(listing.relay_identities.is_empty());
@@ -259,7 +231,13 @@ pub mod conformance {
         let Some(Ok(WatchEvent::Upserted(first))) = watch.next().await else {
             panic!("expected the pool");
         };
-        assert_eq!(first.capabilities, ["decode", "prefill"]);
+        assert_eq!(
+            first.frontends,
+            [
+                Url::parse("http://10.43.1.2:8000/").unwrap(),
+                Url::parse("http://10.43.1.3:8000/").unwrap()
+            ]
+        );
         assert!(matches!(
             watch.next().await,
             Some(Ok(WatchEvent::Resync(_)))
@@ -270,12 +248,8 @@ pub mod conformance {
         for _ in 0..3 {
             clock.advance(Duration::from_secs(10)).await;
             let mut heartbeat = mocker("mocker", "m1");
-            heartbeat.capabilities.reverse();
             heartbeat.frontends.reverse();
-            heartbeat.capacity.push(Capacity {
-                sku: "H100".to_owned(),
-                workers: 8,
-            });
+            heartbeat.frontends.push(heartbeat.frontends[0].clone());
             let _ = registrar.register(heartbeat).await.unwrap();
         }
         assert_eq!(find(&*pools, "mocker").await, Some(first));

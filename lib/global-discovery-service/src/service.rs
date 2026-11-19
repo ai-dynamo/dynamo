@@ -254,9 +254,7 @@ mod tests {
                 "datacenter": null
             },
             "model": "Qwen/Qwen3-0.6B",
-            "capabilities": ["aggregated"],
-            "frontends": ["http://10.43.1.2:8000/"],
-            "capacity": [{"sku": "H100", "workers": 8}]
+            "frontends": ["http://10.43.1.2:8000/"]
         })
     }
 
@@ -329,9 +327,7 @@ mod tests {
                         "datacenter": null
                     },
                     "model": "Qwen/Qwen3-0.6B",
-                    "capabilities": ["aggregated"],
                     "frontends": ["http://10.43.1.2:8000/"],
-                    "capacity": [{"sku": "H100", "workers": 8}],
                     "relay_identities": []
                 }],
                 "complete": false
@@ -445,13 +441,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_older_pool_relays_capabilities_and_capacity_are_ignored() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let mut older = registration();
+        older["capabilities"] = json!(["aggregated"]);
+        older["capacity"] = json!([{"sku": "H100", "workers": 8}]);
+        let (status, _) = post_pool(&base, &older).await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let (_, pools) = get_json(&base, "/pools").await;
+        let listed = pools["pools"][0].as_object().unwrap();
+        assert!(listed.contains_key("model"), "{pools}");
+        assert!(
+            !listed.contains_key("capabilities") && !listed.contains_key("capacity"),
+            "{pools}"
+        );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn a_registration_over_the_body_limit_is_refused() {
-        // A registration of exactly `size` bytes: a capability fills the rest.
+        // A registration of exactly `size` bytes: a field the service does not
+        // know fills the rest.
         let registration_of = |size: usize| {
             let mut body = registration();
-            body["capabilities"] = json!([""]);
+            body["padding"] = json!("");
             let padding = size - body.to_string().len();
-            body["capabilities"] = json!(["c".repeat(padding)]);
+            body["padding"] = json!("c".repeat(padding));
             body
         };
         let (base, shutdown) = start(registrations_backend()).await;
