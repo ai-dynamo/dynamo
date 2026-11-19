@@ -782,7 +782,6 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch, start_
     _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
     assert default_sampling_params == {"temperature": 0.7}
-    # vLLM's processes start the configured way, and fork is checked first.
     assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == start_method
     assert fork_checks.call_count == (1 if start_method == "fork" else 0)
 
