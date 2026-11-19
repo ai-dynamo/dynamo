@@ -139,6 +139,10 @@
 # === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
 /components/src/dynamo/triton/**                                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
+# === sidecar  (@ai-dynamo/dynamo-sidecar-codeowners) ===
+/lib/sidecar/AGENTS.md                                                                                  @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/CLAUDE.md                                                                                  @ai-dynamo/dynamo-sidecar-codeowners
+
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===
 /lib/memory/                                                                                            @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/tokens/                                                                                            @ai-dynamo/dynamo-kv-memory-codeowners
@@ -252,8 +256,6 @@
 /lib/runtime/benches/                                                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/testkit/                                                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/examples/                                                                                  @ai-dynamo/dynamo-runtime-codeowners
-/lib/sidecar/AGENTS.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners
-/lib/sidecar/CLAUDE.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/fixtures/                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/discovery/                                                                                 @ai-dynamo/dynamo-runtime-codeowners
@@ -659,8 +661,6 @@ requirements.txt                                                                
 /.ai/metrics-review.md                                                                                  @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.devcontainer/sglang/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /.devcontainer/trtllm/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
-/lib/sidecar/AGENTS.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
-/lib/sidecar/CLAUDE.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/docker-compose.yml                                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /docs/fern/**/*sidecar*                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-sidecar-codeowners

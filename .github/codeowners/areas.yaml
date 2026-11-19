@@ -141,7 +141,9 @@ areas:
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
 - label: sidecar
   github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
-  path_globs: []
+  path_globs:
+  - lib/sidecar/AGENTS.md
+  - lib/sidecar/CLAUDE.md
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -279,8 +281,6 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
-  - lib/sidecar/AGENTS.md
-  - lib/sidecar/CLAUDE.md
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
   - lib/sidecar/SUPPORT_NOTES.md
@@ -1264,14 +1264,6 @@ shared:
 - glob: lib/mocker/servers/
   owners:
   - performance
-  - sidecar
-- glob: lib/sidecar/AGENTS.md
-  owners:
-  - runtime
-  - sidecar
-- glob: lib/sidecar/CLAUDE.md
-  owners:
-  - runtime
   - sidecar
 - glob: lib/sidecar/Dockerfile
   owners:
