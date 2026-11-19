@@ -3062,7 +3062,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDWithLongWorkerIngressForAdmission(false),
 		},
 
-		// Provider names and workload selectors follow the resources each pathway renders.
 		{
 			name:               "operator adoption preserves an existing component worker name violation",
 			seedWithoutWebhook: true, username: admissionOperatorPrincipal,
