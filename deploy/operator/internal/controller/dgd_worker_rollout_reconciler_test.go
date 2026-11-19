@@ -5096,6 +5096,35 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			},
 		},
 		{
+			name: "disagg - restarting complete old hash survives an incomplete healthy hash",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},
+				"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				prefillA := makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "oldhash0", 1, 1, 1)
+				decodeA := makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "oldhash0", 1, 1, 0)
+				decodeB := makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "oldhash1", 1, 1, 1)
+				prefillA.CreationTimestamp = metav1.NewTime(time.Unix(1, 0))
+				decodeA.CreationTimestamp = prefillA.CreationTimestamp
+				decodeB.CreationTimestamp = metav1.NewTime(time.Unix(2, 0))
+				return []runtime.Object{prefillA, decodeA, decodeB}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 1),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 0),
+				}
+			},
+			expectedOld: map[string]int32{"prefill": 1, "decode": 1},
+			expectedNew: map[string]int32{"prefill": 1, "decode": 1},
+			expectedOldDCDTargets: map[string]int32{
+				"test-dgd-prefill-oldhash0": 1,
+				"test-dgd-decode-oldhash0":  1,
+				"test-dgd-decode-oldhash1":  0,
+			},
+		},
+		{
 			name: "disagg - restarting old decode keeps old prefill",
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},

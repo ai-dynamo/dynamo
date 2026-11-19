@@ -1051,47 +1051,54 @@ type oldWorkerReplicaPlan struct {
 	createdAt metav1.Time
 	spec      int32 // declared intent for this DCD
 	target    int32 // desired replica count for this DCD
-	serving   bool  // this hash has an available replica of every required old role
+	retained  bool  // this hash is kept serving or able to recover after a pod outage
 }
 
 func allocateOldWorkerDCDReplicas(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	oldTarget int32,
-	servingOldHashes map[string]bool,
+	retainedOldHashes map[string]bool,
 ) map[string]int32 {
-	plans := buildOldWorkerReplicaPlans(dcds, servingOldHashes)
-	var servingTarget int32
+	plans := buildOldWorkerReplicaPlans(dcds, retainedOldHashes)
+	var assignedTarget int32
 	for i := range plans {
-		servingTarget += plans[i].target
+		assignedTarget += plans[i].target
 	}
 
-	// if we have more available replicas currently than total desired replicas, remove the oldest DCD replicas first
-	if servingTarget > oldTarget {
-		removeAvailableReplicasOldestFirst(plans, servingTarget-oldTarget)
-		// if we have less available replicas currently than total desired replicas, add the newest DCD replicas first
-	} else if servingTarget < oldTarget {
-		addUnavailableReplicasNewestFirst(plans, oldTarget-servingTarget)
+	// Remove surplus targets while retiring other hashes before retained hashes.
+	if assignedTarget > oldTarget {
+		removeAvailableReplicasOldestFirst(plans, assignedTarget-oldTarget)
+		// Fill any remaining target from the newest declared replicas.
+	} else if assignedTarget < oldTarget {
+		addUnavailableReplicasNewestFirst(plans, oldTarget-assignedTarget)
 	}
 
 	return replicaTargetsByDCDName(plans)
 }
 
-// initializes DCD replicas to available replicas
+// buildOldWorkerReplicaPlans starts with available replicas and reserves one per retained hash.
+// Each DCD in dcds must be non-nil.
 func buildOldWorkerReplicaPlans(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
-	servingOldHashes map[string]bool,
+	retainedOldHashes map[string]bool,
 ) []oldWorkerReplicaPlan {
 	plans := make([]oldWorkerReplicaPlan, 0, len(dcds))
 
 	for _, dcd := range dcds {
 		state := dcdComponentStateFromDCD(dcd)
+		retained := retainedOldHashes[dynamo.GetDCDEffectiveWorkerHash(dcd)]
 		target := min(state.Spec, state.Available)
+		if retained {
+			// Keep a restarting role deployed so the retained hash can recover.
+			target = max(target, min(state.Spec, int32(1)))
+		}
+
 		plans = append(plans, oldWorkerReplicaPlan{
 			name:      dcd.Name,
 			createdAt: dcd.CreationTimestamp,
 			spec:      state.Spec,
 			target:    target,
-			serving:   servingOldHashes[dynamo.GetDCDEffectiveWorkerHash(dcd)],
+			retained:  retained,
 		})
 	}
 
@@ -1099,10 +1106,10 @@ func buildOldWorkerReplicaPlans(
 }
 
 func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32) {
-	// Retire incomplete hashes before taking available replicas from a serving hash.
+	// Retire other hashes before taking replicas from a hash kept serving or recovering.
 	sort.Slice(plans, func(i, j int) bool {
-		if plans[i].serving != plans[j].serving {
-			return !plans[i].serving
+		if plans[i].retained != plans[j].retained {
+			return !plans[i].retained
 		}
 		if plans[i].createdAt.Time.Equal(plans[j].createdAt.Time) {
 			return plans[i].name < plans[j].name
@@ -1442,6 +1449,30 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	return int32(surge), int32(unavail)
 }
 
+// oldWorkerHashesToRetain prefers serving hashes, or one complete deployed hash that can recover.
+func oldWorkerHashesToRetain(deployedRoles, availableRoles map[string]int, requiredRoles int) map[string]bool {
+	// Choose the same fallback for every component regardless of map iteration order.
+	retained := make(map[string]bool)
+	fallbackHash := ""
+	for hash, roles := range deployedRoles {
+		if roles != requiredRoles {
+			continue
+		}
+		if fallbackHash == "" || hash < fallbackHash {
+			fallbackHash = hash
+		}
+		if availableRoles[hash] == requiredRoles {
+			retained[hash] = true
+		}
+	}
+
+	// Preserve one recoverable generation when no old generation is fully available.
+	if len(retained) == 0 && fallbackHash != "" {
+		retained[fallbackHash] = true
+	}
+	return retained
+}
+
 // buildRollingUpdateContext calculates replica targets, retaining old workers while
 // a complete old worker hash remains deployed and the new generation cannot serve.
 // dgd must be non-nil.
@@ -1528,19 +1559,10 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	}
 
 	// Keep a complete old hash deployed until all new roles are available.
-	oldGenerationDeployed := false
-	servingOldHashes := make(map[string]bool)
-	for hash, roles := range oldDeployedRolesByHash {
-		if roles == requiredOldWorkerComponents {
-			oldGenerationDeployed = true
-		}
-		if oldAvailableRolesByHash[hash] == requiredOldWorkerComponents {
-			servingOldHashes[hash] = true
-		}
-	}
-	holdOldGeneration := oldGenerationDeployed && !newGenerationServes
+	retainedOldHashes := oldWorkerHashesToRetain(oldDeployedRolesByHash, oldAvailableRolesByHash, requiredOldWorkerComponents)
+	holdOldGeneration := len(retainedOldHashes) > 0 && !newGenerationServes
 	if !holdOldGeneration {
-		servingOldHashes = nil
+		retainedOldHashes = nil
 	}
 
 	for i := range dgd.Spec.Components {
@@ -1601,7 +1623,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, oldTarget, servingOldHashes))
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, oldTarget, retainedOldHashes))
 
 		logger.V(1).Info("Worker update replica calculation",
 			"component", componentName,
