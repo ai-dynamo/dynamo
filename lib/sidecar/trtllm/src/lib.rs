@@ -52,20 +52,10 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
             if let Some(node) = metadata.filter(|node| !node.leader) {
                 headless::relay(drt, args, node, shutdown).await
             } else {
-                let engine = Arc::new(engine);
-                let worker =
-                    Worker::new(engine.clone(), config).run_with_drt(drt, shutdown.clone());
-                tokio::pin!(worker);
-                tokio::select! {
-                    result = &mut worker => result.map_err(Into::into),
-                    result = engine.monitor_routing() => {
-                        // Let Worker withdraw discovery and drain before exiting.
-                        shutdown.cancel();
-                        let stopped = worker.await;
-                        result?;
-                        stopped.map_err(Into::into)
-                    }
-                }
+                Worker::new(Arc::new(engine), config)
+                    .run_with_drt(drt, shutdown)
+                    .await
+                    .map_err(Into::into)
             }
         },
     )

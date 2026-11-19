@@ -177,17 +177,17 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 		},
 		{
 			name:          "nothing set, full discovery",
-			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920},
 			wantGPUSKU:    "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name:          "nothing set, V100 discovered",
-			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "Tesla-V100-SXM2-16GB", VRAMPerGPU: 16384},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "Tesla-V100-SXM2-16GB", VRAMPerGPU: 16384},
 			wantGPUSKU:    "v100_sxm", wantVRAM: 16384, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name:          "nothing set, unknown GPU falls back to model name",
-			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 4, Model: "FutureGPU-X1000", VRAMPerGPU: 65536},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 4, TotalGPUs: 4, SelectedShapeGPUs: 4, Model: "FutureGPU-X1000", VRAMPerGPU: 65536},
 			wantGPUSKU:    "FutureGPU-X1000", wantVRAM: 65536, wantGPUsNode: 4, wantTotalGPUs: 4, wantChanged: true,
 		},
 		{
@@ -195,24 +195,40 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 			hardware: &nvidiacomv1beta1.HardwareSpec{
 				GPUSKU: "b200_sxm", VRAMMB: new(141312.0), NumGPUsPerNode: new(int32(8)),
 			},
-			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "B200-SXM-180GB", VRAMPerGPU: 141312},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "B200-SXM-180GB", VRAMPerGPU: 141312},
 			wantGPUSKU:    "b200_sxm", wantVRAM: 141312, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
+		},
+		{
+			name: "nominal vramMb near measured VRAM derives totalGpus",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "h100_sxm", VRAMMB: new(81920.0), NumGPUsPerNode: new(int32(8)),
+			},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "NVIDIA H100 80GB HBM3", VRAMPerGPU: 81079},
+			wantGPUSKU:    "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
 			name: "only gpuSku missing, discovery fills it",
 			hardware: &nvidiacomv1beta1.HardwareSpec{
 				VRAMMB: new(81920.0), NumGPUsPerNode: new(int32(8)), TotalGPUs: new(int32(16)),
 			},
-			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "H200-SXM5-141GB", VRAMPerGPU: 141312},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "H200-SXM5-141GB", VRAMPerGPU: 141312},
 			wantGPUSKU:    "h200_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16, wantChanged: true, // user overrides win
 		},
 		{
-			name: "vramMb and numGpusPerNode override discovery",
+			name: "numGpusPerNode override requires an explicit totalGpus",
 			hardware: &nvidiacomv1beta1.HardwareSpec{
-				GPUSKU: "a100_sxm", VRAMMB: new(40960.0), NumGPUsPerNode: new(int32(4)),
+				GPUSKU: "a100_sxm", VRAMMB: new(81920.0), NumGPUsPerNode: new(int32(4)),
 			},
-			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 81920},
-			wantGPUSKU:    "a100_sxm", wantVRAM: 40960, wantGPUsNode: 4, wantTotalGPUs: 8, wantChanged: true,
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 81920},
+			wantErr:       "set hardware.totalGpus explicitly",
+		},
+		{
+			name: "vramMb override requires an explicit totalGpus",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "a100_sxm", VRAMMB: new(40960.0), NumGPUsPerNode: new(int32(8)),
+			},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 81920},
+			wantErr:       "set hardware.totalGpus explicitly",
 		},
 		{
 			name:    "no fields set, discovery fails",
@@ -273,20 +289,62 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestEnrichHardwareFromDiscovery_TotalGPUs(t *testing.T) {
+	tests := []struct {
+		name          string
+		counts        []int
+		explicitTotal *int32
+		wantTotal     int32
+	}{
+		{name: "different node sizes use only the selected shape", counts: []int{8, 4}, wantTotal: 8},
+		{name: "matching selected shapes are aggregated", counts: []int{8, 8, 8, 4, 2}, wantTotal: 24},
+		{name: "selected shape aggregate is capped", counts: []int{8, 8, 8, 8, 4}, wantTotal: 32},
+		{name: "explicit total above cap", counts: []int{8, 4}, explicitTotal: new(int32(64)), wantTotal: 64},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("creating H100 nodes and an unrelated A100 node")
+			objects := []client.Object{gpuNode("a100-node", "A100-SXM4-40GB", 8, 40960)}
+			for i, count := range tt.counts {
+				objects = append(objects, gpuNode(fmt.Sprintf("h100-node-%d", i), "H100-SXM5-80GB", count, 81920))
+			}
+			r := newFakeReconciler(objects...)
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:    nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						TotalGPUs: tt.explicitTotal,
+					},
+				},
+			}
+
+			t.Log("enriching missing hardware fields while preserving an explicit budget")
+			changed, err := r.enrichHardwareFromDiscovery(t.Context(), dgdr)
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.NotNil(t, dgdr.Spec.Hardware.TotalGPUs)
+			assert.Equal(t, tt.wantTotal, *dgdr.Spec.Hardware.TotalGPUs)
+			assert.Equal(t, int32(8), *dgdr.Spec.Hardware.NumGPUsPerNode)
+		})
+	}
+}
+
 func TestEnrichHardwareFromDiscovery_WritesOptionalHardwareMetadata(t *testing.T) {
 	r := newFakeReconciler()
 	r.GPUDiscovery = gpupkg.NewGPUDiscovery(nil)
 	r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
 	r.GPUDiscoveryCache.Set("", &gpupkg.GPUInfo{
-		NodeName:      "n1",
-		GPUsPerNode:   8,
-		NodesWithGPUs: 2,
-		Model:         "NVIDIA H100 80GB HBM3",
-		VRAMPerGPU:    81079,
-		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
-		Interconnect:  "pcie",
-		RDMAEnabled:   true,
-		RDMAType:      "rdma",
+		NodeName:          "n1",
+		GPUsPerNode:       8,
+		NodesWithGPUs:     2,
+		TotalGPUs:         16,
+		SelectedShapeGPUs: 16,
+		Model:             "NVIDIA H100 80GB HBM3",
+		VRAMPerGPU:        81079,
+		System:            nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		Interconnect:      "pcie",
+		RDMAEnabled:       true,
+		RDMAType:          "rdma",
 	}, time.Minute)
 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -310,15 +368,17 @@ func TestEnrichHardwareFromDiscovery_FillsOptionalMetadataWhenRequiredFieldsSet(
 	r.GPUDiscovery = gpupkg.NewGPUDiscovery(nil)
 	r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
 	r.GPUDiscoveryCache.Set(nvidiacomv1beta1.GPUSKUTypeH100PCIe, &gpupkg.GPUInfo{
-		NodeName:      "n1",
-		GPUsPerNode:   8,
-		NodesWithGPUs: 4,
-		Model:         "NVIDIA H100 80GB HBM3",
-		VRAMPerGPU:    81079,
-		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
-		Interconnect:  "pcie",
-		RDMAEnabled:   true,
-		RDMAType:      "rdma",
+		NodeName:          "n1",
+		GPUsPerNode:       8,
+		NodesWithGPUs:     4,
+		TotalGPUs:         32,
+		SelectedShapeGPUs: 32,
+		Model:             "NVIDIA H100 80GB HBM3",
+		VRAMPerGPU:        81079,
+		System:            nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		Interconnect:      "pcie",
+		RDMAEnabled:       true,
+		RDMAType:          "rdma",
 	}, time.Minute)
 
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -364,15 +424,17 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 
 	cache := gpupkg.NewGPUDiscoveryCache()
 	cache.Set("", &gpupkg.GPUInfo{
-		NodeName:      "n1",
-		GPUsPerNode:   8,
-		NodesWithGPUs: 2,
-		Model:         "NVIDIA H100 80GB HBM3",
-		VRAMPerGPU:    81079,
-		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
-		Interconnect:  "pcie",
-		RDMAEnabled:   true,
-		RDMAType:      "rdma",
+		NodeName:          "n1",
+		GPUsPerNode:       8,
+		NodesWithGPUs:     2,
+		TotalGPUs:         16,
+		SelectedShapeGPUs: 16,
+		Model:             "NVIDIA H100 80GB HBM3",
+		VRAMPerGPU:        81079,
+		System:            nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		Interconnect:      "pcie",
+		RDMAEnabled:       true,
+		RDMAType:          "rdma",
 	}, time.Minute)
 
 	r := &DynamoGraphDeploymentRequestReconciler{
@@ -512,11 +574,13 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 			// DCGM metrics lack a form factor suffix (e.g. "NVIDIA H200").
 			mockScraper := func(_ context.Context, _ string) (*gpupkg.GPUInfo, error) {
 				return &gpupkg.GPUInfo{
-					NodeName:    "gpu-node",
-					GPUsPerNode: 8,
-					Model:       tt.dcgmModel,
-					VRAMPerGPU:  143770,
-					System:      "",
+					NodeName:          "gpu-node",
+					GPUsPerNode:       8,
+					TotalGPUs:         8,
+					SelectedShapeGPUs: 8,
+					Model:             tt.dcgmModel,
+					VRAMPerGPU:        143770,
+					System:            "",
 				}, nil
 			}
 

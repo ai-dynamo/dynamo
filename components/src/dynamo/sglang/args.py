@@ -36,8 +36,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     add_sglang_cli_compat,
+    kv_events_config_with_dynamo_format,
     resolved_server_args,
     sglang_default_mla_attention_backend,
+    sglang_dsa_supports_decode_context_parallel,
     sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
@@ -54,11 +56,12 @@ DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
 # MLA backends whose decode returns no log-sum-exp, which SGLang's DCP decode needs.
 # Drop entries once the SGLang pin has #35384/#37735, or #33325 adds fa3 DCP decode.
+# DSA/NSA are rejected only when the engine lacks DSA DCP support.
 MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset(
     {"fa3", "fa4", "flashmla", "dsa", "nsa"}
 )
 
-# Sparse-attention MLA backends; DSA models need them, so only --dcp-size 1 helps.
+# Sparse-attention MLA backends that require the engine's DSA DCP implementation.
 MLA_SPARSE_ATTENTION_BACKENDS = frozenset({"dsa", "nsa"})
 
 ATTENTION_BACKEND_CLI_FIELDS = (
@@ -394,6 +397,19 @@ def _validate_mla_dcp_decode_backend(
         backend = sglang_default_mla_attention_backend(server_args)
     if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
         return
+    if backend in MLA_SPARSE_ATTENTION_BACKENDS:
+        # Unresolved kernel choices are checked again on the engine's config.
+        support = sglang_dsa_supports_decode_context_parallel(server_args)
+        if support is not False:
+            return
+        raise ValueError(
+            f"--dcp-size {dcp_size} is not supported with the decode attention "
+            f"backend '{backend}' and the selected DSA kernels "
+            f"(prefill={getattr(resolved, 'dsa_prefill_backend', None)!r}, "
+            f"decode={getattr(resolved, 'dsa_decode_backend', None)!r}) "
+            "on this SGLang build and GPU. Use --dcp-size 1. Otherwise, select "
+            "matching DCP-capable DSA kernels supported by the engine and GPU."
+        )
 
     selected = (
         " SGLang selects it automatically for this model and GPU because no "
@@ -402,9 +418,7 @@ def _validate_mla_dcp_decode_backend(
         else ""
     )
     remedy = (
-        "Use --dcp-size 1."
-        if backend in MLA_SPARSE_ATTENTION_BACKENDS
-        else "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
+        "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
         "on Blackwell), or --dcp-size 1."
     )
     raise ValueError(
@@ -902,6 +916,9 @@ async def parse_args(args: list[str]) -> Config:
         gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
         if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
             parsed_args.tokenizer_worker_num = gateway_count
+        parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
+            parsed_args.kv_events_config
+        )
         server_args = ServerArgs.from_cli_args(parsed_args)
         _default_cuda_coredump_wait(server_args)
 
@@ -910,6 +927,13 @@ async def parse_args(args: list[str]) -> Config:
             "--schedule-low-priority-values-first is not supported in Dynamo's "
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
+        )
+
+    if getattr(server_args, "default_chat_template_kwargs", None):
+        raise ValueError(
+            "--default-chat-template-kwargs has no effect on a Dynamo worker, because "
+            "the Dynamo frontend renders the chat template. Set "
+            "--default-chat-template-kwargs on the frontend (python -m dynamo.frontend)."
         )
 
     backend_from_cli = _attention_backend_from_cli(parsed_args)

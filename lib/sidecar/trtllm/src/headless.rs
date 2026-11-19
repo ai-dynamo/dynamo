@@ -118,6 +118,7 @@ pub(crate) async fn relay(
                 topic,
                 dp_rank: rank,
                 heartbeat_timeout,
+                idempotent_stores,
                 ..
             } = crate::engine::to_kv_event_source(source, heartbeat)?
             else {
@@ -135,6 +136,9 @@ pub(crate) async fn relay(
                     video_token_id: None,
                     expected_rank: Some(rank),
                     liveness: heartbeat_timeout.map(|timeout| (rank, timeout)),
+                    engine_owned_mm_identity: false,
+                    idempotent_stores,
+                    recovery: None,
                 }),
                 leader_config.enable_local_indexer,
                 rank,

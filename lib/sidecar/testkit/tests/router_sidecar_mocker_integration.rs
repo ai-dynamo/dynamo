@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, FinishReason, LLMEngine};
 use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager};
 use dynamo_llm::kv_router::PrefillRouter;
 use dynamo_llm::model_card::TokenizerKind;
+use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_llm::session_affinity::SessionAffinityMode;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::pipeline::{AsyncEngine, AsyncEngineContextProvider, Operator, RouterMode};
@@ -244,29 +245,25 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
     let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
     let router = env.ready("backend").await;
     let frontend = Frontend::start(&env).await;
-    for (index, is_streaming) in [false, true].into_iter().enumerate() {
-        let id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 1);
-        let handle = control.request(
-            &id,
-            if is_streaming {
-                RequestPlan {
-                    stream: Some(StreamFault {
-                        at: StreamPoint::TokenResponse(1),
-                        action: StreamAction::Fail,
-                        pause: true,
-                    }),
-                    ..Default::default()
-                }
-            } else {
-                RequestPlan {
-                    open: OpenAction::Reject,
-                    ..Default::default()
-                }
-            },
-        );
+    for is_streaming in [false, true] {
+        let handle = control.next_request(if is_streaming {
+            RequestPlan {
+                stream: Some(StreamFault {
+                    at: StreamPoint::TokenResponse(1),
+                    action: StreamAction::Fail,
+                    pause: true,
+                }),
+                ..Default::default()
+            }
+        } else {
+            RequestPlan {
+                open: OpenAction::Reject,
+                ..Default::default()
+            }
+        });
         let mut response = bounded(
             "HTTP native failure response",
-            frontend.generate(&env.model, &id, is_streaming).send(),
+            frontend.generate(&env.model, is_streaming).send(),
         )
         .await
         .unwrap();
@@ -331,13 +328,12 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
         .await;
         peer.scheduler_idle().await;
 
-        let recovery_id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 2);
-        let recovered = control.request(&recovery_id, RequestPlan::default());
+        let recovered = control.next_request(RequestPlan::default());
         let response = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let response = bounded(
                     "HTTP recovery response",
-                    frontend.generate(&env.model, &recovery_id, false).send(),
+                    frontend.generate(&env.model, false).send(),
                 )
                 .await
                 .unwrap();
@@ -634,7 +630,7 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
         },
     )
     .await;
-    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
+    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
     let router = env.ready("backend").await;
     let handle = control.request("shutdown-active", hold_after_token());
     let mut stream = router
@@ -673,6 +669,269 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     independent.start(0).await.unwrap();
     independent.cleanup().await.unwrap();
     peer.shutdown().await;
+}
+
+#[derive(Clone, Copy)]
+enum WorkerFault {
+    /// The native engine goes away mid-stream; the sidecar stays up.
+    EngineFailure,
+    /// The native engine goes away before its first token, while the sidecar
+    /// still waits for the stream to open.
+    EngineFailureBeforeFirstToken,
+    /// The sidecar drains on SIGTERM and ends what is left after its grace period.
+    GracefulShutdown,
+}
+
+/// A request in flight on a faulted worker finishes on the other worker, with
+/// the tokens it already streamed kept, as the frontend's migration does for
+/// in-process workers.
+async fn faulted_request_migrates<F: ProcessFixture>(fault: WorkerFault) {
+    const MAX_TOKENS: usize = 8;
+    let env = Environment::new().await;
+    let controls = [Controller::default(), Controller::default()];
+    let mut peers = Vec::new();
+    for control in &controls {
+        let config = FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        };
+        peers.push(F::start(control.clone(), config).await);
+    }
+    let mut children: Vec<_> = peers
+        .iter()
+        .map(|peer| env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1))
+        .collect();
+    let router = env.ready("backend").await;
+    bounded("both workers selectable", async {
+        while router.selectable_worker_ids().map_or(0, |ids| ids.len()) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let frontend = Frontend::start_with_migration(&env, 3).await;
+
+    // Either worker may take the request; whichever does holds it.
+    let (plan, held) = match fault {
+        WorkerFault::EngineFailureBeforeFirstToken => (
+            RequestPlan {
+                open: OpenAction::Hold,
+                ..Default::default()
+            },
+            Event::Received,
+        ),
+        _ => (hold_after_token(), Event::Checkpoint),
+    };
+    let handles = controls
+        .each_ref()
+        .map(|control| control.next_request(plan));
+    let response = tokio::spawn(
+        frontend
+            .generate_tokens(&env.model, true, MAX_TOKENS as u32)
+            .send(),
+    );
+    let serving = bounded("a worker holds the request", async {
+        tokio::select! {
+            _ = handles[0].wait(held) => 0,
+            _ = handles[1].wait(held) => 1,
+        }
+    })
+    .await;
+    let other = 1 - serving;
+    // The migrated request must not pause on the surviving worker.
+    handles[other].release();
+    match fault {
+        WorkerFault::EngineFailure | WorkerFault::EngineFailureBeforeFirstToken => {
+            peers[serving].shutdown().await
+        }
+        WorkerFault::GracefulShutdown => children[serving].signal(libc::SIGTERM),
+    }
+
+    let response = bounded("HTTP response", response).await.unwrap().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = bounded("migrated stream body", response.text())
+        .await
+        .unwrap();
+    let events: Vec<_> = sse_events(&body).collect();
+    assert!(
+        events.iter().all(|event| event.get("error").is_none()),
+        "{body}"
+    );
+    let tokens: usize = events
+        .iter()
+        .filter_map(|event| event["nvext"]["completion_token_ids"].as_array())
+        .map(Vec::len)
+        .sum();
+    assert_eq!(tokens, MAX_TOKENS, "{body}");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["choices"][0]["finish_reason"] == "length"),
+        "{body}"
+    );
+    assert!(
+        handles[other].reached(Event::Received),
+        "the request must continue on the other worker"
+    );
+
+    frontend.shutdown().await;
+    for (index, child) in children.iter_mut().enumerate() {
+        if index != serving {
+            child.shutdown().await;
+        } else if matches!(fault, WorkerFault::GracefulShutdown) {
+            assert!(child.exit().await.success(), "{}", child.logs());
+        } else {
+            // Its engine is gone, so it cannot drain cleanly.
+            child.signal(libc::SIGKILL);
+            child.exit().await;
+        }
+    }
+    for (index, peer) in peers.iter_mut().enumerate() {
+        if index != serving || matches!(fault, WorkerFault::GracefulShutdown) {
+            peer.shutdown().await;
+        }
+    }
+}
+
+macro_rules! migration_tests {
+    ($backend:ident, $fixture:ty) => {
+        mod $backend {
+            use super::*;
+
+            #[tokio::test]
+            async fn engine_failure_migrates_the_request() {
+                migration_scenario::<$fixture>(WorkerFault::EngineFailure).await;
+            }
+
+            #[tokio::test]
+            async fn engine_failure_before_first_token_migrates_the_request() {
+                migration_scenario::<$fixture>(WorkerFault::EngineFailureBeforeFirstToken).await;
+            }
+
+            #[tokio::test]
+            async fn graceful_shutdown_migrates_the_request() {
+                migration_scenario::<$fixture>(WorkerFault::GracefulShutdown).await;
+            }
+        }
+    };
+}
+
+/// Each scenario runs two sidecar processes that watch file discovery. Running
+/// them one at a time keeps the suite under the per-user inotify instance
+/// limit (128 by default).
+static MIGRATION_SCENARIO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn migration_scenario<F: ProcessFixture>(fault: WorkerFault) {
+    let _serial = MIGRATION_SCENARIO.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        faulted_request_migrates::<F>(fault),
+    )
+    .await
+    .expect("migration scenario exceeded its overall deadline");
+}
+
+migration_tests!(vllm_migration, vllm::Fixture);
+migration_tests!(sglang_migration, sglang::Fixture);
+migration_tests!(trtllm_migration, support::trtllm::Fixture);
+migration_tests!(lpx_migration, lpx::Fixture);
+
+/// Load that stays unavailable past the LPX sidecar's 30 s staleness limit
+/// withdraws the worker, and the sidecar then exits with an error.
+async fn load_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = lpx::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child =
+        env.spawn_with_grace::<lpx::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    // Valid load first, so the limit must count from the last valid answer
+    // rather than from the sidecar's start.
+    let warmed_up = Instant::now() + Duration::from_secs(5);
+    bounded("GetLoad answered after warm-up", async {
+        while peer.load_served_at().is_none_or(|at| at < warmed_up) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    peer.lose_load();
+    tokio::time::timeout(Duration::from_secs(40), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("load loss did not withdraw the worker\n{}", child.logs()));
+    let withdrawn_after = peer
+        .load_served_at()
+        .expect("GetLoad served load before the loss")
+        .elapsed();
+    assert!(
+        withdrawn_after >= Duration::from_secs(29),
+        "withdrawn {withdrawn_after:?} after the last load, before the 30 s limit"
+    );
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(
+        child
+            .logs()
+            .contains("Routing load remained unavailable for 30 seconds"),
+        "{}",
+        child.logs()
+    );
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn vllm_engine_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        engine_loss_withdraws_worker_and_fails_the_process(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A vLLM engine lost after startup withdraws the worker, and the sidecar then
+/// exits with an error.
+async fn engine_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = vllm::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child =
+        env.spawn_with_grace::<vllm::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    peer.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("engine loss did not withdraw the worker\n{}", child.logs()));
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    // 1 is the engine-loss error; a forced shutdown (exit 911) would read 143.
+    assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
+    assert!(
+        child.logs().contains("vLLM engine lost"),
+        "{}",
+        child.logs()
+    );
 }
 
 async fn ready(router: &PrefillRouter) {
@@ -1096,6 +1355,54 @@ async fn sglang_changed_role_never_registers() {
     .expect("process scenario exceeded its overall deadline");
 }
 
+#[tokio::test]
+async fn sglang_engine_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        sglang_engine_loss_withdraws_worker_and_fails_the_process_scenario(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// An SGLang engine lost after startup withdraws the worker, and the sidecar
+/// then exits with an error.
+async fn sglang_engine_loss_withdraws_worker_and_fails_the_process_scenario() {
+    let env = Environment::new().await;
+    let mut peer = sglang::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child = env.spawn_with_grace::<sglang::Fixture>(
+        &peer.endpoint(),
+        DisaggregationMode::Aggregated,
+        5,
+    );
+    let router = env.ready("backend").await;
+    peer.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("engine loss did not withdraw the worker\n{}", child.logs()));
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    // 1 is the engine-loss error; a forced shutdown (exit 911) would read 143.
+    assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
+    assert!(
+        child.logs().contains("SGLang engine lost"),
+        "{}",
+        child.logs()
+    );
+}
+
 async fn served_model_alias_is_published<F: DiscoveryFixture>() {
     let env = Environment::new().await;
     let control = Controller::default();
@@ -1150,12 +1457,16 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
         },
     )
     .await;
+    // SGLang reports the parsers in GetModelInfo and the alias in GetServerInfo.
+    let tokenizer_path = tokenizer.to_str().unwrap().to_string();
     peer.override_discovery(
-        json!({"tokenizer_path": tokenizer}),
-        vec![json!({
-            "served_model_name": "public-alias",
-            "tool_call_parser": "hermes",
-            "reasoning_parser": "deepseek_r1",
+        Some(Box::new(move |info| {
+            info.tokenizer_path = tokenizer_path.clone();
+            info.tool_call_parser = Some("hermes".into());
+            info.reasoning_parser = Some("deepseek_r1".into());
+        })),
+        vec![Box::new(|info| {
+            info.served_model_name = "public-alias".into()
         })],
     );
     let mut child =
@@ -1183,16 +1494,7 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
     assert!(file.checksum_matches(&tokenizer_file));
     assert!(!file.checksum_matches(std::path::Path::new(&env.model).join("tokenizer.json")));
     assert!(card.prompt_formatter.is_some());
-    let handle = healthy::<sglang::Fixture>(&env, &router, &control, "distinct-metadata").await;
-    let native = handle.native_request().unwrap();
-    let traceparent = &native.trace_headers["traceparent"];
-    let fields = traceparent.split('-').collect::<Vec<_>>();
-    assert_eq!(fields.len(), 4);
-    assert_eq!(fields[0], "00");
-    assert_eq!(fields[1].len(), 32);
-    assert_eq!(fields[2].len(), 16);
-    assert!(u128::from_str_radix(fields[1], 16).unwrap() != 0);
-    assert!(u64::from_str_radix(fields[2], 16).unwrap() != 0);
+    healthy::<sglang::Fixture>(&env, &router, &control, "distinct-metadata").await;
     child.shutdown().await;
     env.withdrawn("backend", &router).await;
     peer.shutdown().await;
@@ -1253,8 +1555,11 @@ async fn changed_role_never_registers() {
     )
     .await;
     peer.override_discovery(
-        Value::Null,
-        vec![json!({}), json!({"disaggregation_mode": "prefill"})],
+        None,
+        vec![
+            Box::new(|_| {}),
+            Box::new(|info| info.disaggregation_mode = "prefill".into()),
+        ],
     );
     let mut child =
         env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
@@ -1268,6 +1573,345 @@ async fn changed_role_never_registers() {
         child.logs()
     );
     peer.shutdown().await;
+}
+
+/// Start the listeners of one SGLang node in `mode`.
+async fn node(
+    env: &Environment,
+    control: &Controller<sglang::Adapter>,
+    mode: DisaggregationMode,
+    node: sglang::NodeConfig,
+) -> Vec<sglang::Fixture> {
+    sglang::Fixture::start_node(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            disaggregation_mode: mode,
+            ..Default::default()
+        },
+        node,
+    )
+    .await
+}
+
+async fn shutdown_node(node: &mut [sglang::Fixture]) {
+    for listener in node {
+        listener.shutdown().await;
+    }
+}
+
+/// Wait until `env` has `count` model cards.
+async fn worker_cards(env: &Environment, count: usize) {
+    bounded("worker registrations", async {
+        loop {
+            if env.worker_cards().await.len() == count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+}
+
+/// A PD deployment: `prefill` nodes and one decode listener, a sidecar child
+/// per node, and a real round-robin PrefillRouter.
+struct PdDeployment {
+    env: Environment,
+    prefill_control: Controller<sglang::Adapter>,
+    decode_control: Controller<sglang::Adapter>,
+    prefill: Vec<Vec<sglang::Fixture>>,
+    decode: Vec<sglang::Fixture>,
+    children: Vec<crate::process::Process>,
+    prefill_router: Arc<crate::process::Router>,
+    decode_router: Arc<crate::process::Router>,
+    router: Arc<PrefillRouter>,
+}
+
+impl PdDeployment {
+    async fn start(nodes: Vec<sglang::NodeConfig>) -> Self {
+        let env = Environment::new().await;
+        let prefill_control = Controller::default();
+        let decode_control = Controller::default();
+        let mut prefill = Vec::new();
+        for config in nodes {
+            prefill.push(node(&env, &prefill_control, DisaggregationMode::Prefill, config).await);
+        }
+        let decode = node(
+            &env,
+            &decode_control,
+            DisaggregationMode::Decode,
+            Default::default(),
+        )
+        .await;
+        let mut children: Vec<_> = prefill
+            .iter()
+            .map(|listeners| {
+                env.spawn::<sglang::Fixture>(
+                    &listeners[0].endpoint(),
+                    DisaggregationMode::Prefill,
+                    5,
+                )
+            })
+            .collect();
+        children.push(env.spawn::<sglang::Fixture>(
+            &decode[0].endpoint(),
+            DisaggregationMode::Decode,
+            5,
+        ));
+        let prefill_router = env.ready("prefill").await;
+        let decode_router = env.ready("backend").await;
+        worker_cards(&env, prefill.len() + 1).await;
+        let (activation, activated) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new(
+            activated,
+            Arc::new(ModelManager::new()),
+            RouterMode::RoundRobin,
+            sglang::Fixture::KV_BLOCK_SIZE,
+            None,
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            env.model.clone(),
+            env.namespace.clone(),
+            LoadThresholdHandle::new(Default::default()),
+            env.runtime.primary_token(),
+        );
+        activation.send(env.endpoint("prefill")).unwrap();
+        Self {
+            env,
+            prefill_control,
+            decode_control,
+            prefill,
+            decode,
+            children,
+            prefill_router,
+            decode_router,
+            router,
+        }
+    }
+
+    /// The prefill workers by their first rank.
+    async fn prefill_workers(&self) -> std::collections::BTreeMap<u32, u64> {
+        self.env
+            .worker_cards()
+            .await
+            .into_iter()
+            .filter(|(_, card)| card.worker_type == Some(WorkerType::Prefill))
+            .map(|(worker_id, card)| (card.runtime_config.data_parallel_start_rank, worker_id))
+            .collect()
+    }
+
+    /// Hand one request through prefill to decode, and return what each leg
+    /// put on the wire. A prefill worker with several DP ranks registers no
+    /// bootstrap port, so the router dispatches decode only after the
+    /// prefill's first response; the prefill is not held.
+    async fn handoff(
+        &self,
+        id: &str,
+        routing: Option<RoutingHints>,
+    ) -> (
+        dynamo_sglang_sidecar::proto::GenerateRequest,
+        dynamo_sglang_sidecar::proto::GenerateRequest,
+    ) {
+        let prefill = self.prefill_control.request(id, RequestPlan::default());
+        let decode = self.decode_control.request(id, RequestPlan::default());
+        let mut request = self.env.request(id, 3);
+        request.routing = routing;
+        let stream = bounded(
+            "prefill/decode handoff",
+            self.router.generate(request, self.decode_router.clone()),
+        )
+        .await
+        .unwrap();
+        bounded("prefill native acceptance", prefill.wait(Event::Received)).await;
+        bounded("decode native acceptance", decode.wait(Event::Received)).await;
+        terminal(
+            outputs(stream).await,
+            &decode.tokens(),
+            4,
+            FinishReason::Length,
+        );
+        (
+            prefill.native_request().unwrap(),
+            decode.native_request().unwrap(),
+        )
+    }
+
+    async fn shutdown(mut self) {
+        for child in &mut self.children {
+            child.shutdown().await;
+        }
+        self.env.withdrawn("backend", &self.decode_router).await;
+        self.env.withdrawn("prefill", &self.prefill_router).await;
+        for listeners in &mut self.prefill {
+            shutdown_node(listeners).await;
+        }
+        shutdown_node(&mut self.decode).await;
+    }
+}
+
+/// `(bootstrap_port, bootstrap_room)` on the wire.
+fn port_and_room(wire: &dynamo_sglang_sidecar::proto::GenerateRequest) -> (i64, i64) {
+    use dynamo_sglang_sidecar::proto as pb;
+    let one = |value: Option<&pb::OptionalInt64OrList>| match value
+        .and_then(|value| value.value.as_ref())
+    {
+        Some(pb::optional_int64_or_list::Value::One(value)) => value.value.unwrap(),
+        other => panic!("expected one integer: {other:?}"),
+    };
+    (
+        one(wire.bootstrap_port.as_ref()),
+        one(wire.bootstrap_room.as_ref()),
+    )
+}
+
+/// The prefill ran on one listener, and both legs carry that rank's bootstrap
+/// port and a room congruent to it modulo `dp_size`; they name the rank only
+/// when the router named it. Every node here has two listeners.
+fn assert_named_rank(
+    deployment: &PdDeployment,
+    id: &str,
+    dp_size: u32,
+    router_named: bool,
+    prefill: &dynamo_sglang_sidecar::proto::GenerateRequest,
+    decode: &dynamo_sglang_sidecar::proto::GenerateRequest,
+) -> u32 {
+    let served: Vec<_> = (0..deployment.prefill.len())
+        .flat_map(|node| (0..2).map(move |offset| (node, offset)))
+        .filter(|&(node, offset)| {
+            deployment.prefill[node][offset]
+                .received()
+                .contains(&id.to_string())
+        })
+        .collect();
+    let [(node, offset)] = served[..] else {
+        panic!("{id} reached prefill listeners {served:?}");
+    };
+    let rank = (2 * node + offset) as u32;
+    let named = router_named.then_some(i64::from(rank));
+    assert_eq!(prefill.disagg_prefill_dp_rank, named, "{id}");
+    assert_eq!(decode.disagg_prefill_dp_rank, named, "{id}");
+    let (port, room) = port_and_room(prefill);
+    assert_eq!(port, 8998 + offset as i64, "{id}: the rank's own registry");
+    assert_eq!(port_and_room(decode), (port, room));
+    assert_eq!(room % i64::from(dp_size), i64::from(rank), "{id}");
+    assert_eq!(prefill.routed_dp_rank, None);
+    rank
+}
+
+// Built-in prefill routing picks a worker, not a rank. A worker with several
+// DP ranks registers no bootstrap port, so the router takes each prefill's
+// handoff, on either node; a pinned rank keeps its rank and port.
+#[tokio::test]
+async fn sglang_round_robin_prefill_hands_off_on_both_nodes() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let deployment = PdDeployment::start(vec![
+            sglang::NodeConfig {
+                dp_size: Some(4),
+                ..sglang::NodeConfig::listeners(2)
+            },
+            sglang::NodeConfig {
+                dp_rank: 2,
+                dp_size: Some(4),
+                ..sglang::NodeConfig::listeners(2)
+            },
+        ])
+        .await;
+        let workers = deployment.prefill_workers().await;
+        assert_eq!(workers.keys().copied().collect::<Vec<_>>(), [0, 2]);
+        for card in deployment.env.cards().await {
+            if card.worker_type == Some(WorkerType::Prefill) {
+                assert_eq!(
+                    card.runtime_config
+                        .disaggregated_endpoint
+                        .and_then(|endpoint| endpoint.bootstrap_port),
+                    None
+                );
+            }
+        }
+        ready(&deployment.router).await;
+        let mut ranks = std::collections::BTreeSet::new();
+        for index in 0..16 {
+            let id = format!("round-robin-{index}");
+            let (prefill, decode) = deployment.handoff(&id, None).await;
+            ranks.insert(assert_named_rank(
+                &deployment,
+                &id,
+                4,
+                false,
+                &prefill,
+                &decode,
+            ));
+            if ranks.len() == 4 {
+                break;
+            }
+        }
+        // Each node spreads unranked prefills over both of its ranks.
+        assert_eq!(ranks, std::collections::BTreeSet::from([0, 1, 2, 3]));
+        // `x-dynamo-prefill-instance-id` + `x-dynamo-prefill-dp-rank`.
+        let routing = RoutingHints {
+            prefill_worker_id: Some(workers[&2]),
+            prefill_dp_rank: Some(3),
+            ..Default::default()
+        };
+        let (prefill, decode) = deployment.handoff("pinned-3", Some(routing)).await;
+        assert_eq!(
+            assert_named_rank(&deployment, "pinned-3", 4, true, &prefill, &decode),
+            3
+        );
+        deployment.shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+// Losing one listener of a node withdraws the node's worker, and the sidecar
+// then exits with an error naming that listener's DP rank.
+#[tokio::test]
+async fn sglang_node_listener_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let mut listeners = node(
+            &env,
+            &Controller::default(),
+            DisaggregationMode::Aggregated,
+            sglang::NodeConfig::listeners(2),
+        )
+        .await;
+        // The grace keeps the withdrawn process up while the test observes it.
+        let mut child = env.spawn_with_grace::<sglang::Fixture>(
+            &listeners[0].endpoint(),
+            DisaggregationMode::Aggregated,
+            5,
+        );
+        let router = env.ready("backend").await;
+        listeners[1].shutdown().await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !env.registrations("backend").await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "listener loss did not withdraw the worker\n{}",
+                child.logs()
+            )
+        });
+        env.withdrawn("backend", &router).await;
+        assert!(child.is_running(), "withdrawal must precede process exit");
+        assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
+        assert!(
+            child
+                .logs()
+                .contains("SGLang engine lost: listener for DP rank 1 at "),
+            "{}",
+            child.logs()
+        );
+        listeners[0].shutdown().await;
+    })
+    .await
+    .expect("process scenario exceeded its overall deadline");
 }
 
 #[tokio::test]
@@ -1344,6 +1988,54 @@ async fn trtllm_native_errors_reach_http_and_recover() {
 }
 
 #[tokio::test]
+async fn trtllm_engine_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        liveness_loss_withdraws_worker_and_fails_the_process(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A TensorRT-LLM engine lost after startup ends its `liveness` watch, which
+/// withdraws the worker, and the sidecar then exits with an error.
+async fn liveness_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = support::trtllm::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child = env.spawn_with_grace::<support::trtllm::Fixture>(
+        &peer.endpoint(),
+        DisaggregationMode::Aggregated,
+        5,
+    );
+    let router = env.ready("backend").await;
+    peer.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("engine loss did not withdraw the worker\n{}", child.logs()));
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    // 1 is the engine-loss error; a forced shutdown (exit 911) would read 143.
+    assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
+    assert!(
+        child.logs().contains("TensorRT-LLM engine lost"),
+        "{}",
+        child.logs()
+    );
+}
+
+#[tokio::test]
 async fn lpx_native_errors_reach_http_and_recover() {
     tokio::time::timeout(
         Duration::from_secs(60),
@@ -1398,6 +2090,16 @@ async fn lpx_sigterm_withdraws_worker_and_releases_active_native_request() {
     tokio::time::timeout(
         Duration::from_secs(60),
         sigterm_withdraws_worker_and_releases_active_native_request::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_load_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        load_loss_withdraws_worker_and_fails_the_process(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");

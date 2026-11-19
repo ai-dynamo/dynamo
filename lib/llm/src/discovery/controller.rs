@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use dynamo_runtime::{
     discovery::{
-        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream,
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
         ModelCardInstanceId,
     },
     protocols::EndpointId,
@@ -149,7 +149,10 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 
     fn discard_prepared(&self, prepared: Self::Prepared);
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
+    /// Lists the model cards for a reconciliation snapshot. `query` is the namespace filter's
+    /// [`NamespaceFilter::model_query`], so an exact filter lists only its namespace.
+    async fn list_instances(&self, query: DiscoveryQuery)
+    -> anyhow::Result<Vec<DiscoveryInstance>>;
 }
 
 #[derive(Clone)]
@@ -357,7 +360,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     }
                 }
                 _ = reconciliation_interval.tick(), if self.reconciliations.is_empty() => {
-                    self.start_reconciliation();
+                    self.start_reconciliation(namespace_filter.model_query());
                 }
                 result = self.reconciliations.join_next(), if !self.reconciliations.is_empty() => {
                     match result {
@@ -1149,13 +1152,14 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         while self.reconciliations.join_next().await.is_some() {}
     }
 
-    fn start_reconciliation(&mut self) {
+    /// Lists `query` in the background for a reconciliation snapshot at the current revision.
+    fn start_reconciliation(&mut self, query: DiscoveryQuery) {
         let host = self.host.clone();
         let revision = self.revision;
         self.reconciliations.spawn(async move {
             ReconciliationResult {
                 revision,
-                instances: host.list_instances().await,
+                instances: host.list_instances(query).await,
             }
         });
     }
@@ -1596,7 +1600,10 @@ mod tests {
             self.discarded.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        async fn list_instances(
+            &self,
+            _query: DiscoveryQuery,
+        ) -> anyhow::Result<Vec<DiscoveryInstance>> {
             Ok(Vec::new())
         }
     }
@@ -2025,6 +2032,55 @@ mod tests {
         controller.apply_removed(&peer.key);
         assert_eq!(*admitted.borrow(), vec![1]);
         assert!(controller.apply_added(legacy));
+    }
+
+    #[tokio::test]
+    async fn systemone_serial_cohort_excludes_unsafe_workers_at_same_endpoint() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+        };
+
+        fn worker(id: u64, speculative: bool) -> DesiredInstance {
+            let mut desired = instance(id, "same");
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.source_path = Some("same".to_string());
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = Some(1);
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_GENERATE_CAPABILITY.to_string(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_SYSTEMONE_SERIAL_V1.to_string(), true.into());
+            if speculative {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            }
+            desired.mdc_checksum = card.mdcsum().to_string();
+            desired.card = card;
+            desired
+        }
+
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let serial = worker(1, false);
+        controller.apply_added(serial.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let unsafe_worker = worker(2, true);
+        assert_eq!(unsafe_worker.endpoint_id, serial.endpoint_id);
+        controller.apply_added(unsafe_worker);
+        let compatible = worker(3, false);
+        controller.apply_added(compatible.clone());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([serial.key, compatible.key])
+        );
+        assert_eq!(*host.admissions.lock().unwrap()[0].borrow(), vec![1, 3]);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

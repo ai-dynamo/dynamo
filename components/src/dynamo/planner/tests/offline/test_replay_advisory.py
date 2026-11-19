@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
+    "aisim.replay",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 

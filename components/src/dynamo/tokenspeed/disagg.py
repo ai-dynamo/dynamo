@@ -6,15 +6,13 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import secrets
 import socket
+from collections.abc import Mapping
 from typing import Any
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import InvalidArgument
-
-BOOTSTRAP_HOST_ENV = "DYN_TOKENSPEED_BOOTSTRAP_HOST"
 
 
 def resolve_disaggregation_mode(server_args: Any) -> DisaggregationMode:
@@ -27,24 +25,7 @@ def resolve_disaggregation_mode(server_args: Any) -> DisaggregationMode:
 
 
 def attention_dp_size(server_args: Any) -> int:
-    mapping = getattr(server_args, "mapping", None)
-    attention = getattr(mapping, "attn", None)
-    return int(
-        getattr(attention, "dp_size", None)
-        or getattr(server_args, "data_parallel_size", None)
-        or getattr(server_args, "dp_size", None)
-        or 1
-    )
-
-
-def cache_block_size(server_args: Any) -> int | None:
-    # TokenSpeed renamed block_size to prefix_granularity when physical pages
-    # and reusable-prefix identity became separate concepts. Router blocks track
-    # the prefix identity carried by KV events, not physical allocation pages.
-    value = getattr(server_args, "prefix_granularity", None)
-    if value is None:
-        value = getattr(server_args, "block_size", None)
-    return int(value) if value is not None else None
+    return int(server_args.mapping.attn.dp_size)
 
 
 def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) -> None:
@@ -55,25 +36,15 @@ def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) ->
         != "mooncake"
     ):
         raise ValueError("Dynamo TokenSpeed disaggregation requires Mooncake")
-    if attention_dp_size(server_args) != 1:
-        # TokenSpeed assigns P/D requests by bootstrap_room modulo DP size.
-        # Dynamo's selected cache-owning DP rank must not be silently ignored.
-        raise ValueError(
-            "Dynamo TokenSpeed disaggregation requires attention DP=1; "
-            "use independent workers for multiple prefill/decode replicas"
-        )
-    if (cache_block_size(server_args) or 0) <= 0:
-        raise ValueError(
-            "TokenSpeed disaggregation requires a positive --prefix-granularity (--block-size)"
-        )
 
 
-def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
-    """Advertise a peer-reachable host; the environment opts into single-host use."""
+def runtime_disaggregated_endpoint(
+    server_args: Any, explicit_host: str | None = None
+) -> tuple[str, int]:
+    """Advertise a peer-reachable host; --bootstrap-host opts into single-host use."""
     port = getattr(server_args, "disaggregation_bootstrap_port", None)
     if port is None or not 0 < int(port) < 65536:
         raise ValueError("TokenSpeed prefill requires a valid bootstrap port")
-    explicit_host = os.environ.get(BOOTSTRAP_HOST_ENV)
     host = explicit_host or getattr(server_args, "host", None)
     try:
         address = ipaddress.ip_address(host.strip("[]")) if host else None
@@ -93,22 +64,24 @@ def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
             host = socket.gethostbyname(socket.gethostname())
         except socket.gaierror as exc:
             raise ValueError(
-                f"Cannot determine TokenSpeed bootstrap host; set {BOOTSTRAP_HOST_ENV} "
+                "Cannot determine TokenSpeed bootstrap host; set --bootstrap-host "
                 "to an address reachable by decode workers"
             ) from exc
         address = ipaddress.ip_address(host)
         if address.is_loopback or address.is_unspecified:
             raise ValueError(
                 "TokenSpeed bootstrap host resolves to a local-only address; "
-                f"set {BOOTSTRAP_HOST_ENV} to an address reachable by decode workers"
+                "set --bootstrap-host to an address reachable by decode workers"
             )
     return str(host), int(port)
 
 
 def bootstrap_kwargs(
-    request: dict[str, Any],
+    request: Mapping[str, Any],
     mode: DisaggregationMode,
     prefill_endpoint: tuple[str, int] | None = None,
+    dp_rank: int | None = None,
+    dp_size: int = 1,
 ) -> dict[str, Any]:
     """Validate the handoff, creating a room for synchronous prefill if needed."""
     if mode == DisaggregationMode.AGGREGATED:
@@ -119,8 +92,7 @@ def bootstrap_kwargs(
         info = {
             "bootstrap_host": prefill_host,
             "bootstrap_port": prefill_port,
-            # Match the router's signed-64-bit room range and attention DP=1.
-            "bootstrap_room": secrets.randbits(63),
+            "bootstrap_room": bootstrap_room(dp_rank, dp_size),
         }
     if not isinstance(info, dict):
         raise InvalidArgument(
@@ -142,3 +114,13 @@ def bootstrap_kwargs(
     ):
         raise InvalidArgument("Invalid TokenSpeed bootstrap host, port, or room")
     return {"bootstrap_host": host, "bootstrap_port": port, "bootstrap_room": room}
+
+
+def bootstrap_room(dp_rank: int | None = None, dp_size: int = 1) -> int:
+    """A random room in the router's signed-64-bit range. With a DP rank,
+    ``room % dp_size == dp_rank``: TokenSpeed runs a prefill request on that
+    residue, and decode finds its KV cache there."""
+    max_room = 2**63 - 1
+    if dp_rank is None or dp_size <= 1:
+        return secrets.randbits(63)
+    return secrets.randbelow((max_room - dp_rank) // dp_size + 1) * dp_size + dp_rank

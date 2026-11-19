@@ -53,6 +53,10 @@ class PoolRelayCliConfig:
     tuning: tuple[tuple[str, int], ...]
     sources_file: str | None = None
     connection_revision: str | None = None
+    global_discovery_url: str | None = None
+    routing_pool: str | None = None
+    routing_pool_region: str | None = None
+    routing_pool_frontends: tuple[str, ...] = ()
 
 
 class RelayShutdownWaiter(Protocol):
@@ -163,6 +167,22 @@ def parse_args(
     parser.add_argument("--expected-unique-blocks", type=_positive_int)
 
     parser.add_argument("--bind", help="Plaintext WAN gRPC listen address")
+    parser.add_argument(
+        "--global-discovery-url",
+        help="Global Discovery Service root to read Global Router replicas from",
+    )
+    parser.add_argument(
+        "--routing-pool",
+        help="Publish this DGD's state to Global Routers as <cluster>/<namespace>/<DGD>",
+    )
+    parser.add_argument(
+        "--routing-pool-region",
+        help="Region to register the routing pool in with Global Discovery",
+    )
+    parser.add_argument(
+        "--routing-pool-frontends",
+        help="Comma-separated HTTP(S) frontend URLs Global Routers send the routing pool's requests to",
+    )
 
     parsed = parser.parse_args(argv)
     cluster_id = _string_value(parsed.cluster_id, environment, "DYN_CLUSTER_ID")
@@ -275,6 +295,52 @@ def parse_args(
     if bind is not None and not bind.strip():
         parser.error("--bind must not be empty")
 
+    global_discovery_url = _string_value(
+        parsed.global_discovery_url, environment, "DYN_RELAY_GLOBAL_DISCOVERY_URL"
+    )
+    if global_discovery_url is not None and not global_discovery_url.strip():
+        parser.error("--global-discovery-url must not be empty")
+    routing_pool = _string_value(
+        parsed.routing_pool, environment, "DYN_RELAY_ROUTING_POOL"
+    )
+    if routing_pool is not None:
+        fields = routing_pool.split("/")
+        if len(fields) != 3 or any(
+            not field
+            or field.strip() != field
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in field)
+            for field in fields
+        ):
+            parser.error("--routing-pool must be <cluster>/<namespace>/<DGD>")
+        if fields[0] != cluster_id:
+            parser.error("--routing-pool cluster must match --cluster-id")
+        if global_discovery_url is None or bind is None:
+            parser.error("--routing-pool requires --global-discovery-url and --bind")
+    routing_pool_region = _string_value(
+        parsed.routing_pool_region, environment, "DYN_RELAY_ROUTING_POOL_REGION"
+    )
+    routing_pool_frontends_value = _string_value(
+        parsed.routing_pool_frontends, environment, "DYN_RELAY_ROUTING_POOL_FRONTENDS"
+    )
+    routing_pool_frontends = (
+        _csv_values(routing_pool_frontends_value, "--routing-pool-frontends", parser)
+        if routing_pool_frontends_value is not None
+        else ()
+    )
+    if routing_pool is None:
+        if routing_pool_region is not None or routing_pool_frontends:
+            parser.error(
+                "--routing-pool-region and --routing-pool-frontends require --routing-pool"
+            )
+    elif (
+        routing_pool_region is None
+        or not routing_pool_region
+        or routing_pool_region != routing_pool_region.strip()
+    ):
+        parser.error(
+            "--routing-pool requires a --routing-pool-region without surrounding whitespace"
+        )
+
     tuning: list[tuple[str, int]] = []
     for key in TUNING_KEYS:
         environment_name = f"DYN_RELAY_{key.upper()}"
@@ -304,6 +370,10 @@ def parse_args(
         tuning=tuple(tuning),
         sources_file=sources_file,
         connection_revision=connection_revision,
+        global_discovery_url=global_discovery_url,
+        routing_pool=routing_pool,
+        routing_pool_region=routing_pool_region,
+        routing_pool_frontends=routing_pool_frontends,
     )
 
 

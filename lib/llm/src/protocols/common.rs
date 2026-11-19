@@ -40,9 +40,9 @@ pub fn preprocessed_mm_identifier(modality: &str, raw_kwargs: &[u8]) -> String {
 /// Return the KV-event marker for a content-bound preprocessed-media identity.
 pub fn preprocessed_mm_routing_hash(modality: &str, raw_kwargs: &[u8]) -> String {
     let identifier = preprocessed_mm_identifier(modality, raw_kwargs);
-    let hash = dynamo_kv_router::protocols::hash_mm_identifier(&identifier)
+    let hash = dynamo_kv_hashing::multimodal::hash_mm_identifier(&identifier)
         .expect("content-derived multimodal identity is non-empty");
-    dynamo_kv_router::zmq_wire::mark_mm_hash_for_extra_key(hash)
+    dynamo_kv_hashing::multimodal::mark_mm_hash_for_extra_key(hash)
 }
 
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
@@ -56,6 +56,7 @@ pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Erro
 }
 
 pub mod extensions;
+mod guided_grammar;
 pub mod input_trigger;
 pub mod llm_backend;
 pub mod metadata_upload;
@@ -577,8 +578,9 @@ impl GuidedDecodingOptions {
         Ok(Some(instance))
     }
 
-    /// Validate that only one guided decoding option is set, and that
-    /// grammar nesting depth is bounded.
+    /// Validate that only one guided decoding option is set, that grammar
+    /// nesting depth is bounded, and that a grammar's `root` rule can produce
+    /// a finite string.
     ///
     /// `whitespace_pattern` and `backend` are deliberately absent from the count. Both
     /// modify how a constraint is applied rather than being a constraint themselves, so
@@ -641,6 +643,13 @@ impl GuidedDecodingOptions {
                     MAX_GRAMMAR_NESTING_DEPTH, max
                 )));
             }
+            if guided_grammar::root_cannot_terminate(grammar) {
+                return Err(invalid_argument_error(format!(
+                    "guided_grammar is invalid: rule `{}` cannot produce any finite string \
+                     (recursive rules with no terminal base case)",
+                    guided_grammar::ROOT_RULE
+                )));
+            }
         }
 
         Ok(())
@@ -666,6 +675,13 @@ pub struct OutputOptions {
     /// Omitted by older frontends; stop-token visibility is frontend-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_stop_trim: Option<bool>,
+
+    /// Keep the text of the model's own end-of-turn stop tokens (the hidden system/EOS
+    /// ids) in the decoded output while user stop strings and user stop token ids are
+    /// still trimmed. The frontend sets it for grammars whose parser must see the turn
+    /// terminator (Beam's `<|call|>` / `<|return|>`); it is not a request field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_model_stop_token_text: Option<bool>,
 
     /// Number of log probabilities to return per output token.
     /// Note that the implementation follows the OpenAI API: The return
@@ -1279,5 +1295,95 @@ mod tests {
         let result =
             GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None);
         assert!(result.is_ok());
+    }
+
+    fn validate_grammar(grammar: &str) -> Result<GuidedDecodingOptions> {
+        GuidedDecodingOptions::validated(
+            None,
+            None,
+            None,
+            Some(grammar.to_string()),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn assert_grammar_rejected(grammar: &str) {
+        let error = validate_grammar(grammar)
+            .expect_err("grammar whose root cannot terminate must be rejected");
+        let dynamo_error = error
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .expect("non-terminating guided grammar must remain typed for HTTP 400 mapping");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+        assert!(
+            dynamo_error.message().contains("guided_grammar"),
+            "unexpected message: {}",
+            dynamo_error.message()
+        );
+        assert!(dynamo_error.message().contains("`root`"));
+    }
+
+    // Engines accept these grammars but cannot complete any output for them.
+    #[test]
+    fn test_guided_grammar_without_base_case_rejected() {
+        for grammar in [
+            "root ::= root root",
+            "root ::= a\na ::= b\nb ::= a",
+            "root ::= (root)",
+            "root ::= root+ | (\"x\" root)",
+            "root ::= \"a\" item\nitem ::= item \"b\"",
+        ] {
+            assert_grammar_rejected(grammar);
+        }
+    }
+
+    #[test]
+    fn test_guided_grammar_with_base_case_accepted() {
+        for grammar in [
+            "root ::= \"a\"",
+            "root ::= \"a\" root | \"a\"",
+            "root ::= root \"a\" | \"a\"",
+            "root ::= 'yes' | 'no'",
+            "root ::= root*",
+            "root ::= \"\"",
+            "# a comment ::= root root\nroot ::= [a-z]+ (\",\" [0-9]{1,3})* ws? \"\\\"\" # trailing\nws ::= [ \\t\\n]*",
+            "root ::= item{0,2} \"x\"\nitem ::= item",
+            "root ::= \"a\"\nunused ::= unused unused",
+            "root ::= undefined_rule root | undefined_rule",
+            "item ::= item item",
+            "start: \"a\"",
+            "root ::= root (= \"lookahead\")",
+            "root ::= \"unterminated root root",
+        ] {
+            assert!(
+                validate_grammar(grammar).is_ok(),
+                "grammar should be accepted: {grammar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_guided_grammar_long_rule_chain() {
+        let rules = 5000;
+        let chain = (0..rules)
+            .map(|i| format!("r{i} ::= r{}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let grammar = format!("root ::= r0\n{chain}");
+
+        assert!(validate_grammar(&format!("{grammar}\nr{rules} ::= \"end\"")).is_ok());
+        assert_grammar_rejected(&format!("{grammar}\nr{rules} ::= r0"));
+    }
+
+    // The `]` inside each literal lowers the byte-level nesting count, so only the
+    // scanner's own group limit keeps this from overflowing the stack.
+    #[test]
+    fn test_guided_grammar_deep_groups_hidden_by_literals_accepted() {
+        let grammar = format!("root ::= {}", "(\"]\" ".repeat(100_000));
+        assert!(validate_grammar(&grammar).is_ok());
     }
 }

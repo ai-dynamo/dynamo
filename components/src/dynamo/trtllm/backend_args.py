@@ -195,13 +195,27 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_PUBLISH_METRICS",
             default=False,
             help=(
-                "Expose TensorRT-LLM iteration and request metrics on this "
-                "worker's Prometheus endpoint, and publish the Planner's "
-                "forward-pass metrics, which read the same iteration "
-                "statistics. This does not publish KV cache events; use "
-                "--publish-kv-events for that."
+                "Expose TensorRT-LLM iteration metrics on this worker's "
+                "Prometheus endpoint, and publish the Planner's forward-pass "
+                "metrics, which read the same iteration statistics. This does "
+                "not publish KV cache events; use --publish-kv-events for that. "
+                "Per-request metrics need --publish-per-request-metrics as well."
             ),
             dest="publish_metrics",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-per-request-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS",
+            default=False,
+            help=(
+                "With --publish-metrics, also collect TensorRT-LLM per-request "
+                "performance metrics (SamplingParams.return_perf_metrics) and "
+                "publish the per-request latency, token and KV-transfer metrics "
+                "built from them. Collecting them costs serving throughput, "
+                "most with long prompts."
+            ),
+            dest="publish_per_request_metrics",
         )
         add_argument(
             g,
@@ -512,6 +526,7 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_kv_events: bool
     publish_metrics: bool
+    publish_per_request_metrics: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
@@ -576,3 +591,8 @@ class DynamoTrtllmConfig(ConfigBase):
             self.enable_multimodal = True
         if not self.served_model_name:
             self.served_model_name = None
+        if self.publish_per_request_metrics and not self.publish_metrics:
+            raise ValueError(
+                "--publish-per-request-metrics requires --publish-metrics, which "
+                "exposes the Prometheus endpoint they are published on."
+            )

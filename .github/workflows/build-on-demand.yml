@@ -150,7 +150,7 @@ jobs:
     needs: [init]
     if: inputs.build_operator
     name: Operator
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     env:
       ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
       ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}

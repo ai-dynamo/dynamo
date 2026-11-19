@@ -47,6 +47,13 @@ has answered, and a request the gate admits while every sequence is busy waits
 inside the engine without a response, holding both, until the test closes a
 stream ahead of it.
 
+Neither engine limit is set by default, which leaves the gate disabled: every
+request passes straight to the engine, uncounted, and a positive queue limit
+alone fails the worker's startup. So every scenario that exercises the gate sets
+an engine limit, an engine limit it leaves unset is unlimited yet still has its
+occupancy reported, and one scenario checks the disabled gate against the
+engine's own gauges.
+
 A caller that disconnects while its request is queued is a separate question
 from the gate's own cancellation handling, which its unit tests cover: whether
 the cancellation reaches the queued request at all. On the default path the
@@ -74,7 +81,10 @@ import asyncio
 import contextlib
 import functools
 import logging
+import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine, Iterator
@@ -83,6 +93,7 @@ import aiohttp
 import pytest
 
 from tests.router.helper import (
+    generate_random_suffix,
     managed_runtime,
     poll_for_worker_instances,
     wait_for_frontend_ready,
@@ -487,6 +498,17 @@ class Gate:
                 occupancy[engine] = occupancy.get(engine, 0.0) + value
         return occupancy
 
+    async def await_engine_occupancy(self, expected: dict[str, int], what: str) -> None:
+        """Poll until the mocker holds exactly `expected` requests, running or
+        waiting, on each engine rank."""
+        deadline = time.monotonic() + SETTLE_TIMEOUT_S
+        while (observed := await self.engine_occupancy()) != expected:
+            assert time.monotonic() < deadline, (
+                f"timed out waiting for {what}: the engine holds {observed}, "
+                f"expected {expected}"
+            )
+            await asyncio.sleep(0.05)
+
     async def await_engine_agreement(self, what: str) -> None:
         """Poll until the mocker serves on each rank exactly the requests the
         gate admitted under that rank: the gate's rank is the engine's rank."""
@@ -776,9 +798,10 @@ def test_waiting_limit_holds_requests_until_a_first_response(
     the first response of the one ahead of it, which keeps running and keeps
     its request capacity.
 
-    The request limit is set far above use, so the waiting limit alone is what
-    holds the queue back. The refusal leaves the worker marked overloaded and
-    never reported down, and it serves new work once the lease ends.
+    The request limit is unset, so unlimited, yet the gate still reports its
+    occupancy: the waiting limit alone is what holds the queue back. The
+    refusal leaves the worker marked overloaded and never reported down, and it
+    serves new work once the lease ends.
     """
     queue_limit = WAITING_SCENARIO_QUEUE_LIMIT
 
@@ -885,7 +908,6 @@ def test_waiting_limit_holds_requests_until_a_first_response(
         )
 
     settings = {
-        ENGINE_REQUEST_LIMIT_ENV: 100,
         ENGINE_REQUEST_WAITING_LIMIT_ENV: 1,
         REQUEST_QUEUE_LIMIT_ENV: queue_limit,
     }
@@ -910,8 +932,8 @@ def test_request_limit_holds_requests_until_one_finishes(
 ):
     """Requests that have answered keep their request capacity until they
     finish. The engine has a sequence for every admitted request and the
-    waiting limit follows it, so the request limit alone holds the next one
-    back, and only a stream finishing lets it in."""
+    waiting limit is unset, so unlimited: the request limit alone holds the
+    next one back, and only a stream finishing lets it in."""
 
     async def scenario(
         gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
@@ -962,55 +984,119 @@ def test_request_limit_holds_requests_until_one_finishes(
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
 
 
-######################### ENGINE AND QUEUE DEFAULTS #########################
+######################### DISABLED BY DEFAULT #########################
 
 
 @pytest.mark.timeout(60)
-def test_engine_defaults_follow_capacity_and_queue_default_allows_a_backlog(
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {REQUEST_QUEUE_LIMIT_ENV: 0}],
+    ids=["defaults", "zero-queue-limit"],
+)
+def test_unset_engine_limits_pass_every_request_to_the_engine(
+    request,
+    runtime_services_session,
+    predownload_tokenizers,
+    request_plane,
+    dynamo_dynamic_ports,
+    settings,
+):
+    """With neither engine limit set, by default or with a queue limit of zero,
+    the gate is disabled and every request passes straight to the engine.
+
+    The engine runs one sequence. With one stream running, three more streams
+    all reach the engine, which holds them in its own queue, while the gate
+    counts, queues and refuses none of them and the frontend never marks the
+    worker overloaded. Freeing the engine's sequence lets one of them answer.
+    """
+    followers = 3
+
+    async def scenario(
+        gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
+    ) -> None:
+        runner = await _hold(session, url)
+        await gate.await_engine_occupancy({"0": 1}, "the running stream")
+        waiting = [asyncio.create_task(_hold(session, url)) for _ in range(followers)]
+        await gate.await_engine_occupancy(
+            {"0": 1 + followers}, "every stream to reach the engine"
+        )
+        assert not any(
+            task.done() for task in waiting
+        ), "only the running stream has the engine's sequence"
+        assert await gate.totals() == (0, 0, 0)
+        for rank in gate.ranks:
+            await gate.assert_counters("every stream reaching the engine", rank)
+
+        runner.close()
+        done, pending = await asyncio.wait(
+            waiting, timeout=OUTCOME_TIMEOUT_S, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert len(done) == 1, f"one stream answers on the freed sequence: {done}"
+        done.pop().result().close()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await gate.await_engine_occupancy({"0": 0}, "the engine to drain")
+        for rank in gate.ranks:
+            await gate.assert_counters("the engine draining", rank)
+        assert not _routing_events(
+            gate, "worker_overloaded"
+        ), "a disabled gate must never refuse work"
+
+    with _deployment(
+        request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
+    ) as deployment:
+        _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
+
+
+@pytest.mark.timeout(90)
+def test_a_queue_limit_without_an_engine_limit_fails_worker_startup(
     request,
     runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
 ):
-    """Engine defaults follow the reported capacity of one sequence. The
-    default queue accepts three requests, beyond twice that capacity, and
-    drains in FIFO order. Rust unit tests verify its exact size of 40000."""
-
-    async def scenario(
-        gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
-    ) -> None:
-        runner = await _start_running(gate, session, url, (1, 0, 0), "running")
-        queued = [
-            await _stage_waiting(
-                gate, session, url, _hold, (1, 0, index + 1), f"queued-{index}"
-            )
-            for index in range(3)
-        ]
-        await gate.assert_counters(
-            "the default queue accepts more than twice the engine capacity",
-            received=4,
-            direct=1,
-        )
-
-        released = runner
-        for index, task in enumerate(queued):
-            released.close()
-            released = await _result(task, f"queued-{index}")
-            await gate.await_counter("queue", index + 1, f"queued-{index} to enter")
-            await gate.await_occupancy(
-                1, 0, 2 - index, f"queued-{index} to answer in FIFO order"
-            )
-        released.close()
-        await gate.await_idle()
-        await gate.assert_counters(
-            "the queue has drained", received=4, direct=1, queue=3
-        )
-
-    with _deployment(
-        request, dynamo_dynamic_ports, request_plane, {}, max_num_seqs=1
-    ) as deployment:
-        _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
+    """A positive queue limit with neither engine limit set is a configuration
+    error: the worker never starts serving, and the mocker exits nonzero with
+    an error naming the queue setting and how to set an engine limit."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ADMISSION_SETTINGS
+    }
+    env.update(
+        {
+            REQUEST_QUEUE_LIMIT_ENV: "4",
+            "DYN_REQUEST_PLANE": request_plane,
+            # The runtime binds its system port before the gate reads its
+            # configuration, so it is this test's own, as in every scenario.
+            "DYN_SYSTEM_PORT": str(dynamo_dynamic_ports.system_ports[0]),
+        }
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "dynamo.mocker",
+        "--model-path",
+        MODEL_NAME,
+        "--endpoint",
+        f"dyn://test-namespace-{generate_random_suffix()}.mocker.generate",
+        "--discovery-backend",
+        "etcd",
+        "--num-workers",
+        "1",
+    ]
+    result = subprocess.run(
+        command, env=env, capture_output=True, text=True, timeout=60
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert (
+        f"Backend admission request queue limit {REQUEST_QUEUE_LIMIT_ENV}=4 requires "
+        f"an engine limit: set {ENGINE_REQUEST_LIMIT_ENV} (or --engine-request-limit) "
+        f"or {ENGINE_REQUEST_WAITING_LIMIT_ENV}, or set {REQUEST_QUEUE_LIMIT_ENV} to 0"
+    ) in output, output
 
 
 ######################### ALIASES #########################
@@ -1528,8 +1614,11 @@ def test_a_failed_worker_is_still_reported_down(
     for the worker — the record no worker refusing for capacity may ever
     produce."""
 
+    # An engine limit enables the gate, whose occupancy shows the stream
+    # admitted.
+    settings = {ENGINE_REQUEST_LIMIT_ENV: 1}
     with _deployment(
-        request, dynamo_dynamic_ports, request_plane, {}, max_num_seqs=1
+        request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
     ) as deployment:
 
         async def main() -> None:

@@ -433,8 +433,16 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                 }
             }
             dynamo_protocols::types::Stop::StringArray(sequences) => {
+                // Treat `"stop": []` as no client-supplied stop strings, matching
+                // stock vLLM and stock SGLang. OpenAI's published schema specifies
+                // one to four items for the array form.
+                // `get_stop()` maps the empty list to `None`.
+                // OpenAI Chat Completions schema https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                // OpenAI Completions schema https://developers.openai.com/api/reference/resources/completions/methods/create
+                // Stock vLLM sampling parameters https://github.com/vllm-project/vllm/blob/62d4bc3c7e33b1b6c906e233e6af2d3506c482ca/vllm/sampling_params.py#L581-L584
+                // Stock SGLang sampling parameters https://github.com/sgl-project/sglang/blob/297e54fd105e974cdf401e5b4d20253a22c16f90/python/sglang/srt/sampling/sampling_params.py#L331-L352
                 if sequences.is_empty() {
-                    anyhow::bail!("Stop sequences array cannot be empty");
+                    return Ok(());
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
                     return Err(crate::protocols::common::invalid_argument_error(format!(
@@ -471,9 +479,7 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
 //
 
 /// Validates messages array
-pub fn validate_messages(
-    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
-) -> Result<(), anyhow::Error> {
+pub fn validate_messages(messages: &[ChatCompletionRequestMessage]) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
     }
@@ -481,7 +487,7 @@ pub fn validate_messages(
     // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
-        if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
+        if let ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
             for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
@@ -505,25 +511,6 @@ fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow:
         .map_err(|error| anyhow::anyhow!("{field} must be a valid JSON object string: {error}"))?;
     if !parsed.is_object() {
         anyhow::bail!("{field} must be a valid JSON object string");
-    }
-    Ok(())
-}
-
-/// Rejects custom tools anywhere in a chat request: request tools, a custom named
-/// choice, custom calls in assistant history, and tools declared in system messages.
-/// dynamo-protocols parses these since 8.3, but they used to fail to parse and
-/// Dynamo's templates and parsers still serve only function tools.
-pub fn validate_no_custom_tools(
-    request: &CreateChatCompletionRequest,
-) -> Result<(), anyhow::Error> {
-    // System-message tools stay raw JSON until `validated_effective_tools` parses them.
-    let is_custom = |tool: &Value| tool.get("type").and_then(Value::as_str) == Some("custom");
-    let system_custom = request.messages.iter().any(|message| {
-        matches!(message, ChatCompletionRequestMessage::System(system)
-            if system.tools.iter().flatten().any(is_custom))
-    });
-    if request.has_custom_tools() || system_custom {
-        anyhow::bail!("Custom tools are not supported; use function tools");
     }
     Ok(())
 }
@@ -611,7 +598,9 @@ fn normalize_dynamic_system_tool(
     };
 
     Ok(ChatCompletionTool {
+        custom: None,
         r#type: ChatCompletionToolType::Function,
+        defer_loading: None,
         function: FunctionObject {
             name: name.to_string(),
             description,
@@ -619,8 +608,6 @@ fn normalize_dynamic_system_tool(
             strict,
             defer_loading: None,
         },
-        custom: None,
-        defer_loading: None,
     })
 }
 
@@ -1022,6 +1009,39 @@ mod tests {
     use crate::engines::ValidateRequest;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
 
+    #[test]
+    fn custom_message_content_preserves_model_validation() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let custom = json!({"type":"custom", "kind":"sensor", "fields":{"payload":"value"}});
+        for message in [
+            json!({"role":"user", "content":[custom.clone()]}),
+            json!({"role":"tool", "tool_call_id":"call_1", "content":[custom]}),
+        ] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[message]
+            }))
+            .unwrap();
+            request.validate().unwrap();
+            request.inner.model.clear();
+            assert!(request.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn text_message_content_remains_valid() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model":"test", "messages":[
+                {"role":"user", "content":[{"type":"text", "text":"question"}]},
+                {"role":"tool", "tool_call_id":"call_1", "content":[{"type":"text", "text":"result"}]}
+            ]
+        }))
+        .unwrap();
+        request.validate().unwrap();
+    }
+
     /// Echoing client-controlled keys can duplicate a whole request body while
     /// building HTTP errors, so oversized keys must also yield a fixed diagnostic.
     #[test]
@@ -1372,6 +1392,21 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_empty_array_as_no_stop() {
+        validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![]))).unwrap();
+        // An empty string, alone or as an element, is still rejected.
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::String(String::new()))).is_err()
+        );
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![
+                String::new()
+            ])))
+            .is_err()
+        );
     }
 
     #[test]
