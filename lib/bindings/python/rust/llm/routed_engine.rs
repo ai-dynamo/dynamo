@@ -13,6 +13,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
 use dynamo_llm::protocols::common::extensions::SESSION_AFFINITY_CONTEXT_KEY;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::timing::RequestTracker;
 use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_distributed};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
@@ -32,43 +33,29 @@ impl RoutedEngine {
     }
 }
 
-/// The `PreprocessedRequest` a Python engine passes to [`RoutedEngine::generate`].
-///
-/// `token_ids` and `extra_args` can each hold a prompt-sized list of ints (a chat engine's
-/// capture plan, a multimodal prompt's expanded ids), and pythonize costs tens of ns per
-/// int on the event loop's thread. [`fast_preprocessed_request`] reads those two fields
-/// directly; any request it declines takes the full pythonize conversion, so results and
-/// errors for it are unchanged.
-fn preprocessed_request_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PreprocessedRequest> {
-    if let Some(request) = fast_preprocessed_request(obj) {
-        return Ok(request);
-    }
-    depythonize(obj).map_err(to_pyerr)
-}
-
-/// An exact `dict` whose `token_ids` is an exact list of ints and whose `extra_args` is
-/// absent, `None` or plain JSON-shaped data, with those two fields read directly and the
-/// rest by pythonize. `None` for anything else, or if the rest fails to convert.
+/// The request with `token_ids` and `extra_args` read by [`py_convert`] and the rest by
+/// pythonize; `None` unless it is an exact `dict` whose two fields both read.
 fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedRequest> {
+    let py = obj.py();
+    let token_ids_key = pyo3::intern!(py, "token_ids");
+    let extra_args_key = pyo3::intern!(py, "extra_args");
     let dict = obj.downcast_exact::<PyDict>().ok()?;
-    let token_ids = py_convert::read_exact_u32_list(&dict.get_item("token_ids").ok()??)?;
-    let extra_args = match dict.get_item("extra_args").ok()? {
+    let token_ids = py_convert::read_exact_u32_list(&dict.get_item(token_ids_key).ok()??)?;
+    let extra_args = match dict.get_item(extra_args_key).ok()? {
         Some(value) if !value.is_none() => Some(py_convert::exact_json_value(&value)?),
         _ => None,
     };
     // `token_ids` is required, so the copy keeps an empty one for pythonize to read.
     let rest = dict.copy().ok()?;
-    rest.set_item("token_ids", PyList::empty(obj.py())).ok()?;
-    rest.set_item("extra_args", obj.py().None()).ok()?;
+    rest.set_item(token_ids_key, PyList::empty(py)).ok()?;
+    rest.set_item(extra_args_key, py.None()).ok()?;
     let mut request: PreprocessedRequest = depythonize(rest.as_any()).ok()?;
     request.token_ids = Arc::new(token_ids);
     request.extra_args = extra_args;
     Some(request)
 }
 
-/// Test hook: the request [`RoutedEngine::generate`] builds from `preprocessed`, pythonized
-/// back. With `fast_path`, only the direct read (`None` when it declines); without, full
-/// pythonize. Tests compare the two.
+/// Test hook: the fast path's request (`None` if it declines) or pythonize's, pythonized back.
 #[pyfunction]
 #[pyo3(signature = (preprocessed, fast_path))]
 pub fn _convert_preprocessed_request(
@@ -105,7 +92,12 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request = preprocessed_request_from_py(preprocessed.bind(py))?;
+        let preprocessed = preprocessed.bind(py);
+        let mut request = fast_preprocessed_request(preprocessed)
+            .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
@@ -174,7 +166,7 @@ impl RoutedEngine {
                     }
                 });
 
-                Ok(crate::AsyncResponseStream::new(rx, true))
+                Ok(crate::AsyncResponseStream::routed_engine(rx))
             }
             .instrument(dispatch_span),
         )
