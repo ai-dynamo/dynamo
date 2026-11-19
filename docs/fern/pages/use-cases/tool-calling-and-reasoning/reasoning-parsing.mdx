@@ -350,6 +350,28 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         JSON and tool constraints still apply in the answer phase. Plain chat
         without constraints or a thinking budget does not request this gate.
 
+        With the GLM profile (`glm47` tool parsing or `glm45` reasoning parsing),
+        Dynamo renders Chat Completions `developer` messages as `system` messages,
+        preserving their content and position. Responses developer input is also
+        converted to system messages.
+
+        For this GLM profile on the TensorRT-LLM OpenEngine sidecar, a new assistant
+        generation with thinking disabled requires a rendered prompt ending in
+        `</think>`. A template that leaves reasoning open triggers HTTP 400 before
+        generation.
+
+        ```text
+        The selected GLM chat template does not render a closed reasoning prefill for thinking-off. Remove the reasoning-off setting or use a template that supports it.
+        ```
+
+        This check covers `thinking: {"type":"disabled"}` and
+        `reasoning_effort: "none"`, plus the normalized `thinking`, `enable_thinking`, and
+        `thinking_mode` template controls. Continuations, requests without a new
+        generation prompt, and token-ID inputs without a rendered prompt are
+        exempt. Deployments without the capability keep their existing admission
+        behavior. Reasoning parsing remains active when thinking is disabled;
+        emitted reasoning is not relabeled as answer text.
+
         TensorRT-LLM also supports Dynamo's reasoning/content separation. The
         native grammar-gate behavior described here is specific to SGLang and
         vLLM; it does not configure TensorRT-LLM guided decoding.

@@ -4,7 +4,11 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{EngineConfig, LlmRegistration};
-use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
+use dynamo_llm::local_model::runtime_config::{
+    REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY, REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+    RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
+    VISIBLE_STOP_STRINGS_CAPABILITY,
+};
 
 /// Model identity and registration metadata for the TensorRT-LLM sidecar.
 #[derive(Clone, Debug, Default)]
@@ -41,6 +45,15 @@ impl ConfiguredModel {
                 TOKEN_BUDGET_RUNTIME_KEY.to_string(),
                 serde_json::to_value(token_budget).expect("token budget is serializable"),
             );
+        }
+
+        for capability in [
+            VISIBLE_STOP_STRINGS_CAPABILITY,
+            REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+            REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
+            RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY,
+        ] {
+            runtime_data.insert(capability.to_string(), serde_json::Value::Bool(true));
         }
 
         EngineConfig {

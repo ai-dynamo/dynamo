@@ -337,6 +337,10 @@ impl OpenAISamplingOptionsProvider for UnifiedRequest {
 }
 
 impl CommonExtProvider for UnifiedRequest {
+    fn get_parallel_tool_calls(&self) -> Option<bool> {
+        self.inner.inner.parallel_tool_calls
+    }
+
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.inner.common)
     }

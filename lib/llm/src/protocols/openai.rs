@@ -282,6 +282,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             min_tokens,
             stop,
             stop_token_ids,
+            stop_visible: None,
             stop_token_ids_visible: None,
             stop_token_ids_hidden: None,
             ignore_eos,
@@ -462,6 +463,13 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub reasoning_disabled: bool,
 
+    /// Whether the selected deployment rejects incomplete native tool calls.
+    #[serde(default)]
+    pub reject_incomplete_native_tool_calls: bool,
+
+    #[serde(default)]
+    pub responses_context_overflow_events: bool,
+
     /// JSON response formatting is a content contract, separate from guided tool JSON.
     #[serde(default)]
     pub structured_response: bool,
@@ -533,6 +541,8 @@ impl ParsingOptions {
             tool_call_parser,
             reasoning_parser,
             reasoning_disabled: false,
+            reject_incomplete_native_tool_calls: false,
+            responses_context_overflow_events: false,
             structured_response: false,
             default_thinking_mode: None,
             tool_choice: None,
@@ -545,6 +555,39 @@ impl ParsingOptions {
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
         }
+    }
+
+    pub(crate) fn from_runtime_config(
+        config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+    ) -> Self {
+        use crate::local_model::runtime_config::RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY;
+        use crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY;
+
+        Self {
+            reject_incomplete_native_tool_calls: config.reject_incomplete_native_tool_calls(),
+            responses_context_overflow_events: config
+                .runtime_data
+                .get(RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY)
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+            default_thinking_mode: config
+                .runtime_data
+                .get(DEFAULT_THINKING_MODE_RUNTIME_KEY)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            structural_tag: config.structural_tag.clone(),
+            exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
+            ..Self::new(
+                config.tool_call_parser.clone(),
+                config.reasoning_parser.clone(),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    fn with_reject_incomplete_native_tool_calls(mut self, enabled: bool) -> Self {
+        self.reject_incomplete_native_tool_calls = enabled;
+        self
     }
 
     pub fn with_guided_tool_constraint(mut self, constraint: GuidedToolConstraint) -> Self {

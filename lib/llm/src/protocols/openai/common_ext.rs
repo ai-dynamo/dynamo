@@ -181,6 +181,11 @@ pub trait CommonExtProvider {
         None
     }
 
+    /// Explicit single-call generation constraint, when the endpoint has tools.
+    fn get_parallel_tool_calls(&self) -> Option<bool> {
+        None
+    }
+
     /// Whether to continue the last message instead of starting a new turn.
     fn get_continue_final_message(&self) -> Option<bool> {
         self.common_ext()

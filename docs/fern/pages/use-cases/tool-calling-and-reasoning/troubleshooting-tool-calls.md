@@ -187,6 +187,19 @@ For MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `gui
 
 Forced choices can install guided JSON or family-native structural tags. A mode requiring the V1 jail cannot silently fall back under explicit V2; unsupported combinations are rejected. See [Structural Tags](structural-tag.md) for builder availability and backend activation.
 
+## Incomplete GLM Tool Calls
+
+On the TensorRT-LLM OpenEngine sidecar, an incomplete native GLM tool call at a
+backend `stop` or `tool_calls` finish or unexpected stream end triggers a
+`BackendProtocol` failure. Both unified/V2 and legacy/V1 GLM parsing enforce
+this behavior.
+
+Already-parsed text is emitted before a streaming failure; a non-streaming
+request fails instead of returning a partial result. A backend `length` finish
+retains its token-limit behavior. Deployments without this capability retain
+their existing length/suppression behavior. Check the raw generated tool-call
+envelope and backend finish reason when investigating this error.
+
 ## Known limitations and follow-up
 
 The pinned V2 release includes the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and Kimi tool-ID and call-boundary fixes from [#332](https://github.com/ai-dynamo/frontend-crates/pull/332).
