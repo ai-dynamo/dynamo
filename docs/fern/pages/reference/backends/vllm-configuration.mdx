@@ -53,6 +53,12 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 </Tabs>
 </Card>
 
+## Generation limits
+
+For `/v1/completions`, an omitted or `null` `max_tokens` uses the model's generation limit or vLLM's sampling default (16 tokens when the model has no limit). A finite limit is bounded by the remaining context. Set `--override-generation-config '{"max_new_tokens": 64}'` on the vLLM worker to configure the model's default limit.
+
+Chat completions and Responses use the remaining context when the client and model specify no output limit. Explicit client limits take precedence over defaults and remain subject to context validation.
+
 ## Native KV event configuration
 
 `--kv-events-config` and `--enable-prefix-caching` are native vLLM engine arguments rather than `DynamoVllmConfig` fields, but they determine whether a worker publishes the cache events used by event-driven KV-aware routing.
