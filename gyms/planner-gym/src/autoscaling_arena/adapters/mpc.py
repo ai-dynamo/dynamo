@@ -885,7 +885,9 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         """Reduced fleet keeps utilisation, TTFT and ITL in bounds at every step."""
         schedule = self._active_schedule(candidate)
         for k, step in enumerate(self._queue_plan(forecast_hi, queue_depth, candidate)):
-            ttft = step[1]
+            # Requests already waiting see the wait at the start of the step;
+            # new arrivals see the one at its end. Both must be in bounds.
+            ttft = max(step[1], step[4])
             rps = forecast_hi[min(k, len(forecast_hi) - 1)]
             n_active = schedule[k]
             if rps > self._downsize_utilisation * n_active * self._mu(rps, n_active):

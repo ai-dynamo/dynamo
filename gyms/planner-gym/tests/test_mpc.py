@@ -211,6 +211,26 @@ def test_aggregate_downsize_checks_itl_even_with_low_utilization_and_ttft():
     assert not mpc._downsize_feasible([1.0], 0, 1)
 
 
+def test_aggregate_downsize_checks_the_wait_of_requests_already_queued():
+    class FlatItl(_LinearCapacityModel):
+        def itl_ms(self, load_per_worker, isl, osl, kv_hit_rate, *, saturated=False):
+            return 30.0
+
+    mpc = _mpc(FlatItl(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=0)
+    mpc._ready = mpc._expected = mpc._current_replicas = 2
+    mpc._isl_now, mpc._osl_ema = 500.0, 40.0
+    mu = mpc._mu(1.0, 1)  # one worker serves about 50 requests/s
+    assert 1.0 < 0.75 * mu
+    # Sixty waiting requests clear within the first step, so the wait at its
+    # end is only the prefill, but they themselves wait past half the limit.
+    plan = mpc._queue_plan([1.0], 60, 1)
+    assert plan[0][0] == 0 and plan[0][1] < mpc._slo_ttft * 0.5
+    assert plan[0][4] > mpc._slo_ttft * 0.5
+    assert not mpc._downsize_feasible([1.0], 60, 1)
+    # An empty queue still allows the reduction.
+    assert mpc._downsize_feasible([1.0], 0, 1)
+
+
 @pytest.mark.parametrize("mode,p,d", [("agg", 0, 2), ("disagg", 2, 1)])
 def test_mpc_uses_measured_goodput_per_resident_gpu_second(mode, p, d):
     mpc = _mpc(
