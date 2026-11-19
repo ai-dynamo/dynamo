@@ -38,7 +38,8 @@ async fn other_instances_are_read_directly_when_the_environment_names_a_proxy() 
         for name in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
             std::env::set_var(name, &proxy_url);
         }
-        for name in ["NO_PROXY", "no_proxy"] {
+        // REQUEST_METHOD marks a CGI process, whose proxy variables are ignored.
+        for name in ["NO_PROXY", "no_proxy", "REQUEST_METHOD"] {
             std::env::remove_var(name);
         }
     }
@@ -71,6 +72,12 @@ async fn other_instances_are_read_directly_when_the_environment_names_a_proxy() 
         stop.clone(),
     ));
 
+    // Control: a client that follows the environment goes to the proxy, so
+    // the check below can tell a direct read from a proxied one.
+    let healthz = url.join("healthz").unwrap();
+    assert!(reqwest::Client::new().get(healthz).send().await.is_err());
+    assert_eq!(proxied.load(Ordering::SeqCst), 1);
+
     let instance = RouterReplica {
         replica: RouterReplicaId("a".to_owned()),
         url,
@@ -84,6 +91,6 @@ async fn other_instances_are_read_directly_when_the_environment_names_a_proxy() 
         .shared_registrations(&instance, asker)
         .await;
     assert!(reply.is_ok(), "{reply:?}");
-    assert_eq!(proxied.load(Ordering::SeqCst), 0);
+    assert_eq!(proxied.load(Ordering::SeqCst), 1);
     stop.cancel();
 }

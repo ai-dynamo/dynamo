@@ -254,7 +254,7 @@ impl PeerSync {
                     listed
                 }
                 Err(error) => {
-                    instances.list_failed(&error, lease, Instant::now());
+                    instances.list_failed(&cause(error), lease, Instant::now());
                     self.sharing
                         .registrations
                         .end_round(ExchangeRound::default());
@@ -316,10 +316,7 @@ impl PeerSync {
         let ask = self.source.shared_registrations(peer, asker);
         let reply = tokio::time::timeout(self.every, ask).await;
         let reply = match reply {
-            Ok(reply) => reply.map_err(|error| match error {
-                DiscoveryError::Unavailable(cause) => cause,
-                other => other.into(),
-            }),
+            Ok(reply) => reply.map_err(cause),
             Err(_) => Err(anyhow::anyhow!("no answer within {:?}", self.every)),
         };
         (sent, reply)
@@ -336,6 +333,14 @@ impl PeerSync {
                 .registrations
                 .adopt(registration, remaining.saturating_sub(waited));
         }
+    }
+}
+
+/// What went wrong, for a log line: an unavailable backend's own cause.
+fn cause(error: DiscoveryError) -> anyhow::Error {
+    match error {
+        DiscoveryError::Unavailable(cause) => cause,
+        other => other.into(),
     }
 }
 
@@ -422,15 +427,18 @@ impl Instances {
 
     /// The list of instances failed: logged when it starts to fail, and as an
     /// error once it has failed for a lease, not every round.
-    fn list_failed(&mut self, error: &DiscoveryError, lease: Lease, now: Instant) {
+    fn list_failed(&mut self, error: &anyhow::Error, lease: Lease, now: Instant) {
         let Some(problem) = &mut self.unlisted else {
             self.unlisted = Some(Problem::new(now));
-            tracing::warn!(?error, "cannot list the discovery service instances");
+            tracing::warn!(
+                error = %format_args!("{error:#}"),
+                "cannot list the discovery service instances"
+            );
             return;
         };
         if problem.lasted(lease.duration(), now) {
             tracing::error!(
-                ?error,
+                error = %format_args!("{error:#}"),
                 "the discovery service instances have not been listed for a lease, so pool lists \
                  stay incomplete, and an instance that has never listed them is not ready; check \
                  that this service can list EndpointSlices in the namespace of --peer-service"
@@ -1626,6 +1634,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_failing_list_of_instances_is_logged_once_and_again_after_a_lease() {
+        // With two dispatchers registered, tracing sets a callsite's interest
+        // from both, not from whichever thread reaches it first, so tests on
+        // other threads cannot turn these events off.
+        let _second = tracing::Dispatch::new(Logs::default());
         let logs = Logs::default();
         let _logging = tracing::subscriber::set_default(logs.clone());
         let list = Arc::new(Unlistable::default());
@@ -1636,12 +1648,17 @@ mod tests {
         let stop = CancellationToken::new();
         tokio::spawn(sync.run(stop.clone()));
 
-        // Twelve rounds over two leases: one warning, and one error after a
-        // lease. The instance has asked no one, so it is not ready.
-        tokio::time::sleep(lease().duration() * 2).await;
+        // One warning when it starts, and an error once it has failed for a
+        // lease, not before. The instance has asked no one, so it is not ready.
         let failing = "cannot list the discovery service instances";
-        assert_eq!(logs.count(tracing::Level::WARN, failing), 1);
         let lasting = "have not been listed for a lease";
+        tokio::time::sleep(lease().duration() - lease().heartbeat_interval()).await;
+        assert_eq!(logs.count(tracing::Level::WARN, failing), 1);
+        assert_eq!(logs.count(tracing::Level::ERROR, lasting), 0);
+        tokio::time::sleep(lease().heartbeat_interval() * 2).await;
+        assert_eq!(logs.count(tracing::Level::ERROR, lasting), 1);
+        tokio::time::sleep(lease().duration()).await;
+        assert_eq!(logs.count(tracing::Level::WARN, failing), 1);
         assert_eq!(logs.count(tracing::Level::ERROR, lasting), 1);
         assert!(!sharing.synced());
 

@@ -45,14 +45,19 @@ impl RegistrationSource for HttpRegistrationSource {
             .query(&RegistrationsRequest::from(asker))
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status)
             .map_err(unavailable)?;
-        // A redirect is not followed, so it is no answer.
-        if !response.status().is_success() {
+        // Any other status is no answer, a redirect too, since none is followed.
+        let status = response.status();
+        if !status.is_success() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|location| location.to_str().ok())
+                .map(|location| format!(", to {location},"))
+                .unwrap_or_default();
             return Err(DiscoveryError::Unavailable(anyhow::anyhow!(
-                "{} answered {} instead of its registrations",
-                response.url(),
-                response.status()
+                "{} answered {status}{location} instead of its registrations",
+                response.url()
             )));
         }
         response.json().await.map_err(unavailable)
@@ -65,6 +70,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::Router;
+    use axum::http::StatusCode;
     use axum::response::Redirect;
     use axum::routing::get;
     use tokio::net::TcpListener;
@@ -82,8 +88,30 @@ mod tests {
         url
     }
 
+    /// What reading the instance at `url` fails with.
+    async fn failure(url: Url) -> String {
+        let instance = RouterReplica {
+            replica: RouterReplicaId("other".to_owned()),
+            url,
+        };
+        let asker = Asker {
+            instance: Uuid::new_v4(),
+            holding: true,
+        };
+        let error = HttpRegistrationSource::new()
+            .unwrap()
+            .shared_registrations(&instance, asker)
+            .await
+            .unwrap_err();
+        let DiscoveryError::Unavailable(cause) = error else {
+            panic!("{error:?}");
+        };
+        format!("{cause:#}")
+    }
+
     #[tokio::test]
-    async fn a_redirect_is_an_error_and_is_not_followed() {
+    async fn a_status_other_than_success_is_an_error_that_names_it() {
+        // A redirect is not followed, and says where it pointed.
         let reached = Arc::new(AtomicUsize::new(0));
         let counter = reached.clone();
         let target = serve(Router::new().route(
@@ -95,29 +123,30 @@ mod tests {
         ))
         .await;
         let location = target.join("registrations").unwrap().to_string();
+        let redirect_to = location.clone();
         let redirecting = serve(Router::new().route(
             "/registrations",
-            get(move || async move { Redirect::temporary(&location) }),
+            get(move || async move { Redirect::temporary(&redirect_to) }),
         ))
         .await;
-        let instance = RouterReplica {
-            replica: RouterReplicaId("redirecting".to_owned()),
-            url: redirecting,
-        };
-        let asker = Asker {
-            instance: Uuid::new_v4(),
-            holding: true,
-        };
-
-        let error = HttpRegistrationSource::new()
-            .unwrap()
-            .shared_registrations(&instance, asker)
-            .await
-            .unwrap_err();
-        let DiscoveryError::Unavailable(cause) = error else {
-            panic!("{error:?}");
-        };
-        assert!(format!("{cause:#}").contains("307"), "{cause:#}");
+        let error = failure(redirecting).await;
+        assert!(
+            error.contains("answered 307 Temporary Redirect, to "),
+            "{error}"
+        );
+        assert!(error.contains(&location), "{error}");
         assert_eq!(reached.load(Ordering::SeqCst), 0);
+
+        // An instance that does not share registrations.
+        let not_sharing = serve(Router::new().route(
+            "/registrations",
+            get(|| async { (StatusCode::NOT_IMPLEMENTED, "no sharing") }),
+        ))
+        .await;
+        let error = failure(not_sharing).await;
+        assert!(
+            error.contains("answered 501 Not Implemented instead of"),
+            "{error}"
+        );
     }
 }
