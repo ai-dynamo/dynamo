@@ -498,7 +498,15 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
         *target = Some(replacement.target_id.clone());
-        router.set_test_binding(Some(replacement));
+        router.required.store(
+            replacement.encoder_result_requires_prefill,
+            std::sync::atomic::Ordering::Release,
+        );
+        router.binding.store(Some(replacement));
+        router.lifecycle.store(
+            super::super::PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
         drop(target);
         assert_eq!(
             result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
