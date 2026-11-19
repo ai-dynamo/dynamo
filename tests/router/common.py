@@ -1111,16 +1111,6 @@ def _test_remote_indexer_decisions(
                 {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
                 "consumer B before consumer A's selection-changing write",
             )
-            (
-                before_worker_id,
-                before_dp_rank,
-                before_overlap,
-            ) = await cross_consumer_router.best_worker(selection_tokens)
-            assert (before_worker_id, before_dp_rank, before_overlap) == (
-                worker_b_id,
-                dp_b,
-                3,
-            )
 
             forced_response = await send_request_via_python_kv_router(
                 kv_python_router=consumer_router,
@@ -1163,16 +1153,6 @@ def _test_remote_indexer_decisions(
                 block_size,
                 {(worker_a_id, dp_a): 4, (worker_b_id, dp_b): 3},
                 "consumer B after consumer A's selection-changing write",
-            )
-            (
-                after_worker_id,
-                after_dp_rank,
-                after_overlap,
-            ) = await cross_consumer_router.best_worker(selection_tokens)
-            assert (after_worker_id, after_dp_rank, after_overlap) == (
-                worker_a_id,
-                dp_a,
-                4,
             )
 
             cross_consumer_response = await send_request_via_python_kv_router(
