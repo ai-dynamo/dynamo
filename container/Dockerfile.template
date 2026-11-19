@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.10.0-labs
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 {% include "templates/args.Dockerfile" %}
@@ -31,9 +31,6 @@
 
 # --- SGLang Stages
 {% if framework == "sglang" %}
-    {% if device == "xpu" %}
-        {% include "templates/sglang_xpu_framework.Dockerfile" %}
-    {% endif %}
     # SGLang builds directly from its upstream runtime image.
     {% include "templates/sglang_runtime.Dockerfile" %}
 {% else %}
@@ -52,6 +49,13 @@
     {% include "templates/trtllm_runtime.Dockerfile" %}
 {% else %}
 # --- No TRTLLM stages included
+{% endif %}
+
+# --- Triton Stages
+{% if framework == "triton" %}
+    {% include "templates/triton_runtime.Dockerfile" %}
+{% else %}
+# --- No Triton stages included
 {% endif %}
 
 {% if make_efa == true and target == "runtime" %}

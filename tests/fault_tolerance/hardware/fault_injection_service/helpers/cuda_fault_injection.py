@@ -20,6 +20,15 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 
 
+def _worker_service_names(services: dict) -> List[str]:
+    """Return DGD service names whose declared role is worker."""
+    return [
+        name
+        for name, service in services.items()
+        if service.get("componentType") == "worker"
+    ]
+
+
 class CUDAFaultInjector:
     """Manages CUDA fault injection library and deployment patching."""
 
@@ -133,7 +142,8 @@ class CUDAFaultInjector:
             containers = pod_spec.get("containers", [])
 
             for container in containers:
-                if container.get("name") in ["vllm-worker", "worker"]:
+                # Accept the pre-rename name when checking older deployments.
+                if container.get("name") in ["worker", "vllm-worker"]:
                     env = container.get("env", [])
                     for env_var in env:
                         if env_var.get("name") == "LD_PRELOAD":
@@ -228,13 +238,12 @@ class CUDAFaultInjector:
             deployment_name: Name of the deployment
             namespace: Kubernetes namespace
             force_delete_pods: If True, force delete pods to apply clean spec
-            service_names: Service names to check (default: ["VllmDecodeWorker", "VllmPrefillWorker"])
+            service_names: Service names to check. By default, discovers every
+                service whose componentType is worker.
 
         Returns:
             True if cleanup succeeded
         """
-        if service_names is None:
-            service_names = ["VllmDecodeWorker", "VllmPrefillWorker"]
         print("\n[→] Cleaning up CUDA fault injection...")
 
         sys.path.insert(0, str(self.lib_dir))
@@ -271,16 +280,28 @@ class CUDAFaultInjector:
                         name=deployment_name,
                     )
 
+                    services = dgd.get("spec", {}).get("services", {})
+                    services_to_check = (
+                        service_names
+                        if service_names is not None
+                        else _worker_service_names(services)
+                    )
+                    if not services_to_check:
+                        print("    ✗ No worker services found in deployment spec")
+                        break
+
                     # Check for CUDA fault artifacts
                     has_artifacts = False
                     artifact_details = []
 
-                    for service_name in service_names:
-                        service = (
-                            dgd.get("spec", {})
-                            .get("services", {})
-                            .get(service_name, {})
-                        )
+                    for service_name in services_to_check:
+                        service = services.get(service_name)
+                        if service is None:
+                            has_artifacts = True
+                            artifact_details.append(
+                                f"{service_name}: service not found"
+                            )
+                            continue
 
                         # Check for LD_PRELOAD
                         env_vars = (
@@ -322,20 +343,21 @@ class CUDAFaultInjector:
 
                     if not has_artifacts:
                         print(
-                            f"    ✓ Deployment spec verified clean after {(attempt+1)*5}s"
+                            f"    ✓ Deployment spec verified clean after {(attempt + 1) * 5}s"
                         )
                         spec_cleaned = True
                         break
                     else:
                         print(
-                            f"    ... {(attempt+1)*5}s: Artifacts: {', '.join(artifact_details)}"
+                            f"    ... {(attempt + 1) * 5}s: Artifacts: {', '.join(artifact_details)}"
                         )
 
                 except Exception as e:
-                    print(f"    ... {(attempt+1)*5}s: Error checking spec: {e}")
+                    print(f"    ... {(attempt + 1) * 5}s: Error checking spec: {e}")
 
             if not spec_cleaned:
-                print("    ⚠ Could not verify spec is clean, continuing anyway...")
+                print("    ✗ Could not verify deployment spec is clean")
+                return False
 
             # Step 3: Delete ConfigMap
             print("    → Deleting ConfigMap...")
@@ -603,27 +625,35 @@ class CUDAFaultInjector:
                     name=deployment_name,
                 )
 
-                # Check both worker services
-                for service_name in ["VllmDecodeWorker", "VllmPrefillWorker"]:
-                    if service_name in dgd["spec"]["services"]:
-                        service = dgd["spec"]["services"][service_name]
-                        env_vars = (
-                            service.get("extraPodSpec", {})
-                            .get("mainContainer", {})
-                            .get("env", [])
-                        )
+                services = dgd.get("spec", {}).get("services", {})
+                worker_names = _worker_service_names(services)
+                if not worker_names:
+                    return False
 
-                        for env_var in env_vars:
-                            if env_var.get("name") == "CUDA_FAULT_INJECTION_ENABLED":
-                                if env_var.get("value") != expected_value:
-                                    time.sleep(1)
-                                    break  # Try again
-                        else:
-                            continue  # This service is good
-                        break  # Inner loop broke, try again
-                else:
-                    # All services verified
+                all_verified = True
+                for service_name in worker_names:
+                    service = services[service_name]
+                    env_vars = (
+                        service.get("extraPodSpec", {})
+                        .get("mainContainer", {})
+                        .get("env", [])
+                    )
+                    actual_value = next(
+                        (
+                            env_var.get("value")
+                            for env_var in env_vars
+                            if env_var.get("name") == "CUDA_FAULT_INJECTION_ENABLED"
+                        ),
+                        None,
+                    )
+                    if actual_value != expected_value:
+                        all_verified = False
+                        break
+
+                if all_verified:
                     return True
+
+                time.sleep(1)
 
             except Exception:
                 time.sleep(1)

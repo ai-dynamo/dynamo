@@ -15,14 +15,14 @@ planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 - **`throughput`**（默认）：基于队列深度和 KV cache 利用率使用静态阈值。不需要 SLA 目标或 profiling。开箱即用。
 - **`latency`**：与 `throughput` 采用相同方法，但使用更激进的阈值，即更早扩容并容忍更少排队。适合对延迟敏感的工作负载。
 - **`load`**：使用用户定义的 prefill 队列 token 阈值和 decode KV 利用率阈值，进行反应式的基于负载扩缩容。
-- **`sla`**：使用 Planner 自有的引擎查询层，并通过 AISimulate Python wheel 提供的 `aiconfigurator_core` 兼容命名空间获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
+- **`sla`**：通过 `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` 获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
 
 **何时使用哪种模式：**
 
 - 从 **`throughput`**（默认）开始，它无需配置即可立即工作。
 - 如果工作负载有严格的延迟要求，并且你更倾向于过度预配置而不是排队，请切换到 **`latency`**。
 - 当你希望通过 prefill 队列和 decode KV 利用率阈值直接控制扩缩容时，请使用 **`load`**。
-- 当你希望使用原生 AIC 估算、可选的部署前 profiling 数据或在线 FPM warmup，以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
+- 当你希望使用原生 AISimulate 估算、可选的部署前 profiling 数据或在线 FPM warmup，以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
 
 ## PlannerConfig 参考
 
@@ -60,13 +60,13 @@ spec:
       advisory: true
 ```
 
-advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。
+advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。planner-in-the-loop replay 也遵循此设置：模拟部署保持不变，只报告建议，retune 决策（`executor: local` 的 retune 仅在离线仿真中运行；线上部署使用 `executor: dgdr`，目前为实验功能）也只记录、不应用。
 
 ### 优化目标
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：通过 Planner 自有的引擎查询层和 AISimulate wheel 中的 `aiconfigurator_core` 兼容命名空间，以 ttft_ms/itl_ms 为目标扩缩容。 |
+| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：通过 AISimulate `best_available(config)` 性能模型，以 ttft_ms/itl_ms 为目标扩缩容。 |
 
 当 `optimization_target` 为 `throughput`、`latency` 或 `load` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
 
@@ -85,24 +85,52 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成可选的性能模型启动数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
 
-SLA 模式使用 Planner 自有的引擎查询层。如果配置了 `aic_perf_model`，Planner 会把原生 AIC 模型身份和引擎上限直接传给 AISimulate wheel 中的 `aiconfigurator_core.sdk.RustForwardPassPerfModel`；如果原生 AIC 不支持该模型，该模型会自动回退到基于观测 FPM 的回归模型。如果没有配置 `aic_perf_model`，该模型会从 FPM 回归模型启动，并在自基准测试或在线 FPM 观测足够后变为可用。
+SLA 模式通过唯一构造接口 `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。在 `ais_perf_model` 中为每种已部署的 worker 类型写一份配置：分离式部署写一个包含 `prefill` 和 `decode` 配置的列表，聚合式部署写一份 `aggregated` 配置。列表中的每份配置都要写明 `worker_type`。一份不带 `worker_type` 的配置适用于所有 worker 类型。配置的各个键见 AISimulate 文档中的 [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)。
 
-启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AIC 可用或在线 FPM 足够之前报告 `model_not_ready`。
+新配置默认使用 `estimation_mode: auto` 和 `fallback_policy: deny`。Auto 依次查找 `op_level`、`fpm_interpolation`、`fpm_regression`；`deny` 只禁止显式指定模式后的回退。没有配置 `ais_perf_model` 时，Planner 创建未训练的 `fpm_regression` 模型，并用自基准测试或在线 FPM 训练。
 
-手动配置原生 AIC 性能模型：
+每份配置可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段会报错，同一 worker 类型出现两次也会报错。
+
+通过 `ais_perf_model` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
+
+> [!WARNING]
+> **已弃用。** 请改用配置列表。将在 v1.9 中移除。`ais_perf_model` 的 `roles` 和 `dataset_profiles` 键仍然可用，并会打印一条警告。`dynamo.replay.run_trace_replay` 和 `run_synthetic_trace_replay` 在 `planner_config` 使用这种写法时也会打印这条警告。`roles` 和 `dataset_profiles` 可以同时使用，只要各自对应不同的 worker 类型；二者之一与 `ais_perf_model` 的任何其他键同时出现会报错。
+
+启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AISimulate 可用或在线 FPM 足够之前报告 `model_not_ready`。
+
+在 DynamoGraphDeploymentRequest 中配置各角色模型：
 
 ```yaml
 spec:
   features:
     planner:
       optimization_target: sla
-      aic_perf_model:
-        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-        system: h200_sxm
-        backend: vllm
-        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      mode: disagg
+      ais_perf_model:
+        - worker_type: prefill
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+        - worker_type: decode
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+          estimator_config:
+            fpm_regression:
+              sampling:
+                bins_per_axis: [4, 4]
+                max_observations: 64
+              min_observations: 5
 ```
+
+> [!NOTE]
+> 当 `optimization_target: sla` 时，profiler 会把每份配置的 `model`、`system`、`backend`、`tp` 以及其他并行度相关的键与它选定的部署进行比较。没有写出的键按默认值参与比较，因此不写 `tp` 等同于 `tp: 1`。只要有差异，请求就会失败，例如 `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`。不设置 `ais_perf_model` 时，由 profiler 写入该字段。完整规则见 [DynamoGraphDeploymentRequest 参考中的 ais_perf_model 字段](../../../../../../../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping)。
 
 ### 基于吞吐量的扩缩容设置
 
@@ -125,7 +153,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | FPM 调优更新和基于负载的扩缩容决策之间的秒数。即使只启用了吞吐量扩缩容，实时 FPM 观测也会按此间隔输入到性能模型中。必须短于 `throughput_adjustment_interval_seconds`。 |
 | `max_num_fpm_samples` | int | `64` | 为在线调优或回归保留的 FPM 观测最大数量。 |
 | `fpm_sample_bucket_size` | int | `16` | 用于观测淘汰的 bucket 数量（必须是完全平方数）。 |
-| `load_scaling_down_sensitivity` | int | `80` | 缩容敏感度 0-100（0=永不，100=激进）。 |
+| `load_scaling_down_sensitivity` | int | `80` | SLA 模式下的缩容敏感度 0-100（100=激进）。0 会阻止基于性能模型的缩容，但完全空闲的池仍会每次减少一个副本，直到端点下限（至少 1）。仅在 `optimization_target` 为 `sla` 时生效。 |
 | `load_min_observations` | int | `5` | 做出扩缩容决策前所需的最少观测数。 |
 
 ### 通用设置
@@ -136,7 +164,7 @@ spec:
 | `backend` | string | `vllm` | Backend：`vllm`、`sglang`、`trtllm` 或 `mocker`。 |
 | `environment` | string | `kubernetes` | 运行时环境：`kubernetes`、`virtual` 或 `global-planner`。 |
 | `namespace` | string | env `DYN_NAMESPACE` | 部署使用的 Dynamo 逻辑/运行时 namespace。 |
-| `advisory` | bool | `false` | 仅建议模式。计算、记录、导出并报告建议副本数，但不执行扩缩容操作，也不更改部署。 |
+| `advisory` | bool | `false` | 仅建议模式。计算、记录、导出并报告建议副本数，但不执行扩缩容操作，也不更改部署。planner-in-the-loop replay 同样遵循此设置，retune 决策只记录、不应用。 |
 
 ### 流量预测设置
 
@@ -197,8 +225,8 @@ Planner 默认通过内置 plugin pipeline 运行。基础 pipeline cadence 位�
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
 | `scheduling.scale_interval_seconds` | float | 已启用 builtin interval 的最大公约数 | 基础 pipeline cadence。Pipeline 每个 interval 唤醒一次；每个 plugin 的 `execution_interval_seconds` 决定该 plugin 是否在当前 tick 执行。默认值是 `load_adjustment_interval_seconds` 和启用 throughput scaling 时 `throughput_adjustment_interval_seconds` 的最大公约数，以保留现有配置的 fire time。 |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | 包住完整 plugin pipeline 的外层 deadline。超时会中止当前 tick；下一次 tick 从干净状态继续。 |
-| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | 单个 plugin RPC timeout。Plugin 超时会触发 `PluginTimeoutError`；该 stage 会继续处理剩余 plugin。 |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | 包住完整 plugin pipeline 的外层 wall-clock deadline。超时会中止当前 tick；下一次 tick 从干净状态继续。replay 不应用此 deadline。 |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | 单个 plugin RPC timeout。Plugin 超时会触发 `PluginTimeoutError`；该 stage 会继续处理剩余 plugin。replay 不对 in-process plugin 应用此 timeout。 |
 
 现有 planner 字段仍然驱动内置 plugin：
 

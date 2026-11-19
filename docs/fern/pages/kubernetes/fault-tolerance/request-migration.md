@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Migration
-subtitle: Keep in-flight generations alive across worker failures by retrying them on a healthy worker.
+subtitle: Keep in-flight generations alive across worker failures and shutdown interruptions by retrying them on a healthy worker.
 ---
 
-When a worker fails mid-generation, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point of failure — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
+When a worker fails mid-generation or its shutdown grace period expires, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point of failure — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
 
 Migration is **off by default** (`--migration-limit 0`). The steps below turn it on, optionally bound its memory use, and verify it is working.
 
@@ -84,7 +84,7 @@ kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
 curl -s localhost:8000/metrics | grep dynamo_frontend_model_migration
 ```
 
-- `dynamo_frontend_model_migration_total` — total migrations, labeled by `model` and `migration_type` (`new_request` vs `ongoing_request`).
+- `dynamo_frontend_model_migration_total` — total permitted migration attempts, labeled by `model` and `migration_type` (`new_request` vs `ongoing_request`). Each retry counts once when it begins, even if it later fails or is cancelled. The initial request and retries blocked by the migration limit or sequence-length cap do not count.
 - `dynamo_frontend_model_migration_duration_seconds` — time from detecting a migratable failure until recovery, terminal failure, or cancellation, labeled by `model`, `migration_type`, and `outcome` (`success`, `failure`, or `cancelled`). Use the histogram's `_count` series to count completed migration events by outcome.
 - `dynamo_frontend_model_migration_max_seq_len_exceeded_total` — times migration was disabled because a request exceeded `--migration-max-seq-len`.
 

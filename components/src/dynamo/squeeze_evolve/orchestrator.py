@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -66,6 +67,8 @@ class Tier:
     block_size: int = 0  # 0 -> use the component default block size
     tokenizer: Optional[str] = None  # defaults to `model`
     trust_remote_code: bool = False  # opt-in per tier; runs the model repo's code
+    # AIS perf model of this tier's router: a config, a list, a path or JSON text
+    ais_perf_model: Any = None
 
 
 def parse_tiers(raw: str) -> list[Tier]:
@@ -135,14 +138,14 @@ class TierTransport:
         runtime: Any,
         tier: Tier,
         kv_router_config: Any,
-        aic_perf_config: Any,
+        ais_perf_config: Any,
         default_block_size: int,
         concurrency: int = 32,
     ) -> None:
         self._runtime = runtime
         self._tier = tier
         self._kv_router_config = kv_router_config
-        self._aic_perf_config = aic_perf_config
+        self._ais_perf_config = ais_perf_config
         self._block_size = tier.block_size or default_block_size
         self._semaphore = asyncio.Semaphore(concurrency)
         self._router: Any = None
@@ -161,7 +164,7 @@ class TierTransport:
                 endpoint=endpoint,
                 block_size=self._block_size,
                 kv_router_config=self._kv_router_config,
-                aic_perf_config=self._aic_perf_config,
+                ais_perf_config=self._ais_perf_config,
             )
         return self._router
 
@@ -246,7 +249,7 @@ class SqueezeEvolveOrchestrator:
         tiers: Optional[list[Tier]] = None,
         runtime: Any = None,
         kv_router_config: Any = None,
-        aic_perf_config: Any = None,
+        ais_perf_configs: Optional[Sequence[Any]] = None,
         default_block_size: int = 64,
         transports: Optional[list[Any]] = None,
     ) -> None:
@@ -259,16 +262,24 @@ class SqueezeEvolveOrchestrator:
         else:
             if not tiers:
                 raise ValueError("tiers required when transports are not injected")
+            # ais_perf_configs has one item per tier.
+            if ais_perf_configs is None:
+                ais_perf_configs = [None] * len(tiers)
+            elif len(ais_perf_configs) != len(tiers):
+                raise ValueError(
+                    f"ais_perf_configs has {len(ais_perf_configs)} items for "
+                    f"{len(tiers)} tiers"
+                )
             self._transports = [
                 TierTransport(
                     runtime,
                     tier,
                     kv_router_config,
-                    aic_perf_config,
+                    tier_ais_perf_config,
                     default_block_size,
                     concurrency=cfg.tier_concurrency,
                 )
-                for tier in tiers
+                for tier, tier_ais_perf_config in zip(tiers, ais_perf_configs)
             ]
         self._percentiles = list(cfg.confidence_percentiles)
 

@@ -5,9 +5,12 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
+import yaml
 
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.utils.vllm_omni import vllm_omni_skip_reason
 
 if _omni_skip_reason := vllm_omni_skip_reason():
@@ -18,11 +21,14 @@ try:
 except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
+import vllm_omni
+
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.utils.device import detect_target_device
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payloads import (
     AudioSpeechPayload,
@@ -47,6 +53,47 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
+    "omni_cosmos3_edge_i2v": VLLMOmniConfig(
+        name="omni_cosmos3_edge_i2v",
+        directory=vllm_dir,
+        script_name="agg_omni_cosmos3_i2v.sh",
+        script_args=["--model", "nvidia/Cosmos3-Edge", "--no-guardrails"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.installs_extra_dependencies,
+            pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(12.0),  # GH200 peak 10.2 GiB, plus headroom.
+            # Diffusion allocates no KV cache; declare zero for the GPU scheduler.
+            pytest.mark.requested_vllm_kv_cache_bytes(0),
+        ],
+        model="nvidia/Cosmos3-Edge",
+        # Omni 0.31's Cosmos pipeline imports media_utils, which requires PyAV.
+        # Install it only for this worker; the runtime image intentionally omits it.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
+        health_check_workers=True,
+        health_check_worker_count=1,
+        request_payloads=[
+            I2VPayload(
+                body={
+                    "prompt": "A red cube on a table rotates slowly.",
+                    "size": "256x256",
+                    "response_format": "b64_json",
+                    "nvext": {
+                        "num_inference_steps": 5,
+                        "num_frames": 17,
+                        "fps": 24,
+                        "guidance_scale": 6.0,
+                        "seed": 42,
+                    },
+                },
+                expected_video_shape=(17, 256, 256),
+                expected_video_fps=24,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_disagg_t2i": VLLMOmniConfig(
         name="omni_disagg_t2i",
         directory=vllm_dir,
@@ -147,7 +194,10 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.installs_extra_dependencies,
         ],
+        # Wan imports PyAV at load; the image omits it (#15898).
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
         model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         request_payloads=[
             I2VPayload(
@@ -195,6 +245,84 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    # vLLM defaults to FlashInfer only on B200/GB200, which CI does not have.
+    "omni_audio_flashinfer": VLLMOmniConfig(
+        name="omni_audio_flashinfer",
+        directory=vllm_dir,
+        script_name="agg_omni_audio.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+        ],
+        model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "input": "Hello, this is a test of Dynamo audio generation.",
+                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    "voice": "vivian",
+                    "language": "English",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[r"Warming up FlashInfer attention"],
+            ),
+        ],
+    ),
+    "omni_audex": VLLMOmniConfig(
+        name="omni_audex",
+        directory=vllm_dir,
+        # Audex shares the audio launch script; only the model differs.
+        script_name="agg_omni_audio.sh",
+        script_args=["--model", "nvidia/Nemotron-Labs-Audex-2B"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+            # Profiled with tests/utils/profile_pytest.py on 1x H200: peak
+            # 117.6 GiB, unchanged at every probed KV cap (9-75 GiB). vLLM-Omni's
+            # audex_tts.yaml sizes each stage as a fraction of *total* device
+            # memory (0.4 for the thinker, 0.25 for code2wav) and the aggregated
+            # worker forwards no engine memory args to AsyncOmni, so neither
+            # --kv-cache-memory-bytes nor --gpu-memory-utilization can cap the
+            # footprint from the CLI. Both VRAM markers are therefore omitted:
+            # the H200 number is card-relative, not a portable requirement.
+            # Re-enable once per-stage memory overrides are plumbed through
+            # omni's _build_omni_kwargs, then re-profile on a 24 GiB card.
+            pytest.mark.skip(
+                reason="Audex peaked at 117.6 GiB on 1x H200; the shipped stage "
+                "config sizes stages as a fraction of total device memory and "
+                "the worker cannot cap it, so it exceeds CI capacity (24GB)"
+            ),
+        ],
+        model="nvidia/Nemotron-Labs-Audex-2B",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "model": "nvidia/Nemotron-Labs-Audex-2B",
+                    "input": "Hey, this is generated using Dynamo!",
+                    # Audex is the only audio model that takes cfg_scale, so it
+                    # travels in nvext rather than as an OpenAI field: unknown
+                    # keys are dropped silently, so a plumbing regression would
+                    # leave guidance unapplied without failing the request.
+                    "nvext": {"cfg_scale": 1.5},
+                },
+                repeat_count=1,
+                # Stage 1 is a streaming causal decoder: it emits one ~100 ms
+                # delta per yield, the first of which is empty, and the worker
+                # concatenates them. Mis-assembling that stream yields a short
+                # or silent WAV that still parses, so check the waveform itself:
+                # this prompt decodes to ~2.3s at rms ~0.055.
+                min_duration_s=1.0,
+                min_rms=0.01,
+                expected_sample_rate=16000,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
     # died during handshake (exit code 143)" — the diffusion child process is
     # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
@@ -219,7 +347,10 @@ vllm_omni_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 6_473_647_000
             ),  # KV cache cap (2x safety over min=3_236_823_040)
+            pytest.mark.installs_extra_dependencies,
         ],
+        # PyAV for Wan, see omni_i2v.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[
             VideoGenerationPayload(
@@ -241,6 +372,16 @@ vllm_omni_configs = {
 }
 
 
+def _write_flashinfer_qwen3_tts_stage_config(tmp_path: Path) -> str:
+    source = Path(vllm_omni.__file__).parent / "deploy" / "qwen3_tts.yaml"
+    config = yaml.safe_load(source.read_text())
+    for stage in config["stages"]:
+        stage["attention_config"] = {"backend": "FLASHINFER"}
+    path = tmp_path / "qwen3_tts_flashinfer.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    return str(path)
+
+
 @pytest.fixture(params=params_with_model_mark(vllm_omni_configs))
 def vllm_omni_config_test(request):
     """Fixture that provides different vLLM-Omni test configurations."""
@@ -256,9 +397,23 @@ def test_omni_serve_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
+    tmp_path,
 ):
     """Test dynamo serve deployments with vLLM-Omni configurations."""
     config = dataclasses.replace(
         vllm_omni_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+    extra_env = (
+        {"_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES": "536870912"}
+        if config.name == "omni_audio" and detect_target_device() == "xpu"
+        else None
+    )
+    if config.name == "omni_audio_flashinfer":
+        extra_env = {
+            "DYN_OMNI_STAGE_CONFIGS_PATH": _write_flashinfer_qwen3_tts_stage_config(
+                tmp_path
+            )
+        }
+    run_serve_deployment(
+        config, request, ports=dynamo_dynamic_ports, extra_env=extra_env
+    )

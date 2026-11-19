@@ -29,7 +29,7 @@ import (
 // was used as a workaround for disaggregated serving), `prefill` and `decode`
 // are first-class values: users can set them directly and downstream consumers
 // (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
-// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp
+// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp;lpx
 type ComponentType string
 
 const (
@@ -39,6 +39,7 @@ const (
 	ComponentTypeDecode   ComponentType = "decode"
 	ComponentTypePlanner  ComponentType = "planner"
 	ComponentTypeEPP      ComponentType = "epp"
+	ComponentTypeLPX      ComponentType = "lpx"
 )
 
 const (
@@ -59,7 +60,7 @@ const (
 type CompilationCacheConfig struct {
 	// pvcName references a user-created PVC by name. The PVC must exist in
 	// the same namespace as the DynamoGraphDeployment.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	PVCName string `json:"pvcName"`
 
@@ -76,13 +77,15 @@ type CompilationCacheConfig struct {
 //   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
-//   - value may set only the target's topologyConstraint subtree.
+//   - value may set topologyConstraint, and component contexts may set the
+//     native minAvailable field and rollingUpdate.maxUnavailable. Availability
+//     and rollout budgets are not supported at root or role scope.
 //
 // All other providers, versions, targets, and fields are rejected.
 type ProviderOverride struct {
 	// apiVersion is the Kubernetes API group and version of the provider schema.
 	// Grove requires `grove.io/v1alpha1`.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
 
@@ -94,49 +97,89 @@ type ProviderOverride struct {
 
 	// value is a sparse fragment of the selected provider schema. For Grove,
 	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
-	// PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only
-	// `topologyConstraint`.
-	// +kubebuilder:validation:Required
+	// targets accept `topologyConstraint`. Component contexts also accept
+	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
+	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
+	// deprecated component field preserves its value and leaves the update strategy unchanged.
+	// Component contexts also accept rollingUpdate.maxUnavailable.
+	// +required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Value apiextensionsv1.JSON `json:"value"`
 }
 
-// MultinodeRoleSpec configures one explicit role of a multinode component.
-// Additional role-specific settings can be added here without introducing a
-// polymorphic list keyed by generated provider resource names.
-type MultinodeRoleSpec struct {
-	// providerOverride configures the Grove PCLQ template generated for this
-	// multinode role. It uses apiVersion `grove.io/v1alpha1`, target
-	// `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is
-	// supported only for components embedded in a DGD.
+const (
+	// ComponentRoleLeader identifies the leader Pod-producing role of a multinode component.
+	ComponentRoleLeader = "leader"
+	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
+	ComponentRoleWorker = "worker"
+	// ComponentRoleLPXConductor identifies the launcher role of an LPX component.
+	ComponentRoleLPXConductor = "conductor"
+	// ComponentRoleLPXAgent identifies the LPU-serving role of an LPX component.
+	ComponentRoleLPXAgent = "agent"
+)
+
+// ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+// The enclosing component type defines the allowed role names and cardinality.
+type ComponentRoleSpec struct {
+	// name identifies the role within the enclosing component independently of
+	// generated provider resource names.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// replicas is the logical cardinality of this role in one complete component
+	// instance. The enclosing component type defines the cardinality. For
+	// multinode components, admission defaults and persists omitted values from
+	// multinode.nodeCount; leader must be 1 and worker must be
+	// multinode.nodeCount minus 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// providerOverride configures the provider workload unit generated for this
+	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// podTemplate defines the complete Pod configuration for this role. Admission
+	// permits it only when the enclosing component type supports role-specific Pod
+	// templates. For multinode components, every required role must supply one and
+	// the role templates own backend-specific leader and worker launch commands.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// ComponentRole returns the authored role, or nil when the component does not declare it.
+// The shared spec must not be nil.
+func (s *DynamoComponentDeploymentSharedSpec) ComponentRole(name string) *ComponentRoleSpec {
+	// Resolve the role by its stable authored name.
+	for i := range s.Roles {
+		if s.Roles[i].Name == name {
+			return &s.Roles[i]
+		}
+	}
+	return nil
 }
 
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
-	// Total GPUs used is `nodeCount * container GPU request`.
+	// Total GPUs used is `nodeCount * container GPU request`. The value is
+	// immutable after creation.
 	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
-
-	// leader configures the generated multinode leader unit.
-	// +optional
-	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
-
-	// worker configures the generated multinode worker unit.
-	// +optional
-	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 // ModelReference identifies a model served by a component.
 // When specified, a headless service is created for endpoint discovery.
 type ModelReference struct {
 	// name is the base model identifier (e.g. "llama-3-70b-instruct-v1").
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
@@ -150,7 +193,7 @@ type Restart struct {
 	// id is an arbitrary string that triggers a restart when changed. Any
 	// modification to this value initiates a restart of the graph deployment
 	// according to the configured strategy.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	ID string `json:"id"`
 
@@ -234,9 +277,11 @@ type GroveSpec struct {
 	// deployment. `false` or omitted means automatic selection (multi-node
 	// and inter-pod GMS components use a scaling group, other single-node
 	// components a standalone PodClique), not "force PodClique".
+	// The pointer preserves field presence on the wire: `nil` and `false` are
+	// semantically identical, and consumers must dereference with `false`.
 	// Immutable after creation.
 	// +optional
-	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+	ForceScalingGroup *bool `json:"forceScalingGroup,omitempty"`
 }
 
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
@@ -296,7 +341,7 @@ type GPUMemoryServiceSpec struct {
 	// extraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
 	// declared under checkpoint.job.gmsClientContainers. Every name must match a container
-	// in the enclosing component's podTemplate.spec.containers.
+	// in the enclosing component's podTemplate, or in every role podTemplate when those are used.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -318,6 +363,7 @@ type GMSClientPodSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Name string `json:"name"`
 
 	// podTemplate configures the pod to run as a GMS client.
@@ -402,7 +448,7 @@ type ComponentCheckpointConfig struct {
 	// When true, omit checkpointRef for a DGD-managed automatic checkpoint or
 	// set checkpointRef to restore an existing PodSnapshot in the same namespace.
 	// Omit the checkpoint block, or set enabled=false, to disable checkpointing.
-	// +kubebuilder:validation:Required
+	// +required
 	Enabled bool `json:"enabled"`
 
 	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
@@ -483,13 +529,13 @@ type ComponentCheckpointJobConfig struct {
 type DynamoCheckpointIdentity struct {
 	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
 	// Deprecated: legacy identity only.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
 	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
 	// Deprecated: legacy identity only.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
@@ -534,6 +580,7 @@ type SpecTopologyConstraint struct {
 	// clusterTopologyName is the name of the ClusterTopology resource that
 	// defines the topology hierarchy for this deployment.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	ClusterTopologyName string `json:"clusterTopologyName"`
 
 	// packDomain is the default topology domain to pack pods within.
@@ -548,6 +595,7 @@ type SpecTopologyConstraint struct {
 type TopologyConstraint struct {
 	// packDomain is the topology domain to pack pods within. Must match a
 	// domain defined in the referenced ClusterTopology CR.
+	// +required
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
@@ -602,6 +650,7 @@ type KvTransferPolicy struct {
 	// domain is the logical name for the topology level to enforce
 	// (e.g. "zone", "rack"). The router uses this to match workers that
 	// share the same value for the label identified by `labelKey`.
+	// +required
 	Domain TopologyDomain `json:"domain"`
 
 	// enforcement controls how the selected prefill worker's topology is
@@ -708,8 +757,10 @@ const (
 // RestartStatus contains the status of a graph-level restart.
 type RestartStatus struct {
 	// observedID is the restart ID currently being processed. Matches `Restart.id` in the spec.
+	// +optional
 	ObservedID string `json:"observedID,omitempty"`
 	// phase is the phase of the restart.
+	// +optional
 	Phase RestartPhase `json:"phase,omitempty"`
 	// inProgress contains the names of the components currently being restarted.
 	// +optional
@@ -770,6 +821,7 @@ type ComponentCheckpointStatus struct {
 type ComponentReplicaStatus struct {
 	// componentKind is the underlying resource kind (e.g. `PodClique`,
 	// `Deployment`, `LeaderWorkerSet`).
+	// +required
 	ComponentKind ComponentKind `json:"componentKind"`
 
 	// componentNames is the list of underlying Kubernetes resource names for
@@ -784,6 +836,27 @@ type ComponentReplicaStatus struct {
 	// active revision namespace until cutover completes.
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
+	// servedModelName is the effective primary model identity exposed by this
+	// component's serving role in combined mode. Native sidecars omit this field;
+	// Kubernetes Planner reads their registered model identity. During rolling
+	// updates, worker status keeps the old active revision until cutover completes.
+	// +optional
+	ServedModelName string `json:"servedModelName,omitempty"`
+
+	// runtimeComponentName is an explicit Dynamo runtime component identity
+	// resolved from the serving role's endpoint override in combined mode.
+	// Native sidecars omit this field; Kubernetes Planner reads their registered
+	// component identity. During rolling updates, worker status keeps the old
+	// active revision value until cutover completes.
+	// +optional
+	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
+
+	// gpuPowerLimitWatts is the effective per-GPU power limit propagated to the
+	// component's Pods. Omission means no power limit is configured.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	GPUPowerLimitWatts *int64 `json:"gpuPowerLimitWatts,omitempty"`
 
 	// gpusPerEngine is the number of GPUs assigned to one inference engine in a
 	// component replica, across all of its nodes. Independent auxiliary GPU
@@ -805,10 +878,12 @@ type ComponentReplicaStatus struct {
 
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
+	// +required
 	Replicas int32 `json:"replicas"`
 
 	// updatedReplicas is the number of replicas at the current/desired revision.
 	// +kubebuilder:validation:Minimum=0
+	// +required
 	UpdatedReplicas int32 `json:"updatedReplicas"`
 
 	// readyReplicas is the number of ready replicas. Populated for

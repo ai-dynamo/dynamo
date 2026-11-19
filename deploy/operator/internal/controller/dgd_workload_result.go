@@ -19,6 +19,7 @@ package controller
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -26,7 +27,8 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"k8s.io/utils/ptr"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type Reason string
@@ -57,6 +59,17 @@ func clearComponentGPUShapes(statuses map[string]nvidiacomv1beta1.ComponentRepli
 	}
 }
 
+// clearComponentRuntimeStatuses removes previously projected runtime facts
+// before a provider can fail while rendering a replacement.
+func clearComponentRuntimeStatuses(statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
+	for componentName, status := range statuses {
+		status.ServedModelName = ""
+		status.RuntimeComponentName = ""
+		status.GPUPowerLimitWatts = nil
+		statuses[componentName] = status
+	}
+}
+
 // applyComponentGPUShapes projects provider-resolved shapes onto observed
 // component statuses. Explicit zero distinguishes a successful non-GPU
 // observation from a missing or cleared shape.
@@ -69,8 +82,38 @@ func applyComponentGPUShapes(
 		if !ok {
 			continue
 		}
-		status.GPUsPerEngine = ptr.To(shape.GPUsPerEngine)
-		status.GPUsPerReplica = ptr.To(shape.GPUsPerReplica)
+		status.GPUsPerEngine = new(shape.GPUsPerEngine)
+		status.GPUsPerReplica = new(shape.GPUsPerReplica)
+		statuses[componentName] = status
+	}
+}
+
+// applyComponentRuntimeStatus projects one resolved serving-role identity onto
+// an observed component status.
+func applyComponentRuntimeStatus(
+	status *nvidiacomv1beta1.ComponentReplicaStatus,
+	runtimeStatus dynamo.ComponentRuntimeStatus,
+) {
+	if status == nil {
+		return
+	}
+	status.ServedModelName = runtimeStatus.ServedModelName
+	status.RuntimeComponentName = runtimeStatus.RuntimeComponentName
+	status.GPUPowerLimitWatts = runtimeStatus.GPUPowerLimitWatts
+}
+
+// applyComponentRuntimeStatuses projects provider-resolved serving-role
+// identities onto observed component statuses.
+func applyComponentRuntimeStatuses(
+	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
+	runtimeStatuses map[string]dynamo.ComponentRuntimeStatus,
+) {
+	for componentName, runtimeStatus := range runtimeStatuses {
+		status, ok := statuses[componentName]
+		if !ok {
+			continue
+		}
+		applyComponentRuntimeStatus(&status, runtimeStatus)
 		statuses[componentName] = status
 	}
 }
@@ -87,9 +130,7 @@ func checkResourcesReadiness(resources []Resource) ReconcileResult {
 		ready, reason := resource.IsReady()
 
 		resourceComponentStatuses := resource.GetComponentStatuses()
-		for componentName, componentStatus := range resourceComponentStatuses {
-			componentStatuses[componentName] = componentStatus
-		}
+		maps.Copy(componentStatuses, resourceComponentStatuses)
 
 		if !ready {
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))
@@ -110,6 +151,48 @@ func checkResourcesReadiness(resources []Resource) ReconcileResult {
 		Message:         Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ComponentStatus: componentStatuses,
 	}
+}
+
+// applyComponentCrashLoops fails the graph while any DCD reports, for its
+// current generation, a crash-looping container among its Pods.
+func applyComponentCrashLoops(
+	result ReconcileResult,
+	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+) ReconcileResult {
+	crashLoops := make(map[string]string, len(dcds))
+	for _, dcd := range dcds {
+		if dcd.Status.ObservedGeneration < dcd.Generation {
+			continue
+		}
+		available := meta.FindStatusCondition(
+			dcd.Status.Conditions,
+			nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+		)
+		if available == nil ||
+			available.Status != metav1.ConditionFalse ||
+			available.Reason != dcdReasonContainerCrashLooping {
+			continue
+		}
+		crashLoops[dynamo.GetDCDComponentName(dcd)] = available.Message
+	}
+	return failCrashLoopingComponents(result, crashLoops)
+}
+
+// failCrashLoopingComponents fails the graph while crashLoops, a diagnosis by
+// component name, is non-empty.
+func failCrashLoopingComponents(result ReconcileResult, crashLoops map[string]string) ReconcileResult {
+	if len(crashLoops) == 0 {
+		return result
+	}
+	messages := make([]string, 0, len(crashLoops))
+	for component, diagnosis := range crashLoops {
+		messages = append(messages, fmt.Sprintf("Component %s is crash-looping: %s", component, diagnosis))
+	}
+	sort.Strings(messages)
+	result.State = nvidiacomv1beta1.DGDStateFailed
+	result.Reason = reasonComponentCrashLooping
+	result.Message = Message(strings.Join(messages, "; "))
+	return result
 }
 
 func applyCheckpointStartupReadiness(

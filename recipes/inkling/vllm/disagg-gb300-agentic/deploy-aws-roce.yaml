@@ -58,7 +58,7 @@ metadata:
 spec:
   backendFramework: vllm
   components:
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       metadata:
         annotations:
@@ -215,7 +215,7 @@ spec:
     replicas: 1
     sharedMemorySize: 64Gi
     type: prefill
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       metadata:
         annotations:
@@ -225,7 +225,7 @@ spec:
         - args:
           - |
             set -euo pipefail
-            # See VllmPrefillWorker for the fabric-discovery rationale.
+            # See prefill for the fabric-discovery rationale.
             hca=""
             for hca_path in /sys/class/infiniband/*; do
               [ -d "${hca_path}/device/net" ] || continue

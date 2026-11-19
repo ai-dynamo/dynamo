@@ -37,21 +37,8 @@ spec:
                 - "1.0"
                 - --disaggregation-mode
                 - decode
-                - --aic-perf-model
-                - --aic-backend
-                - vllm
-                - --aic-backend-version
-                - 0.14.0
-                - --aic-system
-                - h100_sxm
-                - --aic-tp-size
-                - "1"
-                - --aic-moe-tp-size
-                - "1"
-                - --aic-moe-ep-size
-                - "1"
-                - --aic-attention-dp-size
-                - "1"
+                - --ais-perf-model
+                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
                 - --engine-type
                 - vllm
               command:
@@ -80,21 +67,8 @@ spec:
                 - "1.0"
                 - --disaggregation-mode
                 - prefill
-                - --aic-perf-model
-                - --aic-backend
-                - vllm
-                - --aic-backend-version
-                - 0.14.0
-                - --aic-system
-                - h100_sxm
-                - --aic-tp-size
-                - "1"
-                - --aic-moe-tp-size
-                - "1"
-                - --aic-moe-ep-size
-                - "1"
-                - --aic-attention-dp-size
-                - "1"
+                - --ais-perf-model
+                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
                 - --engine-type
                 - vllm
               command:
@@ -139,21 +113,8 @@ spec:
             - "1.0"
             - --disaggregation-mode
             - decode
-            - --aic-perf-model
-            - --aic-backend
-            - vllm
-            - --aic-backend-version
-            - 0.14.0
-            - --aic-system
-            - h100_sxm
-            - --aic-tp-size
-            - "1"
-            - --aic-moe-tp-size
-            - "1"
-            - --aic-moe-ep-size
-            - "1"
-            - --aic-attention-dp-size
-            - "1"
+            - --ais-perf-model
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:
@@ -319,21 +280,8 @@ spec:
               - "1.0"
               - --disaggregation-mode
               - decode
-              - --aic-perf-model
-              - --aic-backend
-              - vllm
-              - --aic-backend-version
-              - 0.14.0
-              - --aic-system
-              - h100_sxm
-              - --aic-tp-size
-              - "1"
-              - --aic-moe-tp-size
-              - "1"
-              - --aic-moe-ep-size
-              - "1"
-              - --aic-attention-dp-size
-              - "1"
+              - --ais-perf-model
+              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
               - --engine-type
               - vllm
             command:
@@ -455,21 +403,8 @@ spec:
               - "1.0"
               - --disaggregation-mode
               - decode
-              - --aic-perf-model
-              - --aic-backend
-              - vllm
-              - --aic-backend-version
-              - 0.14.0
-              - --aic-system
-              - h100_sxm
-              - --aic-tp-size
-              - "1"
-              - --aic-moe-tp-size
-              - "1"
-              - --aic-moe-ep-size
-              - "1"
-              - --aic-attention-dp-size
-              - "1"
+              - --ais-perf-model
+              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
               - --engine-type
               - vllm
             command:
@@ -617,21 +552,8 @@ spec:
             - "1.0"
             - --disaggregation-mode
             - prefill
-            - --aic-perf-model
-            - --aic-backend
-            - vllm
-            - --aic-backend-version
-            - 0.14.0
-            - --aic-system
-            - h100_sxm
-            - --aic-tp-size
-            - "1"
-            - --aic-moe-tp-size
-            - "1"
-            - --aic-moe-ep-size
-            - "1"
-            - --aic-attention-dp-size
-            - "1"
+            - --ais-perf-model
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:
@@ -795,21 +717,8 @@ spec:
             - "1.0"
             - --disaggregation-mode
             - prefill
-            - --aic-perf-model
-            - --aic-backend
-            - vllm
-            - --aic-backend-version
-            - 0.14.0
-            - --aic-system
-            - h100_sxm
-            - --aic-tp-size
-            - "1"
-            - --aic-moe-tp-size
-            - "1"
-            - --aic-moe-ep-size
-            - "1"
-            - --aic-attention-dp-size
-            - "1"
+            - --ais-perf-model
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.30.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:

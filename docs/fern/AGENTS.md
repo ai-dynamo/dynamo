@@ -99,14 +99,14 @@ python3 docs/fern/scripts/gen_python_api.py        # writes into gitignored path
 
 The full Kubernetes reference has two stages, and the first lives outside `docs/`.
 `make generate-api-docs` in `deploy/operator/` runs `crd-ref-docs` over the CRD Go types to produce
-`pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md`.
-`gen_kubernetes_api.py` parses that committed Markdown and renders only `full-api-reference.mdx`. It
+`pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md`, then invokes
+`gen_kubernetes_api.py` to render `full-api-reference.mdx`. The renderer alone
 never reads the Go types, so changing a type and rerunning it alone is a no-op — refresh the
 intermediate first.
 
 ```bash
-make -C deploy/operator generate-api-docs         # Go types -> api-reference-k8s.md
-python3 docs/fern/scripts/gen_kubernetes_api.py   # that Markdown -> full-api-reference.mdx
+make -C deploy/operator generate-api-docs         # Go types -> raw Markdown -> full MDX
+python3 docs/fern/scripts/gen_kubernetes_api.py   # rerender MDX from existing raw Markdown only
 ```
 
 The `Generated API References` pre-merge job runs the Python/Rust generators in write mode (a

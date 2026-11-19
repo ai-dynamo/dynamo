@@ -31,7 +31,7 @@ on:
         default: ''
     outputs:
       runtime_version:
-        description: 'Dynamo runtime compatibility version from Cargo.toml'
+        description: 'Dynamo runtime version from Cargo.toml'
         value: ${{ jobs.copy-to-acr.outputs.runtime_version }}
       image_tag:
         description: 'Image tag published to ACR'

@@ -1,0 +1,258 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package lpx
+
+import (
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
+)
+
+func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
+	fixture := newV3CompilerFixture()
+
+	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	projection.stage = testRenderComponentName
+	projection.configuredBuild.ioFPGACount = 1
+	projection.configuredBuild.ioFanoutFactor = 1
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
+	workload := &Workload{
+		modelProjections:     []*ModelProjection{projection},
+		scalingGroupReplicas: 2496,
+	}
+	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
+	plan, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
+	require.NoError(t, err)
+	plan, err = plan.WithGroup("target")
+	require.NoError(t, err)
+
+	t.Log("Validate actual GPU widths rather than assuming the largest int32 pod index")
+	for _, test := range []struct {
+		name      string
+		replicas  int32
+		wantError bool
+	}{
+		{name: "one GPU per engine", replicas: 1},
+		{name: "hostname at DNS limit", replicas: 100_000_000},
+		{name: "hostname over DNS limit", replicas: 100_000_001, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Render the GPU width beneath the same readable PCS name")
+			pcs := renderTestPCS(true)
+			pcs.Name = pcsName
+			cyborg := namedClique(t, pcs, "cond")
+			cyborg.Name, cyborg.Spec.RoleName = plan.CyborgTemplate, plan.CyborgTemplate
+			cyborg.Spec.Replicas = test.replicas
+			cyborg.Spec.MinAvailable = new(test.replicas)
+			_, err := RenderNodeLocal(workload, plan, RenderInput{
+				Cyborg: cyborg,
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+			})
+			if test.wantError {
+				require.ErrorContains(t, err, "materialized Cyborg Pod hostname")
+				require.ErrorContains(t, err, "must be no more than 63 characters")
+				return
+			}
+			require.NoError(t, err)
+			hostname := materializedPodHostname(plan.ForReplica(plan.Replicas-1).CyborgClique, int(test.replicas)-1)
+			require.Empty(t, validation.IsDNS1123Label(hostname))
+			if test.replicas > 1 {
+				require.Len(t, hostname, validation.DNS1123LabelMaxLength)
+			}
+		})
+	}
+}
+
+func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Project a split-I/O selected workload")
+	fixture := newV3CompilerFixture()
+
+	fixture.partitions[0].devicesPerNode = 8
+	fixture.architecture = lp20
+	fixture.units = testSingleUnits(testNodesReservation(1, 1))
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+	build := normalized
+	build.ioFPGACount = 2
+	build.ioFanoutFactor = 2
+	projectionBatch, err := projectModels(ModelProjectionInput{
+		Pipeline: PipelineHybrid, Models: []string{"default"},
+		Build:           normalized,
+		RuntimeBuildRef: "model-build",
+	})
+	require.NoError(t, err)
+	projection := projectionBatch[0]
+
+	t.Log("Render the Cyborg runtime contract")
+	pcs := renderTestPCS(true)
+	decode := namedClique(t, pcs, "cond")
+	decode.Spec.Replicas = 4
+	decode.Spec.MinAvailable = ptr.To[int32](4)
+	decode.Spec.PodSpec.ResourceClaims = nil
+	decode.Spec.PodSpec.Containers[0].Resources.Limits = corev1.ResourceList{
+		corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+	}
+	decode.Spec.PodSpec.Containers[0].Command = []string{"/custom-cyborg", "--wrapper-option"}
+	decode.Spec.PodSpec.Containers[0].Args = []string{"argument with spaces", "literal $HOME", ""}
+	authoredEnv := []corev1.EnvVar{
+		{Name: "RDMA_PORT", Value: "12345"},
+		{Name: "CYBORG_BATCH_SIZE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			FieldPath: "metadata.labels['runtime-batch']",
+		}}},
+		{Name: "CYBORG_FPGA_GPI_IO_FPGA_COUNT", Value: "9"},
+		{Name: "CYBORG_SWA_CACHE_IDS", Value: "8,9"},
+		{Name: "TOKENIZER_DIR", Value: "$(GBUILD_MANIFEST_PATH)/../tokenizer"},
+		{Name: "TOTAL_REPLICAS", Value: "9"},
+	}
+	decode.Spec.PodSpec.Containers[0].Env = authoredEnv
+
+	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
+	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
+	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].SubPath = "cyborg"
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].ReadOnly = true
+	input := RenderInput{
+		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+	}
+	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+	require.NoError(t, err)
+	cyborg := namedClique(t, rendered, "cond")
+
+	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
+	modelEnv := []corev1.EnvVar{
+		{Name: "LPX_ALLOCATION", Value: "agt"},
+		{Name: "LPX_LOCAL_PARTITION_IDS", Value: ""},
+		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/deployment.v1.capnp.bin"},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+	}
+	require.Equal(t, append(modelEnv, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
+	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
+	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
+	})
+	require.Equal(t, []string{"/custom-cyborg", "--wrapper-option"}, cyborg.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"argument with spaces", "literal $HOME", ""}, cyborg.Spec.PodSpec.Containers[0].Args)
+
+	t.Log("Preserve an image-owned entrypoint")
+	imageEntrypointPCS := renderTestPCS(true)
+	imageEntrypointCyborg := namedClique(t, imageEntrypointPCS, "cond")
+	imageEntrypointCyborg.Spec.Replicas = 4
+	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
+	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
+	imageEntrypointEnv := append(modelEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
+
+	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
+	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
+	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
+	require.NoError(t, err)
+	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
+	require.Equal(t, imageEntrypointEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env)
+
+	t.Log("Reject invalid Cyborg runtime bindings")
+
+	for _, test := range []struct {
+		name      string
+		replicas  int32
+		mountPath string
+		wantError string
+	}{
+		{"incomplete endpoints", 1, "/models", "Cyborg replicas 1 must be divisible by ioFpgaCount 2"},
+		{"incomplete fanout", 2, "/models", "Cyborg replicas 2 must provide fanoutFactor 2 clients"},
+		{"different storage path", 4, "/other-models", "conflicts with model storage mount"},
+		{"empty storage path", 4, "", "has no mount path"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Reject incompatible runtime bindings during rendering")
+			pcs := renderTestPCS(true)
+			cyborg := namedClique(t, pcs, "cond")
+			cyborg.Spec.Replicas = test.replicas
+			cyborg.Spec.MinAvailable = new(test.replicas)
+			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
+			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = test.mountPath
+			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+			})
+			require.ErrorContains(t, err, test.wantError)
+		})
+	}
+}
+
+func TestHybridCyborgBindingsPrecedeAuthoredReferences(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Define authored bindings that depend on the manifest and checkpoint locations")
+	checkpoint := &Checkpoint{Model: "openai/gpt-oss-20b", Revision: "6cee5e81ee83917806bbde320786a8fb61efebee"}
+	authored := []corev1.EnvVar{
+		{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},
+		{Name: "CYBORG_ARGS", Value: "--weights-path $(CYBORG_WEIGHTS_PATH)"},
+		{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+	}
+	staleManifest := corev1.EnvVar{Name: gbuildManifestPathEnv, Value: "/stale/manifest"}
+	authoredWeights := corev1.EnvVar{Name: cyborgWeightsPathEnv, Value: "/models/authored"}
+	allocation := corev1.EnvVar{Name: allocationEnvVar, Value: testAgentTemplateName}
+	weights := corev1.EnvVar{
+		Name:  cyborgWeightsPathEnv,
+		Value: "/models/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee",
+	}
+	manifest := []corev1.EnvVar{
+		{Name: localPartitionIDsEnv, Value: ""},
+		{Name: gbuildManifestPathEnv, Value: "/models/build/deployment.v1.capnp.bin"},
+	}
+
+	for _, test := range []struct {
+		name       string
+		checkpoint *Checkpoint
+		env        []corev1.EnvVar
+		want       []corev1.EnvVar
+	}{
+		{
+			name: "missing bindings", checkpoint: checkpoint, env: authored,
+			want: slices.Concat([]corev1.EnvVar{allocation, weights}, manifest, authored),
+		},
+		{
+			name: "stale bindings after references", checkpoint: checkpoint,
+			env:  slices.Concat(authored, []corev1.EnvVar{staleManifest, authoredWeights}),
+			want: slices.Concat([]corev1.EnvVar{allocation, weights}, manifest, authored),
+		},
+		{
+			name: "no checkpoint keeps the authored weights path",
+			env:  slices.Concat(authored, []corev1.EnvVar{authoredWeights}),
+			want: slices.Concat([]corev1.EnvVar{allocation}, manifest, authored, []corev1.EnvVar{authoredWeights}),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Configure a Cyborg clique whose model storage is mounted at /models")
+			cyborg := namedClique(t, renderTestPCS(true), "cond")
+			cyborg.Spec.PodSpec.Containers[0].Env = slices.Clone(test.env)
+			projection := &ModelProjection{
+				configuredBuild: Build{path: "file:///models/build", ioFPGACount: 1, ioFanoutFactor: 1},
+				checkpoint:      test.checkpoint,
+			}
+
+			t.Log("Publish the operator bindings before references while preserving other bindings")
+			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}))
+			require.Equal(t, test.want, cyborg.Spec.PodSpec.Containers[0].Env)
+
+			t.Log("Repeat rendering without duplicating or reordering environment bindings")
+			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}))
+			require.Equal(t, test.want, cyborg.Spec.PodSpec.Containers[0].Env)
+		})
+	}
+}

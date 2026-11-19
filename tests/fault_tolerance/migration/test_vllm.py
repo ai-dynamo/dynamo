@@ -17,13 +17,14 @@ import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
 
 # Customized utils for migration tests
 from .utils import (
     DynamoFrontendProcess,
+    expected_ongoing_migrations,
     managed_processes_concurrently,
     run_migration_test,
     wait_for_endpoint_instances,
@@ -304,10 +305,11 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(["--disaggregation-mode", "decode"])
 
         if is_prefill is not None:
+            nixl_role = "kv_producer" if is_prefill else "kv_consumer"
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    json.dumps({"kv_connector": "NixlConnector", "kv_role": nixl_role}),
                 ]
             )
 
@@ -350,7 +352,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Configure health check based on worker type
         health_check_urls = [
-            (f"http://localhost:{self.system_port}/health", self.is_ready)
+            (f"http://localhost:{self.system_port}/health", check_health_ready)
         ]
         if is_prefill is None or is_prefill is False:
             # aggregated or decode
@@ -374,22 +376,6 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=str(log_dir),
             display_name=worker_id,
         )
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info("%s status is ready", self.worker_id)
-                return True
-            logger.warning(
-                "%s status is not ready: %s",
-                self.worker_id,
-                data.get("status"),
-            )
-        except ValueError:
-            logger.warning("%s health response is not valid JSON", self.worker_id)
-        return False
 
 
 @pytest.mark.timeout(290)  # 3x average
@@ -459,7 +445,9 @@ def test_request_migration_vllm_aggregated(
                 use_chat_completion=(request_api == "chat"),
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
             )
 
 
@@ -548,7 +536,9 @@ def test_request_migration_vllm_kv_transfer(
                 max_tokens=KV_TRANSFER_MAX_TOKENS,
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
             )
 
 
@@ -633,5 +623,7 @@ def test_request_migration_vllm_decode(
                 stream=True,
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
             )

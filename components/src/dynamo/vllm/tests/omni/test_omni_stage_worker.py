@@ -13,6 +13,10 @@ import pytest
 import yaml
 
 try:
+    from PIL import Image
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _create_engine,
@@ -21,6 +25,7 @@ try:
         _prepare_connector_payload,
         _Proxy,
         _stage_config_to_dict,
+        _uses_nixl_connector,
     )
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
@@ -29,6 +34,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -496,6 +502,12 @@ def test_prepare_connector_payload_preserves_empty_attr_positions():
     assert payload["_dynamo_completion_output_attrs"] == [{}]
 
 
+def test_stage_connectors_without_config_file():
+    resolved_path = _ensure_stage_connectors(None, [])
+    assert resolved_path is None
+    assert not _uses_nixl_connector(resolved_path, [])
+
+
 def test_ensure_stage_connectors_adds_missing_shared_memory_edge(tmp_path):
     config_path = tmp_path / "glm_image.yaml"
     config_path.write_text(
@@ -659,6 +671,79 @@ def test_build_sampling_params_user_overrides_yaml_defaults():
     assert sp.guidance_scale == 5.0  # YAML default preserved
 
 
+def _llm_stage_with_sampling_defaults():
+    return SimpleNamespace(
+        stage_type="llm",
+        default_sampling_params={
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.05,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("temperature", "expected"),
+    [
+        (0.0, (0.0, 1.0, 0, 0.0)),
+        # vLLM raises 0 < temperature < 0.01 to 0.01, so this is not greedy.
+        (1e-6, (0.01, 0.8, 20, 0.05)),
+    ],
+    ids=["greedy", "tiny-temperature"],
+)
+def test_build_sampling_params_llm_applies_vllm_post_init_after_overrides(
+    temperature, expected
+):
+    result = _build_sampling_params(
+        _llm_stage_with_sampling_defaults(), {"temperature": temperature}
+    )
+    assert result is not None
+    sp = result[0]
+    assert (sp.temperature, sp.top_p, sp.top_k, sp.min_p) == expected
+
+
+def test_build_sampling_params_llm_rejects_out_of_range_greedy_values():
+    with pytest.raises(VLLMValidationError, match="top_p"):
+        _build_sampling_params(
+            _llm_stage_with_sampling_defaults(), {"temperature": 0.0, "top_p": 0.0}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream",
+    [
+        {"engine_inputs": {"prompt": "hi"}},
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[100, 200, 300])]),
+    ],
+    ids=["raw-prompt", "upstream-tokens"],
+)
+async def test_invalid_sampling_override_raises_invalid_argument(upstream):
+    engine = _MockEngine()
+    in_connector = MagicMock()
+    in_connector.get.return_value = upstream
+    stage_config = _llm_stage_with_sampling_defaults()
+    stage_config.engine_input_source = [0]
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=stage_config,
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+    )
+    request = {
+        "request_id": "req-invalid-top-p",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "sampling_params_list": {"temperature": 0.0, "top_p": 0.0},
+    }
+
+    with pytest.raises(InvalidArgument, match="top_p"):
+        _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert engine.received_prompt is None
+
+
 def test_build_sampling_params_no_defaults_returns_none():
     """No default_sampling_params on stage_config -> returns None."""
     stage_config = SimpleNamespace(stage_type="llm")
@@ -696,6 +781,35 @@ async def test_image_request_with_default_sampling_params():
 
     assert not any("error" in c for c in chunks)
     assert engine.received_sampling_params_list is not None
+
+
+@pytest.mark.asyncio
+async def test_routed_video_request_passes_negative_prompt_to_engine():
+    engine = _MockEngine()
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(
+            stage_type="diffusion",
+            final_output=True,
+            default_sampling_params={"num_inference_steps": 4, "guidance_scale": 3.0},
+        ),
+        connectors={},
+        stage_id=0,
+        output_modalities=["video"],
+    )
+    request = {
+        "request_id": "video-negative-prompt-req",
+        "model": "test-model",
+        "prompt": "a small boat",
+        "size": "320x192",
+        "nvext": {"num_frames": 9, "negative_prompt": "blurry, distorted"},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert not any("error" in c for c in chunks)
+    assert engine.received_prompt["prompt"] == "a small boat"
+    assert engine.received_prompt["negative_prompt"] == "blurry, distorted"
 
 
 @pytest.mark.asyncio
@@ -852,18 +966,103 @@ def test_create_engine_omits_env_when_stage_declares_none():
     assert "env" not in deploy["stages"][0]
 
 
-def test_create_engine_resolves_pipeline_with_the_configured_deploy_config():
-    _, factory = _single_stage_deploy_config(
-        SimpleNamespace(
-            engine_args=SimpleNamespace(model_stage="dit"),
-            runtime=SimpleNamespace(devices="0"),
-            final_output_type="image",
-        ),
-        deploy_config_path="/deploy/dit_only.yaml",
-    )
+@pytest.mark.parametrize(
+    "pipeline,stage_id,model_stage,sampling",
+    [
+        ("qwen3_tts", 1, "code2wav", {"temperature": 0.0, "max_tokens": 8}),
+        ("wan2_2_ti2v", 0, "dit", {"num_inference_steps": 3}),
+        ("glm_image", 1, "dit", {"num_inference_steps": 3}),
+    ],
+)
+def test_create_engine_preserves_resolved_stage_config(
+    monkeypatch, tmp_path, pipeline, stage_id, model_stage, sampling
+):
+    from vllm_omni.config import resolve_omni_config
+    from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 
-    factory.get_pipeline_config.assert_called_once_with(
-        model="model",
-        trust_remote_code=False,
-        deploy_config_path="/deploy/dit_only.yaml",
+    from dynamo.vllm.omni.utils import resolve_stage_configs
+
+    model = str(tmp_path)
+    (tmp_path / "config.json").write_text('{"model_type": "qwen3_tts"}')
+    deploy_path = tmp_path / "deploy.yaml"
+    deploy_path.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": pipeline,
+                "async_chunk": False,
+                "stages": [{"stage_id": i} for i in range(stage_id)]
+                + [
+                    {
+                        "stage_id": stage_id,
+                        "devices": "0",
+                        "env": {"OMP_NUM_THREADS": "4"},
+                        "default_sampling_params": sampling,
+                    }
+                ],
+            }
+        )
     )
+    upstream = resolve_omni_config(
+        model,
+        trust_remote_code=False,
+        deploy_config_path=str(deploy_path),
+        cli_overrides={},
+        stage_overrides=None,
+        strategy_config_path=None,
+    )
+    if not hasattr(upstream.stage_configs[stage_id], "stage_pipeline_config"):
+        pytest.skip(
+            "Requires typed Omni stage configs; the legacy YAML round trip is unsupported"
+        )
+
+    _, stages = resolve_stage_configs(
+        model, trust_remote_code=False, deploy_config_path=str(deploy_path)
+    )
+    stage = stages[stage_id]
+    assert stage.engine_args.model_stage == model_stage
+    assert stage.engine_input_source == ([0] if stage_id else [])
+    params = _build_sampling_params(stage, None)[0]
+    for name, value in sampling.items():
+        assert getattr(params, name) == value
+
+    if pipeline == "glm_image":
+        source_image = Image.new("RGB", (32, 32))
+        worker = _make_worker(stage_config=stage, stage_id=stage_id)
+        upstream = _Proxy(
+            engine_outputs=[
+                SimpleNamespace(outputs=[SimpleNamespace(cumulative_token_ids=[1])])
+            ]
+        )
+        prompt = {
+            "prompt": "Turn the image blue",
+            "height": 32,
+            "width": 32,
+            "multi_modal_data": {"image": source_image},
+        }
+        result = worker._process_stage_inputs([upstream], prompt)
+        assert result["pil_image"] is source_image
+
+    resolved = []
+
+    def capture_engine(**kwargs):
+        _, single_stage = resolve_stage_configs(
+            kwargs["model"],
+            trust_remote_code=kwargs["trust_remote_code"],
+            deploy_config_path=kwargs["deploy_config"],
+        )
+        resolved.extend(single_stage)
+        return MagicMock()
+
+    monkeypatch.setattr("dynamo.vllm.omni.stage_worker.AsyncOmni", capture_engine)
+    registry_before = set(OMNI_PIPELINES)
+    _create_engine(model, stage, stage.stage_type, stage_id, False, str(deploy_path))
+    assert set(OMNI_PIPELINES) == registry_before
+    assert len(resolved) == 1
+    actual = resolved[0]
+    assert actual.stage_id == 0
+    assert actual.engine_args.model_stage == model_stage
+    assert actual.runtime.devices == "0"
+    assert actual.runtime.env == {"OMP_NUM_THREADS": "4"}
+    assert actual.engine_input_source == []
+    for name, value in sampling.items():
+        assert actual.default_sampling_params[name] == value

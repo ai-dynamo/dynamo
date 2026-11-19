@@ -559,6 +559,7 @@ tests/
   basic/                   # Basic smoke tests (wheel contents, CUDA version)
   dependencies/            # Import/dependency tests
   utils/                   # Shared test utilities (NOT test files)
+    ais_perf_model.py      # AIS perf model inputs shared by component tests
     constants.py           # Model IDs, default ports
     managed_process.py     # ManagedProcess for subprocess lifecycle
     port_utils.py          # Dynamic port allocation

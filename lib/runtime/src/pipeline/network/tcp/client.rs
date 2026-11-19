@@ -118,6 +118,15 @@ impl TcpClient {
         info: ConnectionInfo,
         cancellation_counter: Option<IntCounter>,
     ) -> Result<StreamSender> {
+        Self::create_response_stream_with_guard(context, info, cancellation_counter, None).await
+    }
+
+    pub(crate) async fn create_response_stream_with_guard(
+        context: Arc<dyn AsyncEngineContext>,
+        info: ConnectionInfo,
+        cancellation_counter: Option<IntCounter>,
+        writer_guard: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<StreamSender> {
         let info =
             TcpStreamConnectionInfo::try_from(info).context("tcp-stream-connection-info-error")?;
         tracing::trace!("Creating response stream for {:?}", info);
@@ -187,12 +196,10 @@ impl TcpClient {
 
         // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
         let writer_context = context.clone();
-        let writer_task = tokio::spawn(handle_writer(
-            framed_writer,
-            bytes_rx,
-            alive_rx,
-            writer_context,
-        ));
+        let writer_task = tokio::spawn(async move {
+            let _writer_guard = writer_guard;
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
 
         let subject = info.subject.clone();
         let monitor_context = context;
@@ -206,7 +213,10 @@ impl TcpClient {
 
         // set up the prologue for the stream
         // this might have transport specific metadata in the future
-        let prologue = Some(ResponseStreamPrologue { error: None });
+        let prologue = Some(ResponseStreamPrologue {
+            error: None,
+            typed_error: None,
+        });
 
         // create the stream sender
         let stream_sender = StreamSender {
@@ -285,7 +295,9 @@ impl TcpClient {
                 .instrument(reader_span),
         );
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver {
+            rx: bytes_rx.into(),
+        })
     }
 }
 
@@ -750,6 +762,7 @@ mod tests {
     use super::*;
     use crate::pipeline::context::Controller;
     use crate::pipeline::network::tcp::test_utils::create_tcp_pair;
+    use crate::tls_utils::test_certs::{mtls_chain, self_signed_pair};
     use bytes::Bytes;
     use futures::StreamExt;
     use std::collections::HashMap;
@@ -762,7 +775,6 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     type CapturedCancellationEvent = (HashMap<String, String>, Option<String>);
 
@@ -808,9 +820,11 @@ mod tests {
     #[tokio::test]
     async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
         let captured = Arc::new(CancellationEventCapture::default());
-        let _subscriber = tracing_subscriber::registry()
-            .with(CancellationEventLayer(captured.clone()))
-            .set_default();
+        // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CancellationEventLayer(captured.clone())),
+        );
         let controller = Arc::new(Controller::new("request-123".to_string()));
         let span = tracing::info_span!(target: "request_span", "handle_payload");
 
@@ -920,6 +934,45 @@ mod tests {
             expected_sentinel.as_slice(),
             "sentinel header should match serialized ControlMessage::Sentinel"
         );
+    }
+
+    #[tokio::test]
+    async fn response_writer_retains_guard_while_socket_has_pending_output() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let context = Arc::new(Controller::default());
+        let info: ConnectionInfo = TcpStreamConnectionInfo {
+            address: listener.local_addr().unwrap().to_string(),
+            subject: "drain-test".to_string(),
+            context: context.id().to_string(),
+            stream_type: StreamType::Response,
+        }
+        .into();
+        let guard = Arc::new(());
+        let sender =
+            TcpClient::create_response_stream_with_guard(context, info, None, Some(guard.clone()))
+                .await
+                .unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+
+        // Larger than the loopback socket buffers, so dropping the publisher
+        // while the peer is paused leaves the writer with pending output.
+        let data = Bytes::from(vec![1; 16 * 1024 * 1024]);
+        sender.send(data.clone()).await.unwrap();
+        drop(sender);
+        tokio::task::yield_now().await;
+        assert_eq!(Arc::strong_count(&guard), 2);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut reader = FramedRead::new(peer, TwoPartCodec::default());
+            recv_msg(&mut reader).await; // transport handshake
+            assert_data_only_message(recv_msg(&mut reader).await, &data);
+            assert_sentinel_message(recv_msg(&mut reader).await);
+            while Arc::strong_count(&guard) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Test that handle_writer forwards messages from the channel to the framed writer
@@ -2124,20 +2177,15 @@ mod tests {
 
     // ── TLS connector and SNI tests ──────────────────────────────────────────
 
-    fn make_ca_file() -> tempfile::NamedTempFile {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(cert.pem().as_bytes()).unwrap();
-        f
-    }
-
     #[test]
     fn connector_no_env_vars_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_no_env_vars_is_plaintext"),
+            &[],
+        ) {
+            return;
+        }
+
         // Clear every var the builder reads, incl. the client-identity vars, so
         // ambient mTLS settings can't flip this to "TLS requested".
         temp_env::with_vars_unset(
@@ -2155,6 +2203,13 @@ mod tests {
 
     #[test]
     fn connector_insecure_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_insecure_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_INSECURE", Some("true")),
@@ -2166,7 +2221,14 @@ mod tests {
 
     #[test]
     fn connector_with_ca_is_tls() {
-        let ca = make_ca_file();
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_with_ca_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
+        let (ca, _) = self_signed_pair();
         temp_env::with_vars(
             [(
                 "DYN_TCP_TLS_CA_CERT_PATH",
@@ -2174,74 +2236,6 @@ mod tests {
             )],
             || assert!(build_tls_connector_from_env().unwrap().is_some()),
         );
-    }
-
-    // Self-signed cert + matching key, for use as a client identity.
-    fn make_identity_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
-    // CA + server leaf (SAN=localhost, serverAuth) + client leaf (clientAuth),
-    // both signed by the CA. Returns (ca, server_cert, server_key, client_cert,
-    // client_key) PEM temp files.
-    #[allow(clippy::type_complexity)]
-    fn make_mtls_chain() -> (
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-    ) {
-        use std::io::Write;
-        fn write_pem(contents: &str) -> tempfile::NamedTempFile {
-            let mut f = tempfile::NamedTempFile::new().unwrap();
-            f.write_all(contents.as_bytes()).unwrap();
-            f
-        }
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let server_key = rcgen::KeyPair::generate().unwrap();
-        let mut server_params =
-            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        server_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        let client_key = rcgen::KeyPair::generate().unwrap();
-        let mut client_params =
-            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
-        client_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
-        let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        (
-            write_pem(&ca_cert.pem()),
-            write_pem(&server_cert.pem()),
-            write_pem(&server_key.serialize_pem()),
-            write_pem(&client_cert.pem()),
-            write_pem(&client_key.serialize_pem()),
-        )
     }
 
     /// Live mTLS handshake over the **real** response-stream client path:
@@ -2253,7 +2247,7 @@ mod tests {
     async fn response_stream_client_mtls_handshake() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let (ca, server_cert, server_key, client_cert, client_key) = make_mtls_chain();
+        let (ca, server_cert, server_key, client_cert, client_key) = mtls_chain();
 
         // mTLS server acceptor: requires a client cert signed by the CA.
         let server_config = crate::tls_utils::server_tls_config(
@@ -2303,9 +2297,16 @@ mod tests {
 
     #[test]
     fn connector_partial_client_identity_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_partial_client_identity_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         // A client cert without its key must fail closed (pair validation).
-        let ca = make_ca_file();
-        let (client_cert, _client_key) = make_identity_files();
+        let (ca, _) = self_signed_pair();
+        let (client_cert, _client_key) = self_signed_pair();
         temp_env::with_vars(
             [
                 (
@@ -2324,6 +2325,10 @@ mod tests {
 
     #[test]
     fn sni_parsing() {
+        if crate::test_utils::run_isolated(concat!(module_path!(), "::sni_parsing"), &[]) {
+            return;
+        }
+
         temp_env::with_var_unset("DYN_TCP_TLS_SERVER_NAME", || {
             assert!(matches!(
                 tls_server_name("127.0.0.1:8080").unwrap(),

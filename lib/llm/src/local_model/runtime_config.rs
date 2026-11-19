@@ -11,14 +11,12 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::{
-    protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
-    router_hint::{
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
-    },
+use dynamo_kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHintTransferWorkerMetadata, KvTransferEnforcement,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
+use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
@@ -33,8 +31,8 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
-/// Resource-safety bound for rank ranges advertised by one worker.
-pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
+/// Runtime-data key indicating speculative decoding is configured by a backend.
+pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
@@ -43,6 +41,11 @@ pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 /// frontend's structural tag to model an already-opened reasoning block.
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
+
+/// A backend consumes the reasoning prefix only when `require_reasoning` is true
+/// on the request. Missing metadata leaves reasoning in the frontend grammar.
+pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_reasoning_gate";
 
 /// Describes which request-token overflows the frontend may reject early.
 ///
@@ -66,7 +69,16 @@ pub fn topology_taint(domain: &str, value: &str) -> String {
     format!("{TOPOLOGY_TAINT_PREFIX}{domain}={value}")
 }
 
-/// Master switch for structural tag guided decoding.
+/// Controls when structural tags are activated based on `tool_choice`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralTagScope {
+    #[default]
+    Auto,
+    Always,
+}
+
+/// Legacy structural-tag enablement field used by older frontends.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuralTagMode {
@@ -75,13 +87,54 @@ pub enum StructuralTagMode {
     On,
 }
 
-/// Controls when structural tags are activated based on `tool_choice`.
+/// Controls which layer owns a reasoning boundary before structural-tag output.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum StructuralTagScope {
+pub enum StructuralTagReasoningBoundary {
+    /// Follow the reasoning-boundary policy advertised by the inference backend.
     #[default]
     Auto,
-    Always,
+    /// Include reasoning and its closing marker in the structural tag.
+    StructuralTag,
+    /// Let the inference backend activate a suffix-only structural tag after reasoning.
+    Backend,
+}
+
+/// Structural-tag guided-decoding policy for tool-calling requests.
+///
+/// Presence enables structural tags; absence disables operator-controlled tags.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct StructuralTagConfig {
+    pub scope: StructuralTagScope,
+    pub schema: StructuralTagSchemaMode,
+    pub allow_tool_calls_with_structured_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_special_tokens: Option<bool>,
+    pub reasoning_boundary: StructuralTagReasoningBoundary,
+    pub tool_arguments_any_order: bool,
+}
+
+impl StructuralTagConfig {
+    pub fn from_value_strict(value: serde_json::Value) -> serde_json::Result<Self> {
+        const FIELDS: &[&str] = &[
+            "scope",
+            "schema",
+            "allow_tool_calls_with_structured_output",
+            "exclude_special_tokens",
+            "reasoning_boundary",
+            "tool_arguments_any_order",
+        ];
+
+        if let Some(object) = value.as_object() {
+            for field in object.keys() {
+                if !FIELDS.contains(&field.as_str()) {
+                    return Err(serde::de::Error::unknown_field(field, FIELDS));
+                }
+            }
+        }
+        serde_json::from_value(value)
+    }
 }
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
@@ -95,12 +148,28 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// An opted-in worker can consume opaque JSON through `multi_modal_data`.
+/// Absence means unsupported, including workers predating this transport.
+pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";
+
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///
 /// Absence disables exact video routing so a newer frontend remains safe with
 /// older workers that predate this runtime contract.
 pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
     "vllm_qwen_video_processor_contract";
+
+/// Worker-reported Qwen3 video prompt-expansion contract used by SGLang.
+///
+/// SGLang performs an additional frame-selection and spatial-resize stage
+/// before the Transformers processor, so this cannot share vLLM's contract.
+pub const SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "sglang_qwen_video_processor_contract";
+
+/// Worker-reported Nemotron Nano Omni video prompt-expansion contract used by
+/// vLLM. Absence disables exact video routing for mixed-version safety.
+pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "vllm_nemotron_video_processor_contract";
 
 /// Worker-reported vLLM setting that makes multimodal cache identities depend
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
@@ -113,6 +182,16 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// mixed-backend frontend never forwards one engine's opaque request envelope
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
+
+/// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
+pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
+
+/// Worker-advertised guarantee that disaggregated prefill cancellation is safe
+/// at any point before the prefill stream finishes.
+///
+/// Both prefill and decode workers must advertise this versioned capability.
+/// Absence is conservative and leaves remote prefill cancellation disabled.
+pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
 
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +291,11 @@ pub struct ModelRuntimeConfig {
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
 
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
+
     pub max_num_seqs: Option<u64>,
 
     pub max_num_batched_tokens: Option<u64>,
@@ -239,15 +323,17 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_fallback_enabled: Option<bool>,
 
-    /// Whether structural tag guided decoding is enabled for tool calls.
+    /// Structural-tag policy used by the preprocessor. Presence enables
+    /// operator-controlled structural tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<StructuralTagConfig>,
+
+    // Compatibility with v1.4/v1.5 workers and frontends during v1.6 rolling upgrades
+    // TODO: remove when v1.5 falls outside the N-2 compatibility window
     #[serde(default)]
     pub structural_tag_mode: StructuralTagMode,
-
-    /// Controls when structural tags are activated based on tool_choice.
     #[serde(default)]
     pub structural_tag_scope: StructuralTagScope,
-
-    /// Controls whether tools get real or generic schemas in structural tags.
     #[serde(default)]
     pub structural_tag_schema: StructuralTagSchemaMode,
 
@@ -374,6 +460,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -381,6 +468,9 @@ impl Default for ModelRuntimeConfig {
             tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
+            // Older cards and native sidecars remain conservative. Current
+            // Python workers explicitly publish the deployment-facing policy.
+            structural_tag: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -406,6 +496,35 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// Whether the configured grammar can replay distinct Responses phases.
+    pub fn preserves_response_message_phases(&self) -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            self.tool_call_parser.as_deref(),
+            self.reasoning_parser.as_deref(),
+        ) == Some("muse_spark")
+    }
+
+    /// Normalize older wire fields into the current policy and project it back for older readers
+    pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
+        if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
+            self.structural_tag = Some(StructuralTagConfig {
+                scope: self.structural_tag_scope,
+                schema: self.structural_tag_schema,
+                ..Default::default()
+            });
+        }
+
+        if let Some(config) = &self.structural_tag {
+            self.structural_tag_mode = StructuralTagMode::On;
+            self.structural_tag_scope = config.scope;
+            self.structural_tag_schema = config.schema;
+        } else {
+            self.structural_tag_mode = StructuralTagMode::Off;
+            self.structural_tag_scope = StructuralTagScope::Auto;
+            self.structural_tag_schema = StructuralTagSchemaMode::Auto;
+        }
+    }
+
     /// Check whether a runtime boolean is explicitly enabled.
     ///
     /// Rust callers commonly store booleans, while compatibility cards may
@@ -424,15 +543,11 @@ impl ModelRuntimeConfig {
         self.runtime_flag_enabled(capability)
     }
 
-    fn router_hints_enabled(&self) -> bool {
-        self.supports_runtime_capability(ROUTER_HINT_RUNTIME_CAPABILITY_KEY)
-    }
-
-    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+    fn kv_hint_transfer_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
         let dp_rank = dp_rank.to_string();
         let endpoint = self
             .runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
             .as_object()?
             .get(&dp_rank)?
             .as_str()?;
@@ -440,7 +555,7 @@ impl ModelRuntimeConfig {
     }
 }
 
-impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -457,41 +572,34 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn router_hint_metadata_for_dp_rank(
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: u32,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
-        if !self.router_hints_enabled() {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        if !self.supports_runtime_capability(KV_HINT_TRANSFER_CAPABILITY_KEY) {
             return None;
         }
 
         let worker_type = self
             .runtime_data
-            .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY)?
             .as_str()?;
         if worker_type.is_empty() {
             return None;
         }
 
-        Some(RouterHintWorkerMetadata {
+        Some(KvHintTransferWorkerMetadata {
             worker_type,
-            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
+            source_control_endpoint: self.kv_hint_transfer_endpoint_for_dp_rank(dp_rank),
         })
     }
 
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.runtime_data
-            .get("native_offloading_capacity")?
-            .get("total_tokens")?
-            .as_u64()
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
-    }
-
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -508,10 +616,6 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 }
 
@@ -623,6 +727,18 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         ));
     }
 
+    // Range validation alone accepts NaN. Enforce finite routing weights
+    // here so every configuration source receives the same validation.
+    if config
+        .kv_transfer_preferred_weight
+        .is_some_and(|weight| !weight.is_finite())
+    {
+        return Err(validation_error(
+            "invalid_kv_transfer_preferred_weight",
+            "kv_transfer_preferred_weight must be finite",
+        ));
+    }
+
     if config.kv_transfer_preferred_weight.is_some()
         && !matches!(
             config.kv_transfer_enforcement,
@@ -647,7 +763,8 @@ impl ModelRuntimeConfig {
         self.validate().map_err(|error| error.to_string())
     }
 
-    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+    /// Return the validated global DP ranks advertised by this worker.
+    pub fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
         if self.data_parallel_size == 0 {
             return Err("data_parallel_size must be at least 1".to_string());
         }
@@ -780,6 +897,85 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+
+    #[test]
+    fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {
+        assert_eq!(
+            serde_json::from_value::<StructuralTagConfig>(serde_json::json!({})).unwrap(),
+            StructuralTagConfig::default()
+        );
+        assert_eq!(
+            StructuralTagConfig::default().reasoning_boundary,
+            StructuralTagReasoningBoundary::Auto
+        );
+
+        let config = StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Strict,
+            allow_tool_calls_with_structured_output: true,
+            exclude_special_tokens: Some(false),
+            reasoning_boundary: StructuralTagReasoningBoundary::Backend,
+            tool_arguments_any_order: true,
+        };
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            serde_json::from_value::<StructuralTagConfig>(value.clone()).unwrap(),
+            config
+        );
+        assert_eq!(
+            StructuralTagConfig::from_value_strict(value).unwrap(),
+            config
+        );
+
+        let future_config = serde_json::json!({"future_option": true});
+        assert_eq!(
+            serde_json::from_value::<StructuralTagConfig>(future_config.clone()).unwrap(),
+            StructuralTagConfig::default()
+        );
+        let error = StructuralTagConfig::from_value_strict(future_config).unwrap_err();
+        assert!(error.to_string().contains("unknown field `future_option`"));
+    }
+
+    #[test]
+    fn legacy_structural_tag_fields_normalize_to_current_config() {
+        let mut runtime: ModelRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "structural_tag_mode": "on",
+            "structural_tag_scope": "always",
+            "structural_tag_schema": "strict"
+        }))
+        .unwrap();
+
+        runtime.normalize_structural_tag_compatibility();
+
+        assert_eq!(
+            runtime.structural_tag,
+            Some(StructuralTagConfig {
+                scope: StructuralTagScope::Always,
+                schema: StructuralTagSchemaMode::Strict,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn current_structural_tag_config_controls_legacy_projection() {
+        let mut runtime: ModelRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "structural_tag": {"scope": "auto", "schema": "strict"},
+            "structural_tag_mode": "off",
+            "structural_tag_scope": "always",
+            "structural_tag_schema": "auto"
+        }))
+        .unwrap();
+
+        runtime.normalize_structural_tag_compatibility();
+
+        let wire = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(wire["structural_tag_mode"], "on");
+        assert_eq!(wire["structural_tag_scope"], "auto");
+        assert_eq!(wire["structural_tag_schema"], "strict");
+        assert_eq!(wire["structural_tag"]["scope"], "auto");
+        assert_eq!(wire["structural_tag"]["schema"], "strict");
+    }
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the
@@ -1068,71 +1264,56 @@ mod tests {
     }
 
     #[test]
-    fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_kv_router::WorkerConfigLike;
+    fn kv_hint_transfer_support_requires_explicit_true() {
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
-        config
-            .set_engine_specific(
-                "native_offloading_capacity",
-                serde_json::json!({"total_tokens": 300}),
-            )
-            .unwrap();
-
-        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
-    }
-
-    #[test]
-    fn router_hint_support_requires_explicit_true() {
-        use dynamo_kv_router::WorkerConfigLike;
-
-        let mut config = ModelRuntimeConfig::default();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, true)
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, true)
             .unwrap();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .set_engine_specific(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, "prefill")
             .unwrap();
-        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert!(info.source_control_endpoint.is_none());
 
         config
             .set_engine_specific(
-                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
                 serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
             )
             .unwrap();
-        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
         assert_eq!(
             config
-                .router_hint_metadata_for_dp_rank(1)
+                .kv_hint_transfer_metadata_for_dp_rank(1)
                 .unwrap()
                 .source_control_endpoint,
             None
         );
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
             .unwrap();
         assert_eq!(
             config
-                .router_hint_metadata_for_dp_rank(0)
+                .kv_hint_transfer_metadata_for_dp_rank(0)
                 .unwrap()
                 .worker_type,
             "prefill"
         );
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "false")
             .unwrap();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]
@@ -1285,6 +1466,13 @@ mod tests {
     fn test_validate_config_rejects_invalid_topology_components() {
         for config in [
             ModelRuntimeConfig {
+                topology_domains: HashMap::from([(
+                    "zone".to_string(),
+                    "invalid=value".to_string(),
+                )]),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
                 topology_domains: HashMap::from([("".to_string(), "us-east-1a".to_string())]),
                 ..Default::default()
             },
@@ -1297,6 +1485,23 @@ mod tests {
             },
         ] {
             assert!(config.validate_config().is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_invalid_kv_transfer_weights() {
+        for weight in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            let config = ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "zone-a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                kv_transfer_preferred_weight: Some(weight),
+                ..Default::default()
+            };
+            assert!(
+                config.validate_config().is_err(),
+                "invalid preferred weight {weight} must be rejected"
+            );
         }
     }
 

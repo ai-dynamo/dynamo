@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
+    Component,
     Config,
     append_argument,
     break_arguments,
@@ -64,10 +65,30 @@ def _has_arg(args: list[str], key: str) -> bool:
     return any(arg == key or arg.startswith(f"{key}=") for arg in args)
 
 
+# SGLang 0.5.21 removed these aliases, which argparse now rejects as ambiguous;
+# generator templates still emit them, so map each to the -decode form it meant.
+_LEGACY_CUDA_GRAPH_ARGS = {
+    "--cuda-graph-bs": "--cuda-graph-bs-decode",
+    "--cuda-graph-max-bs": "--cuda-graph-max-bs-decode",
+}
+
+
+def _rename_legacy_cuda_graph_args(args: list[str]) -> list[str]:
+    renamed: list[str] = []
+    for arg in break_arguments(args):
+        name, sep, value = arg.partition("=")
+        new_name = _LEGACY_CUDA_GRAPH_ARGS.get(name)
+        if new_name is not None:
+            logger.info("Renaming removed SGLang arg %s to %s", name, new_name)
+            arg = f"{new_name}{sep}{value}"
+        renamed.append(arg)
+    return renamed
+
+
 def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
     args = list(args)
     parsed_args = break_arguments(args)
-    if _has_arg(parsed_args, "--cuda-graph-bs") or _has_arg(
+    if _has_arg(parsed_args, "--cuda-graph-bs-decode") or _has_arg(
         parsed_args, "--disable-cuda-graph"
     ):
         return args
@@ -85,7 +106,7 @@ def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
             default=1,
         )
         safe_bs = max(1, dp_size)
-        args = append_argument(args, ["--cuda-graph-bs", str(safe_bs)])
+        args = append_argument(args, ["--cuda-graph-bs-decode", str(safe_bs)])
     return args
 
 
@@ -153,6 +174,18 @@ def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
     )
 
 
+# Disagg blueprint defaults that AIC engine tuning may omit. SGLang binds the
+# prefill bootstrap server to --host, whose default (127.0.0.1) decode workers
+# in other pods cannot reach. Without a fixed bootstrap port, dynamo.sglang
+# reserves a free one per process, and SGLang before 0.5.12 does not sync rank
+# 0's port to the other ranks of a multinode prefill worker.
+_DISAGG_DEFAULT_ARGS = (
+    ("--disaggregation-transfer-backend", "nixl"),
+    ("--disaggregation-bootstrap-port", "12345"),
+    ("--host", "0.0.0.0"),
+)
+
+
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
@@ -166,26 +199,35 @@ class SGLangConfigModifier(BaseConfigModifier):
         return update_image(config, image)
 
     @classmethod
-    def _apply_disagg_workers(
+    def _finalize_disagg_cli_args(
+        cls, args: list[str], role: SubComponentType
+    ) -> list[str]:
+        if role == SubComponentType.PREFILL:
+            # Rename before the prefill safety check so it sees generated values.
+            args = _normalize_prefill_dp_limits(_rename_legacy_cuda_graph_args(args))
+        # SGLang treats a missing --disaggregation-mode as aggregated serving.
+        finalized = set_unique_argument_value(
+            break_arguments(args), "--disaggregation-mode", role.value
+        )
+        for key, value in _DISAGG_DEFAULT_ARGS:
+            if not _has_arg(finalized, key):
+                finalized = append_argument(finalized, [key, value])
+        return finalized
+
+    @classmethod
+    def _apply_worker_config(
         cls,
-        cfg: Config,
-        prefill_cli_args: list[str],
-        prefill_replicas: int,
-        prefill_gpus: int,
-        decode_cli_args: list[str],
-        decode_replicas: int,
-        decode_gpus: int,
+        component: Component,
+        cli_args: list[str],
+        replicas: int,
+        gpus: int,
         num_gpus_per_node: int | None = None,
     ) -> None:
-        prefill_cli_args = _normalize_prefill_dp_limits(prefill_cli_args)
-        super()._apply_disagg_workers(
-            cfg,
-            prefill_cli_args=prefill_cli_args,
-            prefill_replicas=prefill_replicas,
-            prefill_gpus=prefill_gpus,
-            decode_cli_args=decode_cli_args,
-            decode_replicas=decode_replicas,
-            decode_gpus=decode_gpus,
+        super()._apply_worker_config(
+            component,
+            _rename_legacy_cuda_graph_args(cli_args),
+            replicas,
+            gpus,
             num_gpus_per_node=num_gpus_per_node,
         )
 
@@ -316,6 +358,8 @@ class SGLangConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_component_from_config(
@@ -323,7 +367,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         )
 
         # Set up resources
-        setup_worker_component_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -518,6 +562,74 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
 
         args = append_argument(args, "--enable-dp-lm-head")
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_kv_cache(
+        cls,
+        config: dict,
+        block_size: int,
+        memory_fraction: float | None,
+        prefix_caching: bool,
+        num_gpu_blocks: int | None = None,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply KV-cache block size, memory budget, and prefix-caching policy.
+
+        SGLang naming/polarity differs from vLLM, confirmed against the real
+        base template (--page-size) and real deploy examples/launch scripts
+        (--mem-fraction-static, present at examples/backends/sglang/deploy and
+        launch/_test_agg.sh). Prefix caching (SGLang: radix cache) defaults ON
+        and is a single-flag toggle, not a paired enable/disable flag like
+        vLLM -- presence of --disable-radix-cache means OFF, its absence means
+        the (default) ON state. Do not copy vLLM's flag names or polarity here.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        if memory_fraction is None:
+            raise ValueError(
+                "SGLang direct rendering does not support fixed KV-cache blocks"
+            )
+        args = set_argument_value(args, "--page-size", str(block_size))
+        args = set_argument_value(args, "--mem-fraction-static", str(memory_fraction))
+
+        if "--disable-radix-cache" in args:
+            args.remove("--disable-radix-cache")
+        if not prefix_caching:
+            args = append_argument(args, "--disable-radix-cache")
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_model(
+        cls,
+        config: dict,
+        model_name: str,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's model to the worker's CLI args.
+
+        See VllmV1ConfigModifier.set_config_model for why this call exists:
+        without it, the base template's placeholder model name survives
+        untouched into the materialized DGD.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, cls.WORKER_MODEL_PATH_ARG, model_name)
+        args = set_argument_value(args, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name)
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()

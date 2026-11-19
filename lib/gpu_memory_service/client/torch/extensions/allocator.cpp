@@ -1,16 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Minimal CUDAPluggableAllocator shim for GPU Memory Service.
+// Minimal pluggable-allocator shim for GPU Memory Service.
 //
 // This extension provides the my_malloc/my_free function pointers required by
-// PyTorch's CUDAPluggableAllocator. All actual CUDA VMM operations are delegated
-// to Python callbacks which use cuda.bindings.
+// PyTorch's pluggable allocator (CUDAPluggableAllocator or XPUPluggableAllocator).
+// All actual VMM operations are delegated to Python callbacks — the shim itself
+// is device-agnostic (pure void* ABI, no CUDA or SYCL dependency).
 //
-// Note: The stream parameter is unused because CUDA VMM operations (cuMemMap,
-// cuMemUnmap) are synchronous and globally visible - they don't have per-stream
-// semantics like cudaMallocAsync. We keep the parameter to match PyTorch's
-// CUDAPluggableAllocator interface signature.
+// Note: The stream parameter is unused because VMM operations (cuMemMap on CUDA,
+// physical_mem::map on SYCL) are synchronous and globally visible — they don't
+// have per-stream semantics like cudaMallocAsync. We keep the parameter to match
+// PyTorch's pluggable allocator interface signature (void* stream).
 //
 // PEP 703 (free-threaded CPython) note: the callback pair is held in a magic-
 // statics singleton, so reads from my_malloc/my_free are data-race-free without
@@ -128,7 +129,8 @@ static PyMethodDef module_methods[] = {
     {"init_module", py_init_module, METH_VARARGS, "Set malloc/free callbacks"}, {nullptr, nullptr, 0, nullptr}};
 
 static struct PyModuleDef allocator_module = {
-    PyModuleDef_HEAD_INIT, "_allocator_ext", "CUDAPluggableAllocator shim for GPU Memory Service", -1, module_methods};
+    PyModuleDef_HEAD_INIT, "_allocator_ext", "Device-agnostic pluggable allocator shim for GPU Memory Service", -1,
+    module_methods};
 
 PyMODINIT_FUNC
 PyInit__allocator_ext(void)

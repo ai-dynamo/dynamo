@@ -11,12 +11,23 @@ if [ -d /usr/local/tensorrt/targets ]; then
     [ -d "$TENSORRT_LIB_DIR" ] && export LD_LIBRARY_PATH="${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}"
 fi
 
-if [ -d /opt/hpcx/ompi ]; then
-    export OPAL_PREFIX=/opt/hpcx/ompi
-    export OMPI_MCA_coll_ucc_enable=0
-    export PATH="/opt/hpcx/ompi/bin:${PATH}"
-    export LD_LIBRARY_PATH="/opt/hpcx/ompi/lib:${LD_LIBRARY_PATH}"
+# /opt/dynamo/mpi is the Open MPI that trtllm_runtime.Dockerfile selects per
+# architecture, and its ENV already points there. Prefer it, so that a login
+# shell does not switch back to the base image's default at /opt/hpcx/ompi.
+if [ -d /opt/dynamo/mpi ]; then
+    _mpi_prefix=/opt/dynamo/mpi
+elif [ -d /opt/hpcx/ompi ]; then
+    _mpi_prefix=/opt/hpcx/ompi
+else
+    _mpi_prefix=
 fi
+if [ -n "${_mpi_prefix}" ]; then
+    export OPAL_PREFIX="${_mpi_prefix}"
+    export OMPI_MCA_coll_ucc_enable=0
+    export PATH="${_mpi_prefix}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${_mpi_prefix}/lib:${LD_LIBRARY_PATH}"
+fi
+unset _mpi_prefix
 
 [ -d /opt/hpcx/ucc/lib ] && export LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 [ -f /etc/shinit_v2 ] && export ENV="${ENV:-/etc/shinit_v2}"

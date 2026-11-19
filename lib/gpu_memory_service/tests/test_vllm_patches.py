@@ -3,6 +3,7 @@
 
 """Focused API regression coverage for vLLM GMS monkey-patches."""
 
+import inspect
 import sys
 from types import ModuleType
 
@@ -29,15 +30,12 @@ pytestmark = [
 ]
 
 
-def test_nixl_base_patch_covers_pull_push_and_cross_layer_registration(monkeypatch):
-    """Patch the shared vLLM 0.27 base rather than its pull-only alias."""
+def test_nixl_base_patch_covers_pull_and_push_registration(monkeypatch):
+    """Both NIXL modes defer registration through the vLLM 0.29 base."""
 
     class NixlBaseConnector:
         def register_kv_caches(self, kv_caches):
             raise AssertionError("scratch-backed KV caches must be deferred")
-
-        def register_cross_layers_kv_cache(self, kv_cache, attn_backend):
-            raise AssertionError("scratch-backed cross-layer KV must be deferred")
 
     class NixlPullConnector(NixlBaseConnector):
         pass
@@ -60,13 +58,22 @@ def test_nixl_base_patch_covers_pull_push_and_cross_layer_registration(monkeypat
     pull = NixlPullConnector()
     push = NixlPushConnector()
     kv_caches = {"layer.0": object()}
-    cross_layer_kv = object()
-    attn_backend = object()
     pull.register_kv_caches(kv_caches)
-    push.register_cross_layers_kv_cache(cross_layer_kv, attn_backend)
+    push.register_kv_caches(kv_caches)
 
     assert pull._scratch_kv_pending is kv_caches
-    assert push._scratch_cross_layers_kv_pending == (
-        cross_layer_kv,
-        attn_backend,
-    )
+    assert push._scratch_kv_pending is kv_caches
+
+
+def test_request_memory_patch_accepts_upstream_signature(monkeypatch):
+    """The shadow-mode patch must accept every argument vLLM passes."""
+    worker_utils = pytest.importorskip("vllm.v1.worker.utils")
+    original = worker_utils.request_memory
+    monkeypatch.setattr(worker_utils, "request_memory", original)
+    monkeypatch.setattr(patches, "_request_memory_patched", False)
+
+    patches.patch_request_memory()
+
+    patched = worker_utils.request_memory
+    assert patched is not original
+    inspect.signature(patched).bind(*inspect.signature(original).parameters)

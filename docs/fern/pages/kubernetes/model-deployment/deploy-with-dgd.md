@@ -45,6 +45,11 @@ spec:
 - `type: worker` runs the inference engine (vLLM, SGLang, or TensorRT-LLM).
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
+For every backend, a component's `name` is its stable identifier within the DGD. The operator
+uses that name to derive Kubernetes resource names and sets it on the
+`nvidia.com/dynamo-component` label. Keep the name consistent anywhere commands, selectors, scaling
+resources, or overrides refer to that component; renaming it changes those references.
+
 The steps below fill in these fields, building one spec from a model to a running deployment.
 
 <Steps toc={true} tocDepth={2}>
@@ -89,7 +94,7 @@ spec:
         containers:
         - name: main
           image: ${RUNTIME_IMAGE}
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:
@@ -153,7 +158,6 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
 ```
 
 </Tab>
@@ -217,21 +221,21 @@ The worker in the previous step runs **vLLM**. Dynamo also supports **SGLang** a
 <Tab title="vLLM" language="vllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
 ```
 
 </Tab>
 <Tab title="SGLang" language="sglang">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
 ```
 
 </Tab>
 <Tab title="TensorRT-LLM" language="trtllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0
 ```
 
 </Tab>
@@ -251,7 +255,7 @@ vLLM and SGLang take tensor/pipeline/data parallelism as CLI flags (covered in t
 > [!IMPORTANT]
 > **Check the model works on your hardware and backend before you deploy.** Not every model, GPU, and backend combination is valid — a quantization can be unsupported on your GPU architecture (for example, FP8 needs Hopper/Ada or newer; some FP4/NVFP4 paths need Blackwell), or an engine may not yet implement a model's architecture. Confirm against the backend's supported-models list ([vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md), [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md), [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md)) and, for sizing, the [AIConfigurator support matrix](../../developer-guide/additional-resources/aiconfigurator-reference.md).
 
-You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover or multinode TensorRT-LLM.
+You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover, or when the operator cannot infer it from the worker command, which includes every native sidecar engine launch.
 
 For per-backend setup and tuning, see [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md), [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md), and [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md).
 
@@ -276,7 +280,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
   components:
   - name: Frontend
     type: frontend
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -295,7 +299,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
   components:
   - name: Frontend
     type: frontend
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     sharedMemorySize: 16Gi
     podTemplate:
@@ -309,8 +313,8 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-  - name: VllmDecodeWorker
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+  - name: decode
     type: decode
     sharedMemorySize: 16Gi
     podTemplate:
@@ -324,7 +328,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
 
 </Tab>
@@ -382,7 +386,7 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 <Tab title="vLLM" language="vllm">
 
 ```yaml
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -455,7 +459,7 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 
 **Mixture-of-Experts.** MoE models — DeepSeek-R1, Qwen3-235B, Kimi-K2 — add **expert parallelism (EP)** on top of the knobs above, and expose it as **two** sizes: how experts are split (EP) and how the non-expert (attention) weights are split (a tensor-parallel size for the MoE layers). In vLLM, enable EP with `--enable-expert-parallel`, typically alongside `--data-parallel-size` for the attention layers. In SGLang, use `--ep-size` with `--enable-dp-attention`. In TensorRT-LLM, set both `moe_expert_parallel_size` and `moe_tensor_parallel_size` in the engine config. Wide-EP deployments usually pair this with multinode and a fast all-to-all backend (for example `VLLM_ALL2ALL_BACKEND=deepep_low_latency`). For a worked multinode wide-EP example, see the [DeepSeek-R1 recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/vllm/disagg/deploy_hopper_16gpu.yaml).
 
-**Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. See [Multinode Deployments](../installation/multinode-orchestration.md) and the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
+**Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. To use different images, resources, placement, or commands for the leader and workers, provide [Role-Specific Pod Templates](../installation/multinode-orchestration.md#role-specific-pod-templates). New multinode components expose provider-independent `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` aliases for custom commands. See [Multinode Deployments](../installation/multinode-orchestration.md) and its [Portable Topology Environment Variables](../installation/multinode-orchestration.md#portable-topology-environment-variables) section, plus the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
 
 > [!WARNING]
 > **Leave room for the KV cache.** The weights are only part of GPU memory — the KV cache grows with context length and concurrency, and if it has no room the worker OOMs at load or under traffic. Each engine caps the fraction of GPU memory it will use: `--gpu-memory-utilization` (vLLM, default 0.90), `--mem-fraction-static` (SGLang), or `free_gpu_memory_fraction` in the engine config (TensorRT-LLM). If you hit OOM, lower the fraction, add a GPU (raise TP), or reduce max context length.
@@ -546,7 +550,7 @@ spec:
         containers:
         - name: main
           image: ${RUNTIME_IMAGE}             # export: vllm-runtime image + tag
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 8                               # substitute: scale out for throughput
     podTemplate:
@@ -636,7 +640,6 @@ spec:
           - --context-length
           - "32000"
           - --trust-remote-code
-          - --skip-tokenizer-init
           resources:
             requests:
               nvidia.com/gpu: "2"
@@ -715,6 +718,46 @@ spec:
 
 
 This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations above — disaggregated, multinode, MoE expert-parallel, cached, KV-routed, or offloaded — apply the change from that step or the matching page below.
+
+## Before updating a Grove deployment
+
+Grove uses RollingRecreate by default for every DGD. To opt into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. New Grove DGDs created by operator 1.6.0 or later default provider-native `minAvailable` to `1` unless the manifest uses a deprecated component minimum. Existing DGDs retain their persisted legacy minima. Moving those minima to provider overrides preserves their effective values and does not select Coherent.
+
+For deployments that explicitly select Coherent, use Grove v0.1.0-alpha.15 or later with its matching CRDs, which includes the [corrective-update recovery fix](https://github.com/ai-dynamo/grove/issues/873), and complete these checks before changing worker images or pod templates:
+
+1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
+2. Review any `providerOverride.value.rollingUpdate.maxUnavailable`. It is a ceiling on unavailable replicas, defaults to the effective minimum under Coherent, and must be at least that minimum.
+3. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
+4. Plan with existing capacity: Grove has no surge support, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
+5. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
+
+See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#coherent-capacity-and-disruption) for budget semantics and examples. Coherent coordination applies within one PCS and does not guarantee zero downtime.
+
+### Recover from a stalled Coherent update
+
+On Grove alpha.14, a corrective update can stall because old replicas are already unavailable. [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873) is fixed in v0.1.0-alpha.15; upgrade Grove and its matching CRDs together. For an older installation with a stalled update, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change.
+
+> [!WARNING]
+> Recreating the DGD stops its workloads and interrupts serving. Plan downtime or move traffic to another deployment before using this reset path.
+
+1. Prepare a replacement manifest, such as `deployment.yaml`, with the same DGD name and namespace. Remove `metadata.annotations["nvidia.com/grove-update-strategy"]` to use RollingRecreate.
+2. Delete the DGD and wait for its owned resources to be removed. Replace the example name and namespace with those from your manifest:
+
+   ```bash
+   DGD_NAME="my-dgd"
+   DEPLOY_NAMESPACE="default"
+   kubectl delete dynamographdeployment "$DGD_NAME" -n "$DEPLOY_NAMESPACE" --cascade=foreground --wait=true
+   ```
+
+3. Recreate the deployment from the prepared manifest:
+
+   ```bash
+   kubectl apply -f deployment.yaml
+   ```
+
+   Verify that the components become Ready and inference succeeds before restoring traffic.
+
+For PodCliqueScalingGroup (PCSG) components, deleting stuck member pods does not unblock this failure: Grove refills them at the old revision. For a standalone PodClique, deleting the stuck pod is a proposed workaround that has not been verified on a running cluster; do not rely on it as a confirmed recovery procedure.
 
 ## Optional next steps
 

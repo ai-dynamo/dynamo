@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from prometheus_api_client import PrometheusApiClientException
+from requests import ConnectionError as RequestsConnectionError
 
 from dynamo import prometheus_names
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
@@ -42,6 +43,9 @@ class _FixedPrefillCapacity:
     def __init__(self, engine_rps: float):
         self.engine_rps = engine_rps
 
+    def has_valid_engine_limits(self):
+        return True
+
     def find_engine_capacity_rps(self, **kwargs):
         return SimpleNamespace(rps=self.engine_rps, ttft_ms=100.0, eligible=True)
 
@@ -55,6 +59,7 @@ class _ThroughputScalingHarness(ThroughputScalingMixin):
             decode_min_endpoint=None,
         )
         self._prefill_regression = _FixedPrefillCapacity(engine_rps)
+        self._diag_throughput_metadata_available = {}
         self._diag_throughput_reason = None
         self._diag_engine_rps_prefill = None
 
@@ -335,24 +340,52 @@ def test_get_average_metric_with_validation_error():
         assert result == 25.5
 
 
-def test_get_average_metric_multiple_matching_containers(mock_prometheus_result):
-    """Test _get_average_metric with multiple matching containers returns average"""
-    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+def test_frontend_histogram_query_and_model_namespace_selection():
+    client = _mocked_frontend_client("target_namespace")
+    client.prom.custom_query.return_value = [
+        {
+            "metric": {"model": "other", "dynamo_namespace": "target_namespace"},
+            "value": [0, "9999"],
+        },
+        {
+            "metric": {"model": "target_model", "dynamo_namespace": "other"},
+            "value": [0, "9999"],
+        },
+        {
+            "metric": {
+                "model": "target_model",
+                "dynamo_namespace": "target_namespace",
+            },
+            "value": [0, "199"],
+        },
+    ]
 
-    with patch.object(client.prom, "custom_query") as mock_query:
-        # Use containers 1, 2, 3 which all match target criteria
-        mock_query.return_value = mock_prometheus_result[1:]
+    result = client.get_avg_input_sequence_tokens("60s", "TARGET_MODEL")
 
-        result = client._get_average_metric(
-            full_metric_name="test_metric",
-            interval="60s",
-            operation_name="test operation",
-            model_name="target_model",
+    client.prom.custom_query.assert_called_once_with(
+        query=(
+            "sum by (model, dynamo_namespace) "
+            "(increase(dynamo_frontend_input_sequence_tokens_sum[60s])) / "
+            "sum by (model, dynamo_namespace) "
+            "(increase(dynamo_frontend_input_sequence_tokens_count[60s]))"
         )
+    )
+    assert result == 199.0
 
-        # Average of 42.7, 35.5, and 15.5 (using value[1] from each container)
-        expected = (42.7 + 35.5 + 15.5) / 3
-        assert result == expected
+
+def test_frontend_histogram_preserves_nan_result():
+    client = _mocked_frontend_client("target_namespace")
+    client.prom.custom_query.return_value = [
+        {
+            "metric": {
+                "model": "target_model",
+                "dynamo_namespace": "target_namespace",
+            },
+            "value": [0, "NaN"],
+        }
+    ]
+
+    assert math.isnan(client.get_avg_input_sequence_tokens("60s", "target_model"))
 
 
 def test_get_avg_request_count_uses_started_requests():
@@ -411,6 +444,69 @@ def test_get_avg_request_count_falls_back_to_completed_when_started_missing():
     queries = [call.kwargs["query"] for call in mock_query.call_args_list]
     assert "dynamo_frontend_requests_started_total" in queries[0]
     assert "dynamo_frontend_requests_total" in queries[1]
+
+
+def test_get_avg_request_count_returns_none_when_no_data():
+    """No data is UNKNOWN demand, not zero demand.
+
+    A frontend whose metrics are not being scraped -- a PodMonitor pointing at the
+    wrong path, say -- looks exactly like a frontend nobody is sending requests to.
+    Returning 0 makes the planner size the pools for no traffic while traffic is
+    flowing; only min_endpoint then stands between a busy pool and its floor.
+    """
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = [[], []]
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result is None
+
+
+def test_frontend_completed_zero_does_not_prove_zero_demand():
+    client = _mocked_frontend_client("target_namespace")
+    zero = [
+        {
+            "metric": {
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0, "0"],
+        }
+    ]
+    with patch.object(client.prom, "custom_query", side_effect=[[], zero]):
+        assert client.get_avg_request_count("30s", "target_model") is None
+    with patch.object(client.prom, "custom_query", return_value=zero) as query:
+        assert client.get_avg_request_count("30s", "target_model") == 0
+        assert query.call_count == 1
+
+
+def test_get_avg_request_count_returns_none_when_prometheus_is_unreachable():
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = RequestsConnectionError("connection refused")
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result is None
+
+
+def test_get_avg_request_count_returns_none_on_unexpected_errors():
+    """A malformed response is unknown demand, and must not kill the planner.
+
+    The tick loop catches only GPUShapeUnavailableError (core/base.py:1042), so
+    anything raised here would shut the planner down instead of skipping a tick.
+    """
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = ValueError("malformed payload")
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result is None
 
 
 def test_vllm_spec_decode_accept_length_query_derives_from_counters():
@@ -716,7 +812,7 @@ class TestPrometheusAPIClientRouterSource:
             "started query failed" in record.message for record in caplog.records
         )
 
-    def test_router_request_count_returns_zero_when_completed_query_fails(
+    def test_router_request_count_is_unavailable_when_completed_query_fails(
         self, router_client
     ):
         router_client.prom.custom_query.side_effect = [
@@ -726,7 +822,7 @@ class TestPrometheusAPIClientRouterSource:
 
         result = router_client.get_avg_request_count("60s", "mymodel")
 
-        assert result == 0
+        assert result is None
 
     def test_router_request_count_reraises_malformed_response(
         self, router_client, caplog
@@ -782,12 +878,37 @@ class TestPrometheusAPIClientRouterSource:
         assert router_client.prom.custom_query.call_count == 1
 
     def test_router_request_count_preserves_valid_zero(self, router_client):
-        router_client.prom.custom_query.return_value = [{"value": [0, "0.0"]}]
+        router_client.prom.custom_query.side_effect = [
+            [{"value": [0, "0.0"]}],
+            [],
+        ]
 
         result = router_client.get_avg_request_count("60s", "mymodel")
 
         assert result == 0.0
-        assert router_client.prom.custom_query.call_count == 1
+        assert router_client.prom.custom_query.call_count == 2
+
+    @pytest.mark.parametrize("coalesced", [[], [{"value": [0, "0.0"]}]])
+    def test_router_completed_zero_does_not_prove_zero_demand(
+        self, router_client, coalesced
+    ):
+        router_client.prom.custom_query.side_effect = [
+            coalesced,
+            [{"metric": {"instance": "legacy"}, "value": [0, "0.0"]}],
+        ]
+        assert router_client.get_avg_request_count("60s", "mymodel") is None
+        if coalesced:
+            query = router_client.prom.custom_query.call_args.kwargs["query"]
+            assert "unless ignoring(__name__)" in query
+            assert query.count('dynamo_namespace="test_fe_namespace"') == 2
+
+    def test_router_zero_is_unknown_when_legacy_series_check_fails(self, router_client):
+        router_client.prom.custom_query.side_effect = [
+            [{"value": [0, "0.0"]}],
+            PrometheusApiClientException("legacy-series check failed"),
+            [{"value": [0, "0.0"]}],
+        ]
+        assert router_client.get_avg_request_count("60s", "mymodel") is None
 
     def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
         """Router histogram query must filter by dynamo_namespace so each pool planner
@@ -823,20 +944,21 @@ class TestPrometheusAPIClientRouterSource:
         result = router_client.get_avg_inter_token_latency("60s", "mymodel")
         assert result == 0
 
-    def test_router_request_count_returns_zero_on_empty_result(self, router_client):
-        """Router request count returns 0 when neither counter has data."""
+    def test_router_request_count_is_unavailable_on_empty_result(self, router_client):
+        """Missing counters must not masquerade as an idle pool."""
         router_client.prom.custom_query.return_value = []
         result = router_client.get_avg_request_count("60s", "mymodel")
-        assert result == 0
+        assert result is None
 
-    def test_router_request_count_returns_zero_when_both_counters_are_nan(
-        self, router_client
+    @pytest.mark.parametrize("value", ["NaN", "Inf"])
+    def test_router_request_count_is_unavailable_when_both_counters_are_nonfinite(
+        self, router_client, value
     ):
-        router_client.prom.custom_query.return_value = [{"value": [0, "NaN"]}]
+        router_client.prom.custom_query.return_value = [{"value": [0, value]}]
 
         result = router_client.get_avg_request_count("60s", "mymodel")
 
-        assert result == 0
+        assert result is None
 
     def test_router_histogram_returns_zero_on_nan(self, router_client):
         """_get_router_average_histogram returns 0 when value is NaN."""

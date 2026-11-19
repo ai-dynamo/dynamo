@@ -29,7 +29,6 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -41,7 +40,7 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 	g := gomega.NewGomegaWithT(t)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
+		Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid"),
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -74,7 +73,6 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 		nil,
 		nil,
 		nil,
-		nil,
 	)
 	_, err := sharedResources.Reconcile(ctx, dgd)
 
@@ -89,8 +87,9 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	ctx := context.Background()
 	reference := "referenced-checkpoint"
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
+		Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid"),
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "worker",
@@ -114,9 +113,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	dgd.Annotations = map[string]string{
 		consts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	require.NoError(t, err)
-	referenced := dgdTestPodSnapshot(reference, workerHash, true)
+	referenced := dgdTestPodSnapshot(reference, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(s).
@@ -133,7 +130,6 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 		events.NewFakeRecorder(10),
 		config,
 		runtimeConfig,
-		nil,
 		nil,
 		nil,
 		nil,

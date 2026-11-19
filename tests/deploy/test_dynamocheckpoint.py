@@ -7,7 +7,7 @@ import asyncio
 import copy
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -43,8 +43,7 @@ SNAPSHOT_JOB_PLURAL = "snapshotjobs"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
 CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
-CHECKPOINT_STORAGE_MOUNT_PATH = "/checkpoints"
-TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
+TRTLLM_HF_HOME = "/tmp/dynamo-trtllm-hf-cache"
 
 SNAPSHOT_JOB_OWNER_LABEL = "nvidia.com/snapshot-job"
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
@@ -88,6 +87,8 @@ class CheckpointBackendConfig:
     target_container: str
     model: str
     args: tuple[str, ...]
+    tensor_parallel_flag: str
+    gpus: int = 1
     env: tuple[tuple[str, str], ...] = ()
     extra_volumes: tuple[dict[str, Any], ...] = ()
     extra_volume_mounts: tuple[dict[str, Any], ...] = ()
@@ -103,7 +104,7 @@ CHECKPOINT_BACKENDS = {
     "vllm": CheckpointBackendConfig(
         name="vllm",
         manifest=("examples", "backends", "vllm", "deploy", "agg.yaml"),
-        decode_component="VllmDecodeWorker",
+        decode_component="worker",
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
         model=CHECKPOINT_MODEL,
@@ -115,6 +116,7 @@ CHECKPOINT_BACKENDS = {
             "--gpu-memory-utilization",
             "0.30",
         ),
+        tensor_parallel_flag="--tensor-parallel-size",
     ),
     "sglang": CheckpointBackendConfig(
         name="sglang",
@@ -136,11 +138,10 @@ CHECKPOINT_BACKENDS = {
             CHECKPOINT_MODEL,
             "--page-size",
             "16",
-            "--tp",
-            "1",
             "--trust-remote-code",
             "--skip-tokenizer-init",
         ),
+        tensor_parallel_flag="--tp",
         # Keep SGLang capture and restore sequential on one GPU. vLLM exercises
         # the Immediate policy in this shared test.
         checkpoint_startup_policy="WaitForCheckpoint",
@@ -176,8 +177,10 @@ CHECKPOINT_BACKENDS = {
             "--free-gpu-memory-fraction",
             "0.10",
         ),
-        # UCX_TLS is always set. HF_HOME defaults to the snapshot PVC so restore
-        # pods keep weights without a model-cache PVC; when CI passes
+        tensor_parallel_flag="--tensor-parallel-size",
+        # UCX_TLS is always set. HF_HOME uses writable container storage so the
+        # runtime image does not need a root-owned /checkpoints directory; the
+        # restored rootfs carries it into the target pod. When CI passes
         # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
         # shared cache mount can own it (same as regular deploy tests).
         env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
@@ -222,11 +225,22 @@ CHECKPOINT_BACKENDS = {
 def _checkpoint_backend(request: pytest.FixtureRequest) -> CheckpointBackendConfig:
     backend_name = request.config.getoption("--checkpoint-backend")
     try:
-        return CHECKPOINT_BACKENDS[backend_name]
+        backend = CHECKPOINT_BACKENDS[backend_name]
     except KeyError as exc:
         raise AssertionError(
             f"unsupported checkpoint backend {backend_name!r}"
         ) from exc
+    tensor_parallel_size = request.config.getoption("--checkpoint-tp")
+    if tensor_parallel_size == 1:
+        return backend
+    # Capture and restore run one after the other, so the test still needs only
+    # one worker's GPUs.
+    return replace(
+        backend,
+        args=(*backend.args, backend.tensor_parallel_flag, str(tensor_parallel_size)),
+        gpus=tensor_parallel_size,
+        checkpoint_startup_policy="WaitForCheckpoint",
+    )
 
 
 def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
@@ -274,9 +288,13 @@ def _new_checkpoint_spec(
     # vCluster adds host-side resources that make the physical Pod Burstable.
     # Keep the virtual Pod in the same QoS class so status synchronization can
     # propagate Snapshot's restore condition without an immutable-field error.
-    requests = container.setdefault("resources", {}).setdefault("requests", {})
+    resources = container.setdefault("resources", {})
+    requests = resources.setdefault("requests", {})
     requests.setdefault("cpu", "1")
     requests.setdefault("memory", "2Gi")
+    for bucket in resources.values():
+        if "nvidia.com/gpu" in bucket:
+            bucket["nvidia.com/gpu"] = str(backend.gpus)
 
     if backend.extra_volumes:
         pod_spec.setdefault("volumes", []).extend(
@@ -635,7 +653,7 @@ async def test_dgd_checkpoint_restore_deploy(
     if not image:
         pytest.fail(
             "--image is required for the checkpoint deploy test "
-            f"(expected the CI-built {backend.name} checkpoint placeholder image)",
+            f"(expected the CI-built {backend.name} runtime image)",
             pytrace=False,
         )
     frontend_image = request.config.getoption("--frontend-image")

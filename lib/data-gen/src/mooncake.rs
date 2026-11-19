@@ -15,7 +15,7 @@
 //! deserialization. Serialization emits the canonical names.
 
 use anyhow::{Context, Result, bail};
-use dynamo_kv_hashing::{Request, compute_hash_v2, compute_next_sequence_hash};
+use dynamo_kv_hashing::{Request, compute_hash_v2, compute_next_sequence_hash, compute_salt_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -230,6 +230,50 @@ pub fn sequence_hashes_for_tokens(tokens: &[u32], block_size: usize) -> Result<V
     Ok(sequence_hashes)
 }
 
+/// Extends reusable full-block sequence hashes to cover `tokens`.
+///
+/// `prefix_hashes` must be the leading full-block hashes that [`sequence_hashes_for_tokens`]
+/// returns for `tokens`. Only the remaining blocks are hashed, and the result equals
+/// `sequence_hashes_for_tokens(tokens, block_size)`.
+pub fn extend_sequence_hashes(
+    prefix_hashes: &[u64],
+    tokens: &[u32],
+    block_size: usize,
+) -> Result<Vec<u64>> {
+    require_positive("block size", block_size)?;
+    let full_blocks = tokens.len() / block_size;
+    if prefix_hashes.len() > full_blocks {
+        bail!(
+            "{} reusable sequence hashes exceed {full_blocks} full blocks",
+            prefix_hashes.len()
+        );
+    }
+    let salt_hash = compute_salt_hash(None, None)?;
+    let mut sequence_hashes = Vec::with_capacity(full_blocks + 1);
+    sequence_hashes.extend_from_slice(prefix_hashes);
+    let mut block_bytes = Vec::with_capacity(block_size * std::mem::size_of::<u32>());
+    for block in
+        tokens[prefix_hashes.len() * block_size..full_blocks * block_size].chunks_exact(block_size)
+    {
+        block_bytes.clear();
+        for token in block {
+            block_bytes.extend_from_slice(&token.to_ne_bytes());
+        }
+        let block_hash = compute_hash_v2(&block_bytes, salt_hash);
+        let sequence_hash = match sequence_hashes.last() {
+            Some(parent) => compute_next_sequence_hash(*parent, block_hash),
+            None => block_hash,
+        };
+        sequence_hashes.push(sequence_hash);
+    }
+    if let Some(partial_hash) =
+        trailing_partial_sequence_hash(salt_hash, block_size, tokens, &sequence_hashes)
+    {
+        sequence_hashes.push(partial_hash);
+    }
+    Ok(sequence_hashes)
+}
+
 fn trailing_partial_sequence_hash(
     salt_hash: u64,
     block_size: usize,
@@ -418,6 +462,32 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+
+    #[test]
+    fn extended_sequence_hashes_match_full_hashing() {
+        let mut state = 0x9e37_79b9_u32;
+        let tokens = (0..300)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                state
+            })
+            .collect::<Vec<_>>();
+        for block_size in [1, 3, 64] {
+            for length in [0, 1, 2, 63, 64, 65, 128, 191, 300] {
+                let tokens = &tokens[..length];
+                let expected = sequence_hashes_for_tokens(tokens, block_size).unwrap();
+                for reused in 0..=length / block_size {
+                    let extended =
+                        extend_sequence_hashes(&expected[..reused], tokens, block_size).unwrap();
+                    assert_eq!(
+                        extended, expected,
+                        "block={block_size} len={length} reused={reused}"
+                    );
+                }
+            }
+        }
+        assert!(extend_sequence_hashes(&[1, 2], &tokens[..3], 2).is_err());
+    }
 
     #[test]
     fn shared_prefix_yields_shared_leading_hash_ids() {

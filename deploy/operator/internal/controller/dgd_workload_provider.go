@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,8 +36,9 @@ import (
 type workloadProvider string
 
 const (
-	workloadProviderComponent workloadProvider = consts.WorkloadProviderComponent
-	workloadProviderGrove     workloadProvider = consts.WorkloadProviderGrove
+	workloadProviderComponent        workloadProvider = consts.WorkloadProviderComponent
+	workloadProviderGrove            workloadProvider = consts.WorkloadProviderGrove
+	workloadProviderDisaggregatedSet workloadProvider = consts.WorkloadProviderDisaggregatedSet
 )
 
 var (
@@ -96,16 +98,23 @@ func providerFromOwnedWorkloads(
 	if err != nil {
 		return "", false, err
 	}
+	hasDisaggregatedSet, err := hasOwnedDisaggregatedSet(ctx, reader, dgd)
+	if err != nil {
+		return "", false, err
+	}
 
-	// Adopt one unambiguous family and fail closed when both families exist.
+	// DisaggregatedSet and Grove are the only ambiguous combination. DS takes
+	// precedence over legacy DCDs; Grove takes precedence over DCDs.
 	switch {
-	case hasComponents && hasGrove:
+	case hasGrove && hasDisaggregatedSet:
 		return "", false, fmt.Errorf(
-			"%w: DynamoGraphDeployment %s/%s owns DynamoComponentDeployments and PodCliqueSets",
+			"%w: DynamoGraphDeployment %s/%s owns workloads from multiple providers",
 			errConflictingWorkloadProviders,
 			dgd.Namespace,
 			dgd.Name,
 		)
+	case hasDisaggregatedSet:
+		return workloadProviderDisaggregatedSet, true, nil
 	case hasGrove:
 		return workloadProviderGrove, true, nil
 	case hasComponents:
@@ -113,6 +122,24 @@ func providerFromOwnedWorkloads(
 	default:
 		return "", false, nil
 	}
+}
+
+func hasOwnedDisaggregatedSet(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (bool, error) {
+	// A DGD owns one deterministic DisaggregatedSet. Treat an unavailable
+	// optional API as an empty observable workload family during adoption.
+	ds := newDisaggregatedSetObject()
+	key := client.ObjectKey{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}
+	if err := reader.Get(ctx, key, ds); err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get owned DisaggregatedSet: %w", err)
+	}
+	return metav1.IsControlledBy(ds, dgd), nil
 }
 
 func hasOwnedComponentWorkloads(
@@ -167,13 +194,16 @@ func providerFromCurrentIntent(
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse {
 		return workloadProviderGrove
 	}
+	if strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet]) == consts.KubeLabelValueTrue {
+		return workloadProviderDisaggregatedSet
+	}
 	return workloadProviderComponent
 }
 
 func parseWorkloadProvider(value string) (workloadProvider, error) {
 	// Accept only the workload programs implemented by this controller.
 	switch workloadProvider(value) {
-	case workloadProviderComponent, workloadProviderGrove:
+	case workloadProviderComponent, workloadProviderGrove, workloadProviderDisaggregatedSet:
 		return workloadProvider(value), nil
 	default:
 		return "", fmt.Errorf("%w: %q", errUnsupportedWorkloadProvider, value)

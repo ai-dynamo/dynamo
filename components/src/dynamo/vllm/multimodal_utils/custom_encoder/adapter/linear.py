@@ -162,33 +162,22 @@ def build_mixed_embeds(
     return prompt_embeds, out_token_ids, is_token_ids
 
 
-class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
-    """Build mixed ``EmbedsPrompt`` inputs for a text-only decoder."""
+class LinearEmbedsPromptBuilder:
+    """Validate linear encoder artifacts and build a mixed vLLM prompt."""
 
-    def __init__(
-        self,
-        backend: VisionEncoderBackend[Any, Any, torch.Tensor],
-        model_config: Any,
-        engine_args: Any,
-    ) -> None:
+    def __init__(self, model_config: Any, engine_args: Any) -> None:
         if model_config is None:
             raise ValueError("CustomEncoder requires the resolved vLLM ModelConfig")
         if _is_multimodal_model(model_config):
             raise ValueError(
                 "CustomEncoder does not yet support this multimodal decoder; "
-                "the linear EmbedsPrompt adapter is only valid for text-only models"
+                "the linear EmbedsPrompt adapter is only valid for text-only decoders"
             )
         if not getattr(engine_args, "enable_prompt_embeds", False):
             raise ValueError(
                 "text-only CustomEncoder output requires --enable-prompt-embeds"
             )
-        image_token_id = getattr(backend, "image_token_id", None)
-        if not isinstance(image_token_id, int) or isinstance(image_token_id, bool):
-            raise ValueError(
-                "text-only CustomEncoder output requires an integer image_token_id"
-            )
 
-        self._image_token_id = image_token_id
         self._hidden_size = _hidden_size(model_config)
         model_dtype = getattr(model_config, "dtype", None)
         self._dtype = model_dtype if isinstance(model_dtype, torch.dtype) else None
@@ -197,14 +186,15 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
         self,
         token_ids: list[int],
         artifacts: Sequence[torch.Tensor],
-    ) -> EmbedsPrompt | TokensPrompt:
-        """Build a mixed prompt from per-image visual embedding tensors.
+        *,
+        image_token_id: int,
+    ) -> EmbedsPrompt:
+        """Build a mixed prompt from ordered per-image embedding tensors."""
 
-        Each artifact must be a CPU tensor shaped
-        ``(n_visual_tokens, decoder_hidden_size)`` with the decoder's dtype.
-        Artifacts must appear in the same order as the image placeholders in
-        ``token_ids``.
-        """
+        if not isinstance(image_token_id, int) or isinstance(image_token_id, bool):
+            raise ValueError(
+                "text-only CustomEncoder output requires an integer image_token_id"
+            )
         rows = list(artifacts)
         for index, tensor in enumerate(rows):
             if not isinstance(tensor, torch.Tensor):
@@ -224,10 +214,41 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
                 )
 
         prompt_embeds, prompt_token_ids, prompt_is_token_ids = build_mixed_embeds(
-            token_ids, rows, self._image_token_id
+            token_ids, rows, image_token_id
         )
         return EmbedsPrompt(
             prompt_embeds=prompt_embeds,
             prompt_token_ids=prompt_token_ids,
             prompt_is_token_ids=prompt_is_token_ids,
+        )
+
+
+class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
+    """Build mixed ``EmbedsPrompt`` inputs for a text-only decoder."""
+
+    def __init__(
+        self,
+        backend: VisionEncoderBackend[Any, Any, torch.Tensor],
+        model_config: Any,
+        engine_args: Any,
+    ) -> None:
+        image_token_id = getattr(backend, "image_token_id", None)
+        if not isinstance(image_token_id, int) or isinstance(image_token_id, bool):
+            raise ValueError(
+                "text-only CustomEncoder output requires an integer image_token_id"
+            )
+        self._image_token_id = image_token_id
+        self._prompt_builder = LinearEmbedsPromptBuilder(model_config, engine_args)
+
+    def prepare_prompt(
+        self,
+        token_ids: list[int],
+        artifacts: Sequence[torch.Tensor],
+    ) -> EmbedsPrompt | TokensPrompt:
+        """Build a mixed prompt from per-image visual embedding tensors."""
+
+        return self._prompt_builder.prepare_prompt(
+            token_ids,
+            artifacts,
+            image_token_id=self._image_token_id,
         )

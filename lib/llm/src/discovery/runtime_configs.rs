@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
@@ -96,6 +96,7 @@ fn base_runtime_config_watch(
                     }
                 }
                 Ok(DiscoveryEvent::Removed(_)) => continue,
+                Ok(DiscoveryEvent::Resync(_)) => continue,
                 Err(error) => {
                     tracing::error!(%error, "Base model runtime-config discovery stream failed");
                     continue;
@@ -323,9 +324,18 @@ mod tests {
             unreachable!()
         };
 
-        tx.send(Ok(DiscoveryEvent::Added(base_instance))).unwrap();
+        tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
+            .unwrap();
         configs.changed().await.unwrap();
         configs.borrow_and_update();
+
+        tx.send(Ok(DiscoveryEvent::Resync(vec![base_instance])))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), configs.changed())
+                .await
+                .is_err()
+        );
 
         let updated_taints = vec!["blue".to_string(), "gpu".to_string()];
         tx.send(Ok(DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {

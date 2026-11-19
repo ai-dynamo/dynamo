@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator
 import uvloop
 
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     KvRouterConfig,
     ModelInput,
     ModelType,
@@ -145,14 +145,14 @@ async def worker(runtime: DistributedRuntime) -> None:
         tiers=tiers,
         runtime=runtime,
         # Parity with dynamo.router.args.build_kv_router_config /
-        # build_aic_perf_config, which are typed for DynamoRouterConfig
+        # build_ais_perf_config, which are typed for DynamoRouterConfig
         # (single --endpoint); this config inherits the shared bases directly.
         kv_router_config=KvRouterConfig(**config.kv_router_kwargs()),
-        aic_perf_config=(
-            AicPerfConfig(**config.aic_perf_kwargs())
-            if config.router_prefill_load_model == "aic"
-            else None
-        ),
+        # One item per tier; None when the load model is not ais.
+        ais_perf_configs=[
+            AisPerfConfig(**kwargs) if kwargs is not None else None
+            for kwargs in config.ais_perf_kwargs_by_tier()
+        ],
         default_block_size=config.default_block_size,
     )
     handler = SqueezeEvolveHandler(model_name, orchestrator)

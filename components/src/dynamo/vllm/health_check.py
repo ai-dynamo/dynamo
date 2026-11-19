@@ -7,7 +7,10 @@ vLLM-specific health check configuration.
 This module defines the default health check payload for vLLM backends.
 """
 
+import base64
+import io
 import logging
+import wave
 from typing import TYPE_CHECKING, Any, Optional
 
 from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
@@ -58,12 +61,26 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
     return 1
 
 
+def _sampling_mask_enabled(engine_client) -> bool:
+    vllm_config = getattr(engine_client, "vllm_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    return getattr(model_config, "return_sampling_mask", False) is True
+
+
 def _make_default_payload(
     engine_client: Optional["AsyncLLM"], use_text_input: bool
 ) -> dict:
-    sampling_options = {
-        "temperature": 0.0,
-    }
+    sampling_options: dict[str, Any]
+    if _sampling_mask_enabled(engine_client):
+        # vLLM rejects mask-mode requests unless temperature > 0 and top_k > 0,
+        # so a greedy canary fails every probe; the sampled token is never read.
+        sampling_options = {"temperature": 1.0, "top_k": 8}
+        logger.info(
+            "return_sampling_mask is enabled; health check uses sampled "
+            "decoding (temperature=1.0, top_k=8)"
+        )
+    else:
+        sampling_options = {"temperature": 0.0}
 
     stop_conditions = {
         "max_tokens": 1,
@@ -144,6 +161,34 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
                 specific name to advertise.
         """
         self.default_payload: dict[str, Any] = {"input": "probe"}
+        if model_name is not None:
+            self.default_payload["model"] = model_name
+        super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
+
+
+def _silent_wav_b64() -> str:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(b"\x00" * 3_200)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+class VllmTranscriptionHealthCheckPayload(HealthCheckPayload):
+    """Real, short ASR probe matching TranscriptionWorkerHandler input."""
+
+    def __init__(self, model_name: Optional[str] = None):
+        self.default_payload: dict[str, Any] = {
+            "audio_b64": _silent_wav_b64(),
+            "filename": "health-check.wav",
+            "language": "en",
+            "response_format": "json",
+        }
         if model_name is not None:
             self.default_payload["model"] = model_name
         super().__init__()

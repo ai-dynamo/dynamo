@@ -38,8 +38,9 @@ environment variable three layers of tooling away. Installing these packages
 broadens the codec surface of the running container; review that against your
 organization's distribution and security policies before rolling it out.
 
-Each package installs at a version validated against Dynamo's multimodal test
-suite (see the specs below): the lower bound is the exact validated version and
+For vLLM, codec-free OpenCV is replaced with a binary wheel matching the installed
+version. Other packages install at a version validated against Dynamo's multimodal
+test suite (see the specs below): the lower bound is the exact validated version and
 the upper bound excludes the next major, so a fresh install cannot silently
 pick up an unvalidated release. This installer deliberately covers ONLY those
 tested combinations; to pin different versions or install a custom subset, run
@@ -49,7 +50,7 @@ commands).
 The default install runs with ``--no-deps`` so it cannot change the image's
 pinned dependency stack (e.g. numpy under torch/vLLM); the carriers need only
 numpy, which the backend already provides. The install is idempotent (skipped
-when the module already imports), serialized across processes with a file
+when imports and OpenCV video support are available), serialized with a file
 lock, and bounded by a timeout so a stalled index cannot hang forever. The
 encode path (video output) is unaffected and stays on the in-tree FFmpeg. The
 optional Rust frontend decoder links FFmpeg's compiled-in decoders and is
@@ -121,9 +122,9 @@ VALIDATED_SPECS: dict[str, str] = {d.package: d.spec for d in (_OPENCV, _PYAV, _
 # image cannot otherwise handle, without rebuilding the in-tree FFmpeg.
 #
 # Excluded on purpose, for two different reasons:
-#   * PyNvVideoCodec -- already shipped in every runtime image as the NVDEC
-#     path, so H.264/H.265 decode needs no install. Listing it here would
-#     reinstall what is already present.
+#   * PyNvVideoCodec -- already shipped in every CUDA runtime image as the
+#     NVDEC path, so H.264/H.265 decode needs no install there. Listing it
+#     here would reinstall what is already present.
 #   * torchcodec, PyAV-on-SGLang, opencv-on-SGLang -- no Dynamo decode path
 #     imports them, so installing them would add a carrier nothing calls.
 _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {
@@ -140,33 +141,25 @@ _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {
 }
 
 
+def installer_covers(backend: str, package: str) -> bool:
+    """Return whether the backend installer covers this package."""
+    return any(d.package == package for d in _BACKEND_DECODERS.get(backend, ()))
+
+
 def _modules_missing_fresh(modules: Sequence[str]) -> list[str]:
-    """Return the subset of `modules` a FRESH interpreter cannot IMPORT.
-
-    Fresh interpreter, not this process: running as a non-root user, pip
-    defaults to a user-site install, and a user-site directory created after
-    the parent interpreter started is never added to its ``sys.path``
-    (``site.py`` only does that at startup, and
-    ``importlib.invalidate_caches()`` cannot add path entries). Verified on
-    all three runtime images: the same-process check reported the install
-    missing while a fresh process imported it fine. What matters
-    operationally is the worker process launched after this command --
-    which is exactly a fresh interpreter.
-
-    Real import, not ``find_spec``: a package whose files are present but
-    whose native libraries cannot load (a broken or partially removed wheel)
-    has a spec and would be treated as installed, silently skipping the
-    install and deferring the failure to request time. Importing in the
-    probe subprocess keeps this process's module state untouched.
-    """
+    """Check imports and OpenCV video support in a fresh worker-like interpreter."""
     if not modules:
         return []
     probe = (
-        "import importlib, sys\n"
+        "import importlib, re, sys\n"
         "missing = []\n"
         "for m in sys.argv[1:]:\n"
         "    try:\n"
-        "        importlib.import_module(m)\n"
+        "        module = importlib.import_module(m)\n"
+        "        if m == 'cv2' and not re.search(\n"
+        "            r'^\\s*(FFMPEG|GSTREAMER):\\s*YES',\n"
+        "            module.getBuildInformation(), re.M | re.I):\n"
+        "            missing.append(m)\n"
         "    except Exception:\n"
         "        missing.append(m)\n"
         "print(' '.join(missing))\n"
@@ -183,6 +176,42 @@ def _modules_missing_fresh(modules: Sequence[str]) -> list[str]:
         logger.warning("fresh-interpreter verification failed to run: %s", exc)
         return list(modules)
     return out.stdout.split()
+
+
+def _vllm_opencv_spec() -> str:
+    """Preserve the image's OpenCV version when replacing its source build."""
+    probe = (
+        "import importlib.metadata\n"
+        "version = ''\n"
+        "for package in ('opencv-python-headless', 'opencv-python'):\n"
+        "    try:\n"
+        "        version = importlib.metadata.version(package)\n"
+        "        break\n"
+        "    except importlib.metadata.PackageNotFoundError:\n"
+        "        pass\n"
+        "if not version:\n"
+        "    try:\n"
+        "        import cv2\n"
+        # A cv2 that raises anything is as unusable as a missing one.
+        "    except Exception:\n"
+        "        pass\n"
+        "    else:\n"
+        "        version = cv2.__version__ + '.*'\n"
+        "print(version)\n"
+    )
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - an unreadable version is not fatal
+        logger.warning("OpenCV version probe failed to run: %s", exc)
+        return _OPENCV.spec
+    version = out.stdout.strip()
+    return f"{_OPENCV.package}=={version}" if version else _OPENCV.spec
 
 
 def _redact(text: str) -> str:
@@ -253,9 +282,9 @@ def install_media_decoders(
 ) -> list[str]:
     """Install `backend`'s media-decoder package(s); return the specs installed.
 
-    Installs the backend's validated, version-bounded specs with ``--no-deps``,
-    skipping any package whose module already imports. Deliberately covers only
-    the tested combinations: for custom versions or subsets, run pip directly.
+    Installs with ``--no-deps`` and skips usable decoders. vLLM OpenCV is
+    replaced with a same-version binary wheel; other packages use validated
+    bounds. For custom versions or subsets, run pip directly.
 
     Returns the list of pip specs actually installed (empty when everything was
     already present). ``dry_run`` returns what would install without running
@@ -267,9 +296,7 @@ def install_media_decoders(
         raise ValueError(
             f"unknown backend {backend!r}; expected one of {sorted(_BACKEND_DECODERS)}"
         )
-    # Install only what does not already import cleanly. The probe does a
-    # real import in a fresh interpreter, so a present-but-broken package
-    # counts as missing rather than being silently skipped.
+    # Include import failures and OpenCV builds without a video backend.
     missing_names = set(_modules_missing_fresh([d.module for d in decoders]))
     missing = [d for d in decoders if d.module in missing_names]
     if not missing:
@@ -278,10 +305,18 @@ def install_media_decoders(
             backend,
         )
         return []
-    specs = [d.spec for d in missing]
+    specs = [
+        _vllm_opencv_spec() if backend == "vllm" and d.module == "cv2" else d.spec
+        for d in missing
+    ]
     verify_modules = [d.module for d in missing]
 
     if dry_run:
+        if backend == "vllm" and "cv2" in verify_modules:
+            logger.info(
+                "dry run: OpenCV replacement requires "
+                "--force-reinstall --only-binary opencv-python-headless"
+            )
         logger.info(
             "dry run: would install for %s: %s", backend, _redact(" ".join(specs))
         )
@@ -306,13 +341,17 @@ def install_media_decoders(
             return []
         specs = [spec for spec, _ in pending]
         verify_modules = [mod for _, mod in pending]
-        _pip_install(specs, pip_args, timeout_s=timeout_s)
+        extra_args = list(pip_args)
+        if backend == "vllm" and "cv2" in verify_modules:
+            specs[verify_modules.index("cv2")] = _vllm_opencv_spec()
+            extra_args += ["--force-reinstall", "--only-binary", _OPENCV.package]
+        _pip_install(specs, extra_args, timeout_s=timeout_s)
 
     importlib.invalidate_caches()
     still_missing = _modules_missing_fresh(verify_modules)
     if still_missing:
         raise RuntimeError(
-            "media decoder module(s) still not importable after install: "
+            "media decoder module(s) still not importable or video-capable after install: "
             + " ".join(still_missing)
             + ". If a package is present but broken, pip may have treated the "
             "requirement as already satisfied -- pip uninstall it and rerun, "
@@ -329,8 +368,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m dynamo.common.utils.install_media_decoders",
         description=(
-            "Install a Dynamo backend's media-decoder package(s) at validated, "
-            "version-bounded releases. Explicit by design: nothing installs "
+            "Install a Dynamo backend's media decoders, preserving vLLM's OpenCV "
+            "version and using validated bounds otherwise. Nothing installs "
             "unless an operator runs this."
         ),
     )
@@ -348,7 +387,6 @@ def main(argv: list[str] | None = None) -> int:
             'string. Use the = form -- --pip-args="--no-index --find-links '
             '/wheels" -- so a value starting with a dash is not mistaken '
             "for an option (for air-gapped hosts)"
-            "air-gapped hosts)"
         ),
     )
     parser.add_argument(

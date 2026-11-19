@@ -43,16 +43,10 @@ func HasGroveTopologyOverrides(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool
 		if overrideWritesGroveTopology(component.ProviderOverride) {
 			return true
 		}
-		if component.Multinode == nil {
-			continue
-		}
-		if component.Multinode.Leader != nil &&
-			overrideWritesGroveTopology(component.Multinode.Leader.ProviderOverride) {
-			return true
-		}
-		if component.Multinode.Worker != nil &&
-			overrideWritesGroveTopology(component.Multinode.Worker.ProviderOverride) {
-			return true
+		for roleIndex := range component.Roles {
+			if overrideWritesGroveTopology(component.Roles[roleIndex].ProviderOverride) {
+				return true
+			}
 		}
 	}
 	return false
@@ -88,31 +82,25 @@ func ComposeGroveOverrides(
 	// Resolve each component and role fragment to its generated Grove destination.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
+		// LPX availability is rendered by its dedicated workload renderer.
+		if component.ManagedByExternalController() {
+			continue
+		}
 		componentPath := fmt.Sprintf("spec.components[%d]", i)
 		if err := applyGroveComponentOverride(result, component, component.ProviderOverride); err != nil {
 			return nil, fmt.Errorf("%s.providerOverride: %w", componentPath, err)
 		}
-		if component.Multinode == nil {
-			continue
-		}
-		if component.Multinode.Leader != nil {
-			if err := applyGroveRoleOverride(
-				result,
-				component,
-				ScopeMultinodeLeader,
-				component.Multinode.Leader.ProviderOverride,
-			); err != nil {
-				return nil, fmt.Errorf("%s.multinode.leader.providerOverride: %w", componentPath, err)
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			if role.ProviderOverride == nil {
+				continue
 			}
-		}
-		if component.Multinode.Worker != nil {
-			if err := applyGroveRoleOverride(
-				result,
-				component,
-				ScopeMultinodeWorker,
-				component.Multinode.Worker.ProviderOverride,
-			); err != nil {
-				return nil, fmt.Errorf("%s.multinode.worker.providerOverride: %w", componentPath, err)
+			scope, ok := ScopeForComponentRole(role.Name)
+			if !ok {
+				return nil, fmt.Errorf("%s.roles[%d].providerOverride: unsupported component role %q", componentPath, roleIndex, role.Name)
+			}
+			if err := applyGroveRoleOverride(result, component, scope, role.ProviderOverride); err != nil {
+				return nil, fmt.Errorf("%s.roles[%d].providerOverride: %w", componentPath, roleIndex, err)
 			}
 		}
 	}
@@ -167,14 +155,14 @@ func applyGroveComponentOverride(
 	name := strings.ToLower(component.ComponentName)
 	switch override.Target {
 	case TargetPodCliqueTemplateSpec:
-		return setNamedGroveTopologyConstraint(
+		return setNamedGroveOverride(
 			result,
 			[]string{"spec", "template", "cliques"},
 			name,
 			override,
 		)
 	case TargetPodCliqueScalingGroupConfig:
-		return setNamedGroveTopologyConstraint(
+		return setNamedGroveOverride(
 			result,
 			[]string{"spec", "template", "podCliqueScalingGroups"},
 			name,
@@ -203,12 +191,12 @@ func applyGroveRoleOverride(
 		return err
 	}
 	suffix := consts.GroveRoleSuffixLeader
-	if scope == ScopeMultinodeWorker {
+	if scope == ScopeRoleWorker {
 		suffix = consts.GroveRoleSuffixWorker
 	}
 
 	// Insert the PCLQ topology subtree named for the selected multinode role.
-	return setNamedGroveTopologyConstraint(
+	return setNamedGroveOverride(
 		result,
 		[]string{"spec", "template", "cliques"},
 		strings.ToLower(component.ComponentName+"-"+suffix),
@@ -232,6 +220,20 @@ func validateOverrideIdentity(
 		return fmt.Errorf("unsupported Grove target %q; resolved target is %q", override.Target, expected)
 	}
 
+	// Member cliques draw their minimum from their owning scaling group.
+	if scope != ScopeComponent {
+		if _, exists := GroveMinAvailable(override.Value.Raw); exists {
+			return fmt.Errorf("minAvailable is supported only at component scope; member cliques use the owning scaling group's minimum")
+		}
+	}
+
+	// Only the complete component owns a rolling-update budget.
+	if scope != ScopeComponent {
+		if _, exists := GroveMaxUnavailable(override.Value.Raw); exists {
+			return fmt.Errorf("rollingUpdate is supported only at component scope; member cliques use the owning component's rollingUpdate budget")
+		}
+	}
+
 	// Recheck value ownership before the controller mutates provider resources.
 	if valueErrs := ValidateValue(override.Target, override.Value.Raw); len(valueErrs) != 0 {
 		return fmt.Errorf("value is invalid: %s", valueErrs[0].Error())
@@ -239,9 +241,9 @@ func validateOverrideIdentity(
 	return nil
 }
 
-// setNamedGroveTopologyConstraint sets the registered opaque subtree on one
+// setNamedGroveOverride sets the registered provider subtrees on one
 // named embedded target. result and override must not be nil.
-func setNamedGroveTopologyConstraint(
+func setNamedGroveOverride(
 	result *unstructured.Unstructured,
 	path []string,
 	name string,
@@ -256,19 +258,26 @@ func setNamedGroveTopologyConstraint(
 		return fmt.Errorf("generated destination %s[%q] was not found", strings.Join(path, "."), name)
 	}
 
-	// Decode the raw subtree once before locating its generated destination.
-	topologyConstraint, err := groveTopologyConstraint(override)
+	// Decode the allowed subtrees without requiring topology for a budget-only override.
+	var value map[string]any
+	err = sigsjson.UnmarshalCaseSensitivePreserveInts(override.Value.Raw, &value)
 	if err != nil {
 		return err
 	}
 
 	// Set only the generated entry whose stable name matches the DGD context.
 	for i := range items {
-		item, ok := items[i].(map[string]interface{})
+		item, ok := items[i].(map[string]any)
 		if !ok || item["name"] != name {
 			continue
 		}
-		item["topologyConstraint"] = topologyConstraint
+		// Availability is already resolved while rendering; preserve the full PodClique spec.
+		if topology, exists := value["topologyConstraint"]; exists {
+			item["topologyConstraint"] = topology
+		}
+		if rolling, exists := value["rollingUpdate"]; exists {
+			item["rollingUpdate"] = rolling
+		}
 		items[i] = item
 		return unstructured.SetNestedSlice(result.Object, items, path...)
 	}
@@ -277,9 +286,9 @@ func setNamedGroveTopologyConstraint(
 
 // groveTopologyConstraint extracts the raw opaque subtree registered for one
 // Grove target. override must not be nil.
-func groveTopologyConstraint(override *nvidiacomv1beta1.ProviderOverride) (interface{}, error) {
+func groveTopologyConstraint(override *nvidiacomv1beta1.ProviderOverride) (any, error) {
 	// Decode without a provider struct so unknown fields and explicit nulls survive.
-	var value map[string]interface{}
+	var value map[string]any
 	if err := sigsjson.UnmarshalCaseSensitivePreserveInts(override.Value.Raw, &value); err != nil {
 		return nil, fmt.Errorf("decode value: %w", err)
 	}

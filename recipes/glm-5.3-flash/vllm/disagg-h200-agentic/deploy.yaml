@@ -71,7 +71,7 @@ spec:
                   cpu: "16"
                   memory: 32Gi
 
-    - name: VllmPrefillWorker
+    - name: prefill
       type: prefill
       runtimeVersionOverride: 1.4.1
       replicas: 1
@@ -249,7 +249,7 @@ spec:
                 medium: Memory
                 sizeLimit: 128Gi
 
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       runtimeVersionOverride: 1.4.1
       replicas: 1
