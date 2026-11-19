@@ -64,8 +64,8 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
     request_cache_salt,
+    request_id_from_context,
     resolve_chat_template,
 )
 
@@ -975,7 +975,7 @@ class VllmProcessor:
         Local vLLM processing handles tokenization and response assembly, while
         routing metadata and worker arguments carry request settings to inference.
         """
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         _reject_unsupported_chat_logprobs(
             request.get("logprobs"),
@@ -1546,7 +1546,7 @@ class VllmProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": choices,
                         "created": int(time.time()),
                         "model": request["model"],
