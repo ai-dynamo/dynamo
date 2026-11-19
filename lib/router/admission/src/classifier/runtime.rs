@@ -934,6 +934,52 @@ mod tests {
         drop(next_lifecycle);
     }
 
+    struct SetsBackendPriority;
+
+    impl RequestClassifier for SetsBackendPriority {
+        fn classify(
+            &mut self,
+            mut request: ClassifyRequest,
+            _workers: &dyn WorkerView,
+        ) -> ClassifyFuture {
+            request.set_backend_priority(-250);
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retry_keeps_the_backend_priority_its_first_classification_set() {
+        let runtime =
+            RequestClassifierRuntime::new(Box::new(SetsBackendPriority), CancellationToken::new());
+        let mut lifecycle = runtime.begin_request("request-1").unwrap();
+        let classify = || {
+            runtime.classify_with(
+                ClassifyRequest::new(10, 0).with_request_id("request-1"),
+                &NoWorkers,
+            )
+        };
+
+        assert_eq!(classify().await.unwrap().backend_priority(), Some(-250));
+        lifecycle.prepare_retry();
+        assert_eq!(classify().await.unwrap().backend_priority(), Some(-250));
+        lifecycle.abort(None);
+    }
+
+    #[tokio::test]
+    async fn default_classifier_sets_no_backend_priority() {
+        let runtime =
+            RequestClassifierRuntime::new(Box::new(PassThrough), CancellationToken::new());
+        let _lifecycle = runtime.begin_request("request-1").unwrap();
+        let classified = runtime
+            .classify_with(
+                ClassifyRequest::new(10, 0).with_request_id("request-1"),
+                &NoWorkers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(classified.backend_priority(), None);
+    }
+
     #[tokio::test]
     async fn retry_reuses_classification_overrides_without_reinvoking_plugin() {
         let calls = Arc::new(AtomicUsize::new(0));

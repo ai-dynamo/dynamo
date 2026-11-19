@@ -867,25 +867,14 @@ fn default_cli_args_load_the_canonical_512_token_fixture() -> anyhow::Result<()>
 }
 
 #[test]
-fn removed_legacy_branch_sharded_name_is_rejected() {
-    let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
-    let error = MooncakeIndexerConfig::from_short_name(&removed_name, 4).unwrap_err();
-    let message = error.to_string();
+fn unknown_indexer_name_is_rejected_with_the_valid_names() {
+    let error = MooncakeIndexerConfig::from_short_name("no-such-indexer", 4).unwrap_err();
 
-    assert!(message.contains("Unknown indexer"));
-    assert!(message.contains("branch-sharded-crtc"));
-    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
-    assert!(!valid_names.contains(&removed_name));
-}
-
-#[test]
-fn retired_transposed_ckf_benchmark_name_is_rejected() {
-    let error = MooncakeIndexerConfig::from_short_name("transposed-ckf", 4).unwrap_err();
-    let message = error.to_string();
-
-    assert!(message.contains("Unknown indexer"));
-    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
-    assert!(!valid_names.contains("transposed-ckf"));
+    assert_eq!(
+        error.to_string(),
+        "Unknown indexer 'no-such-indexer'. Valid names: radix-tree, nested-map, \
+         concurrent-radix-tree-compressed, branch-sharded-crtc"
+    );
 }
 
 #[test]
