@@ -17,8 +17,8 @@ independent DGD.
 
 > [!WARNING]
 > **Experimental.** DGDR v1beta2 is not feature complete and may change incompatibly in future
-> releases. This guide covers static and recorded-trace workloads, scalar optimization, DGD
-> overrides, and manual Candidate-to-DGD creation.
+> releases. This guide covers static and recorded-trace workloads, scalar and Pareto optimization,
+> DGD overrides, and manual Candidate-to-DGD creation.
 
 ## Prerequisites
 
@@ -129,11 +129,25 @@ spec:
 ```
 
 `maxCandidates` defaults to `1`, accepts 1 through 100, and bounds published Candidates rather than
-internal optimizer trials. The supported objective mode is `Optimize` with one scalar `metric`;
-`Pareto` and `objective.metrics` are not admitted. `Goodput` and `GoodputPerGPU` require at least one
-SLA bound. See the [scalar objective
+internal optimizer trials. `Optimize` uses one scalar `metric`; `Goodput` and `GoodputPerGPU` require
+at least one SLA bound. See the [objective
 reference](../../reference/kubernetes-api/full-api-reference.mdx#objectivespec) for metrics and SLA
 combinations.
+
+For a Pareto search, set `mode: Pareto`. The supported objectives are `ThroughputPerGPU` and
+`ThroughputPerUser`; omitting `metrics` selects that pair. When switching an existing scalar
+Request, remove its `metric` in the same update:
+
+```yaml
+spec:
+  objective:
+    mode: Pareto
+    metric: null
+    metrics: [ThroughputPerGPU, ThroughputPerUser]
+```
+
+Pareto Candidates represent trade-offs between the two objectives. Choose a point that meets your
+workload requirements; there is no single best Candidate across both objectives.
 
 ## Replay a Recorded Trace
 
@@ -209,7 +223,8 @@ operator underlay
 ```
 
 Admission rejects overrides of `dgdr_run.name`, `max_candidates`, `snapshot_dir`, `runtime_image`,
-`runtime_version_override`, `derive_runtime_images`, `num_gpus_per_node`, and `namespace`. These
+`runtime_version_override`, `derive_runtime_images`, `num_gpus_per_node`, `namespace`, `is_pareto`,
+and `pareto_objectives`. These
 values define the Run identity, trust boundary, and transport.
 
 Request and Run creation validate the merged input against the bundled AISimulate input schema.
@@ -292,7 +307,9 @@ status:
 ```
 
 The publisher updates ordered `candidateRefs`, `progress.candidates.published`, the publication
-condition, and coarse progress time. Per-branch rounds and detailed evaluation counters are reserved
+condition, and coarse progress time. Pareto searches also report `progress.candidates.paretoFront`,
+which can exceed the number of published Candidates when `maxCandidates` bounds the projection.
+Per-branch rounds and detailed evaluation counters are reserved
 in the API but are not currently populated from the snapshot; their absence is not a failed search.
 
 Treat `status.aisim.input` as the authoritative record of what the Job received. For a native
@@ -316,7 +333,8 @@ Kubernetes credentials.
 
 ## Inspect Candidates
 
-Use the Run's ordered `candidateRefs`; list order is the scalar ranking, best first:
+Use the Run's ordered `candidateRefs`. Scalar searches list the best-ranked Candidate first;
+Pareto searches publish a bounded projection of the current front:
 
 ```bash
 CANDIDATE=$(kubectl get dgdrrun "$RUN" -n inference \
@@ -429,8 +447,15 @@ newest Request generation start. Rapid successive edits can coalesce intermediat
 The Request retains the five newest terminal Runs in `status.recentRunRefs`; older owned Runs and
 their Candidates are garbage-collected. Metadata-only Request changes do not create a Run.
 
-The current API has no unchanged-input `spec.rerun` trigger. To execute another search, change an
-execution input, such as a seed in `inputOverrides`, and apply it as a new generation.
+To repeat the search without changing its inputs, change `spec.rerun.reason`:
+
+```bash
+kubectl patch dgdr qwen-search -n inference --type merge \
+  --patch '{"spec":{"rerun":{"reason":"repeat after catalog refresh"}}}'
+```
+
+Use a different reason for each rerun. Reapplying the same reason does not create a generation.
+The reason is frozen into the replacement Run; this does not retry execution within an existing Run.
 
 ## Work with v1beta1 Clients
 
