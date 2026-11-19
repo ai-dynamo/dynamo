@@ -23,7 +23,6 @@ VLLM_CAUSAL_DECISION_CAPABILITY = "vllm_causal_decision_v1"
 _ARCHITECTURES = frozenset(
     {
         "Qwen3ForCausalLM",
-        "Qwen3_5ForConditionalGeneration",
         "Gemma4ForConditionalGeneration",
     }
 )

@@ -214,7 +214,12 @@ def test_explicit_opt_in_rejects_unqualified_runtime(profile, monkeypatch, relea
 
 @pytest.mark.parametrize(
     "architecture",
-    ["UnknownForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Gemma4ForCausalLM"],
+    [
+        "UnknownForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Gemma4ForCausalLM",
+    ],
 )
 def test_explicit_opt_in_names_unsupported_architecture(profile, architecture):
     profile["vllm_config"].model_config.architecture = architecture
