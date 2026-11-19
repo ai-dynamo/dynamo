@@ -445,7 +445,9 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
         handoff.check_cancellation(engine_ctx.as_ref())?;
-        if self.binding_for_request(&req)?.is_none() {
+        if self.lifecycle_state() != PrefillLifecycleState::Active
+            && self.binding_for_request(&req)?.is_none()
+        {
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -1213,9 +1215,8 @@ mod tests {
 
     #[tokio::test]
     async fn pending_target_still_serves_query_only_requests() {
-        // Routing previews never reach the engine, so they are not at risk and
-        // must keep working while the prefill binding is being built.
-        let router = fresh_decode_router();
+        // Only KV routing interprets the annotation as a worker lookup.
+        let router = active_conditional_router();
         mark_target_pending(&router);
 
         let host = Arc::new(QueryOnlyDecodeHost::default());
