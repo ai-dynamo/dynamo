@@ -936,7 +936,7 @@ mod tests {
     /// decode worker was booked, so no receiver will pull the staged KV.
     #[tokio::test]
     async fn decode_queue_deadline_cancels_prefill() {
-        use dynamo_scheduler::host::KvSchedulerError;
+        use dynamo_kv_router::scheduling::KvSchedulerError;
 
         for output in [
             PrefillNeed::None,
