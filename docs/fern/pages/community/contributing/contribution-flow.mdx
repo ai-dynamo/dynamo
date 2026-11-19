@@ -74,12 +74,13 @@ or multiple major components require a
     unavailable, a maintainer can review the current head and comment `/ok to test <sha>` to start
     CI. Wait for that action rather than repeatedly pushing unchanged commits.
 
-    For failed jobs on an already approved commit, comment `/rerun ci` on the pull request.
-    This command requires repository write access. It retries failed PR and PR-XPU jobs and
-    their dependent jobs. Independent successful jobs retain their results.
+    To retry failed jobs for the current PR commit, comment `/rerun ci` on the pull request.
+    This command requires repository write access. It retries failed Pre Merge, PR, and PR-XPU jobs
+    and their dependent jobs. Independent successful jobs retain their results.
+    PR and PR-XPU retries require prior CI approval for the current commit.
 
-    To specify the expected current commit, use `/rerun ci <sha>` with at least seven SHA characters.
-    The command rejects a SHA that differs from the current PR head.
+    The command checks each Pre Merge run's PR number and target branch.
+    If GitHub omits that PR association, use the linked run's retry controls in Actions.
 
     <Info>
     You are responsible for understanding and validating all submitted code, including code
