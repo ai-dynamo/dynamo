@@ -78,6 +78,12 @@ impl CleanupState {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
+
+    /// Drop a schedule when the sweep cannot be started. Does not move the
+    /// last-completion clock, so the next caller may try again.
+    pub fn cancel(&self) {
+        self.scheduled.store(false, Ordering::Release);
+    }
 }
 
 impl Default for CleanupState {
@@ -112,6 +118,36 @@ impl Drop for CleanupGuard<'_> {
                 .store(elapsed_ms, Ordering::Relaxed);
         }
         self.state.scheduled.store(false, Ordering::Release);
+    }
+}
+
+/// Run `sweep` on a detached thread and clear the cleanup schedule when it
+/// finishes.
+///
+/// Callers on the replica-sync and request paths must not walk the tree
+/// themselves. A multi-second sweep on that task stops it from draining the
+/// inbound channel, and the channel drops active-sequence events once full.
+pub fn spawn_scheduled_sweep<F>(
+    cleanup: Arc<CleanupState>,
+    sweep: F,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    let cleanup_for_thread = Arc::clone(&cleanup);
+    match std::thread::Builder::new()
+        .name("kv-router-tree-cleanup".into())
+        .spawn(move || {
+            let mut guard = CleanupGuard::new(&cleanup_for_thread);
+            sweep();
+            guard.mark_completed();
+        }) {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            cleanup.cancel();
+            tracing::error!(%error, "failed to start tree cleanup thread");
+            Err(error)
+        }
     }
 }
 

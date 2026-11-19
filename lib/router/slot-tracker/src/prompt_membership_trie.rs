@@ -8,7 +8,7 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
+use crate::cleanup::{self, CleanableNode, CleanupState};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
@@ -142,7 +142,7 @@ impl OverlapPath {
 #[derive(Default)]
 pub(super) struct PromptMembershipTrie {
     root: SharedNode,
-    cleanup: CleanupState,
+    cleanup: Arc<CleanupState>,
 }
 
 impl Drop for PromptMembershipTrie {
@@ -165,16 +165,19 @@ impl Drop for PromptMembershipTrie {
 impl PromptMembershipTrie {
     /// Run the stale-child sweep if the throttle interval has elapsed.
     ///
-    /// Safe to call from any write path; the sweep is a no-op until
-    /// [`CLEANUP_INTERVAL_MS`](crate::cleanup::CLEANUP_INTERVAL_MS) has passed
-    /// since the last completion, and only one sweep runs at a time.
+    /// Safe to call from any write path, including replica sync. The sweep is
+    /// a no-op until [`CLEANUP_INTERVAL_MS`](crate::cleanup::CLEANUP_INTERVAL_MS)
+    /// has passed since the last completion, only one sweep runs at a time,
+    /// and the walk itself runs on a detached thread so this caller can keep
+    /// draining events.
     pub(super) fn maybe_cleanup(&self) {
         if !self.cleanup.try_schedule() {
             return;
         }
-        let mut guard = CleanupGuard::new(&self.cleanup);
-        cleanup::sweep_stale_children(&self.root);
-        guard.mark_completed();
+        let root = Arc::clone(&self.root);
+        let _started = cleanup::spawn_scheduled_sweep(Arc::clone(&self.cleanup), move || {
+            cleanup::sweep_stale_children(&root);
+        });
     }
 
     fn split_node(node: &mut PromptTrieNode, pos: usize) {
@@ -1026,5 +1029,23 @@ mod tests {
         drop(pinned);
         cleanup::sweep_stale_children(&trie.root);
         assert!(!trie.root.read().children.contains_key(&1));
+    }
+
+    #[test]
+    fn background_cleanup_unlinks_an_unreferenced_leaf() {
+        let trie = PromptMembershipTrie::default();
+        let worker = worker(1, 0);
+        trie.store_path(worker, &[7, 8], 0);
+        trie.remove_worker(worker);
+        let root = Arc::clone(&trie.root);
+        let handle = cleanup::spawn_scheduled_sweep(Arc::clone(&trie.cleanup), move || {
+            cleanup::sweep_stale_children(&root);
+        })
+        .expect("cleanup thread starts");
+        handle.join().expect("cleanup thread finishes");
+        assert!(
+            trie.root.read().children.is_empty(),
+            "background sweep should unlink the empty leaf"
+        );
     }
 }
