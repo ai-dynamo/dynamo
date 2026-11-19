@@ -224,6 +224,8 @@ navigation:
             contents:
               - page: Dynamo Snapshot
                 path: ../pages-v1.5.1/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
+              - page: Model Express
+                path: ../pages-v1.5.1/developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md
           - page: Benchmarking with AIPerf
             path: ../pages-v1.5.1/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
