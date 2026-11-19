@@ -75,6 +75,13 @@ PodCliqueSet handlers at Grove's production paths. Grove CRD schema validation
 and OpenAPI defaulting still run in the API server; the transparent handlers
 are replaced by Grove's production `Setup` API once it is released.
 
+The shared setup derives Grove test CRDs from the pinned Go API bundle through
+`hack/prepare_grove_test_crds`. It retains only `v1alpha1` as the served and storage
+version, preserving that version's schema, CEL validation, and OpenAPI defaults.
+Conversion is disabled because this harness does not run the Grove operator.
+The deployment smoke tests install the published Grove chart and exercise its
+real beta conversion and admission webhooks.
+
 The webhook manager is independent of all per-test controller managers. No
 operator controller runs merely because a test uses admission or conversion.
 The proxy image is configurable with `WebhookProxyImage`; the controller suite

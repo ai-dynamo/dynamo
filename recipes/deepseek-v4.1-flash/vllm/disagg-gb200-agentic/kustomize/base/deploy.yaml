@@ -26,7 +26,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -61,7 +61,7 @@ spec:
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -180,7 +180,7 @@ spec:
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1
           imagePullPolicy: IfNotPresent
           command:
           - python3

@@ -20,8 +20,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
-from aisimulate_core.datasets import prepare_execution_profile
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.datasets import prepare_execution_profile
+from aisim_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,

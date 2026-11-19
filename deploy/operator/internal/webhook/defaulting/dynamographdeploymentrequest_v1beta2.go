@@ -54,9 +54,10 @@ const (
 // objective.mode, the scalar metric, objective.sla, recommendation.maxCandidates,
 // workload.static and discovered cluster hardware. workload.static: {} opts out of the static
 // workload; a nonempty static object receives any missing inputTokens, outputTokens and load
-// defaults. objective.sla: {} opts out of the latency defaults. hardware: {} opts out of
-// cluster discovery and typed hardware defaults; a nonempty object is completed.
-// spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
+// defaults, and workload.trace suppresses the static default. objective.sla: {} opts out of the
+// latency defaults. hardware: {} opts out of cluster discovery and typed hardware defaults; a
+// nonempty object is completed.
+// spec.aisim.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
@@ -211,6 +212,11 @@ func defaultGPUHardwareSpecV1beta2(gpu *nvidiacomv1beta2.GPUHardwareSpec, defaul
 }
 
 func defaultWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec) {
+	// A trace is the complete traffic model and receives no static default. The CRD schema, not
+	// admission, defaults its format.
+	if workload.Trace != nil {
+		return
+	}
 	if workload.Static == nil {
 		workload.Static = &nvidiacomv1beta2.StaticWorkloadSpec{}
 	} else if workload.Static.InputTokens == nil && workload.Static.OutputTokens == nil && workload.Static.Load == nil {
@@ -237,7 +243,7 @@ func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpe
 
 // defaultObjectiveSpecV1beta2 defaults the mode, the Optimize metric and an absent SLA.
 // Existing SLA objects are preserved, including the empty opt-out. It reads the typed objective
-// alone: spec.aisimulate.inputOverrides overrides the completed typed values when the input is
+// alone: spec.aisim.inputOverrides overrides the completed typed values when the input is
 // lowered, so it never suppresses these defaults.
 func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	if objective.Mode == "" {

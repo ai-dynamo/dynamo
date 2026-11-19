@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_scheduler::host::PrefillLoadEstimator;
+use dynamo_worker_selection::host::{ConditionalDisaggConfig, make_conditional_disagg_policy};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
-    config::KvRouterConfig,
-};
 use dynamo_runtime::{
     component::Endpoint, discovery::DiscoveryQuery, pipeline::RouterMode,
     prelude::DistributedRuntimeProvider,
@@ -139,6 +138,7 @@ impl PrefillRouter {
             Some(activation_rx),
             model_manager,
             decode_router_mode,
+            false,
             kv_cache_block_size,
             kv_router_config,
             SelectionPolicySource::Registry,
@@ -170,6 +170,7 @@ impl PrefillRouter {
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
+            decode_supports_prefill_cancellation: false,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
             conditional_disagg_policy: make_conditional_disagg_policy(None),
@@ -190,6 +191,7 @@ impl PrefillRouter {
         activation_rx: Option<oneshot::Receiver<Endpoint>>,
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
+        decode_supports_prefill_cancellation: bool,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         selection_policy: SelectionPolicySource,
@@ -204,7 +206,12 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let cancel_token = parent_token.child_token();
         let (target_tx, target_rx) = watch::channel(None);
-        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        let conditional_disagg_policy = make_conditional_disagg_policy(
+            kv_router_config
+                .as_ref()
+                .map(ConditionalDisaggConfig::from)
+                .as_ref(),
+        );
         let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
             c.conditional_disagg_prefill_busy_threshold
                 .or(c.router_queue_threshold)
@@ -222,6 +229,7 @@ impl PrefillRouter {
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,
+            decode_supports_prefill_cancellation,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
             conditional_disagg_policy,
@@ -394,6 +402,11 @@ impl PrefillRouter {
                     .await?,
             )
         } else {
+            crate::kv_router::check_hint_policies_route_on_kv_path(
+                prefill_router_mode,
+                &prefill_kv_config.clone().unwrap_or_default(),
+                &[crate::worker_type::WorkerType::Prefill],
+            )?;
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
                 context.session_affinity_mode,
@@ -656,6 +669,7 @@ impl PrefillRouter {
 #[cfg(test)]
 mod tests {
     use dynamo_runtime::protocols::maybe_error::MaybeError;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use super::*;
@@ -664,7 +678,6 @@ mod tests {
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::protocols::annotated::Annotated;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -677,6 +690,7 @@ mod tests {
         },
         storage::kv,
     };
+    use dynamo_scheduler::host::RoutingConstraints;
     use futures::StreamExt;
     use std::collections::HashSet;
 
@@ -735,7 +749,7 @@ mod tests {
         );
     }
 
-    struct PrefillWorker(u32);
+    struct PrefillWorker(u32, Option<Arc<AtomicUsize>>);
 
     #[async_trait::async_trait]
     impl
@@ -749,6 +763,9 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            if let Some(calls) = &self.1 {
+                calls.fetch_add(1, Ordering::Relaxed);
+            }
             let mut output = LLMEngineOutput::stop();
             output.token_ids = vec![self.0];
             Ok(ResponseStream::new(
@@ -771,7 +788,7 @@ mod tests {
 
     async fn prefilled_worker(router: &PrefillRouter) -> u32 {
         let mut response = router
-            .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+            .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99, None)))
             .await
             .unwrap();
         let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
@@ -784,7 +801,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match router
-                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99, None)))
                     .await
                 {
                     Err(error) => {
@@ -868,7 +885,7 @@ mod tests {
             workers.push(
                 endpoint
                     .endpoint_builder()
-                    .handler(Ingress::for_engine(Arc::new(PrefillWorker(marker))).unwrap())
+                    .handler(Ingress::for_engine(Arc::new(PrefillWorker(marker, None))).unwrap())
                     .start_with_registration()
                     .await
                     .unwrap(),
@@ -937,6 +954,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::RoundRobin,
+            false,
             16,
             None,
             SelectionPolicySource::Registry,
@@ -1113,9 +1131,9 @@ mod tests {
             let cancelled = self.0.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 worker_context.stopped().await;
@@ -1244,6 +1262,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             64,
             None,
             SelectionPolicySource::Registry,
@@ -1342,9 +1361,9 @@ mod tests {
             let held = self.held.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 tokio::select! {
@@ -1561,6 +1580,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             64,
             None,
             SelectionPolicySource::Registry,
@@ -1627,7 +1647,7 @@ mod tests {
                         id,
                         Default::default(),
                     ),
-                    Arc::new(PrefillWorker(7)),
+                    Arc::new(PrefillWorker(7, None)),
                 )
                 .await;
             match rebook {
@@ -1649,5 +1669,183 @@ mod tests {
         worker.shutdown().await.unwrap();
         frontend_runtime.shutdown();
         worker_runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn runtime_lora_rejected_before_prefill_dispatch() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::runtime_lora_rejected_before_prefill_dispatch"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("prefill subprocess must finish within its deadline")
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            runtime.clone(),
+            DistributedConfig {
+                discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Memory),
+                nats_config: None,
+                request_plane: RequestPlaneMode::Tcp,
+                response_plane: None,
+                event_transport_kind: EventTransportKind::Zmq,
+            },
+        )
+        .await
+        .unwrap();
+        let namespace = format!("runtime-lora-prefill-{}", uuid::Uuid::new_v4());
+        let endpoint = drt
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = endpoint
+            .endpoint_builder()
+            .handler(Ingress::for_engine(Arc::new(PrefillWorker(0, Some(calls.clone())))).unwrap())
+            .start_with_registration()
+            .await
+            .unwrap();
+        let runtime_request = || {
+            let mut req = request();
+            req.routing_mut().lora_resolution_version =
+                Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION);
+            req
+        };
+        drt.discovery()
+            .register(
+                DiscoverySpec::from_model(
+                    namespace.clone(),
+                    "workers".into(),
+                    "prefill".into(),
+                    &card(None),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let disabled = PrefillRouter::disabled(manager.clone(), RouterMode::RoundRobin, None);
+        let mut output = disabled
+            .generate(
+                SingleIn::new(runtime_request()),
+                Arc::new(PrefillWorker(99, None)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output.next().await.unwrap().data.unwrap().token_ids,
+            vec![99]
+        );
+        drop(output);
+        for (generation, mode) in [(1, RouterMode::RoundRobin), (2, RouterMode::KV)] {
+            let selected = card(Some(RouterConfig::new(
+                mode,
+                KvRouterConfig {
+                    use_kv_events: false,
+                    router_track_active_blocks: false,
+                    ..Default::default()
+                },
+            )));
+            let (_admissions, admitted_ids) = watch::channel(vec![worker.instance().id()]);
+            let target = WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint: endpoint.clone(),
+                group: endpoint.id().to_string(),
+                generation,
+                card: Arc::new(selected),
+                admitted_ids,
+            });
+            let target_id = target.id();
+            let router = PrefillRouter::new_with_selection_policy(
+                None,
+                manager.clone(),
+                mode,
+                false,
+                16,
+                None,
+                SelectionPolicySource::Registry,
+                None,
+                None,
+                SessionAffinityMode::Hard,
+                "test-model".into(),
+                namespace.clone(),
+                LoadThresholdHandle::new(Default::default()),
+                drt.child_token(),
+                None,
+            );
+            router.set_target(Some(target));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !router
+                    .binding
+                    .load_full()
+                    .is_some_and(|binding| binding.target_id == target_id)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("prefill routing mode must activate");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(mut output) = router
+                        .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99, None)))
+                        .await
+                    {
+                        assert_eq!(
+                            output.next().await.unwrap().data.unwrap().token_ids,
+                            vec![0]
+                        );
+                        while output.next().await.is_some() {}
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ordinary request must reach the discovered prefill worker");
+            let calls_before = calls.load(Ordering::Relaxed);
+            let error = router
+                .generate(
+                    SingleIn::new(runtime_request()),
+                    Arc::new(PrefillWorker(99, Some(calls.clone()))),
+                )
+                .await
+                .expect_err("runtime LoRA must fail before prefill dispatch");
+            assert_eq!(
+                error.to_string(),
+                "InvalidRequest: runtime_lora_disaggregated_unsupported"
+            );
+            assert!(dynamo_runtime::error::match_error_chain(
+                error.as_ref(),
+                &[dynamo_runtime::error::ErrorType::InvalidArgument],
+                &[],
+            ));
+            assert_eq!(calls.load(Ordering::Relaxed), calls_before);
+        }
+
+        worker.shutdown().await.unwrap();
+        runtime.shutdown();
     }
 }

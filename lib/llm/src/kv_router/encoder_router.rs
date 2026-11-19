@@ -25,7 +25,7 @@ use dynamo_runtime::{
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    preprocessor::TraceLink,
+    preprocessor::{MultimodalData, TraceLink},
 };
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
@@ -185,9 +185,12 @@ impl EncoderRouter {
     ) -> Result<EncoderBinding> {
         let target_id = target.id();
         let client = target.client(cancel_token).await?;
-        let router =
-            EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
-                .await?;
+        let router = EncodePushRouter::from_client_with_options(
+            client,
+            RouterMode::RoundRobin,
+            crate::kv_router::plugins::push_router_options(),
+        )
+        .await?;
         Ok(EncoderBinding {
             target_id,
             router: Arc::new(router),
@@ -339,10 +342,13 @@ impl EncoderRouter {
     fn should_encode(request: &PreprocessedRequest) -> bool {
         !request.is_probe
             && request.encoder_result.is_none()
-            && request
-                .multi_modal_data
-                .as_ref()
-                .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+            && request.multi_modal_data.as_ref().is_some_and(|media| {
+                media.values().any(|items| !items.is_empty())
+                    && !media
+                        .values()
+                        .flatten()
+                        .any(|item| matches!(item, MultimodalData::Json(_)))
+            })
     }
 
     async fn consume_encode_stream(
@@ -364,9 +370,10 @@ impl EncoderRouter {
         let terminal = terminal.context("Encode worker stream ended without a terminal chunk")?;
         let result = terminal
             .encoder_result
+            .map(|result| *result)
             .filter(serde_json::Value::is_object)
             .context("Encode worker terminal is missing an object-shaped encoder_result")?;
-        Ok((result, terminal.worker_trace_link))
+        Ok((result, terminal.worker_trace_link.map(|link| *link)))
     }
 }
 
@@ -389,6 +396,10 @@ impl
         {
             return next.generate(context.map(|_| request)).await;
         }
+        crate::routing_policy::check_stage(
+            &request,
+            crate::routing_policy::ExecutionStage::Encoder,
+        )?;
 
         let encode_context = Context::with_id_and_metadata(
             request.clone(),
@@ -430,7 +441,7 @@ impl
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        sync::Mutex,
+        sync::{Mutex, atomic::AtomicUsize},
         time::Duration,
     };
 
@@ -484,6 +495,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn opaque_json_skips_the_encoder_even_when_mixed_with_media() {
+        let mut request = multimodal_request();
+        assert!(EncoderRouter::should_encode(&request));
+        request.multi_modal_data.as_mut().unwrap().insert(
+            "chemistry".into(),
+            vec![MultimodalData::Json(serde_json::json!({"atoms":["C"]}))],
+        );
+        assert!(!EncoderRouter::should_encode(&request));
+    }
+
     fn multimodal_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
             .model("model".to_string())
@@ -501,7 +523,7 @@ mod tests {
             .unwrap()
     }
 
-    struct EncodeWorker(u64);
+    struct EncodeWorker(u64, Arc<AtomicUsize>);
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -511,6 +533,7 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.1.fetch_add(1, Ordering::SeqCst);
             let output = LLMEngineOutput::encode_terminal(
                 json!({"worker_id": self.0}).as_object().unwrap().clone(),
             );
@@ -580,6 +603,7 @@ mod tests {
         let namespace = format!("encoder-admission-{}", uuid::Uuid::new_v4());
         let mut workers = Vec::new();
         let mut runtimes = Vec::new();
+        let encode_calls = Arc::new(AtomicUsize::new(0));
         for _ in 0..3 {
             let drt = DistributedRuntime::new(runtime.clone(), config())
                 .await
@@ -592,7 +616,13 @@ mod tests {
                 .endpoint("encode");
             let worker = endpoint
                 .endpoint_builder()
-                .handler(Ingress::for_engine(Arc::new(EncodeWorker(drt.connection_id()))).unwrap())
+                .handler(
+                    Ingress::for_engine(Arc::new(EncodeWorker(
+                        drt.connection_id(),
+                        encode_calls.clone(),
+                    )))
+                    .unwrap(),
+                )
                 .start_with_registration()
                 .await
                 .unwrap();
@@ -655,6 +685,45 @@ mod tests {
                 .available_worker_ids_for("other-group", &endpoint.id())
                 .is_none()
         );
+        let calls_before = encode_calls.load(Ordering::SeqCst);
+        let downstream = Arc::new(CaptureEngine::default());
+        let mut runtime_request = multimodal_request();
+        runtime_request.routing_mut().lora_resolution_version =
+            Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION);
+        let result = router
+            .generate(SingleIn::new(runtime_request.clone()), downstream.clone())
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("runtime LoRA must not dispatch to an encoder"),
+        };
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("runtime_lora_encoder_unsupported")
+        );
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before);
+        assert!(downstream.request.lock().unwrap().is_none());
+
+        runtime_request.multi_modal_data = None;
+        router
+            .generate(SingleIn::new(runtime_request), downstream.clone())
+            .await
+            .unwrap();
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before);
+        let text_request = downstream.request.lock().unwrap().take().unwrap();
+        assert_eq!(
+            text_request.routing.unwrap().lora_resolution_version,
+            Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION)
+        );
+        assert!(text_request.encoder_result.is_none());
+        assert_eq!(encoded_worker(&router).await, Some(ids[0]));
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before + 1);
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[0]));
         }

@@ -361,6 +361,7 @@ async fn the_replayed_logprob_is_the_one_the_handoff_carried() {
         Some(HANDED_OFF),
         "position 0 must report the handed-off value, not a regenerated one"
     );
+    assert!(!first.tokens[0].token.is_empty());
 }
 
 /// A repeated token must keep its logprob even if the replayed token has none.

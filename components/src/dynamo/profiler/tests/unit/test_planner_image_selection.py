@@ -186,7 +186,7 @@ def test_sibling_image_derivation_rejects_digest_only_and_empty_tag_references(
             derive_backend_image(image, "vllm")
 
 
-def test_add_planner_to_config_uses_dynamo_planner_image():
+def test_add_planner_to_config_uses_planner_image_and_entrypoint():
     image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3"
     dgdr = _make_dgdr(image)
     config = _base_dgd_config(image)
@@ -194,8 +194,9 @@ def test_add_planner_to_config_uses_dynamo_planner_image():
     add_planner_to_config(dgdr, config)
 
     planner = _component_map(config)["Planner"]
-    planner_image = _main_container(planner)["image"]
-    assert planner_image == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
+    container = _main_container(planner)
+    assert container["image"] == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
+    assert container["command"] == ["python3", "-m", "dynamo.planner"]
     assert "scalingAdapter" not in planner
 
 

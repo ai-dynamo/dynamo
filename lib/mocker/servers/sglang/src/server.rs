@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! SGLang-compatible Mocker gRPC service.
+//! SGLang-compatible Mocker gRPC service: `sglang.api.v1.SglangService`,
+//! shaped like SGLang's Rust server, with typed discovery, `GenerateStreamItem`
+//! frames, and in-stream error items carrying HTTP status codes.
 
 use std::fmt;
 use std::pin::Pin;
@@ -11,13 +13,14 @@ use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
     EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
-use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
+use dynamo_mocker::live::{
+    LiveEngine, LiveEngineConfig, RequestOutputBuffering, stable_request_uuid,
+};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
-use serde_json::json;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
 
 #[path = "server_request.rs"]
@@ -26,7 +29,10 @@ mod request;
 use request::PreparedRequest;
 
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
+/// The Mocker's one scheduler rank, whatever DP rank discovery advertises.
 pub(super) const DP_RANK: u32 = 0;
+/// SGLang's code for a request cancelled by Abort or a disconnect.
+const CLIENT_CLOSED_REQUEST: u32 = 499;
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 pub(super) type BoxedStatusResult<T> = Result<T, Box<Status>>;
 
@@ -68,6 +74,14 @@ pub struct MockerServerConfig {
     pub max_concurrent_requests: usize,
     pub bootstrap_host: String,
     pub bootstrap_port: u16,
+    /// This listener's DP rank, as discovery and its KV events report it.
+    pub dp_rank: u32,
+    /// Every DP rank of the deployment, counting attention-DP ranks.
+    pub dp_size: u32,
+    /// Attention DP: report the launch-wide running-request limit.
+    pub enable_dp_attention: bool,
+    /// This listener's offset among its node's listeners.
+    pub port_offset: u32,
 }
 
 impl Default for MockerServerConfig {
@@ -80,6 +94,10 @@ impl Default for MockerServerConfig {
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             bootstrap_host: "127.0.0.1".to_string(),
             bootstrap_port: 8_998,
+            dp_rank: 0,
+            dp_size: 1,
+            enable_dp_attention: false,
+            port_offset: 0,
         }
     }
 }
@@ -87,13 +105,14 @@ impl Default for MockerServerConfig {
 #[derive(Clone, Debug)]
 struct DiscoveryMetadata {
     page_size: u32,
-    kv_events: Option<serde_json::Value>,
+    kv_event_port: Option<u16>,
     max_total_num_tokens: usize,
     max_running_requests: usize,
     max_prefill_tokens: usize,
 }
 
-/// SGLang-compatible service driven by one shared Mocker scheduler.
+/// SGLang-compatible service driven by one Mocker scheduler: one Rust-server
+/// listener.
 #[derive(Clone)]
 pub struct SglangMockerService {
     config: Arc<MockerServerConfig>,
@@ -117,6 +136,7 @@ impl SglangMockerService {
             config.max_concurrent_requests > 0,
             "max_concurrent_requests must be greater than 0"
         );
+        anyhow::ensure!(config.dp_size > 0, "dp_size must be greater than 0");
         if config.mode == ServerMode::Prefill {
             anyhow::ensure!(
                 !config.bootstrap_host.trim().is_empty(),
@@ -150,37 +170,34 @@ impl SglangMockerService {
             match ZmqKvEventSink::bind(
                 engine_args.runtime.zmq_kv_events_port,
                 engine_args.runtime.zmq_replay_port,
-                DP_RANK,
+                config.dp_rank,
                 page_size,
             ) {
                 Ok(sink) => Some(sink),
                 Err(error) => {
-                    tracing::error!(dp_rank = DP_RANK, %error, "Failed to create ZMQ KV event sink");
+                    tracing::error!(dp_rank = config.dp_rank, %error, "Failed to create ZMQ KV event sink");
                     None
                 }
             }
         } else {
             None
         };
-        let kv_events = sink.as_ref().map(|sink| {
-            let address: std::net::SocketAddr = sink
-                .endpoint()
-                .strip_prefix("tcp://")
-                .expect("ZMQ sink uses TCP")
-                .parse()
-                .expect("ZMQ sink reports a bound socket address");
-            json!({
-                "publisher": "zmq",
-                "endpoint_host": address.ip().to_string(),
-                "endpoint_port_base": address.port(),
-                "topic": "",
-                "block_size": page_size,
-                "dp_size": 1,
+        let kv_event_port = sink
+            .as_ref()
+            .map(|sink| {
+                let endpoint = sink.endpoint();
+                endpoint
+                    .strip_prefix("tcp://")
+                    .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                    .map(|address| address.port())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("ZMQ sink endpoint {endpoint} is not a TCP address")
+                    })
             })
-        });
+            .transpose()?;
         let discovery = DiscoveryMetadata {
             page_size,
-            kv_events,
+            kv_event_port,
             max_total_num_tokens,
             max_running_requests: engine_args.effective_handoff_capacity(),
             max_prefill_tokens: if engine_args.max_num_batched_tokens == usize::MAX {
@@ -189,7 +206,8 @@ impl SglangMockerService {
                 engine_args.max_num_batched_tokens
             },
         };
-        let engine = LiveEngine::start_with_config(
+        // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
+        let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
             DP_RANK,
             LiveEngineConfig {
@@ -199,6 +217,7 @@ impl SglangMockerService {
                 ),
                 ..Default::default()
             },
+            RequestOutputBuffering::FullResponse,
         )?;
         let max_concurrent_requests = config.max_concurrent_requests;
         Ok(Self {
@@ -207,6 +226,40 @@ impl SglangMockerService {
             engine,
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
         })
+    }
+
+    /// The `listeners` listeners of one node: listener `k` serves DP rank
+    /// `config.dp_rank + k`, bootstrap port `config.bootstrap_port + k` and
+    /// the configured ZMQ ports + `k`, with its own scheduler.
+    pub fn node(
+        config: MockerServerConfig,
+        engine_args: MockerConfig,
+        listeners: u32,
+    ) -> anyhow::Result<Vec<Self>> {
+        (0..listeners)
+            .map(|offset| {
+                let port = |port: u16| {
+                    u16::try_from(u32::from(port) + offset)
+                        .map_err(|_| anyhow::anyhow!("listener {offset}'s port exceeds 65535"))
+                };
+                let mut engine_args = engine_args.clone();
+                for zmq_port in [
+                    &mut engine_args.runtime.zmq_kv_events_port,
+                    &mut engine_args.runtime.zmq_replay_port,
+                ] {
+                    *zmq_port = zmq_port.map(port).transpose()?;
+                }
+                Self::new(
+                    MockerServerConfig {
+                        dp_rank: config.dp_rank + offset,
+                        bootstrap_port: port(config.bootstrap_port)?,
+                        port_offset: offset,
+                        ..config.clone()
+                    },
+                    engine_args,
+                )
+            })
+            .collect()
     }
 
     pub fn config(&self) -> &MockerServerConfig {
@@ -221,185 +274,161 @@ impl SglangMockerService {
         self.engine.metrics_receiver()
     }
 
-    async fn start_generation(
-        &self,
-        request: pb::GenerateRequest,
-    ) -> Result<(PreparedRequest, LiveRequest, OwnedSemaphorePermit), Status> {
-        let permit = self
-            .request_permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
-        let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
-        let direct = prepared.direct_request();
-        let live = if prepared.has_decode_handoff {
-            self.engine.submit_decode(direct).await
-        } else {
-            self.engine.submit(direct).await
-        }
-        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
-        Ok((prepared, live, permit))
-    }
-
     fn model_info(&self) -> pb::GetModelInfoResponse {
+        let model = &self.config.model;
         pb::GetModelInfoResponse {
-            model_path: self.config.model.clone(),
-            json_info: json!({
-                "model_path": self.config.model,
-                "tokenizer_path": self.config.model,
-            })
-            .to_string(),
+            model_path: model.clone(),
+            served_model_name: model.clone(),
+            tokenizer_path: model.clone(),
+            is_generation: true,
+            ..Default::default()
         }
     }
 
     fn server_info(&self) -> pb::GetServerInfoResponse {
-        pb::GetServerInfoResponse {
-            json_info: json!({
-                "disaggregation_mode": self.config.mode.discovery_value(),
-                "incremental_streaming_output": true,
-                "page_size": self.discovery.page_size,
-                "kv_events": self.discovery.kv_events,
-                "max_total_num_tokens": self.discovery.max_total_num_tokens,
-                "max_running_requests": self.discovery.max_running_requests,
-                "max_prefill_tokens": self.discovery.max_prefill_tokens,
-                "dp_size": 1,
-                "context_length": self.config.context_length,
-                "allow_auto_truncate": false,
-                "served_model_name": self.config.model,
-                "disaggregation_bootstrap_port": self.config.bootstrap_port,
-                "dist_init_addr": format!(
-                    "{}:{}",
-                    self.config.bootstrap_host, self.config.bootstrap_port
-                ),
+        let config = &self.config;
+        let discovery = &self.discovery;
+        let to_u64 = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        // Like SGLang, the publisher binds every interface and is reported at
+        // a dialable node-local address; the sidecar runs on the same node.
+        let kv_event_sources = discovery
+            .kv_event_port
+            .map(|port| pb::KvEventSource {
+                dp_rank: config.dp_rank,
+                endpoint: format!("tcp://127.0.0.1:{port}"),
+                topic: String::new(),
+                block_size: discovery.page_size,
             })
-            .to_string(),
+            .into_iter()
+            .collect();
+        pb::GetServerInfoResponse {
+            model_path: config.model.clone(),
+            served_model_name: config.model.clone(),
+            tokenizer_path: config.model.clone(),
+            max_context_length: config.context_length,
+            max_total_num_tokens: Some(to_u64(discovery.max_total_num_tokens)),
+            num_reserved_tokens: 0,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            internal_states: Vec::new(),
+            host: config.bootstrap_host.clone(),
+            // The Mocker serves no native HTTP API.
+            port: 0,
+            incremental_streaming_output: true,
+            disaggregation_mode: config.mode.discovery_value().to_string(),
+            allow_auto_truncate: false,
+            skip_tokenizer_init: false,
+            deployment_info: Some(pb::DeploymentInfo {
+                disaggregation_bootstrap_port: Some(u32::from(config.bootstrap_port)),
+                node_rank: 0,
+                nnodes: 1,
+                dp_size: config.dp_size,
+                dp_rank: Some(config.dp_rank),
+                // The node's rendezvous: the first listener's bootstrap address.
+                dist_init_addr: Some(format!(
+                    "{}:{}",
+                    config.bootstrap_host,
+                    u32::from(config.bootstrap_port) - config.port_offset
+                )),
+                page_size: Some(discovery.page_size),
+                dcp_size: 1,
+                // SGLang reports the launch-wide limit and splits it across
+                // attention-DP ranks.
+                max_running_requests: Some(to_u64(discovery.max_running_requests).saturating_mul(
+                    if config.enable_dp_attention {
+                        u64::from(config.dp_size)
+                    } else {
+                        1
+                    },
+                )),
+                max_prefill_tokens: to_u64(discovery.max_prefill_tokens),
+                enable_dp_attention: config.enable_dp_attention,
+                kv_event_sources,
+                ..Default::default()
+            }),
+            ..Default::default()
         }
     }
 }
 
 #[tonic::async_trait]
 impl pb::sglang_service_server::SglangService for SglangMockerService {
-    type TextGenerateStream = BoxStream<pb::TextGenerateResponse>;
-    type GenerateStream = BoxStream<pb::GenerateResponse>;
-    type ChatCompleteStream = BoxStream<pb::OpenAiStreamChunk>;
-    type CompleteStream = BoxStream<pb::OpenAiStreamChunk>;
-    type WatchEngineStateStream = BoxStream<pb::EngineStateSnapshot>;
-
-    async fn watch_engine_state(
-        &self,
-        _request: Request<pb::WatchEngineStateRequest>,
-    ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
-        unsupported("WatchEngineState")
-    }
-
-    async fn text_generate(
-        &self,
-        _request: Request<pb::TextGenerateRequest>,
-    ) -> Result<Response<Self::TextGenerateStream>, Status> {
-        unsupported("TextGenerate")
-    }
+    type GenerateStream = BoxStream<pb::GenerateStreamItem>;
 
     async fn generate(
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
-        let (prepared, mut live, permit) = self.start_generation(request.into_inner()).await?;
-        // Keep LiveEngine's fixed delivery queue independent of client and
-        // transport pacing. This request-owned buffer cannot exceed the
-        // validated output-token budget, and dropping the client stream closes
-        // the receiver so the pump drops `live` and cancels unfinished work.
-        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(prepared.max_output_tokens);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = signal_tx.closed() => break,
-                    signal = live.recv() => {
-                        let Some(signal) = signal else {
-                            if live.is_aborted() {
-                                let _ = signal_tx.send(Err(Status::cancelled("Request aborted"))).await;
-                            }
-                            break;
-                        };
-                        let completed = signal.completed;
-                        if signal_tx.send(Ok(signal)).await.is_err() || completed {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-        let stream = async_stream::try_stream! {
+        let permit = self
+            .request_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
+        let prepared =
+            PreparedRequest::new(request.into_inner(), &self.config).map_err(|status| *status)?;
+        if let Some(message) = prepared.context_error.clone() {
+            let item = error_item(400, message);
+            return Ok(Response::new(Box::pin(futures::stream::once(async move {
+                let _permit = permit;
+                Ok(item)
+            }))));
+        }
+        let direct = prepared.direct_request();
+        let mut live = if prepared.has_decode_handoff {
+            self.engine.submit_decode(direct).await
+        } else {
+            self.engine.submit(direct).await
+        }
+        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
+        let stream = async_stream::stream! {
             let _permit = permit;
             let mut completion_tokens = 0_usize;
+            let mut cached_tokens = 0_usize;
             // The sidecar contract enables SGLang's incremental streaming output,
-            // so each response contains only this chunk's token and metadata.
-            while let Some(signal) = signal_rx.recv().await {
-                let signal = signal?;
-                let token_id = checked_token(&signal).map_err(|status| *status)?;
-                let output_id = i32::try_from(token_id)
-                    .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;
+            // so each frame contains only this chunk's token and metadata.
+            while let Some(signal) = live.recv().await {
+                let token_id = match checked_token(&signal) {
+                    Ok(token_id) => token_id,
+                    Err((code, message)) => {
+                        yield Ok(error_item(code, message.to_string()));
+                        return;
+                    }
+                };
                 completion_tokens = completion_tokens.saturating_add(1);
-                yield pb::GenerateResponse {
-                    output_ids: vec![output_id],
-                    meta_info: prepared.meta_info(
+                // The scheduler reports prefix-cache hits on the first signal.
+                if let Some(tokens) = signal.cached_tokens {
+                    cached_tokens = tokens;
+                }
+                yield Ok(pb::GenerateStreamItem {
+                    item: Some(pb::generate_stream_item::Item::Frame(prepared.frame(
                         &[token_id],
                         completion_tokens,
+                        cached_tokens,
+                        completion_tokens == 1,
                         signal.completed,
-                    ),
-                    finished: signal.completed,
-                    text: prepared.output_text(token_id),
-                };
+                    ))),
+                });
                 if signal.completed {
                     return;
                 }
             }
-            Err(Status::internal(
-                "Mocker output channel closed before a terminal response",
-            ))?;
+            if live.is_aborted() {
+                yield Ok(error_item(CLIENT_CLOSED_REQUEST, "client disconnected".to_string()));
+                return;
+            }
+            yield Ok(error_item(
+                500,
+                "Mocker output channel closed before a terminal response".to_string(),
+            ));
         };
         Ok(Response::new(Box::pin(stream)))
-    }
-
-    async fn text_embed(
-        &self,
-        _request: Request<pb::TextEmbedRequest>,
-    ) -> Result<Response<pb::TextEmbedResponse>, Status> {
-        unsupported("TextEmbed")
-    }
-
-    async fn embed(
-        &self,
-        _request: Request<pb::EmbedRequest>,
-    ) -> Result<Response<pb::EmbedResponse>, Status> {
-        unsupported("Embed")
-    }
-
-    async fn classify(
-        &self,
-        _request: Request<pb::ClassifyRequest>,
-    ) -> Result<Response<pb::ClassifyResponse>, Status> {
-        unsupported("Classify")
-    }
-
-    async fn tokenize(
-        &self,
-        _request: Request<pb::TokenizeRequest>,
-    ) -> Result<Response<pb::TokenizeResponse>, Status> {
-        unsupported("Tokenize")
-    }
-
-    async fn detokenize(
-        &self,
-        _request: Request<pb::DetokenizeRequest>,
-    ) -> Result<Response<pb::DetokenizeResponse>, Status> {
-        unsupported("Detokenize")
     }
 
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,
     ) -> Result<Response<pb::HealthCheckResponse>, Status> {
+        // The Mocker is ready once constructed. It does not simulate SGLang's
+        // one-token probe, which would perturb scheduler-state assertions.
         Ok(Response::new(pb::HealthCheckResponse { healthy: true }))
     }
 
@@ -426,16 +455,17 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                 id: self.config.model.clone(),
                 root: self.config.model.clone(),
                 parent: None,
-                max_model_len: Some(self.config.context_length as i32),
+                max_model_len: u64::from(self.config.context_length),
             }],
         }))
     }
 
-    async fn get_load(
+    async fn detokenize(
         &self,
-        _request: Request<pb::GetLoadRequest>,
-    ) -> Result<Response<pb::GetLoadResponse>, Status> {
-        unsupported("GetLoad")
+        _request: Request<pb::DetokenizeRequest>,
+    ) -> Result<Response<pb::DetokenizeResponse>, Status> {
+        // SGLang answers the same way when it runs without a tokenizer.
+        Err(Status::unimplemented("detokenization requires a tokenizer"))
     }
 
     async fn abort(
@@ -443,125 +473,81 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
         let request = request.into_inner();
+        if request.abort_all != request.rid.is_empty() {
+            return Err(Status::invalid_argument(
+                "provide either a nonempty rid or abort_all=true, not both",
+            ));
+        }
         if request.abort_all {
             return Err(Status::unimplemented(
                 "Abort with abort_all=true is not supported by the Mocker server",
             ));
         }
-        if request.rid.trim().is_empty() {
-            return Err(Status::invalid_argument("Abort.rid must not be empty"));
-        }
         let request_id = stable_request_uuid(self.config.seed, &request.rid);
-        self.engine.cancel(request_id).await.map_err(|error| {
+        let success = self.engine.cancel(request_id).await.map_err(|error| {
             Status::internal(format!("Mocker request cancellation failed: {error}"))
         })?;
-        Ok(Response::new(pb::AbortResponse { success: true }))
+        Ok(Response::new(pb::AbortResponse { success }))
     }
 
-    async fn flush_cache(
+    async fn get_hi_cache_storage(
         &self,
-        _request: Request<pb::FlushCacheRequest>,
-    ) -> Result<Response<pb::FlushCacheResponse>, Status> {
-        unsupported("FlushCache")
+        _request: Request<pb::GetHiCacheStorageRequest>,
+    ) -> Result<Response<pb::HiCacheStatus>, Status> {
+        Err(hicache_unimplemented())
     }
 
-    async fn pause_generation(
+    async fn attach_hi_cache_storage(
         &self,
-        _request: Request<pb::PauseGenerationRequest>,
-    ) -> Result<Response<pb::PauseGenerationResponse>, Status> {
-        unsupported("PauseGeneration")
+        _request: Request<pb::AttachHiCacheStorageRequest>,
+    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+        Err(hicache_unimplemented())
     }
 
-    async fn continue_generation(
+    async fn detach_hi_cache_storage(
         &self,
-        _request: Request<pb::ContinueGenerationRequest>,
-    ) -> Result<Response<pb::ContinueGenerationResponse>, Status> {
-        unsupported("ContinueGeneration")
+        _request: Request<pb::DetachHiCacheStorageRequest>,
+    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+        Err(hicache_unimplemented())
     }
 
-    async fn chat_complete(
+    async fn clear_hi_cache_storage(
         &self,
-        _request: Request<pb::OpenAiRequest>,
-    ) -> Result<Response<Self::ChatCompleteStream>, Status> {
-        unsupported("ChatComplete")
-    }
-
-    async fn complete(
-        &self,
-        _request: Request<pb::OpenAiRequest>,
-    ) -> Result<Response<Self::CompleteStream>, Status> {
-        unsupported("Complete")
-    }
-
-    async fn open_ai_embed(
-        &self,
-        _request: Request<pb::OpenAiRequest>,
-    ) -> Result<Response<pb::OpenAiResponse>, Status> {
-        unsupported("OpenAIEmbed")
-    }
-
-    async fn open_ai_classify(
-        &self,
-        _request: Request<pb::OpenAiRequest>,
-    ) -> Result<Response<pb::OpenAiResponse>, Status> {
-        unsupported("OpenAIClassify")
-    }
-
-    async fn score(
-        &self,
-        _request: Request<pb::OpenAiRequest>,
-    ) -> Result<Response<pb::OpenAiResponse>, Status> {
-        unsupported("Score")
-    }
-
-    async fn rerank(
-        &self,
-        _request: Request<pb::OpenAiRequest>,
-    ) -> Result<Response<pb::OpenAiResponse>, Status> {
-        unsupported("Rerank")
-    }
-
-    async fn start_profile(
-        &self,
-        _request: Request<pb::StartProfileRequest>,
-    ) -> Result<Response<pb::StartProfileResponse>, Status> {
-        unsupported("StartProfile")
-    }
-
-    async fn stop_profile(
-        &self,
-        _request: Request<pb::StopProfileRequest>,
-    ) -> Result<Response<pb::StopProfileResponse>, Status> {
-        unsupported("StopProfile")
-    }
-
-    async fn update_weights_from_disk(
-        &self,
-        _request: Request<pb::UpdateWeightsRequest>,
-    ) -> Result<Response<pb::UpdateWeightsResponse>, Status> {
-        unsupported("UpdateWeightsFromDisk")
+        _request: Request<pb::ClearHiCacheStorageRequest>,
+    ) -> Result<Response<pb::HiCacheStorageResponse>, Status> {
+        Err(hicache_unimplemented())
     }
 }
 
-// Tonic requires `Status` at the RPC boundary, so boxing here would only be
-// undone immediately by every unsupported trait method.
-#[allow(clippy::result_large_err)]
-fn unsupported<T>(rpc: &str) -> Result<Response<T>, Status> {
-    Err(Status::unimplemented(format!(
-        "{rpc} is outside the SGLang sidecar test contract"
-    )))
+fn hicache_unimplemented() -> Status {
+    Status::unimplemented("HiCache storage management is not supported by the Mocker server")
 }
 
-fn checked_token(signal: &OutputSignal) -> BoxedStatusResult<u32> {
+/// One request's failure inside an open Generate stream; `code` is the HTTP
+/// status SGLang's native error body carries.
+fn error_item(code: u32, message: String) -> pb::GenerateStreamItem {
+    pb::GenerateStreamItem {
+        item: Some(pb::generate_stream_item::Item::Error(
+            pb::GenerateStreamError {
+                error: Some(pb::ErrorBody {
+                    message,
+                    code,
+                    ..Default::default()
+                }),
+                index: None,
+            },
+        )),
+    }
+}
+
+fn checked_token(signal: &OutputSignal) -> Result<u32, (u32, &'static str)> {
     if signal.rejected {
-        return Err(
-            Status::resource_exhausted("request exceeds the simulated KV-cache capacity").into(),
-        );
+        // SGLang reports scheduler overload as 503.
+        return Err((503, "request exceeds the simulated KV-cache capacity"));
     }
     signal
         .token_id
-        .ok_or_else(|| Status::internal("Mocker output signal is missing a token ID"))
-        .map_err(Into::into)
+        .ok_or((500, "Mocker output signal is missing a token ID"))
 }
 
 #[cfg(test)]
