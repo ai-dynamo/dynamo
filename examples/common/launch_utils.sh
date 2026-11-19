@@ -77,7 +77,6 @@ dyn_port() {
 
     if [[ "${prefix}" == "DYN_SYSTEM_PORT" ]]; then
         minimum_port=0
-        maximum_port=32767
     fi
 
     local selected="${value:-${fallback}}"
