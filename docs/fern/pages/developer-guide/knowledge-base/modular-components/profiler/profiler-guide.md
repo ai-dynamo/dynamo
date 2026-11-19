@@ -680,9 +680,12 @@ spec:
 ```
 
 The v1beta1 profiling job also runs an `output-copier` sidecar that relays profiler status and
-writes results to the output ConfigMap. See [Output-copier image](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#output-copier-image)
-for the bundled digest-pinned image and operator-wide configuration. A per-request image override
-via `overrides.profilingJob` takes precedence:
+writes results to the output ConfigMap. For private registries, set the platform Helm value
+`dynamo-operator.dgdr.outputCopierImage` to your mirrored image. See
+[Output-copier image](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#output-copier-image)
+for the bundled digest-pinned image and a configuration example.
+
+A per-request image override via `overrides.profilingJob` takes precedence:
 
 ```yaml
 overrides:

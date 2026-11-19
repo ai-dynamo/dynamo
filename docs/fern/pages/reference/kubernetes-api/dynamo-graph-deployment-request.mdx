@@ -551,6 +551,8 @@ dynamo-operator:
 
 The equivalent operator configuration field is `dgdr.outputCopierImage`. A per-request
 `spec.overrides.profilingJob.template.spec.containers` entry named `output-copier` takes precedence.
+See [profiling artifacts](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#accessing-profiling-artifacts)
+for a per-request override example.
 
 Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash; a dash-only
 `/bin/sh` is not sufficient), `kubectl`, and the shell utilities used by the copier (`date`, `grep`,
