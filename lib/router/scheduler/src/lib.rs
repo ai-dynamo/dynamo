@@ -107,7 +107,8 @@ pub use tracking_hash::{
 pub use types::{
     AccountingAttribution, AdmissionAttempt, AdmittedSchedulingResponse,
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, NonMaxOverlapSelection,
-    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, RejectThresholdsProvider,
-    ScheduleMode, ScheduleRequest, SchedulingContext, SchedulingRequest, SchedulingResponse,
-    TierOverlapBlocks, WorkerAvailabilityProvider, WorkerIdSet, WorkerSelectionPolicyFactory,
+    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueWaitObserver,
+    RejectThresholdsProvider, ScheduleMode, ScheduleRequest, SchedulingContext, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider, WorkerIdSet,
+    WorkerSelectionPolicyFactory,
 };

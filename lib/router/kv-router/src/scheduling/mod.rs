@@ -13,14 +13,14 @@ pub use crate::compat::scheduling::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, NoopOverlapScoresRefresh,
     OverlapAnalysis, OverlapScoresRefresh, OverlapScoresResponse, OverlapSignals,
     OverloadedWorkerProvider, PolicyQueue, PolicyQueueEntry, PotentialLoad, PrefillLoadEstimator,
-    QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot, RefreshedOverlap,
-    RequestLifecycle, RoutingEligibility, ScheduleMode, ScheduleRequest, SchedulingContext,
-    SchedulingRequest, SchedulingResponse, SelectedWorkerTierSnapshot, SessionContext,
-    SharedCacheOverlapScore, TierOverlapBlocks, TieredOverlapRefresher, WorkerAvailabilityProvider,
-    WorkerEligibilityError, WorkerIdSet, WorkerOverlapScore, WorkerPlacement,
-    WorkerSelectionInputTrigger, WorkerSelectionPolicyError, effective_prefill_tokens, overlap,
-    overlap_refresh, policy, policy_queue, prefill_load, prefill_load_hint_from_effective_tokens,
-    queue, request_classifier, selector,
+    QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot, QueueWaitObserver,
+    RefreshedOverlap, RequestLifecycle, RoutingEligibility, ScheduleMode, ScheduleRequest,
+    SchedulingContext, SchedulingRequest, SchedulingResponse, SelectedWorkerTierSnapshot,
+    SessionContext, SharedCacheOverlapScore, TierOverlapBlocks, TieredOverlapRefresher,
+    WorkerAvailabilityProvider, WorkerEligibilityError, WorkerIdSet, WorkerOverlapScore,
+    WorkerPlacement, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
+    effective_prefill_tokens, overlap, overlap_refresh, policy, policy_queue, prefill_load,
+    prefill_load_hint_from_effective_tokens, queue, request_classifier, selector,
 };
 #[cfg(test)]
 mod policy_queue_tests;

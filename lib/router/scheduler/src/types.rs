@@ -244,6 +244,12 @@ impl NonMaxOverlapSelection {
     }
 }
 
+/// Callback invoked inline on the scheduler actor when a request leaves the queue toward
+/// worker selection, with its policy class index and the time it spent queued. Requests
+/// admitted without entering a queue report zero. It runs in the drain loop, so it must
+/// return promptly and must not call back into the scheduler.
+pub type QueueWaitObserver = Arc<dyn Fn(usize, std::time::Duration) + Send + Sync + 'static>;
+
 #[derive(Debug)]
 pub struct AdvisorySchedulingResponse {
     pub response: SchedulingResponse,

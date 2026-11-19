@@ -228,6 +228,9 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
+    # Time a request waited in the router's scheduler queue before worker selection
+    # (histogram, seconds). Requests admitted without queueing record zero.
+    ROUTER_QUEUE_WAIT_SECONDS = "router_queue_wait_seconds"
     # Number of replicas allocated for a LoRA adapter (gauge per LoRA)
     LORA_REPLICA_FACTOR = "lora_replica_factor"
     # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)

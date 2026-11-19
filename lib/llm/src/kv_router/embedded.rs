@@ -25,9 +25,10 @@ use dynamo_router_protocol::worker_type::WorkerType;
 use dynamo_scheduler::host::{
     CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostHints, HostLoad,
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, PrefillLoadEstimator, RejectThresholdsProvider, SelectionHost,
-    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
-    WorkerAvailabilityProvider, WorkerCatalogSource, WorkerConfigLike, WorkerRequest,
+    OverloadedWorkerProvider, PrefillLoadEstimator, QueueWaitObserver, RejectThresholdsProvider,
+    SelectionHost, SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun,
+    SelectionScheduler, WorkerAvailabilityProvider, WorkerCatalogSource, WorkerConfigLike,
+    WorkerRequest,
 };
 use dynamo_slot_tracker::host::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use tokio_util::sync::CancellationToken;
@@ -143,6 +144,23 @@ fn spawn_queue_metrics_updater(
             }
         }
     });
+}
+
+/// Observe each scheduler queue wait on its policy class's histogram.
+///
+/// `per_class` is indexed by the scheduler's class index, in the order the resolved profile
+/// lists its classes. Runs inline on the scheduler actor: one histogram observation, no I/O.
+fn queue_wait_observer(per_class: Vec<RouterQueueMetricHandles>) -> QueueWaitObserver {
+    Arc::new(move |class_index, wait| {
+        let Some(handles) = per_class.get(class_index) else {
+            debug_assert!(
+                false,
+                "missing queue wait histogram for policy class {class_index}"
+            );
+            return;
+        };
+        handles.queue_wait_seconds.observe(wait.as_secs_f64());
+    })
 }
 
 fn non_max_overlap_observer(worker_type: &'static str) -> NonMaxOverlapSelectionObserver {
@@ -335,6 +353,12 @@ impl EmbeddedSelection {
             queue_metrics.clone(),
             cancellation_token.child_token(),
         );
+        if !partition
+            .scheduler()
+            .set_queue_wait_observer(queue_wait_observer(queue_metrics.clone()))
+        {
+            anyhow::bail!("queue wait observer is already installed");
+        }
         if worker_type == WorkerType::Prefill
             && !partition
                 .scheduler()
@@ -533,6 +557,23 @@ pub(crate) fn worker_request_from_runtime_config(
 mod tests {
     use super::*;
     use dynamo_scheduler::host::SchedulerLoadSink;
+
+    #[test]
+    fn queue_wait_observer_records_on_the_class_histogram() {
+        let handles: Vec<_> = ["latency", "bulk"]
+            .iter()
+            .map(|class| ROUTER_QUEUE_METRICS.handles("queue-wait-test", "prefill", class))
+            .collect();
+        let observer = queue_wait_observer(handles.clone());
+
+        observer(1, Duration::from_millis(250));
+        observer(0, Duration::ZERO);
+
+        assert_eq!(handles[0].queue_wait_seconds.get_sample_count(), 1);
+        assert_eq!(handles[0].queue_wait_seconds.get_sample_sum(), 0.0);
+        assert_eq!(handles[1].queue_wait_seconds.get_sample_count(), 1);
+        assert!((handles[1].queue_wait_seconds.get_sample_sum() - 0.25).abs() < 1e-9);
+    }
 
     #[test]
     fn queue_metrics_are_updated_by_class_index() {

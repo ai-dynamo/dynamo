@@ -67,5 +67,5 @@ pub use crate::queue::{BookingHandle, SchedulerBookingCleanup};
 pub use crate::types::WorkerIdSet;
 pub use crate::types::{
     AdvisoryWorkerLoad, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    WorkerAvailabilityProvider,
+    QueueWaitObserver, WorkerAvailabilityProvider,
 };

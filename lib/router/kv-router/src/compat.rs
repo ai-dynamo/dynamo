@@ -1489,6 +1489,7 @@ pub mod scheduling {
     pub use dynamo_scheduler::NoopOverlapScoresRefresh;
     pub use dynamo_scheduler::OverlapAnalysis;
     pub use dynamo_scheduler::OverlapScoresRefresh;
+    pub use dynamo_scheduler::QueueWaitObserver;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_scheduler::OverlapScoresResponse; removed in 1.10.0"
