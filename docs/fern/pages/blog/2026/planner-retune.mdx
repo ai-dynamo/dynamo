@@ -56,21 +56,30 @@ which worker serves each request, trading KV-cache reuse (send a request to the 
 against load balance (send it to the least busy worker). The **Planner** decides how many workers to run and how
 quickly to add or remove them. Both have a handful of knobs, and the right values depend on the traffic.
 
-<Frame caption="Figure 1 — The best router and Planner settings depend on the traffic">
-  <img src="../_assets/planner-retune/fig1_router_optimum_light.png" alt="Two heatmaps: router settings by traffic type and Planner settings by traffic type, each row marking its best setting." />
+<Frame caption="Figure 1a — The best router setting depends on the traffic">
+  <img src="../_assets/planner-retune/fig1a_router_optimum_light.png" alt="Heat table of goodput per GPU for five prefill_load_scale values and three traffic types; a different value is best for each traffic type." />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
 Simulation (AISim replay). Each cell is goodput per GPU relative to the best setting in its row; blue marks the
-best. (a) Twelve KV-router settings, DeepSeek-V4-Pro on a fixed fleet of 128 B300 GPUs, one day of each traffic type.
-(b) Five Planner scaling settings, Qwen3-32B with the Planner autoscaling between 1 and 8 H200 GPUs, two hours of each
-traffic type.
+best. Five values of `prefill_load_scale` at `overlap_score_credit` 1, DeepSeek-V4-Pro on a fixed fleet of 128 B300
+GPUs, one day of each traffic type.
 </Info>
 
 On the router side (Figure 1a), RAG traffic wants strong cache affinity: `prefill_load_scale` 64 is best. The same
 setting loses **33%** on single-tenant reasoning traffic, where long decodes pile up on the few workers that hold the
 hot prefixes; there, a much lighter `prefill_load_scale` 4 wins. Agentic traffic lands in between, at 16. The default
 (credit 1, scale 1) is never the best and gives up 2 to 14%.
+
+<Frame caption="Figure 1b — So does the best Planner setting">
+  <img src="../_assets/planner-retune/fig1b_planner_optimum_light.png" alt="Heat table of goodput per GPU for five Planner scaling settings and five traffic types; no setting is best for all of them." />
+</Frame>
+
+<Info icon="hand-point-up" className="fig-caption">
+Simulation (AISim replay), read like Figure 1a. Five Planner scaling settings: load-based scaling with a scale-down
+sensitivity of 70, 80 (the default) or 90, load-based scaling with a 10-second step, and load plus throughput
+scaling. Qwen3-32B with the Planner autoscaling between 1 and 8 H200 GPUs, two hours of each traffic type.
+</Info>
 
 The Planner shows the same pattern (Figure 1b). On reasoning traffic and bursty waves, scaling down conservatively
 (sensitivity 90) is best and the default sensitivity of 80 loses up to 9%. On coding traffic it is the reverse:
@@ -169,13 +178,13 @@ about 4,800 input tokens and 3,700 output tokens, twelve times the output of a R
 input and almost half of the reasoning input repeats a prefix that an earlier request already sent.
 
 <Frame caption="Figure 3a — The traffic: two days of RAG and two days of reasoning, in both orders">
-  <img src="../_assets/planner-retune/fig3a_traffic_switch_light.png" alt="Request rate, input tokens, output tokens and KV-reusable input share per hour over four days, for RAG then reasoning and for reasoning then RAG." />
+  <img src="../_assets/planner-retune/fig3a_traffic_switch_light.png" alt="Request rate per hour over four days, for RAG then reasoning and for reasoning then RAG, with the mean input tokens, output tokens and KV-reusable input share of each traffic type." />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-Hourly means of the replayed traces. **KV-reusable input** is the share of input tokens whose prefix already appeared
-earlier in the trace: the most a KV cache could reuse. A real deployment reuses less. A line breaks where an hour has
-no requests.
+Hourly request rate of the replayed traces; the reasoning days are tinted. **KV-reusable input** is the share of
+input tokens whose prefix already appeared earlier in the trace: the most a KV cache could reuse. A real deployment
+reuses less.
 </Info>
 
 The deployment is DeepSeek-V4-Pro on up to 32 B300 GPUs with the SLA Planner autoscaling, and retune runs once per
@@ -216,12 +225,12 @@ the rate does not: 17 requests per second on average for the first 16 hours, wit
 about 2 requests per second for the last 8 hours.
 
 <Frame caption="Figure 4a — The traffic: one day of RAG traffic, 16 busy hours and then 8 quiet ones">
-  <img src="../_assets/planner-retune/fig4a_traffic_rag_day_light.png" alt="Request rate, input tokens, output tokens and KV-reusable input share per 15 minutes over one day of RAG traffic." />
+  <img src="../_assets/planner-retune/fig4a_traffic_rag_day_light.png" alt="Request rate per 15 minutes over one day of RAG traffic, with the mean input tokens, output tokens and KV-reusable input share per request." />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-15-minute means of the replayed trace; KV-reusable input as in Figure 3a. Vertical lines mark the 6-hour retune
-windows. A line breaks where 15 minutes pass without a request.
+Request rate of the replayed trace in 15-minute bins; KV-reusable input as in Figure 3a. Vertical lines mark the
+6-hour retune windows.
 </Info>
 
 <Frame caption="Figure 4b — Simulation: tuning router and Planner together">
@@ -230,8 +239,9 @@ windows. A line breaks where 15 minutes pass without a request.
 
 <Info icon="hand-point-up" className="fig-caption">
 Simulation (AISim replay). DeepSeek-V4-Pro on up to 128 B300 GPUs with SLA Planner autoscaling, one day of RAG
-traffic, retune every 6 hours. Black ticks mark the best fixed setting, found in hindsight. Both runs use the same
-settings in the first window, so the −1.8% gap there is run-to-run randomness.
+traffic, retune every 6 hours. Without retune the router stays on the fixed-fleet setting. Black ticks mark the best
+fixed setting, found in hindsight. Both runs use the same settings in the first window, so the −1.8% gap there is
+run-to-run randomness.
 </Info>
 
 Starting from that setting, retune searches router and Planner settings together. Its first decision switches the
@@ -265,12 +275,12 @@ requests at a steady 1.3 requests per second, about 9,400 input tokens and 340 o
 input repeating an earlier prefix.
 
 <Frame caption="Figure 5a — The traffic: two hours of steady conversation traffic">
-  <img src="../_assets/planner-retune/fig5a_traffic_conversation_light.png" alt="Request rate, input tokens, output tokens and KV-reusable input share per 5 minutes over two hours of conversation traffic." />
+  <img src="../_assets/planner-retune/fig5a_traffic_conversation_light.png" alt="Request rate per 5 minutes over two hours of conversation traffic, with the mean input tokens, output tokens and KV-reusable input share per request." />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-5-minute means of the replayed trace; KV-reusable input as in Figure 3a. The vertical line marks the end of the first
-retune window.
+Request rate of the replayed trace in 5-minute bins; KV-reusable input as in Figure 3a. The vertical line marks the
+end of the first retune window.
 </Info>
 
 <Frame caption="Figure 5b — Live router retune on H200">
@@ -301,22 +311,21 @@ The second hour repeats the conversations of the first hour with new prefixes, s
 3,472 requests in total.
 
 <Frame caption="Figure 6a — The traffic: the same conversations in waves, 0.2 to 0.9 requests per second">
-  <img src="../_assets/planner-retune/fig6a_traffic_waves_light.png" alt="Request rate, input tokens, output tokens and KV-reusable input share per 5 minutes over two hours of wave-shaped conversation traffic." />
+  <img src="../_assets/planner-retune/fig6a_traffic_waves_light.png" alt="Request rate per 5 minutes over two hours of wave-shaped conversation traffic, with the mean input tokens, output tokens and KV-reusable input share per request." />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-5-minute means of the replayed trace; KV-reusable input as in Figure 3a. The vertical line marks the end of the first
-retune window.
+Request rate of the replayed trace in 5-minute bins; KV-reusable input as in Figure 3a. The vertical line marks the
+end of the first retune window.
 </Info>
 
 <Frame caption="Figure 6b — Live router and Planner retune with autoscaling on H200">
-  <img src="../_assets/planner-retune/fig6_gpu_autoscaling_retune_light.png" alt="Offered load, GPUs in use and share of requests within SLA for retune on and off over two hours." />
+  <img src="../_assets/planner-retune/fig6_gpu_autoscaling_retune_light.png" alt="GPUs in use and share of requests within SLA for retune on and off over two hours." />
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-Measured on H200. Top: requests per 5 minutes, the same waves in both hours. Middle: GPUs in use. Bottom: share of
-requests within SLA. In the first hour both deployments run the same settings, so the −0.9% difference is run-to-run
-randomness.
+Measured on H200, in 5-minute bins. Top: GPUs in use. Bottom: share of requests within SLA. In the first hour both
+deployments run the same settings, so the −0.9% difference in goodput per GPU is run-to-run randomness.
 </Info>
 
 Five minutes after the first hour ended, retune changed two settings at once: the router's `prefill_load_scale` from 1
