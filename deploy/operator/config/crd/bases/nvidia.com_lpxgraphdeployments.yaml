@@ -32,7 +32,7 @@ spec:
         openAPIV3Schema:
           description: |-
             LPXGraphDeployment is generated and owned by the Dynamo operator, not authored
-            by users. It owns one LPX PCS and its build/placement resources.
+            by users. It owns one LPX PCS and its Services.
             It serves only v1alpha1 and has no conversion contract.
           properties:
             apiVersion:

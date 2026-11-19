@@ -102,7 +102,6 @@ fn sequence_error_status(error: &SequenceError) -> StatusCode {
             StatusCode::NOT_FOUND
         }
         SequenceError::DuplicateRequest { .. } => StatusCode::CONFLICT,
-        SequenceError::ReplicaSyncPublishFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
