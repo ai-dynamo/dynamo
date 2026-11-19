@@ -40,7 +40,7 @@ Metrics defined in Python, such as the planner metrics, also expose a `_created`
 |--------|------------|-----------------|
 | `dynamo_frontend_*` | HTTP frontend (`python -m dynamo.frontend`) | `/metrics` on `DYN_HTTP_PORT` (default 8000) |
 | `dynamo_tokio_*`, `dynamo_request_plane_*`, `dynamo_transport_*` | Frontend | `/metrics` on `DYN_HTTP_PORT` |
-| `dynamo_component_*` | Backend workers, standalone router, KV state agent, and the frontend's router and runtime metrics | `/metrics` on `DYN_SYSTEM_PORT` (must be set); `/metrics` on `DYN_HTTP_PORT` for the frontend |
+| `dynamo_component_*` | Backend workers, standalone router, standalone EPP router, KV state agent, and the frontend's router and runtime metrics | `/metrics` on `DYN_SYSTEM_PORT` (must be set); `/metrics` on `DYN_HTTP_PORT` for the frontend; `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) for the standalone EPP router |
 | `dynamo_router_*` | Frontend | `/metrics` on `DYN_HTTP_PORT` |
 | `dynamo_work_handler_*`, `dynamo_backend_admission_*`, `dynamo_embedding_*` | Backend workers | `/metrics` on `DYN_SYSTEM_PORT` |
 | `trtllm_*` metrics that Dynamo computes | TensorRT-LLM workers | `/metrics` on `DYN_SYSTEM_PORT` |
@@ -576,14 +576,14 @@ The approximate cache tracks likely-cached blocks when the router does not consu
 
 Not all router metrics appear in every deployment. This matrix shows which groups are **registered** and **populated** in each configuration.
 
-| Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
-|---|---|---|---|---|
-| `dynamo_component_router_*` | Registered and populated; `non_max_overlap_selections_total`, `overlap_blocks_lost`, and `kv_transfer_estimated_latency_seconds` stay at zero | Registered and populated | Request, latency, and sequence-length metrics populated; `kv_hit_rate`, `non_max_overlap_selections_total`, `overlap_blocks_lost`, and the shared-cache histograms **always zero**; other KV-specific metrics **not created** | Populated (on `DYN_SYSTEM_PORT`) |
-| `dynamo_router_overhead_*` | Registered and populated | Registered and populated | Registered, **always zero** | **Not created** |
-| `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
-| `dynamo_frontend_router_admission_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
-| `dynamo_component_kv_cache_events_applied` | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | **Not registered** | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` |
-| `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | `worker_last_*` populated (`worker_type` = `decode`); `worker_active_*` absent | **Not created** |
+| Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router | Standalone EPP |
+|---|---|---|---|---|---|
+| `dynamo_component_router_*` | Registered and populated; `non_max_overlap_selections_total`, `overlap_blocks_lost`, and `kv_transfer_estimated_latency_seconds` stay at zero | Registered and populated | Request, latency, and sequence-length metrics populated; `kv_hit_rate`, `non_max_overlap_selections_total`, `overlap_blocks_lost`, and the shared-cache histograms **always zero**; other KV-specific metrics **not created** | Populated (on `DYN_SYSTEM_PORT`) | Only requests started and input/output sequence lengths are registered and populated (on `DYN_EPP_METRICS_PORT`) |
+| `dynamo_router_overhead_*` | Registered and populated | Registered and populated | Registered, **always zero** | **Not created** | **Not created** |
+| `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** | **Not created** |
+| `dynamo_frontend_router_admission_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** | **Not created** |
+| `dynamo_component_kv_cache_events_applied` | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | **Not registered** | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | **Not created** |
+| `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | `worker_last_*` populated (`worker_type` = `decode`); `worker_active_*` absent | **Not created** | **Not created** |
 
 **Key:**
 
@@ -733,6 +733,10 @@ Emitted by the power agent, a DaemonSet (`deploy/power-agent`) that enforces the
 ## Endpoint Picker Metrics
 
 Emitted by the endpoint picker (EPP) when routing through the Gateway API Inference Extension, at `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090). Set the port to `0` to disable the endpoint.
+
+The standalone EPP router registers the three existing `dynamo_component_router_*` families it can observe on this endpoint. Its `model` and `inference_pool` labels come from startup configuration. Successful selections increment `dynamo_component_router_requests_started_total` and observe `dynamo_component_router_input_sequence_tokens` with `phase="aggregated"` and the configured model. Terminal responses with `usage.completion_tokens` observe `dynamo_component_router_output_sequence_tokens`, including a reported zero.
+
+The other router families are absent from the EPP endpoint until equivalent scheduler or token-level signals are available. Response byte chunks do not provide TTFT or inter-token latency.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
