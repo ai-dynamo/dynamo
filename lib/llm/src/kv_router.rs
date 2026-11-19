@@ -34,25 +34,20 @@ use dynamo_runtime::{
     CancellationToken,
     component::{Client, Endpoint},
     error::{DynamoError, ErrorType},
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
-        async_trait, error::PipelineError,
-    },
-    protocols::annotated::Annotated,
+    pipeline::error::PipelineError,
     traits::DistributedRuntimeProvider,
 };
 use dynamo_scheduler::host::{
     BookingHandle, CacheHitEstimates, CacheHitWeights, KvSchedulerError, OverlapAnalysis,
     OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, PromptView,
-    RejectThresholdsProvider, RouterConfigOverride, RouterRequest, RouterResponse,
-    RoutingConstraints, Selected, SelectionAdmission, SelectionError, SelectionOperation,
-    SelectionOutcome, SelectionRun, SessionBinding, SharedKvCache, TrackingHashAlgorithm,
-    TrackingHashContext, TrackingHashScope, WorkerAvailabilityProvider, WorkerConfigLike,
-    cache_hit_estimates_from_tiered_matches, effective_prefill_tokens,
+    RejectThresholdsProvider, RouterConfigOverride, RoutingConstraints, Selected,
+    SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome, SelectionRun,
+    SessionBinding, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    WorkerAvailabilityProvider, WorkerConfigLike, cache_hit_estimates_from_tiered_matches,
+    effective_prefill_tokens,
 };
 use dynamo_slot_tracker::host::{PrefillLoadHint, SchedulerBookingDescriptor};
 use dynamo_worker_selection::host::SelectionConfig;
-use futures::stream;
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::scheduling;
@@ -688,14 +683,6 @@ fn map_scheduler_error(error: dynamo_scheduler::host::KvSchedulerError) -> anyho
     } else {
         error.build().into()
     }
-}
-
-fn cancelled_error(context_id: &str) -> anyhow::Error {
-    DynamoError::builder()
-        .error_type(ErrorType::Cancelled)
-        .message(format!("Request {context_id} was cancelled"))
-        .build()
-        .into()
 }
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
@@ -1764,11 +1751,6 @@ impl KvRouter {
         self.selection.scheduler().pending_count()
     }
 
-    /// Sum of ISL tokens for requests currently parked in the scheduler queue.
-    pub fn pending_isl_tokens(&self) -> usize {
-        self.selection.scheduler().pending_isl_tokens()
-    }
-
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
@@ -1819,15 +1801,16 @@ impl KvRouter {
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    pub(crate) async fn add_output_blocks_if_booking(
+    pub(crate) async fn update_output_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
         num_blocks: usize,
         decay_fraction: Option<f64>,
+        progress: Option<dynamo_slot_tracker::host::DecodeProgressUpdate>,
     ) -> Result<(), KvSchedulerError> {
         self.selection
             .scheduler()
-            .add_output_blocks_if_booking(booking, num_blocks, decay_fraction)
+            .update_output_if_booking(booking, num_blocks, decay_fraction, progress)
             .await
     }
 
@@ -1988,125 +1971,6 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
-    }
-}
-
-// NOTE: KVRouter works like a PushRouter,
-// but without the reverse proxy functionality, but based on the RouterRequest contract
-#[async_trait]
-impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
-    async fn generate(
-        &self,
-        request: SingleIn<RouterRequest>,
-    ) -> Result<ManyOut<Annotated<RouterResponse>>> {
-        let (request, ctx) = request.into_parts();
-        let context_id = ctx.context().id().to_string();
-        let policy_class = ctx.metadata().get("policy-class").cloned();
-        // Handle different request types
-        let response = match request {
-            RouterRequest::New {
-                tokens,
-                block_mm_infos,
-                routing_constraints,
-                priority_jump,
-                strict_priority,
-                lora_name,
-                cache_namespace,
-            } => {
-                let request_context = ctx.context();
-                let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
-                    Some(&context_id),
-                    &tokens,
-                    block_mm_infos.as_deref(),
-                    None,
-                    true,
-                    false,
-                    lora_name,
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    policy_class,
-                    None,
-                    None,
-                    None,
-                    None,
-                    routing_constraints,
-                ));
-                let outcome = tokio::select! {
-                    biased;
-
-                    _ = request_context.stopped() => None,
-                    outcome = &mut schedule => Some(outcome),
-                };
-                drop(schedule);
-
-                let Some(outcome) = outcome else {
-                    if let Err(error) = self.free(&context_id).await {
-                        tracing::warn!(
-                            request_id = %context_id,
-                            %error,
-                            "Failed to free scheduler state after RouterRequest::New cancellation"
-                        );
-                    }
-                    return Err(cancelled_error(&context_id));
-                };
-                match outcome {
-                    Ok(FindBestMatchOutcome::Routed {
-                        worker,
-                        overlap_blocks,
-                        ..
-                    }) => RouterResponse::New {
-                        worker_id: worker.worker_id,
-                        dp_rank: worker.dp_rank,
-                        overlap_blocks,
-                    },
-                    Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
-                        RouterResponse::QueueRejected { rejection }
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            RouterRequest::PotentialLoads {
-                tokens,
-                block_mm_infos,
-                lora_name,
-                cache_namespace,
-            } => RouterResponse::PotentialLoads {
-                loads: self
-                    .get_potential_loads(
-                        &tokens,
-                        None,
-                        block_mm_infos.as_deref(),
-                        lora_name.as_deref(),
-                        cache_namespace.as_deref(),
-                    )
-                    .await?,
-                pending_count: self.pending_count(),
-                pending_isl_tokens: self.pending_isl_tokens(),
-            },
-            RouterRequest::MarkPrefill { request_id } => {
-                let request_id = match request_id.as_deref() {
-                    Some(request_id) if !request_id.trim().is_empty() => request_id,
-                    _ => &context_id,
-                };
-                RouterResponse::PrefillMarked {
-                    success: self.mark_prefill_completed(request_id).await.is_ok(),
-                }
-            }
-            RouterRequest::MarkFree { request_id } => {
-                let request_id = match request_id.as_deref() {
-                    Some(request_id) if !request_id.trim().is_empty() => request_id,
-                    _ => &context_id,
-                };
-                RouterResponse::FreeMarked {
-                    success: self.free(request_id).await.is_ok(),
-                }
-            }
-        };
-
-        let response = Annotated::from_data(response);
-        let stream = stream::iter(vec![response]);
-        Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
 

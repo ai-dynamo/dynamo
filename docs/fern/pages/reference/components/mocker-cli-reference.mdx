@@ -155,6 +155,22 @@ MTP (`--ais-nextn`).
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>lifo</Badge> <Badge intent="note" minimal>fifo</Badge></span>
 </ParamField>
 
+A vLLM engine models async scheduling by default, except with MTP and native host offload, where
+it keeps synchronous scheduling: a busy engine keeps its next batch committed, so a request that
+arrives while the engine is busy is admitted up to two passes later than with synchronous
+scheduling. A request that arrives at an idle engine is not delayed. To model
+synchronous scheduling (`--no-async-scheduling` in vLLM), set `engine.async_scheduling` to `false`
+in the `--extra-engine-args` file. SGLang and TensorRT-LLM engines reject the setting. The file
+replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a
+file that changes only the scheduling of a default Mocker is:
+
+```json
+{
+  "engine": {"async_scheduling": false},
+  "dynamo": {"enable_local_indexer": true}
+}
+```
+
 ## Timing
 
 <ParamField path="--speedup-ratio" type="float" default="1.0">
@@ -218,7 +234,7 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 <ParamField path="--ais-perf-model" type="boolean" default="false">
   Use the canonical AISimulate performance-model API for latency prediction instead of the
-  interpolated or polynomial models. Install `aisimulate` and use a supported
+  interpolated or polynomial models. Install `aisim` and use a supported
   `system/backend/version` tuple.
 </ParamField>
 
@@ -345,6 +361,27 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 ## SGLang-specific
 
 Apply only when `--engine-type sglang`. Set the radix-cache page size with `--block-size`.
+
+The SGLang scheduler keeps one token of the context for itself, admits a prompt only when more
+than five further tokens stay free, and caps the output by the free KV capacity. A decode worker
+reserves 512 tokens for each handoff and keeps no prefix cache. To change these two defaults, set
+`engine.sglang.num_reserved_decode_tokens` or
+`engine.sglang.disaggregation_decode_enable_radix_cache` in the `--extra-engine-args` file. That
+file replaces the engine flags, so it also names the backend and the worker role. Without
+`engine.backend` the engine is vLLM and the SGLang settings have no effect.
+
+```json
+{
+  "engine": {
+    "backend": "sglang",
+    "worker_type": "decode",
+    "sglang": {
+      "num_reserved_decode_tokens": 128,
+      "disaggregation_decode_enable_radix_cache": true
+    }
+  }
+}
+```
 
 <ParamField path="--sglang-schedule-policy" type="string" default="fifo">
   SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.

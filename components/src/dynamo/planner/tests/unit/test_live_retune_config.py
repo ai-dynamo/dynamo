@@ -19,11 +19,11 @@ import math
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config.engine import ParallelismRecommendationConfig
+from aisim.config.engine import ParallelismRecommendationConfig
 from pydantic import ValidationError
 
 from dynamo.planner.config.planner_config import (

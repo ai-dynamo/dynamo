@@ -24,8 +24,7 @@ The language and Kubernetes references are generated from Dynamo's source tree.
 Each module page lists every class and function, expands into per-symbol
 signatures and public methods, and deep-links to the exact file and line on `main`.
 
-For HTTP request contracts, see the [frontend endpoints](../components/frontend-configuration.mdx#http-endpoints)
-and the [Image Edits API](image-edits.mdx).
+For HTTP request contracts, see the [frontend endpoints](../components/frontend-configuration.mdx#http-endpoints), [Decision APIs](decision-apis.md), and [Image Edits API](image-edits.mdx).
 
 ## Coverage
 

@@ -1625,6 +1625,25 @@ impl ModelManager {
             .get_chat_engine_with_parsing()
     }
 
+    pub fn get_chat_completions_engine_with_parsing_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_parsing_for_capability(capability)
+    }
+
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
