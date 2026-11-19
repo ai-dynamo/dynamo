@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
+from dynamo.vllm import decision_execution as decisions
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -799,8 +800,18 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     assert should_register_model_ignore_weights(config) is False
 
 
-def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+@pytest.mark.parametrize("shared_embedding", [False, True])
+@pytest.mark.parametrize(
+    "qualification",
+    ["disabled", "qualified", "release", "architecture", "scheduler", "cache"],
+)
+def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
+    monkeypatch, tmp_path, shared_embedding, qualification
+):
     from dynamo.vllm import main as vllm_main
+
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    order = []
 
     # Isolate NIXL env so allow_nixl_telemetry_capture() cannot leak into later tests.
     for var in (
@@ -812,6 +823,16 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     class FakeModelConfig:
+        architecture = "Qwen3ForCausalLM"
+        runner_type = "generate"
+        logprobs_mode = "raw_logprobs"
+        is_encoder_decoder = False
+        is_diffusion = False
+        model_impl = "auto"
+        model_class_overrides = None
+        convert_type = "none"
+        max_model_len = 2048
+
         def get_diff_sampling_param(self):
             return {"temperature": 0.7}
 
@@ -820,6 +841,14 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         cache_config=SimpleNamespace(block_size=None),
         model_config=FakeModelConfig(),
         structured_outputs_config=SimpleNamespace(backend="xgrammar"),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=1, scheduler_cls=None, async_scheduling=False
+        ),
+        parallel_config=SimpleNamespace(data_parallel_size=1),
+        lora_config=None,
+        speculative_config=None,
+        kv_transfer_config=None,
+        ec_transfer_config=None,
     )
 
     class FakeEngineArgs:
@@ -832,6 +861,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
             raise AssertionError("setup_vllm_engine must not create ModelConfig twice")
 
         def create_engine_config(self, usage_context):
+            order.append("create_engine_config")
             return vllm_config
 
     engine_client = SimpleNamespace(vllm_config=vllm_config)
@@ -839,7 +869,27 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     class FakeAsyncLLM:
         @staticmethod
         def from_vllm_config(**_kwargs):
+            order.append("engine_factory")
             return engine_client
+
+    def create_shared_engine(**_kwargs):
+        order.append("shared_engine_factory")
+        return engine_client, vllm_config, None
+
+    def installed_version(_package):
+        order.append("release")
+        return "0.32.0" if qualification == "release" else "0.33.0"
+
+    def verify_cache_sources():
+        order.append("cache_sources")
+        return qualification != "cache"
+
+    monkeypatch.setattr(decisions, "version", installed_version)
+    monkeypatch.setattr(decisions, "verify_cache_sources", verify_cache_sources)
+    if qualification == "architecture":
+        vllm_config.model_config.architecture = "UnknownForCausalLM"
+    elif qualification == "scheduler":
+        vllm_config.scheduler_config.scheduler_cls = "custom.Scheduler"
 
     class FakeMetrics:
         def __init__(self, **_kwargs):
@@ -853,6 +903,9 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
     monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
     monkeypatch.setattr(
+        vllm_main, "create_shared_embedding_engine_client", create_shared_engine
+    )
+    monkeypatch.setattr(
         vllm_main,
         "get_engine_cache_info",
         lambda _engine: {"block_size": 16},
@@ -862,8 +915,9 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),
-        embedding_worker=False,
-        embedding_worker_processes=1,
+        embedding_worker=shared_embedding,
+        embedding_worker_processes=2 if shared_embedding else 1,
+        systemone_serial=qualification != "disabled",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
         gms_shadow_mode=False,
@@ -872,9 +926,28 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         served_model_name="Qwen/Qwen3-0.6B",
     )
 
-    _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
+    errors = {
+        "release": "vLLM 0.33.0",
+        "architecture": "unsupported model architecture",
+        "scheduler": "standard scheduler_cls",
+        "cache": "cache sources",
+    }
+    if qualification in errors:
+        with pytest.raises(ValueError, match=errors[qualification]):
+            vllm_main.setup_vllm_engine(config)
+        assert "engine_factory" not in order
+        assert "shared_engine_factory" not in order
+        assert order[0] == "create_engine_config"
+    else:
+        _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
-    assert default_sampling_params == {"temperature": 0.7}
+        assert default_sampling_params == {"temperature": 0.7}
+        factory_name = "shared_engine_factory" if shared_embedding else "engine_factory"
+        assert order == (
+            ["create_engine_config", factory_name]
+            if qualification == "disabled"
+            else ["create_engine_config", "release", "cache_sources", factory_name]
+        )
 
 
 # --disaggregation-mode tests
