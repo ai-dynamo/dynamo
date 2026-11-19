@@ -13,7 +13,8 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.core,
     pytest.mark.gpu_0,
-    pytest.mark.timeout(30),
+    # Cold vLLM model-registry initialization can exceed 30s on ARM64.
+    pytest.mark.timeout(120),
 ]
 
 

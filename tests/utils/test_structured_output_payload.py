@@ -95,9 +95,9 @@ def test_ordinary_payload_status_remains_exact(engine_process, expected_status):
 @pytest.mark.parametrize(
     ("streaming", "status_code", "content"),
     [
-        (False, 400, _JSON_ERROR),
-        (True, 400, _JSON_ERROR),
-        (True, 200, _sse(_sse_error())),
+        pytest.param(False, 400, _JSON_ERROR, id="unary-json-400"),
+        pytest.param(True, 400, _JSON_ERROR, id="stream-json-400"),
+        pytest.param(True, 200, _sse(_sse_error()), id="stream-sse-400"),
     ],
 )
 def test_structured_output_error_accepts_both_commit_boundaries(
@@ -111,25 +111,23 @@ def test_structured_output_error_accepts_both_commit_boundaries(
 @pytest.mark.parametrize(
     ("streaming", "status_code", "content"),
     [
-        (False, 200, _sse(_sse_error())),
-        (True, 503, _JSON_ERROR),
-        (True, 200, _JSON_ERROR),
-        (
-            True,
-            200,
-            _sse(_sse_error(500)),
-        ),
-        (
+        pytest.param(False, 200, _sse(_sse_error()), id="unary-http-200"),
+        pytest.param(True, 503, _JSON_ERROR, id="stream-http-503"),
+        pytest.param(True, 200, _JSON_ERROR, id="stream-json-200"),
+        pytest.param(True, 200, _sse(_sse_error(500)), id="stream-error-code-500"),
+        pytest.param(
             True,
             200,
             _sse(
                 {"choices": [{"delta": {"content": "unexpected output"}}]}, _sse_error()
             ),
+            id="content-before-error",
         ),
-        (
+        pytest.param(
             True,
             200,
             _sse(_sse_error(), {"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            id="success-after-error",
         ),
     ],
 )
