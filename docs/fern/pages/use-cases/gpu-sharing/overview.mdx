@@ -114,9 +114,11 @@ Dynamo does not partition GPUs itself. A `DynamoGraphDeployment` (DGD) worker is
 
             **Install**
 
-            Build the images by following [Build the KAI-Scheduler and GPU Fractioning Forks](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/build-gpu-fractioning-forks.md), then install both charts from the checked-out forks:
+            Build the images by following [Build the KAI-Scheduler and GPU Fractioning Forks](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/build-gpu-fractioning-forks.md), then install both charts from the checked-out forks. Fetch the scheduler chart's dependency first. Helm requires it even though the subchart stays disabled:
 
             ```bash
+            helm dependency build ./KAI-Scheduler/deployments/kai-scheduler
+
             helm upgrade --install kai-scheduler ./KAI-Scheduler/deployments/kai-scheduler \
               -n kai-scheduler --create-namespace \
               --set global.gpuSharingMode=NvFractions \
