@@ -44,17 +44,17 @@ class _Manager:
     granted_lock_type = GrantedLockType.RW
     is_unmapped = False
 
-    def __init__(self, storage: torch.UntypedStorage):
-        va = storage.data_ptr()
+    def __init__(self, *storages: torch.UntypedStorage):
         self.mappings = {
-            va: SimpleNamespace(
-                va=va,
+            storage.data_ptr(): SimpleNamespace(
+                va=storage.data_ptr(),
                 aligned_size=storage.nbytes(),
-                allocation_id="weights-0",
+                allocation_id=f"weights-{index}",
                 handle=1,
             )
+            for index, storage in enumerate(storages)
         }
-        self.total_bytes = storage.nbytes()
+        self.total_bytes = sum(storage.nbytes() for storage in storages)
         self.metadata = {}
 
     def metadata_put(self, key, allocation_id, offset_bytes, value):
@@ -86,7 +86,10 @@ def _view(storage, dtype, byte_offset, shape):
 
 @pytest.fixture
 def write_with(monkeypatch):
-    """Run the vLLM writer's prepare step on a model ``build(storage)`` returns."""
+    """Run the vLLM writer's prepare step on a model ``build(storage)`` returns.
+
+    ``allocations=2`` gives ``build`` a second storage, in its own allocation.
+    """
     monkeypatch.setattr(model_loader, "_pending_gms_client", None)
     monkeypatch.setattr(model_loader, "_pending_retained_gms_tensors", [])
     monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
@@ -99,9 +102,12 @@ def write_with(monkeypatch):
     monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *args: None)
     monkeypatch.setattr(model_loader, "gms_use_mem_pool", lambda *args: nullcontext())
 
-    def run(build):
-        storage = torch.zeros(_ARENA_BYTES, dtype=torch.uint8).untyped_storage()
-        manager = _Manager(storage)
+    def run(build, allocations=1):
+        storages = [
+            torch.zeros(_ARENA_BYTES, dtype=torch.uint8).untyped_storage()
+            for _ in range(allocations)
+        ]
+        manager = _Manager(*storages)
 
         class Pool:
             pass
@@ -116,7 +122,7 @@ def write_with(monkeypatch):
             },
         )
         loader_utils = ModuleType("vllm.model_executor.model_loader.utils")
-        loader_utils.initialize_model = lambda **kwargs: build(storage)
+        loader_utils.initialize_model = lambda **kwargs: build(*storages)
         loader_utils.process_weights_after_loading = lambda *args: None
         torch_utils = ModuleType("vllm.utils.torch_utils")
         torch_utils.set_default_torch_dtype = lambda dtype: nullcontext()
@@ -130,7 +136,7 @@ def write_with(monkeypatch):
             SimpleNamespace(load_weights=lambda model, model_config: None),
             torch.device("cpu"),
         )
-        return manager, model, storage
+        return manager, model, storages[0]
 
     return run
 
@@ -190,6 +196,28 @@ def test_writable_buffer_held_outside_the_module_tree_leaves_gms(write_with):
         model.attn.impl._kv_counter_buffer, torch.ones(512, dtype=torch.uint8)
     )
     assert not manager.in_gms(model.attn._k_scale)
+
+
+def test_parameter_held_outside_the_module_tree_fails_the_write(write_with):
+    """Only non-Parameters are copied out, so a Parameter that no module holds
+    stays in GMS, and nothing registers it. In an allocation of its own it
+    would be committed without metadata. A reader maps only the allocations
+    its metadata references, so it could not remap that layout."""
+    kernel = SimpleNamespace()
+
+    def build(storage, own):
+        model = torch.nn.Module()
+        model.weight = torch.nn.Parameter(
+            _view(storage, torch.float32, 0, (1024,)), requires_grad=False
+        )
+        kernel.table = torch.nn.Parameter(
+            _view(own, torch.float32, 0, (1024,)), requires_grad=False
+        )
+        return model
+
+    with pytest.raises(RuntimeError, match="keeps 1 allocation"):
+        write_with(build, allocations=2)
+    assert model_loader._pending_gms_client is None
 
 
 def test_module_buffers_frozen_by_gc_still_leave_gms(write_with):

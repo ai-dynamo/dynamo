@@ -478,7 +478,6 @@ def test_vllm_writer_publishes_from_a_released_pool(running_gms, monkeypatch):
             writer, model
         )
 
-        # Only the unused segment was released.
         assert stats.pruned_count == 1 and stats.pruned_bytes >= 32 << 20
         assert stats.committed_bytes == writer.total_bytes
         assert writer.total_bytes == allocated_bytes - stats.pruned_bytes
@@ -531,6 +530,35 @@ def test_vllm_writer_publishes_from_a_released_pool(running_gms, monkeypatch):
         reader.close()
 
 
+def test_vllm_writer_refuses_an_allocation_no_registered_tensor_is_in(running_gms):
+    """A Parameter held outside the module tree is not copied out, so it keeps
+    its allocation through the pool release, and nothing registers it. A
+    reader would map fewer allocations than the layout has and fail to wake,
+    so the writer fails before it publishes."""
+    if _allocator_ext is None:
+        pytest.skip("GMS allocator extension is not built")
+    writer = gms_allocator.get_or_create_gms_client_memory_manager(
+        running_gms, 0, RequestedLockType.RW, tag="weights"
+    )
+    try:
+        with gms_allocator.gms_use_mem_pool("weights", torch.device(_DEVICE, 0)):
+            model = _TinyModule()
+            external = torch.nn.Parameter(
+                torch.zeros(64 << 20, dtype=torch.uint8, device=_DEVICE),
+                requires_grad=False,
+            )
+        referenced = register_module_tensors(writer, model)
+        stats, _, owners = model_loader._copy_out_and_release_pool(writer, model)
+        assert _in_gms(writer, external) and stats.pruned_count == 0
+        assert len(writer.mappings) == 2 and len(referenced) == 1
+        with pytest.raises(RuntimeError, match="keeps 1 allocation"):
+            model_loader._raise_if_unreferenced_allocations(writer, referenced)
+        del owners
+    finally:
+        model = external = None
+        writer.close()
+
+
 def test_vllm_writer_commits_no_allocation_a_reader_cannot_reference(
     running_gms, monkeypatch
 ):
@@ -558,8 +586,9 @@ def test_vllm_writer_commits_no_allocation_a_reader_cannot_reference(
             model.load_state_dict(baseline.state_dict())
             workspace = torch.zeros(64 << 20, dtype=torch.uint8, device=_DEVICE)
         assert len(writer.mappings) == 2
-        register_module_tensors(writer, model)
+        referenced = register_module_tensors(writer, model)
         stats, _, owners = model_loader._copy_out_and_release_pool(writer, model)
+        model_loader._raise_if_unreferenced_allocations(writer, referenced)
         assert not _in_gms(writer, workspace)
         assert stats.pruned_count == 1 and stats.pruned_bytes >= 64 << 20
         publish_gms_write(writer)

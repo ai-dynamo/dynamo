@@ -372,10 +372,11 @@ def _prepare_write(
 
             torch_device().empty_cache()
 
-    register_module_tensors(gms_client, model)
+    referenced = register_module_tensors(gms_client, model)
     stats, rebound_bytes, retained_gms_tensors = _copy_out_and_release_pool(
         gms_client, model
     )
+    _raise_if_unreferenced_allocations(gms_client, referenced)
     _store_pending_gms_write(gms_client, stats, rebound_bytes, retained_gms_tensors)
 
     logger.info(
@@ -469,6 +470,32 @@ def _copy_out_and_release_pool(
     )
     _log_copy_out(copied, in_tree, stats)
     return stats, rebound_bytes, retained_gms_tensors
+
+
+def _raise_if_unreferenced_allocations(
+    gms_client: "GMSClientMemoryManager", referenced: set[str]
+) -> None:
+    """Fail the write if an allocation is left that no registered tensor is in.
+
+    A reader maps only the allocations its tensor metadata references, and
+    its remap fails if the committed layout has more. Storage that stays in
+    GMS unregistered keeps its allocation: a Parameter held outside the
+    module tree (only non-Parameters are copied out), or a tensor the
+    copy-out could not find.
+    """
+    unreferenced = [
+        mapping
+        for mapping in gms_client.mappings.values()
+        if mapping.allocation_id not in referenced
+    ]
+    if unreferenced:
+        size = sum(mapping.aligned_size for mapping in unreferenced)
+        raise RuntimeError(
+            f"[GMS] Unregistered storage keeps {len(unreferenced)} allocation(s) "
+            f"({size / (1 << 20):.2f} MiB) alive, for example a Parameter held "
+            "outside the module tree. No tensor metadata references them, so a "
+            "reader could not remap this layout; it is not published"
+        )
 
 
 def _log_copy_out(
