@@ -32,6 +32,10 @@ class GMSV1Worker(Worker):
         super().init_device()
         self._get_sleep_mode_backend()
 
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        # vLLM maps an extensible KV cache itself, outside the GMS KV region.
+        return "GMS allocates the KV cache"
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager[None]:
         backend = self._get_sleep_mode_backend()
         if tag == "weights":

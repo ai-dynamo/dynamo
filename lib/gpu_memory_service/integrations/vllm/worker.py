@@ -284,6 +284,12 @@ class GMSWorker(_BaseWorker):
 
         return int(projected_available)
 
+    def extensible_kv_cache_unsupported_reason(self) -> Optional[str]:
+        # vLLM maps an extensible KV cache itself, outside the GMS KV pool.
+        if is_scratch_kv_enabled() or self.model_config.enable_sleep_mode:
+            return "GMS allocates the KV cache"
+        return super().extensible_kv_cache_unsupported_reason()
+
     def initialize_from_config(self, kv_cache_config) -> None:
         """Allocate KV cache backing.
 

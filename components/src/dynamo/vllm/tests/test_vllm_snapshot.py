@@ -61,12 +61,19 @@ class _CheckpointLifecycleEngine:
     def __init__(self):
         self.sleeping = False
         self.state = "running"
+        self.worker_calls = []
 
     async def pause_generation(self):
         pass
 
     async def release_kv_cache_memory(self):
         self.sleeping = True
+
+    async def sleep(self):
+        self.sleeping = True
+
+    async def collective_rpc(self, method):
+        self.worker_calls.append(method)
 
     async def checkpoint_prepare(self):
         if self.sleeping:
@@ -101,6 +108,20 @@ async def test_snapshot_pause_prepares_checkpoint_on_awake_engine():
     assert engine.state == "prepared"
     assert await controller.resume() is True
     assert engine.state == "running"
+
+
+@pytest.mark.asyncio
+async def test_gms_snapshot_pause_prepares_workers_after_sleep():
+    engine = _CheckpointLifecycleEngine()
+    controller = VllmEnginePauseController(
+        snapshot._GmsCheckpoint(engine), prepare_for_process_checkpoint=True
+    )
+
+    assert await controller.pause(None) is True
+    assert engine.sleeping
+    assert engine.worker_calls == ["checkpoint_prepare"]
+    assert await controller.resume() is True
+    assert engine.worker_calls == ["checkpoint_prepare", "checkpoint_restore"]
 
 
 @pytest.mark.parametrize(

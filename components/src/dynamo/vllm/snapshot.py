@@ -60,6 +60,27 @@ class _ReleaseOnlyKvCache:
             )
 
 
+class _GmsCheckpoint:
+    """Engine client that checkpoints a GMS engine after it sleeps.
+
+    GMS restores weights outside the checkpoint, so they are released by
+    sleeping. vLLM 0.34's checkpoint_prepare refuses a sleeping engine, so run
+    the worker step that 0.33's checkpoint_prepare ran.
+    """
+
+    def __init__(self, engine_client: Any):
+        self._engine_client = engine_client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine_client, name)
+
+    async def checkpoint_prepare(self) -> None:
+        await self._engine_client.collective_rpc("checkpoint_prepare")
+
+    async def checkpoint_restore(self) -> None:
+        await self._engine_client.collective_rpc("checkpoint_restore")
+
+
 def apply_restore_served_model_name(config: Config) -> None:
     """Serve the names the restore Pod sets in ``DYN_SERVED_MODEL_NAME``.
 
@@ -95,14 +116,13 @@ async def prepare_snapshot_engine(
         embedding_worker=config.embedding_worker,
     )
     engine = setup_vllm_engine(config, stat_logger_factory)
-    # GMS restores weights outside the checkpoint, so they must be released by
-    # sleeping.
-    engine_client = engine[0]
     if (
         getattr(config.engine_args, "load_format", None) != "gms"
         and os.environ.get("DYN_GMS_USE_V1") != "true"
     ):
-        engine_client = _ReleaseOnlyKvCache(engine_client)
+        engine_client = _ReleaseOnlyKvCache(engine[0])
+    else:
+        engine_client = _GmsCheckpoint(engine[0])
 
     gc.collect()
     snapshot_controller = EngineSnapshotController(

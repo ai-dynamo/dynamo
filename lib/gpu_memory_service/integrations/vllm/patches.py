@@ -105,9 +105,15 @@ def patch_request_memory() -> None:
     # externally held weights, minus the free-memory check. The XPU worker
     # still calls it with two arguments.
     def patched_request_memory(init_snapshot, cache_config, external_weight_memory=0):
+        # vLLM 0.33 (XPU and enterprise images) has no resolved value; remove once
+        # they ship 0.34.
+        utilization = getattr(
+            cache_config,
+            "resolved_gpu_memory_utilization",
+            cache_config.gpu_memory_utilization,
+        )
         requested_memory = (
-            int(init_snapshot.total_memory * cache_config.gpu_memory_utilization)
-            - external_weight_memory
+            int(init_snapshot.total_memory * utilization) - external_weight_memory
         )
         logger.info(
             "[GMS Patch] Shadow mode: bypassing memory check "
