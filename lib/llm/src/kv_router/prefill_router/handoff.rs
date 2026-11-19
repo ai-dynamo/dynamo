@@ -6,7 +6,7 @@
 use std::{future::Future, sync::Arc};
 
 use dynamo_runtime::{
-    error::{DynamoError, ErrorClass},
+    error::{DynamoError, ErrorClass, RetryHint},
     pipeline::{AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -292,7 +292,8 @@ fn cancel_prefill_on_decode_rejection(
     let mut current = Some(error);
     while let Some(cause) = current {
         if let Some(error) = cause.downcast_ref::<DynamoError>()
-            && error.class() == ErrorClass::CapacityExhausted
+            && (error.class() == ErrorClass::CapacityExhausted
+                || error.retry_hint() == Some(RetryHint::Draining))
         {
             tracing::debug!(request_id = %prefill_context.id(), %error,
                 "Cancelling remote prefill after decode admission rejection");
@@ -763,8 +764,8 @@ mod tests {
             .unwrap();
     }
 
-    async fn assert_stream_rejection_cancels_prefill(output: PrefillNeed, error_type: ErrorType) {
-        let case = format!("output={output:?}, error={error_type:?}");
+    async fn assert_stream_rejection_cancels_prefill(output: PrefillNeed, error: DynamoError) {
+        let case = format!("output={output:?}, error={error:?}");
         let prefill_context = Arc::new(Controller::default());
         let task_context = prefill_context.clone();
         let (cleaned_tx, cleaned_rx) = oneshot::channel();
@@ -777,10 +778,6 @@ mod tests {
             prefill_context.clone(),
         );
         let request_context = Arc::new(Controller::default());
-        let error = dynamo_runtime::error::DynamoError::builder()
-            .error_type(error_type)
-            .message("decode stream admission rejected")
-            .build();
         let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
             Box::pin(stream::iter([Annotated::from_err(error)])),
             request_context.clone(),
@@ -814,6 +811,16 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn decode_drain_rejection_cancels_prefill() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .retry_hint(RetryHint::Draining)
+            .message("decode stream admission rejected")
+            .build();
+        assert_stream_rejection_cancels_prefill(PrefillNeed::BeforeFirst, error).await;
     }
 
     async fn assert_decode_error_preserves_prefill(output: PrefillNeed, error: anyhow::Error) {
@@ -872,7 +879,11 @@ mod tests {
                 ErrorType::CapacityExhausted,
                 ErrorType::Backend(BackendError::WorkerOverloaded),
             ] {
-                assert_stream_rejection_cancels_prefill(output, error_type).await;
+                let error = DynamoError::builder()
+                    .error_type(error_type)
+                    .message("decode stream admission rejected")
+                    .build();
+                assert_stream_rejection_cancels_prefill(output, error).await;
             }
         }
     }

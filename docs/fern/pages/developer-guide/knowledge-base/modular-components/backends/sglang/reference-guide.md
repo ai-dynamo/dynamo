@@ -234,17 +234,19 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 ## Experimental Worker Drain
 
-**Experimental.** Manual drain currently supports standalone aggregated SGLang
-workers using the TCP response plane. Workers that share an engine across
-multiple Dynamo gateway processes do not expose these controls.
+**Experimental.** Manual drain supports standalone aggregated SGLang workers
+and standalone Prefill and Decode workers with the TCP response plane.
 
-There is no separate drain enable flag. On a supported worker, enabling the
-system listener with `DYN_SYSTEM_PORT` also exposes the lifecycle API below.
-`Experimental` describes the support and validation scope, not an additional
-opt-in requirement. Setting `DYN_SYSTEM_PORT=-1` disables the entire system
-listener, including its health and metrics endpoints; this is the default when
-no system port is configured. Normal SIGTERM shutdown still works without the
-listener.
+For Prefill and Decode, use SGLang v0.5.23 with NIXL, one node, one tokenizer
+worker, and tensor, data, pipeline, and attention context parallel sizes of one.
+Enable `--enable-forward-pass-metrics` on each worker you plan to drain. The
+worker needs SGLang's scheduler-gated Forward Pass Metrics (FPM) heartbeat to
+confirm completion.
+
+On a supported worker, set `DYN_SYSTEM_PORT` to expose the lifecycle API.
+Setting `DYN_SYSTEM_PORT=-1` disables the system listener, including its health
+and metrics endpoints. This is the default when no system port is configured.
+Normal SIGTERM shutdown works without the listener.
 
 Use the selected worker's system listener directly and restrict access to
 trusted administrators. The frontend HTTP address does not expose these
@@ -366,9 +368,10 @@ follows the existing shutdown sequence.
 
 Poll status for `drained`. The worker reaches this state after business
 admission closes, worker ingress requests and their response streams finish,
-and the SGLang tokenizer manager has no remaining request IDs. While draining,
-`reason` indicates whether the worker is waiting for routing grace, Dynamo
-ingress, SGLang requests, or an available completion check.
+and the SGLang tokenizer manager has no remaining request IDs. Prefill and
+Decode workers also wait for a scheduler idle confirmation. The worker starts a
+fresh local FPM subscription after a scheduler query returns and waits for two
+consecutive idle heartbeats.
 
 | Reason | Meaning |
 | --- | --- |
@@ -376,11 +379,15 @@ ingress, SGLang requests, or an available completion check.
 | `discovery_unregister_pending` | Withdrawal is unconfirmed; retry drain |
 | `dynamo_inflight` | Admitted worker requests or their response streams remain |
 | `sglang_inflight` | The tokenizer manager still tracks requests |
-| `completion_check_unavailable` | Completion cannot be confirmed; this does not count as `drained` |
+| `completion_check_unavailable` | Request completion cannot be confirmed |
+| `scheduler_idle_pending` | Prefill or Decode is waiting for scheduler idle heartbeats |
+| `scheduler_idle_unavailable` | Scheduler idle confirmation failed or timed out. Poll status to try again |
 
 > [!NOTE]
-> `drained` confirms request-level completion. Background scheduler and KV
-> cache operations may still be in progress.
+> For aggregated workers, `drained` confirms request-level completion. For
+> Prefill and Decode, it also confirms that the scheduler reports idle,
+> including its tracked KV transfer and cleanup queues. The engine can retain
+> cached prefixes in memory.
 
 Replacement admission and Pod deletion remain part of the
 [manual Grove OnDelete release workflow](https://github.com/ai-dynamo/dynamo/issues/17568).

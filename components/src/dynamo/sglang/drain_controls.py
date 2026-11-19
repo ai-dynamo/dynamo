@@ -10,6 +10,7 @@ from functools import partial
 
 from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
 from dynamo.sglang.drain import DrainConflict, WorkerDrain
+from dynamo.sglang.drain_scheduler import scheduler_idle_probe
 from dynamo.sglang.engine_routes import parse_engine_route_descriptors
 
 _LIFECYCLE_METHODS = {"drain": "POST", "resume": "POST", "status": "GET"}
@@ -23,12 +24,19 @@ def configure_worker_drain(
     terminal_event,
     *,
     enable_admin=True,
+    disaggregated=False,
 ):
     """Install LLM admission fencing, with optional administrative HTTP controls."""
 
     def pending_engine_requests() -> int | None:
         states = getattr(handler.engine.tokenizer_manager, "rid_to_state", None)
         return len(states) if isinstance(states, Mapping) else None
+
+    enable_admin = enable_admin and runtime.system_status_server_url() is not None
+    scheduler_idle = None
+    if enable_admin and disaggregated:
+        scheduler_idle = scheduler_idle_probe(handler)
+        enable_admin = scheduler_idle is not None
 
     controller = WorkerDrain(
         handler.generate_endpoint,
@@ -39,10 +47,11 @@ def configure_worker_drain(
         is_paused=lambda: bool(handler.engine.tokenizer_manager.is_pause),
         grace_period=get_grace_period_seconds(),
         pending_engine_requests=pending_engine_requests if enable_admin else None,
+        scheduler_idle=scheduler_idle,
     )
 
     handler._worker_drain = controller
-    if not enable_admin or runtime.system_status_server_url() is None:
+    if not enable_admin:
         return controller
     for descriptor in parse_engine_route_descriptors(
         handler.config.dynamo_args.engine_routes

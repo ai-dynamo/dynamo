@@ -338,9 +338,8 @@ async def init_decode(
             ready_event,
             shutdown_event,
             terminal_event or shutdown_event,
-            enable_admin=(
-                decode_worker_type == WorkerType.Aggregated and attached_engine is None
-            ),
+            enable_admin=attached_engine is None,
+            disaggregated=decode_worker_type == WorkerType.Decode,
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:
@@ -516,7 +515,8 @@ async def init_prefill(
             ready_event,
             shutdown_event,
             terminal_event or shutdown_event,
-            enable_admin=False,
+            enable_admin=attached_engine is None,
+            disaggregated=True,
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:
@@ -527,6 +527,10 @@ async def init_prefill(
                 drain.wrap(handler.generate),
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
+                track_response_completion=(
+                    getattr(handler, "_drain_controls_enabled", False)
+                    and dynamo_args.response_plane == "tcp"
+                ),
                 health_check_payload=health_check_payload,
             ),
             load_lora_endpoint.serve_endpoint(

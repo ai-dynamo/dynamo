@@ -5,10 +5,11 @@
 
 import asyncio
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from contextlib import aclosing
 from functools import wraps
 from time import monotonic
+from typing import Any
 
 from dynamo._core import WorkerDraining
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -30,6 +31,7 @@ class WorkerDrain:
         is_paused: Callable[[], bool],
         grace_period: float,
         pending_engine_requests: Callable[[], int | None] | None = None,
+        scheduler_idle: Callable[[], Coroutine[Any, Any, bool]] | None = None,
     ) -> None:
         if not math.isfinite(grace_period) or grace_period < 0:
             raise ValueError("drain grace period must be finite and non-negative")
@@ -41,6 +43,9 @@ class WorkerDrain:
         self._is_paused = is_paused
         self._grace_period = grace_period
         self._pending_engine_requests = pending_engine_requests
+        self._scheduler_idle = scheduler_idle
+        self._idle_probe: asyncio.Task[bool] | None = None
+        self._canaries = 0
         # None resumes admission; infinity keeps it open until withdrawal is confirmed.
         self._admission_deadline: float | None = None
         self._last_error: str | None = None
@@ -70,8 +75,14 @@ class WorkerDrain:
     def withdrawn(self) -> bool:
         return self._is_stopping() or self._admission_deadline is not None
 
+    def _reset_idle_probe(self) -> None:
+        if self._idle_probe is not None:
+            self._idle_probe.cancel()
+            self._idle_probe = None
+
     def stop(self) -> None:
         self._terminal_event.set()
+        self._reset_idle_probe()
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -117,22 +128,13 @@ class WorkerDrain:
             state, reason = "withdrawing", "routing_grace"
         else:
             state = "withdrawn"
-            if self._pending_engine_requests is None:
-                reason = "completion_check_unavailable"
+            reason = self._local_work_reason()
+            if reason is None:
+                reason = self._scheduler_idle_reason()
+                if reason is None:
+                    state = "drained"
             else:
-                inflight = self._endpoint.inflight_requests()
-                if inflight is None:
-                    reason = "completion_check_unavailable"
-                elif inflight != 0:
-                    reason = "dynamo_inflight"
-                else:
-                    pending = self._pending_engine_requests()
-                    if pending is None:
-                        reason = "completion_check_unavailable"
-                    elif pending:
-                        reason = "sglang_inflight"
-                    else:
-                        state = "drained"
+                self._reset_idle_probe()
         return {
             "state": state,
             "reason": reason,
@@ -140,6 +142,36 @@ class WorkerDrain:
             "accepting_requests": accepting,
             "last_error": self._last_error,
         }
+
+    def _local_work_reason(self) -> str | None:
+        if self._pending_engine_requests is None:
+            return "completion_check_unavailable"
+        inflight = self._endpoint.inflight_requests()
+        if inflight is None:
+            return "completion_check_unavailable"
+        if inflight or self._canaries:
+            return "dynamo_inflight"
+        pending = self._pending_engine_requests()
+        if pending is None:
+            return "completion_check_unavailable"
+        if pending:
+            return "sglang_inflight"
+        return None
+
+    def _scheduler_idle_reason(self) -> str | None:
+        if self._scheduler_idle is None:
+            return None
+        if self._idle_probe is None:
+            probe = asyncio.create_task(self._scheduler_idle())
+            self._idle_probe = probe
+            self._operations.add(probe)
+            probe.add_done_callback(self._operation_finished)
+        if not self._idle_probe.done():
+            return "scheduler_idle_pending"
+        if not self._idle_probe.cancelled() and self._idle_probe.result():
+            return None
+        self._reset_idle_probe()
+        return "scheduler_idle_unavailable"
 
     @staticmethod
     def _validate_body(body: dict) -> None:
@@ -201,6 +233,7 @@ class WorkerDrain:
                 raise DrainConflict(
                     "continue engine generation before resuming worker routing"
                 )
+            self._reset_idle_probe()
             self._admission_deadline = None
             self._last_error = None
             try:
@@ -234,8 +267,17 @@ class WorkerDrain:
                 and (not self._ready_event.is_set() or not self._accepts_requests())
             ):
                 raise WorkerDraining("worker is not accepting new requests")
-            async with aclosing(handler(*args, **kwargs)) as stream:
-                async for item in stream:
-                    yield item
+            track_canary = health_check and self._scheduler_idle is not None
+            if track_canary:
+                # Local canaries bypass TCP ingress accounting.
+                self._reset_idle_probe()
+                self._canaries += 1
+            try:
+                async with aclosing(handler(*args, **kwargs)) as stream:
+                    async for item in stream:
+                        yield item
+            finally:
+                if track_canary:
+                    self._canaries -= 1
 
         return admitted

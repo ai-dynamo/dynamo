@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.drain_controls import configure_worker_drain
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -105,6 +106,60 @@ async def test_status_waits_for_ingress_and_sglang_before_reporting_drained(cont
     handler.generate_endpoint.register_endpoint_instance.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_pd_drain_requires_fresh_scheduler_idle_after_a_canary(
+    controls, monkeypatch
+):
+    handler, runtime, ready, terminal = controls
+    confirm = AsyncMock(side_effect=[False, True, True, True])
+    monkeypatch.setattr(
+        "dynamo.sglang.drain_controls.scheduler_idle_probe", lambda handler: confirm
+    )
+    drain = configure_worker_drain(
+        handler, runtime, ready, asyncio.Event(), terminal, disaggregated=True
+    )
+    try:
+        handler.generate_endpoint.inflight_requests.return_value = 1
+        response = await call(runtime, "drain", "POST")
+        assert response["body"]["reason"] == "dynamo_inflight"
+        confirm.assert_not_awaited()
+
+        handler.generate_endpoint.inflight_requests.return_value = 0
+        assert (await call(runtime, "status", "GET"))["body"][
+            "reason"
+        ] == "scheduler_idle_pending"
+        await asyncio.wait_for(drain._idle_probe, 1)
+        assert (await call(runtime, "status", "GET"))["body"][
+            "reason"
+        ] == "scheduler_idle_unavailable"
+        assert (await call(runtime, "status", "GET"))["body"]["state"] == "draining"
+        await asyncio.wait_for(drain._idle_probe, 1)
+        assert (await call(runtime, "status", "GET"))["body"]["state"] == "drained"
+
+        async def generate(_request):
+            yield "healthy"
+
+        canary = drain.wrap(generate)({HEALTH_CHECK_KEY: True})
+        try:
+            assert await anext(canary) == "healthy"
+            assert (await call(runtime, "status", "GET"))["body"][
+                "reason"
+            ] == "dynamo_inflight"
+        finally:
+            await canary.aclose()
+        assert (await call(runtime, "status", "GET"))["body"][
+            "reason"
+        ] == "scheduler_idle_pending"
+        await asyncio.wait_for(drain._idle_probe, 1)
+        assert (await call(runtime, "status", "GET"))["body"]["state"] == "drained"
+
+        assert (await call(runtime, "resume", "POST"))["body"]["state"] == "serving"
+        response = await call(runtime, "drain", "POST")
+        assert response["body"]["reason"] == "scheduler_idle_pending"
+    finally:
+        await drain.close()
+
+
 def test_controls_do_not_shadow_a_configured_engine_route(controls):
     handler, runtime, ready, terminal = controls
     handler.config.dynamo_args.engine_routes = ["status/alias=get_server_info"]
@@ -164,10 +219,18 @@ async def test_quic_rejects_unpublish_without_changing_worker_state(controls):
     assert response["status"] == 200
 
 
-def test_unsupported_worker_does_not_expose_manual_drain(controls):
+@pytest.mark.parametrize("disaggregated", [False, True])
+def test_unsupported_worker_does_not_expose_manual_drain(controls, disaggregated):
     handler, runtime, ready, terminal = controls
+    handler.config.server_args = SimpleNamespace(enable_forward_pass_metrics=False)
     configure_worker_drain(
-        handler, runtime, ready, asyncio.Event(), terminal, enable_admin=False
+        handler,
+        runtime,
+        ready,
+        asyncio.Event(),
+        terminal,
+        enable_admin=disaggregated,
+        disaggregated=disaggregated,
     )
     runtime.register_engine_http_handler.assert_not_called()
 
