@@ -34,7 +34,6 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     FrontendRoute,
-    FrontendShutdown,
     make_engine,
     run_input,
 )
@@ -475,12 +474,7 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
-    frontend_shutdown = (
-        FrontendShutdown()
-        if not (config.interactive or config.kserve_grpc_server)
-        else None
-    )
-    install_signal_handlers(loop, runtime, frontend_shutdown)
+    install_signal_handlers(loop, runtime)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
@@ -569,14 +563,7 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(
-                runtime,
-                "http",
-                engine,
-                frontend_route_extensions,
-                shutdown=frontend_shutdown,
-                http_endpoint_drain_delay_secs=config.http_endpoint_drain_delay_secs,
-            )
+            await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
         pass
     finally:

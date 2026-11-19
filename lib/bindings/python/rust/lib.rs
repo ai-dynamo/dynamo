@@ -394,7 +394,6 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
-    m.add_class::<llm::entrypoint::FrontendShutdown>()?;
     m.add_class::<llm::frontend_routes::PyFrontendRoute>()?;
     m.add_class::<llm::frontend_routes::PyFrontendResponse>()?;
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
@@ -1551,6 +1550,13 @@ impl DistributedRuntime {
 
     fn shutdown(&self) {
         self.inner.shutdown();
+    }
+
+    /// Force the shutdown already started by `shutdown()` (starting it first if
+    /// needed): drained work is aborted instead of being waited on. A frontend
+    /// skips its propagation window and drain and ends in-flight exchanges.
+    fn force_shutdown(&self) {
+        self.inner.force_shutdown();
     }
 
     fn event_loop(&self) -> PyObject {

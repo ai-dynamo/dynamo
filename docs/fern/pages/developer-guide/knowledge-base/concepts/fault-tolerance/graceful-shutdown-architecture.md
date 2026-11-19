@@ -88,20 +88,14 @@ generate_endpoint.serve_endpoint(
 
 ### Frontend HTTP Draining
 
-The Frontend uses a separate HTTP drain state before it cancels the distributed runtime:
+The HTTP Frontend holds a graceful task in the runtime until its listener finishes draining.
 
-1. A process signal triggers a dedicated Frontend shutdown token instead of cancelling the distributed runtime.
-2. Enter the quiescing state. Return `503 Service Unavailable` from `/health`, keep `/live` at `200 OK`, and continue admitting inference traffic while upstream endpoint removal propagates.
-3. After `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS` (default `10` seconds), enter the draining state and reject new OpenAI-compatible inference requests with 503.
-4. Wait for admitted response bodies, including streaming responses, to complete.
-5. Continue tracking accepted `/v1/realtime` WebSocket sessions until their tasks exit, even though the HTTP upgrade response has completed.
-6. After requests finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires (default `5` seconds), enter the stopping state and cancel runtime state.
-7. Return control to the Python entrypoint, which shuts down discovery and the rest of the distributed runtime.
+1. On the first `SIGTERM` or `SIGINT`, the Frontend calls `runtime.shutdown()`.
+2. The HTTP service enters `propagating`. Its `/health` endpoint returns 503 and `/live` returns 200. It continues serving inference while upstream endpoints stop routing traffic to it.
+3. After `DYN_FRONTEND_PROPAGATION_DELAY_SECS` (default 5 seconds), the service enters `draining`. New inference requests receive 503. Admitted response bodies and upgraded `/v1/realtime` WebSocket sessions have up to `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (default 5 seconds) to finish.
+4. When draining completes or times out, the service enters `stopping` and releases its graceful task so runtime teardown can proceed.
 
-This separates readiness from liveness: traffic is removed promptly without turning an intentional
-drain into a restart loop. The endpoint propagation delay also closes the interval where Kubernetes
-still routes to a terminating Frontend after that process has stopped accepting requests. A second
-`SIGTERM` or `SIGINT` skips the staged path and cancels the runtime immediately.
+A second signal calls `runtime.force_shutdown()` and interrupts either the propagation window or the drain.
 
 ### Migration Integration
 

@@ -49,8 +49,8 @@ Four environment variables control Dynamo's internal draining. Set the HTTP valu
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS` | `10` | How long the Frontend remains available after readiness fails, allowing Kubernetes EndpointSlice, kube-proxy, and external load balancers to stop sending traffic. |
-| `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
+| `DYN_FRONTEND_PROPAGATION_DELAY_SECS` | `5` | How long the Frontend remains available after readiness fails, allowing Kubernetes EndpointSlice, kube-proxy, and external load balancers to stop sending traffic. |
+| `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before releasing its graceful task. |
 | `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
 | `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
 
@@ -91,10 +91,10 @@ DEBUG Cleaning up worker
 ```
 
 During Frontend shutdown, `/health` first returns 503 while `/live` remains 200. The Frontend keeps
-accepting inference requests for `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS` so traffic already in the
+accepting inference requests for `DYN_FRONTEND_PROPAGATION_DELAY_SECS` so traffic already in the
 Kubernetes endpoint propagation path does not fail. It then rejects new OpenAI-compatible requests
-with 503 and drains admitted response bodies and `/v1/realtime` WebSocket sessions. Runtime teardown
-starts only after requests finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires.
+with 503 and drains admitted response bodies and `/v1/realtime` WebSocket sessions. A second
+`SIGTERM` or `SIGINT` interrupts either wait.
 
 During worker shutdown, endpoints unregister and stop receiving new work while admitted requests
 have time to complete. If a pod receives `SIGKILL` before draining finishes, increase

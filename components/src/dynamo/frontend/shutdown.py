@@ -4,20 +4,22 @@
 import asyncio
 import logging
 import signal
-from typing import Optional, Protocol
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
 
-class ShutdownHandle(Protocol):
+class ShutdownRuntime(Protocol):
     def shutdown(self) -> None:
+        ...
+
+    def force_shutdown(self) -> None:
         ...
 
 
 def install_signal_handlers(
     loop: asyncio.AbstractEventLoop,
-    runtime: ShutdownHandle,
-    frontend_shutdown: Optional[ShutdownHandle],
+    runtime: ShutdownRuntime,
 ) -> None:
     """Install staged HTTP shutdown with a force-stop on repeated signals."""
     shutdown_requested = False
@@ -27,16 +29,13 @@ def install_signal_handlers(
         nonlocal force_stop_requested, shutdown_requested
         if not shutdown_requested:
             shutdown_requested = True
-            if frontend_shutdown is not None:
-                frontend_shutdown.shutdown()
-            else:
-                runtime.shutdown()
+            runtime.shutdown()
             return
 
-        if frontend_shutdown is not None and not force_stop_requested:
+        if not force_stop_requested:
             force_stop_requested = True
             logger.warning("Repeated shutdown signal; forcing runtime shutdown")
-            runtime.shutdown()
+            runtime.force_shutdown()
             return
 
         logger.info("Shutdown already requested; ignoring repeated signal")

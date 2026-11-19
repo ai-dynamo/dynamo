@@ -7675,13 +7675,13 @@ mod tests {
     }
 
     #[test]
-    fn test_check_ready_admits_quiescing_and_rejects_draining_service() {
+    fn test_check_ready_admits_propagating_and_rejects_draining_service() {
         let service = service_v2::HttpService::builder().build().unwrap();
         let state = service.state_clone();
 
         assert!(check_ready(&state).is_ok());
 
-        state.start_quiescing();
+        state.start_propagating();
         assert!(check_ready(&state).is_ok());
 
         state.start_draining();

@@ -1071,10 +1071,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_shutdown_closes_only_the_last_owner_after_its_streams_drain() {
         temp_env::async_with_vars(
-            [
-                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
-                ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1")),
-            ],
+            [("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1"))],
             async {
                 // Separate owned Tokio runtimes: the service must remain alive
                 // even after the runtime that created it has been dropped.
@@ -1117,16 +1114,18 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(10), main.cancelled())
                     .await
                     .unwrap();
-                // The main token starts the HTTP drain. The service refuses new
-                // owners, but its holders can still register during the drain,
-                // and it stays open past the drain while a response is in flight.
+                // At transport teardown the service refuses new owners. Existing
+                // holders can still register late responses in the drain window.
                 assert!(second.velo_response_service().service().await.is_err());
                 drop(
                     service
                         .register_response(EngineContext::new(()).context(), false)
                         .unwrap(),
                 );
-                tokio::time::sleep(Duration::from_millis(1_500)).await;
+                tokio::time::sleep(
+                    crate::runtime::VELO_RESPONSE_DRAIN_WINDOW + Duration::from_millis(100),
+                )
+                .await;
                 assert!(!service.closed.initialized());
                 tokio::net::TcpStream::connect(address).await.unwrap();
                 drop(registration);

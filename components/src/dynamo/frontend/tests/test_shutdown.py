@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import signal
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -18,48 +19,17 @@ class FakeLoop:
         self.handlers[sig] = handler
 
 
-class FakeRuntime:
-    def __init__(self):
-        self.shutdowns = 0
-
-    def shutdown(self):
-        self.shutdowns += 1
-
-
-class FakeFrontendShutdown:
-    def __init__(self):
-        self.shutdowns = 0
-
-    def shutdown(self):
-        self.shutdowns += 1
-
-
-def test_http_signal_stages_first_signal_and_forces_on_second():
+@pytest.mark.parametrize(
+    "first,second", [(signal.SIGTERM, signal.SIGINT), (signal.SIGINT, signal.SIGTERM)]
+)
+def test_first_signal_shuts_down_and_second_forces(first, second):
     loop = FakeLoop()
-    runtime = FakeRuntime()
-    frontend_shutdown = FakeFrontendShutdown()
-    install_signal_handlers(loop, runtime, frontend_shutdown)
+    runtime = Mock(spec=["shutdown", "force_shutdown"])
+    install_signal_handlers(loop, runtime)
 
-    loop.handlers[signal.SIGTERM]()
-    assert frontend_shutdown.shutdowns == 1
-    assert runtime.shutdowns == 0
+    loop.handlers[first]()
+    assert runtime.method_calls == [call.shutdown()]
 
-    loop.handlers[signal.SIGINT]()
-    assert frontend_shutdown.shutdowns == 1
-    assert runtime.shutdowns == 1
-
-    loop.handlers[signal.SIGTERM]()
-    assert frontend_shutdown.shutdowns == 1
-    assert runtime.shutdowns == 1
-
-
-def test_non_http_signal_shuts_runtime_down_immediately():
-    loop = FakeLoop()
-    runtime = FakeRuntime()
-    install_signal_handlers(loop, runtime, None)
-
-    loop.handlers[signal.SIGTERM]()
-    assert runtime.shutdowns == 1
-
-    loop.handlers[signal.SIGINT]()
-    assert runtime.shutdowns == 1
+    loop.handlers[second]()
+    loop.handlers[first]()
+    assert runtime.method_calls == [call.shutdown(), call.force_shutdown()]

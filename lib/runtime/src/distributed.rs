@@ -551,6 +551,18 @@ impl DistributedRuntime {
         self.discovery_client.shutdown();
     }
 
+    /// Forces the shutdown: graceful tasks abort the work they are draining.
+    /// See [`Runtime::force_shutdown`].
+    pub fn force_shutdown(&self) {
+        self.runtime.force_shutdown();
+        self.discovery_client.shutdown();
+    }
+
+    /// See [`Runtime::force_shutdown_token`].
+    pub fn force_shutdown_token(&self) -> CancellationToken {
+        self.runtime.force_shutdown_token()
+    }
+
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         Namespace::new(self.clone(), name.into())
