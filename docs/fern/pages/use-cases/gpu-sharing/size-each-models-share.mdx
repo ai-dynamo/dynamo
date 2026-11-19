@@ -5,7 +5,7 @@ title: Size Each Model's Share
 subtitle: Measure the memory and compute each model needs, then pack the models onto GPUs
 ---
 
-Under GPU fractions, each model asks for two things: a share of the GPU's streaming multiprocessors (SMs) and an amount of memory. This page walks through sizing both from the model and its traffic, not from an even split, and checking that the shares pack onto your GPUs. It assumes you have already [decided that your models should share a GPU](decide-whether-to-share.mdx).
+Under GPU fractions, each model asks for two things: a share of the GPU's streaming multiprocessors (SMs) and an amount of memory. This page walks through sizing both from the model and its traffic and checking that the shares pack onto your GPUs. It assumes you have already [decided that your models should share a GPU](decide-whether-to-share.mdx).
 
 The example on this page packs three models onto one 80 GB H100 GPU. The model names and sizes are illustrative.
 
@@ -14,7 +14,7 @@ The example on this page packs three models onto one 80 GB H100 GPU. The model n
 
 A model needs enough memory for three things:
 
-- **Weights:** about 2 bytes per parameter in BF16, so an 8B model needs about 16 GB.
+- **Weights:**  an 8B model needs about 16 GB.
 - **Engine overhead:** the CUDA context, activations, and CUDA graphs. Measure it by starting the engine with a small KV cache.
 - **KV cache:** enough for the concurrency and context length the model must serve. Size it from the model's KV bytes per token, multiplied by the tokens in flight at peak.
 
@@ -37,20 +37,20 @@ The compute share is the smallest share of the SMs at which the model still meet
    - the memory the engine uses beyond its KV cache.
 
    Measure once per model and GPU type, and reuse the curves for every packing decision. [Try MPS on One GPU](try-mps-on-one-gpu.mdx) shows how to run a process at a chosen share without Kubernetes.
-2. **Set the targets.** For each model, write down its expected request rate `R`, its TTFT ceiling `TTFT_max`, and its inter-token latency (ITL) ceiling `ITL_max`.
+2. **Set the targets.** For each model, write down its expected request rate `R` (from your historical traffic), its TTFT ceiling `TTFT_max` (your latency tolerance), and its inter-token latency (ITL) ceiling `ITL_max` (your interactivity tolerance).
 3. **Admit the shares that pass three checks.** A share is admitted only when it passes all three:
 
    | Check | Passes when |
    |---|---|
    | ITL | A decode step at the model's batch size is at most `ITL_max`. |
    | Load | The engine's load `rho`, the fraction of time it is busy serving `R`, is below 1. |
-   | Violation | The expected time until the first request misses `TTFT_max`, `tau`, is at least one hour. |
+   | Violation | The expected time until the first request misses `TTFT_max`, `tau`, is at least one hour or your own setting. |
 
-   The violation check is the one that usually decides. Every request queued ahead of a new one adds a full prefill to its TTFT, so a slower prefill both raises the load and lowers how many queued requests still fit within `TTFT_max`. `tau` is how long Poisson arrivals at rate `R` take, on average, to queue more than that.
-4. **Take the smallest admitted share.** Read the curves only at measured points: between two measured batch sizes, use the slower value. Look for plateaus, where a larger share is no faster. A share inside a plateau buys nothing.
+   The violation check is the one that usually decides. Every request queued ahead of a new one adds a full prefill to its TTFT, so a slower prefill both raises the load and lowers how many queued requests still fit within `TTFT_max`.
+4. **Take the smallest admitted share.** Read the curves only at measured points: between two measured batch sizes, use the slower value. Look for plateaus, where a larger share is no faster.
 
 <Note>
-A share measured on an idle GPU is optimistic. When every model on the GPU is busy, the GPU can reach its power limit and lower its clocks, and every model's share runs slower. Memory bandwidth and the L2 cache are also shared. Always measure each share with the rest of the GPU loaded.
+A share measured on an idle GPU is optimistic. When multiple models on the GPU are executing, the power limit is more likely to be hit, slowing the GPU's clocks. Always measure the forward passes under iso-power.
 </Note>
 
 The targets decide how many models fit. For Qwen3-4B on one RTX PRO 6000 with 2048-token inputs and 256-token outputs, at `ITL_max` = 100 ms, the procedure packs this many models per GPU:
@@ -82,10 +82,6 @@ Think of each GPU as two budgets, and pack models into it:
 
 A model fits on a GPU only when both budgets have room. The three example models use 0.5 + 0.3 + 0.2 = 1.0 of the compute and 32 + 24 + 8 = 64 GB of the 80 GB, so they fill one GPU's compute with 16 GB of memory to spare. A fourth model needs another GPU, however small it is.
 
-Then leave headroom, and apply two placement rules:
-
-- **Don't put two latency-critical models on one GPU.** If one is busy, its memory traffic slows the other.
-- **Spread the replicas of a critical model across GPUs or nodes.** A fatal fault in one model can stop every model on its GPU, so two replicas on one GPU can fail together.
 
 </Step>
 <Step title="Compare with MIG profiles" id="compare-with-mig-profiles">
@@ -100,28 +96,9 @@ MIG can also put several models on one GPU, but each model gets a fixed instance
 | `code-7b` | 30% of the SMs, 24 GB | 0.3, 24 GB | `3g.40gb`: 43% of the SMs, 40 GB. A `2g.20gb` has too little memory |
 | `guard-1b` | 20% of the SMs, 8 GB | 0.2, 8 GB | `2g.20gb`, but the GPU's 7 SM slices are already allocated |
 
-With MIG, the first two models take the whole GPU, and the third needs another GPU. Across a cluster, rounding every model up to a profile strands capacity on every GPU. In exchange, MIG keeps each model's memory traffic and faults away from its neighbors.
+With MIG, the first two models take the whole GPU, and the third needs another GPU. Across a cluster, rounding every model up to a profile strands capacity on every GPU.
 
-</Step>
-<Step title="Work out each engine's memory setting" id="work-out-each-engines-memory-setting">
 
-Under GPU fractions, the memory cap is enforced, but the engine still sees the GPU's full memory as its total. An engine that sizes its KV cache as a fraction of total memory, such as vLLM with `--gpu-memory-utilization`, must be given a fraction that fits inside the cap:
-
-```text
---gpu-memory-utilization  ≤  memory request ÷ GPU memory
-```
-
-For `chat-8b`, 32 GB on an 80 GB GPU gives 0.4. Set the value a little lower, to leave room under the cap for memory the engine allocates outside its budget, such as the CUDA context. The A100 benchmark capped each worker at 19,968 MiB of a 40 GB GPU and ran vLLM at 0.40, about 15.8 GiB.
-
-Record the three values for each model, which the deployment guide uses:
-
-| Model | Compute share | Memory request | `--gpu-memory-utilization` |
-|---|---:|---:|---:|
-| `chat-8b` | 0.5 | 32 GB | 0.38 |
-| `code-7b` | 0.3 | 24 GB | 0.28 |
-| `guard-1b` | 0.2 | 8 GB | 0.09 |
-
-</Step>
 </Steps>
 
 ## Next Steps
