@@ -192,7 +192,7 @@ fn default_row<C: WorkerConfigLike>(
     let row = source.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
-        WorkerInputs::ALL,
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },

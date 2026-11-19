@@ -433,8 +433,16 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                 }
             }
             dynamo_protocols::types::Stop::StringArray(sequences) => {
+                // Treat `"stop": []` as no client-supplied stop strings, matching
+                // stock vLLM and stock SGLang. OpenAI's published schema specifies
+                // one to four items for the array form.
+                // `get_stop()` maps the empty list to `None`.
+                // OpenAI Chat Completions schema https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                // OpenAI Completions schema https://developers.openai.com/api/reference/resources/completions/methods/create
+                // Stock vLLM sampling parameters https://github.com/vllm-project/vllm/blob/62d4bc3c7e33b1b6c906e233e6af2d3506c482ca/vllm/sampling_params.py#L581-L584
+                // Stock SGLang sampling parameters https://github.com/sgl-project/sglang/blob/297e54fd105e974cdf401e5b4d20253a22c16f90/python/sglang/srt/sampling/sampling_params.py#L331-L352
                 if sequences.is_empty() {
-                    anyhow::bail!("Stop sequences array cannot be empty");
+                    return Ok(());
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
                     return Err(crate::protocols::common::invalid_argument_error(format!(
@@ -1384,6 +1392,21 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_empty_array_as_no_stop() {
+        validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![]))).unwrap();
+        // An empty string, alone or as an element, is still rejected.
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::String(String::new()))).is_err()
+        );
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![
+                String::new()
+            ])))
+            .is_err()
+        );
     }
 
     #[test]

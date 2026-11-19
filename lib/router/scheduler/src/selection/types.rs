@@ -103,10 +103,6 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         &self.taints
     }
 
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
-    }
-
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
         Some(&self.topology_domains)
     }
@@ -117,10 +113,6 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 
     fn kv_hint_transfer_metadata_for_dp_rank(
