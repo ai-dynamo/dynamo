@@ -7,29 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 
 The testkit holds the shared CPU integration tests for the sidecars. They connect real sidecars to local Mocker servers, which simulate engine responses without loading a model.
 
-## File layout
-
-```text
-lib/sidecar/testkit/
-├── src/
-│   ├── lib.rs              # Bounded waits and public testkit exports
-│   ├── control.rs          # Per-request controls, observations and controller test
-│   ├── server.rs           # Local server lifetime, including abrupt shutdown
-│   ├── fixtures.rs         # Shared request construction and stream collection
-│   └── assert.rs           # Token, terminal, usage and error assertions
-├── tests/
-│   ├── sidecar_mocker_integration.rs         # Direct sidecar-to-Mocker scenarios over real gRPC
-│   ├── router_sidecar_mocker_integration.rs  # Sidecar children, discovery, routing and shutdown
-│   └── support/
-│       ├── mod.rs         # Fixture contracts and scheduler-state waits
-│       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
-│       ├── sglang.rs      # SGLang api.v1 gRPC and HTTP peers, discovery, health, Abort and child-command adapter
-│       ├── trtllm.rs      # OpenEngine peer, context limits and child-command adapter
-│       ├── lpx.rs         # LPX peer and child-command adapter
-│       └── process.rs     # Local discovery, worker processes and TCP routing
-└── README.md              # This guide
-```
-
 The testkit library owns request controls, bounded waits, stream collection,
 assertions and server lifetime. Concrete sidecars, Mockers and protocol libraries
 are development dependencies used by the integration tests. Production sidecars
