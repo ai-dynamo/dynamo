@@ -75,6 +75,139 @@ pub(super) fn configure_selection(selected: &mut SystemOneExecutionSelection) {
 }
 
 #[tokio::test]
+async fn mixed_profiles_route_the_whole_request_before_admission() {
+    let service = super::super::super::service_v2::HttpService::builder()
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let engine = TestEngine::new(EngineBehavior::Success);
+    let register = |namespace: &str, backend| {
+        let mut selected = selection(engine.clone());
+        if backend == ScoringBackend::Vllm {
+            configure_selection(&mut selected);
+        } else {
+            selected.card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            selected.card.runtime_config.max_num_seqs = Some(1);
+            selected.card.runtime_config.data_parallel_size = 1;
+            for capability in ["sglang_generate", "sglang_systemone_serial_v1"] {
+                selected
+                    .card
+                    .runtime_config
+                    .runtime_data
+                    .insert(capability.into(), true.into());
+            }
+        }
+        assert_eq!(selected.card.systemone_backend(), Some(backend));
+        let mut workers =
+            crate::discovery::WorkerSet::new(namespace.into(), namespace.into(), selected.card);
+        workers.generate_engine = Some(selected.engine);
+        workers.systemone_preprocessor = Some(selected.preprocessor);
+        let (members, receiver) = tokio::sync::watch::channel(vec![41]);
+        workers.set_instance_watcher(receiver);
+        assert!(
+            state
+                .manager()
+                .add_worker_set("test-model", namespace, workers)
+        );
+        members
+    };
+    let vllm = register("vllm", ScoringBackend::Vllm);
+    let sglang = register("sglang", ScoringBackend::Sglang);
+    assert!(state.manager().register_alias("public-model", "test-model"));
+    let admission = state.systemone_admission();
+    let preflight = state.systemone_preflight_admission();
+    let _permit = admission
+        .clone()
+        .acquire_many_owned(admission.available_permits() as u32)
+        .await
+        .unwrap();
+    let before = (admission.available_permits(), preflight.available_permits());
+    for dialect in [
+        dynamo_decisions::Dialect::Jev,
+        dynamo_decisions::Dialect::OpenAi,
+    ] {
+        for (vllm_live, sglang_live, candidates, expected) in [
+            (
+                true,
+                false,
+                26,
+                super::super::super::error::overload_status_code(),
+            ),
+            (true, false, 27, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                false,
+                true,
+                27,
+                super::super::super::error::overload_status_code(),
+            ),
+            (
+                false,
+                true,
+                255,
+                super::super::super::error::overload_status_code(),
+            ),
+            (
+                true,
+                true,
+                27,
+                super::super::super::error::overload_status_code(),
+            ),
+            (false, false, 27, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            vllm.send_replace(if vllm_live { vec![41, 42] } else { vec![] });
+            sglang.send_replace(if sglang_live { vec![43] } else { vec![] });
+            let criteria: serde_json::Map<String, Value> = (0..candidates)
+                .map(|index| (format!("candidate-{index}"), json!("A candidate")))
+                .collect();
+            let mut request = dynamo_decisions::parse_request(
+                &serde_json::to_vec(&json!({"model":"public-model", "state":"test",
+                "questions":{
+                    "a-predicate":{"type":"noul", "instructions":"urgent?"},
+                    "z-choice":{"type":"choice", "criteria":criteria}
+                }}))
+                .unwrap(),
+                dynamo_decisions::Route::SystemOne,
+            )
+            .unwrap();
+            assert_eq!(request.questions[0].candidates.len(), 2);
+            assert_eq!(request.questions[1].candidates.len(), candidates);
+            request.dialect = dialect;
+            if expected == super::super::super::error::overload_status_code() {
+                let selected = state
+                    .manager()
+                    .get_systemone_execution_selection("public-model", candidates)
+                    .unwrap();
+                assert_eq!(selected.canonical_model, "test-model");
+                assert_eq!(
+                    selected.backend,
+                    if sglang_live {
+                        ScoringBackend::Sglang
+                    } else {
+                        ScoringBackend::Vllm
+                    }
+                );
+                assert_eq!(
+                    selected.decision_capabilities().max_candidates,
+                    if sglang_live { 255 } else { 26 }
+                );
+            }
+            let response =
+                super::super::handle_request(state.clone(), "mixed-profiles".into(), request).await;
+            assert_eq!(
+                response.status(),
+                expected,
+                "{dialect:?}, {candidates}, vllm={vllm_live}, sglang={sglang_live}"
+            );
+            assert_eq!(
+                (admission.available_permits(), preflight.available_permits()),
+                before
+            );
+            assert!(engine.observations.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn candidate_limit_is_reported_and_rejected_before_admission() {
     let service = super::super::super::service_v2::HttpService::builder()
         .build()
@@ -96,7 +229,7 @@ async fn candidate_limit_is_reported_and_rejected_before_admission() {
     );
     let capabilities = state
         .manager()
-        .get_systemone_execution_selection("test-model")
+        .get_systemone_execution_selection("test-model", 2)
         .unwrap()
         .decision_capabilities();
     assert_eq!(capabilities.max_candidates, 26);

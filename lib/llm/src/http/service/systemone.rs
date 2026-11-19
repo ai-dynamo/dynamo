@@ -245,9 +245,15 @@ async fn handle_request(
         );
     }
 
+    let required_candidates = request
+        .questions
+        .iter()
+        .map(|question| question.candidates.len())
+        .max()
+        .unwrap_or_default();
     let selection = match state
         .manager()
-        .get_systemone_execution_selection(&request.model)
+        .get_systemone_execution_selection(&request.model, required_candidates)
     {
         Ok(selection) => selection,
         Err(SystemOneSelectionError::NotFound) => {

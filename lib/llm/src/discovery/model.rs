@@ -810,11 +810,33 @@ impl Model {
 
     pub(crate) fn get_systemone_execution_selection(
         &self,
+        required_candidates: usize,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         self.select_worker_set_with_worker_count(
-            |ws| self.systemone_execution_inputs(ws),
+            |ws| {
+                let backend = ws.card().systemone_backend()?;
+                if required_candidates > backend.max_candidates() {
+                    return None;
+                }
+                self.systemone_execution_inputs(ws)
+            },
             WorkerSet::decision_worker_count,
         )
+        .or_else(|| {
+            let has_capable_profile = self.worker_sets.load().values().any(|ws| {
+                ws.card()
+                    .systemone_backend()
+                    .is_some_and(|backend| required_candidates <= backend.max_candidates())
+            });
+            if has_capable_profile {
+                return None;
+            }
+            // Preserve canonical validation errors when every advertised profile is too small.
+            self.select_worker_set_with_worker_count(
+                |ws| self.systemone_execution_inputs(ws),
+                WorkerSet::decision_worker_count,
+            )
+        })
         .ok_or_else(|| {
             if self
                 .worker_sets
@@ -1479,7 +1501,7 @@ mod tests {
         workers_b.send(vec![]).unwrap();
         model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
         model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
-        let selection_a = model.get_systemone_execution_selection().unwrap();
+        let selection_a = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection_a.engine,
             worker_set_a.generate_engine.as_ref().unwrap()
@@ -1493,7 +1515,7 @@ mod tests {
 
         workers_a.send(vec![]).unwrap();
         workers_b.send(vec![2]).unwrap();
-        let selection_b = model.get_systemone_execution_selection().unwrap();
+        let selection_b = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection_b.engine,
             worker_set_b.generate_engine.as_ref().unwrap()
@@ -1515,7 +1537,7 @@ mod tests {
                 .insert("vllm_causal_decision_v1".into(), true.into());
         });
         model.add_worker_set("ns".into(), workers);
-        let selected = model.get_systemone_execution_selection().unwrap();
+        let selected = model.get_systemone_execution_selection(2).unwrap();
         assert_eq!(
             selected.backend,
             crate::protocols::systemone::ScoringBackend::Sglang
@@ -1567,7 +1589,7 @@ mod tests {
             let (worker_set, _workers) = systemone_worker_set("ns", configure);
             model.add_worker_set("ns".to_string(), worker_set);
             assert!(matches!(
-                model.get_systemone_execution_selection(),
+                model.get_systemone_execution_selection(2),
                 Err(SystemOneSelectionError::Unsupported)
             ));
         }
@@ -1578,7 +1600,7 @@ mod tests {
             .systemone_preprocessor = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
@@ -1586,7 +1608,7 @@ mod tests {
         Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
@@ -1594,7 +1616,7 @@ mod tests {
         workers.send(vec![]).unwrap();
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
     }
@@ -1606,7 +1628,7 @@ mod tests {
             card.migration_limit = 1;
         });
         model.add_worker_set("ns".to_string(), worker_set);
-        assert!(model.get_systemone_execution_selection().is_ok());
+        assert!(model.get_systemone_execution_selection(2).is_ok());
     }
 
     #[test]
@@ -1618,7 +1640,7 @@ mod tests {
             .unwrap()
             .set_lifecycle_cancellation(cancellation.clone());
         model.add_worker_set("ns".to_string(), workers);
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
         cancellation.cancel();
         assert_eq!(
@@ -1626,7 +1648,7 @@ mod tests {
             Err(SystemOneSelectionError::Unavailable)
         );
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
     }
@@ -1646,7 +1668,7 @@ mod tests {
         local.set_lifecycle_cancellation(cancellation.clone());
         assert_eq!(local.decision_worker_count(), 1);
         model.add_worker_set("local".to_string(), Arc::new(local));
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(selection.admitted_ids.is_none());
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         cancellation.cancel();
@@ -1685,12 +1707,12 @@ mod tests {
         );
         model.add_worker_set("ns-a".to_string(), unadmitted);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let (available, _available_tx) = systemone_worker_set("ns-b", |_| {});
         model.add_worker_set("ns-b".to_string(), available.clone());
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection.engine,
             available.generate_engine.as_ref().unwrap()
@@ -1707,7 +1729,7 @@ mod tests {
         assert_eq!(workers.decision_worker_count(), 0);
         drop(admitted_tx);
         assert_eq!(workers.decision_worker_count(), 0);
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection.engine,
             available.generate_engine.as_ref().unwrap()
