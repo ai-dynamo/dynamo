@@ -8,7 +8,6 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
-from socket import socketpair
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -306,8 +305,10 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
 
 
 def test_child_attaches_without_launching_engine(monkeypatch):
-    listener_fds = [listener.detach() for listener in socketpair()]
-    monkeypatch.setenv(processes._LISTENER_FDS_ENV, json.dumps(listener_fds))
+    monkeypatch.setenv(processes._LISTENER_FDS_ENV, "[5, 6]")
+    monkeypatch.setattr(
+        processes, "socket", SimpleNamespace(socket=lambda fileno: fileno)
+    )
     monkeypatch.setenv(processes._ROLE_ENV, processes._CHILD_ROLE)
     monkeypatch.setenv(processes._INDEX_ENV, "1")
     monkeypatch.setenv(
@@ -340,10 +341,7 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["process_index"] == 1
     assert attach.call_args.kwargs["input_address"] == "in1"
     assert attach.call_args.kwargs["output_address"] == "out1"
-    listeners = attach.call_args.kwargs["listeners"]
-    assert [listener.fileno() for listener in listeners] == listener_fds
-    for listener in listeners:
-        listener.close()
+    assert attach.call_args.kwargs["listeners"] == (5, 6)
 
 
 def _run_listener_child():
