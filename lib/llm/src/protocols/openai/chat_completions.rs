@@ -323,6 +323,21 @@ pub enum ResponseOutputEvent {
     Boundary(MessageBoundary),
     Text(String),
     ToolCall(String),
+    /// The next `n` entries of choice 0's aggregated `logprobs.content` arrived at
+    /// this point of the stream on chunks with visible text or no content (EOS),
+    /// so a Responses projection can give each message the scores generated while
+    /// it was open.
+    Scores(usize),
+    /// The next `n` entries arrived on reasoning or tool-call chunks. They are not
+    /// output text, so a Responses projection skips them.
+    HiddenScores(usize),
+}
+
+impl ResponseOutputEvent {
+    /// Score bookkeeping that never changes the projected output items.
+    pub fn is_score(&self) -> bool {
+        matches!(self, Self::Scores(_) | Self::HiddenScores(_))
+    }
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -707,7 +722,12 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {

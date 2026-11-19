@@ -9,6 +9,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 
 import importlib.util
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -27,6 +28,7 @@ from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
+from dynamo._core import _raise_routed_http_error
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -34,7 +36,12 @@ from dynamo.frontend.prepost import (
     _prepare_request,
     build_tool_call_guided_decoding,
 )
-from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    HttpError,
+    InvalidArgument,
+    RoutedEngineError,
+    WorkerUnavailable,
+)
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the real_vllm_processor_module fixture). Importing it at module
@@ -1217,6 +1224,194 @@ def vllm_processor_module(monkeypatch, real_vllm_processor_module):
     return module
 
 
+@pytest.fixture
+def cache_salt_processor(vllm_processor_module, monkeypatch):
+    """Keep the real request-to-engine path, with model work replaced by fakes."""
+    module = vllm_processor_module
+
+    async def preprocess(request, **kwargs):
+        return SimpleNamespace(
+            request_for_sampling=prepost_module.ChatCompletionRequest.model_construct(
+                **request
+            ),
+            tool_parser=None,
+            chat_template_kwargs={},
+            engine_prompt={"prompt": "Hello"},
+            prompt_token_ids=[1, 2, 3],
+            guided_decoding=None,
+            uses_dynamo_json_tool_call_fallback=False,
+        )
+
+    monkeypatch.setattr(module, "preprocess_chat_request", preprocess)
+    monkeypatch.setattr(
+        module.InputProcessor, "assign_request_id", lambda request: None
+    )
+    monkeypatch.setattr(
+        module, "StreamingPostProcessor", lambda **kwargs: _FakePostProcessor()
+    )
+
+    def make_processor(mm_features=None):
+        def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+            return SimpleNamespace(
+                request_id=request_id,
+                external_req_id=None,
+                sampling_params=sampling_params,
+                prompt_token_ids=engine_inputs["prompt_token_ids"],
+                mm_features=mm_features,
+            )
+
+        routed_engine = _FakeRoutedEngine([])
+        processor = module.VllmProcessor(
+            tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+            input_processor=SimpleNamespace(
+                generation_config_fields={},
+                renderer=SimpleNamespace(
+                    process_for_engine_async=AsyncMock(
+                        side_effect=lambda prompt, arrival_time: prompt
+                    )
+                ),
+                process_inputs=process_inputs,
+                model_config=None,
+            ),
+            output_processor=_FakeOutputProcessor(),
+            tool_parser_class=None,
+            reasoning_parser_class=None,
+            routed_engine=routed_engine,
+        )
+        processor.nixl_mm_enabled = False
+        return processor, routed_engine
+
+    return make_processor
+
+
+@pytest.mark.asyncio
+@pytest.mark.router
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        pytest.param({}, None, id="absent"),
+        pytest.param(
+            {"routing": {"backend_instance_id": 7, "cache_salt": "internal"}},
+            None,
+            id="internal-hint-is-not-public-salt",
+        ),
+        pytest.param({"cache_salt": ""}, None, id="empty-legacy"),
+        pytest.param({"nvext": {"cache_salt": ""}}, None, id="empty-canonical"),
+        pytest.param({"cache_salt": "legacy"}, "legacy", id="legacy"),
+        pytest.param(
+            {"nvext": {"cache_salt": None}, "cache_salt": "legacy"},
+            "legacy",
+            id="null-canonical-fallback",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": ""}, "cache_salt": "legacy"},
+            "legacy",
+            id="empty-canonical-fallback",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "canonical"}, "cache_salt": "legacy"},
+            "canonical",
+            id="canonical-precedence",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "tenant-a"}, "allowed_token_ids": [123]},
+            "tenant-a",
+            id="salt-with-sampling-options",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "canonical"}, "routing": None},
+            "canonical",
+            id="no-routing-hints",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "dynamo-cache-salt:租户"}},
+            "dynamo-cache-salt:租户",
+            id="public-value-preserved",
+        ),
+    ],
+)
+async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expected):
+    """Preserve public salt precedence across local, router, and worker inputs."""
+    processor, routed_engine = cache_salt_processor()
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 1,
+        "routing": {"backend_instance_id": 7, "priority": 2},
+        **fields,
+    }
+    original = deepcopy(request)
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    assert request == original
+    assert len(routed_engine.requests) == 1
+    preprocessed = routed_engine.requests[0]
+    renderer = processor.input_processor.renderer.process_for_engine_async
+    local_prompt = renderer.await_args.args[0]
+    if expected is None:
+        assert preprocessed["routing"] == original["routing"]
+        assert "extra_args" not in preprocessed
+        assert "cache_salt" not in local_prompt
+    else:
+        assert preprocessed["routing"] == {
+            **(original["routing"] or {}),
+            "cache_salt": expected,
+        }
+        expected_extra_args = {"nvext": {"cache_salt": expected}}
+        if "allowed_token_ids" in fields:
+            expected_extra_args["sampling_options"] = {
+                "allowed_token_ids": fields["allowed_token_ids"]
+            }
+        assert preprocessed["extra_args"] == expected_extra_args
+        assert local_prompt["cache_salt"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_generator_cache_salt_survives_multimodal_metadata(
+    cache_salt_processor, vllm_processor_module, monkeypatch
+):
+    """Keep salt and multimodal metadata together without mutating the request."""
+    feature = SimpleNamespace(
+        modality="image",
+        mm_hash="a" * 64,
+        data=object(),
+        mm_position=SimpleNamespace(offset=0, length=3),
+    )
+    mm_routing_info = {"block_mm_infos": [None]}
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *args, **kwargs: mm_routing_info,
+    )
+    processor, routed_engine = cache_salt_processor([feature])
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 1,
+        "nvext": {"cache_salt": "canonical"},
+        "routing": {"backend_instance_id": 7, "cache_salt": "stale"},
+    }
+    original = deepcopy(request)
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    assert request == original
+    preprocessed = routed_engine.requests[0]
+    assert preprocessed["routing"] == {
+        "backend_instance_id": 7,
+        "cache_salt": "canonical",
+    }
+    assert preprocessed["extra_args"] == {
+        "nvext": {"cache_salt": "canonical"},
+        "mm_hashes": [feature.mm_hash],
+        "mm_hashes_by_modality": {"image": [feature.mm_hash]},
+        "mm_placeholders": [(0, 3)],
+        "mm_placeholders_by_modality": {"image": [(0, 3)]},
+        "expanded_token_ids": [1, 2, 3],
+    }
+    assert preprocessed["mm_routing_info"] == mm_routing_info
+
+
 @pytest.mark.asyncio
 @pytest.mark.multimodal
 @pytest.mark.parametrize(
@@ -1369,6 +1564,51 @@ async def test_generator_rejects_top_logprobs_without_logprobs(
     assert excinfo.value.code == 400
     assert "`logprobs` must be set to true" in excinfo.value.message
     preprocess.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generator_vllm_validation_error_keeps_reason_for_client(
+    vllm_processor_module,
+):
+    from vllm.exceptions import VLLMValidationError
+
+    message = "The decoder prompt is longer than the maximum model length."
+
+    async def _inner(request, context=None):
+        raise VLLMValidationError(message)
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(InvalidArgument, match="longer than the maximum model length"):
+        await anext(processor.generator({"model": "test"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [("VLLMNotFoundError", 404), ("VLLMUnprocessableEntityError", 422)],
+)
+async def test_generator_vllm_non_400_client_error_keeps_status(
+    vllm_processor_module, error_type, expected_status
+):
+    from vllm import exceptions as vllm_exceptions
+
+    async def _inner(request, context=None):
+        raise getattr(vllm_exceptions, error_type)("rejected")
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor.generator({"model": "test"}))
+    assert excinfo.value.code == expected_status
 
 
 @pytest.mark.asyncio
@@ -2122,6 +2362,39 @@ class TestRoutedEnginePath:
         processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
 
         with pytest.raises(WorkerUnavailable) as caught:
+            await _run_generate(processor, _base_preproc())
+        assert caught.value is rejection
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("http_status", [499, 529])
+    @pytest.mark.parametrize("rejected_after_frames", [None, 1])
+    async def test_routed_engine_error_is_raised_not_enveloped(
+        self, vllm_processor_module, rejected_after_frames, http_status
+    ):
+        # Keep cancellation (499) and capacity (529) errors before or during a stream.
+        with pytest.raises(RoutedEngineError) as raised:
+            _raise_routed_http_error(http_status, "worker rejected request")
+        rejection = raised.value
+
+        class _RejectingRoutedEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                if rejected_after_frames is None:
+                    raise rejection
+                stream = await super().generate(preprocessed, **kwargs)
+
+                async def _stream():
+                    async for item in stream:
+                        yield item
+                    raise rejection
+
+                return _stream()
+
+        routed_engine = _RejectingRoutedEngine(
+            [{"token_ids": [101], "index": 0}] * (rejected_after_frames or 0)
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        with pytest.raises(RoutedEngineError) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 
