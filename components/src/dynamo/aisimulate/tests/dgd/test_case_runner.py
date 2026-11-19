@@ -8,8 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-
-from dynamo.aisimulate.tests.dgd.comparison import run_cases
+from comparison import run_cases
 
 pytestmark = [
     pytest.mark.unit,
