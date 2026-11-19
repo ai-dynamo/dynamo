@@ -300,6 +300,40 @@ mod cuda_tests {
     }
 
     #[test]
+    fn test_pinned_storage_device_address_is_host_address() {
+        // Copy kernels use a pinned block's host address as its device address.
+        use cudarc::driver::{result::device, sys};
+        let storage = PinnedStorage::new(4096).unwrap();
+        storage.ctx().bind_to_thread().unwrap();
+        let host_ptr = storage.addr() as *mut std::ffi::c_void;
+        let mut flags = 0;
+        // SAFETY: `storage` is a live cuMemHostAlloc allocation and its context is bound.
+        unsafe { sys::cuMemHostGetFlags(&mut flags, host_ptr) }
+            .result()
+            .unwrap();
+        if flags & sys::CU_MEMHOSTALLOC_WRITECOMBINED != 0 {
+            // SAFETY: the device handle comes from the storage's context.
+            let attr = unsafe {
+                device::get_attribute(
+                    storage.ctx().cu_device(),
+                    sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM,
+                )
+            };
+            assert!(
+                matches!(attr, Ok(v) if v != 0),
+                "write-combined memory on a device that cannot use its host address: {attr:?}"
+            );
+        } else {
+            let mut dev_ptr = 0;
+            // SAFETY: as above; pinned storage that is not write-combined is mapped (DEVICEMAP).
+            unsafe { sys::cuMemHostGetDevicePointer_v2(&mut dev_ptr, host_ptr, 0) }
+                .result()
+                .unwrap();
+            assert_eq!(dev_ptr, storage.addr() as sys::CUdeviceptr);
+        }
+    }
+
+    #[test]
     fn test_pinned_storage_zero_size() {
         let storage = PinnedStorage::new(0);
         assert!(storage.is_err());
