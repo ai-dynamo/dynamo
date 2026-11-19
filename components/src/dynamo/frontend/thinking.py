@@ -88,12 +88,23 @@ def glm_prompt_reasoning_open(
     """
     if not add_generation_prompt or continue_final_message or not prompt_token_ids:
         return None
-    tail = tokenizer.decode(
-        list(prompt_token_ids[-_GLM_PROMPT_TAIL_TOKENS:]),
-        skip_special_tokens=False,
-    ).rstrip()
-    if tail.endswith(_GLM_THINK_START):
-        return True
-    if tail.endswith(_GLM_THINK_END):
-        return False
-    return None
+    tail_tokens = _GLM_PROMPT_TAIL_TOKENS
+    while True:
+        tail = tokenizer.decode(
+            list(prompt_token_ids[-tail_tokens:]),
+            skip_special_tokens=False,
+        ).rstrip()
+        if tail.endswith(_GLM_THINK_START):
+            return True
+        if tail.endswith(_GLM_THINK_END):
+            return False
+        # Whitespace can fill the window or leave only part of a marker.
+        # A window that starts inside a multibyte token can add a replacement.
+        suffix = tail.lstrip("\ufffd")
+        if tail_tokens >= len(prompt_token_ids) or (
+            suffix
+            and not _GLM_THINK_START.endswith(suffix)
+            and not _GLM_THINK_END.endswith(suffix)
+        ):
+            return None
+        tail_tokens *= 2

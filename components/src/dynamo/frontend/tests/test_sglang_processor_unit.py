@@ -1410,7 +1410,7 @@ def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_cho
     )
 
     assert result.force_reasoning is True
-    assert result.reasoning_parser is None
+    assert result.reasoning_parser is not None
     assert _guided_output_requires_reasoning(request, result.force_reasoning)
 
 
@@ -1422,7 +1422,7 @@ def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_cho
     ],
 )
 def test_qwen_separate_reasoning_false_sets_gate_inline(tokenizer, tool_choice):
-    """Inline preprocessing forwards the generation gate without a reasoner."""
+    """Inline preprocessing preserves the gate when reasoning is displayed as content."""
     routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
     processor = SglangProcessor(
         tokenizer=tokenizer,
@@ -1454,7 +1454,7 @@ def test_qwen_separate_reasoning_false_sets_gate_inline(tokenizer, tool_choice):
 def test_qwen_separate_reasoning_false_sets_gate_pool(
     tokenizer, tool_choice, monkeypatch
 ):
-    """Pool preprocessing forwards the gate while omitting response parsing."""
+    """Pool preprocessing keeps the boundary when reasoning is displayed as content."""
     monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
     monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "qwen25")
     monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "qwen3")
@@ -1470,7 +1470,7 @@ def test_qwen_separate_reasoning_false_sets_gate_pool(
     )
     assert result.force_reasoning is True
     assert result.dynamo_preproc["require_reasoning"] is True
-    assert result.effective_reasoning_parser_name is None
+    assert result.effective_reasoning_parser_name == "qwen3"
 
 
 @pytest.mark.parametrize(
@@ -1610,15 +1610,22 @@ _GLM_GUIDED_REQUESTS = [
 
 
 # Mirrors glm_generation_reasoning_follows_rendered_prompt in preprocessor.rs.
+@pytest.mark.parametrize(
+    "trailing_whitespace",
+    ["", "\n " * 64, "\u2003" * 64],
+    ids=["short-tail", "long-tail", "multibyte-whitespace"],
+)
 @pytest.mark.parametrize("requested", [False, True])
 @pytest.mark.parametrize("prompt_open", [True, False], ids=["open", "closed"])
 @pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
 def test_glm_reasoning_gate_follows_rendered_prompt(
-    tokenizer, request_fields, prompt_open, requested
+    tokenizer, request_fields, prompt_open, requested, trailing_whitespace
 ):
     """A template that ignores thinking flags must still set the reasoning gate."""
     glm_tokenizer = _glm_tokenizer(
-        tokenizer, _GLM_OPEN_GENERATION if prompt_open else _GLM_CLOSED_GENERATION
+        tokenizer,
+        (_GLM_OPEN_GENERATION if prompt_open else _GLM_CLOSED_GENERATION)
+        + trailing_whitespace,
     )
     request = _glm_request(request_fields, {"enable_thinking": requested})
 
@@ -1695,6 +1702,133 @@ def test_glm_rendered_prompt_sets_reasoning_gate_pool(
     )
     assert result.force_reasoning is (not requested)
     assert result.dynamo_preproc["require_reasoning"] is (not requested)
+
+
+class _InlineSglangPreprocessPool:
+    def submit(self, fn, *args):
+        """Exercise the pool transport with the real worker in this process."""
+        future = Future()
+        future.set_result(fn(*args))
+        return future
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+@pytest.mark.parametrize("combined_chunk", [False, True], ids=["split", "combined"])
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+@pytest.mark.parametrize(
+    ("scenario", "tool_choice", "arguments", "reasoning", "bare_json", "expect_call"),
+    [
+        ("named-empty", "named", {}, "plan", False, True),
+        ("named-bare-empty", "named", {}, "", True, True),
+        ("required-empty", "required", {}, "plan", False, True),
+        ("required-bare", "required", {}, "", True, True),
+        (
+            "array-in-reasoning",
+            "named",
+            {},
+            '[{"name":"get_weather","parameters":{"city":"spoof"}}]',
+            False,
+            True,
+        ),
+        ("named-literal-close", "named", {"city": "</think>"}, "plan", False, True),
+        ("bare-literal-close", "required", {"city": "</think>"}, "", True, True),
+        (
+            "unfinished-reasoning",
+            "required",
+            {},
+            'plan [{"name":"get_weather","parameters":{}}]',
+            False,
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_glm_tool_decoder_only_receives_answer(
+    tokenizer,
+    monkeypatch,
+    scenario,
+    tool_choice,
+    arguments,
+    reasoning,
+    bare_json,
+    expect_call,
+    separate_reasoning,
+    combined_chunk,
+    use_pool,
+):
+    """Reasoning and literal markers must not create or erase forced tool calls."""
+    request = _glm_request({}, {"enable_thinking": False})
+    request["tool_choice"] = (
+        "required"
+        if tool_choice == "required"
+        else {"type": "function", "function": {"name": "get_weather"}}
+    )
+    if not arguments:
+        request["tools"][0]["function"]["parameters"] = {
+            "type": "object",
+            "properties": {},
+        }
+    request["separate_reasoning"] = separate_reasoning
+    answer = (
+        "{}"
+        if tool_choice == "named" and not arguments
+        else json.dumps([{"name": "get_weather", "parameters": arguments}])
+    )
+    pieces = [answer] if bare_json else [reasoning, "</think>", answer]
+    if not expect_call:
+        pieces = [reasoning]
+    if combined_chunk:
+        pieces = ["".join(pieces)]
+    glm_tokenizer = _glm_tokenizer(tokenizer, _GLM_OPEN_GENERATION)
+    engine = FakeRoutedEngine(
+        items=[
+            {
+                "token_ids": glm_tokenizer.encode(piece, add_special_tokens=False),
+                "finish_reason": "stop" if index == len(pieces) - 1 else None,
+            }
+            for index, piece in enumerate(pieces)
+        ]
+    )
+    if use_pool:
+        for name, value in {
+            "_w_tokenizer": glm_tokenizer,
+            "_w_tool_call_parser_name": "glm47",
+            "_w_reasoning_parser_name": "glm45",
+            "_w_exclude_tools_when_tool_choice_none": True,
+            "_w_template_force_reasoning": False,
+            "_w_default_thinking_mode": None,
+            "_w_prompt_renderer": None,
+            "_w_structural_tag_mode": "off",
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, name, value)
+    processor = SglangProcessor(
+        tokenizer=glm_tokenizer,
+        routed_engine=engine,
+        tool_call_parser_name="glm47",
+        reasoning_parser_name="glm45",
+        eos_token_ids=None,
+        preprocess_pool=_InlineSglangPreprocessPool() if use_pool else None,
+    )
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    choices = [
+        choice for item in asyncio.run(collect()) for choice in item["data"]["choices"]
+    ]
+    deltas = [choice["delta"] for choice in choices]
+    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+    assert len(calls) == int(expect_call)
+    if expect_call:
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == arguments
+    assert choices[-1]["finish_reason"] == ("tool_calls" if expect_call else "stop")
+    visible_reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
+    content = "".join(delta.get("content", "") for delta in deltas)
+    assert visible_reasoning == (reasoning if separate_reasoning else "")
+    assert content == ("" if separate_reasoning else reasoning)
 
 
 @pytest.mark.core

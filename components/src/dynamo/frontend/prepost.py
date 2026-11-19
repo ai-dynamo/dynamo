@@ -1572,7 +1572,8 @@ class StreamingPostProcessor:
         if self.reasoning_parser is not None:
             self._reasoning_token_ids.extend(output.token_ids or [])
         if self._uses_dynamo_json_tool_call_fallback and (
-            self.reasoning_parser is None or self.reasoning_is_done
+            not isinstance(self.reasoning_parser, Glm47MoeParserReasoningAdapter)
+            or self.reasoning_is_done
         ):
             return self._process_dynamo_json_fallback_tool_calls(
                 output, content=output.text
