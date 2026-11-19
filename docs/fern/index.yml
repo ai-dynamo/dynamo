@@ -888,8 +888,12 @@ navigation:
         collapsed: true
         icon: layer-group
         slug: gpu-sharing
-        path: pages/use-cases/gpu-sharing/overview.mdx
-        contents: []
+        contents:
+          - page: Overview
+            path: pages/use-cases/gpu-sharing/overview.mdx
+          - page: Benchmark
+            slug: benchmark
+            path: pages/use-cases/gpu-sharing/benchmark.mdx
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================

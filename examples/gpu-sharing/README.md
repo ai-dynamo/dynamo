@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Many Models per GPU: Reference Manifests and Scripts
 
 This directory holds the manifests and scripts behind the
-[GPU sharing results](../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx)
+[GPU sharing results](../../docs/fern/pages/use-cases/gpu-sharing/benchmark.mdx)
 for many-model serving. It reproduces three experiments on one node with 8x A100 40GB GPUs:
 
 | Experiment | Directory | DGDs | Placement | Isolation |
@@ -157,6 +157,7 @@ Also confirm the per-worker caps:
 ## Related Documentation
 
 - [GPU Sharing](../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx)
+- [GPU Sharing Benchmark](../../docs/fern/pages/use-cases/gpu-sharing/benchmark.mdx)
 - [Deploy the Baseline Experiment](docs/deploy-baseline.md)
 - [Deploy the KAI + HAMi Experiment](docs/deploy-kai-hami.md)
 - [Build the KAI-Scheduler and GPU Fractioning Forks](docs/build-gpu-fractioning-forks.md)
