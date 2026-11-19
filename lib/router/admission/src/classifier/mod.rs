@@ -338,14 +338,16 @@ pub trait RequestClassifier: Send + 'static {
     /// with a session context always waits in its session's lane, gate or not, so a hold blocks
     /// only that session; a held lane is asked again when the gate's recheck handle fires or its
     /// hold deadline passes, not on every worker free. `None` dispatches every head the host's
-    /// own capacity checks allow.
+    /// own capacity checks allow. Experimental, as [`DispatchGate`] is.
     fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
         None
     }
 }
 
-/// One queue head the dispatch gate is asked about.
+/// One queue head the dispatch gate is asked about. Experimental, with [`DispatchGate`]; read
+/// it through its accessors, which may grow.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct DispatchHead<'a> {
     request_id: Option<&'a str>,
     session_context: Option<&'a SessionContext>,
@@ -442,6 +444,9 @@ impl std::fmt::Debug for DispatchRecheck {
 }
 
 /// Per-head admission decision consulted by the router queue at dispatch time.
+///
+/// Experimental: this contract, [`DispatchDecision`], and [`DispatchHead`] may change in a
+/// minor release while the gate has one in-tree user. Classifying without a gate is stable.
 ///
 /// The gate is the place for a policy that must hold a request after it is queued: a session
 /// admission controller, a wait for a preferred worker, a per-request fit check. The queue

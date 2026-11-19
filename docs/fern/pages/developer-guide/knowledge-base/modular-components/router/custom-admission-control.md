@@ -293,6 +293,9 @@ Use a class name from the [router policy configuration](configuration-and-tuning
 
 ### Hold Queued Requests With a Dispatch Gate
 
+> [!NOTE]
+> The dispatch gate is experimental. `DispatchGate`, `DispatchDecision`, and `DispatchHead` may change in a minor release while ThunderAgent is their only in-tree user. Classifying requests without a gate is stable.
+
 Implement `DispatchGate` and return it from `dispatch_gate`. Dynamo queues every request at once and asks the gate about each queue head before it dispatches:
 
 ```rust
