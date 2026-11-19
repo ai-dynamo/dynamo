@@ -51,6 +51,22 @@ trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
 )
 
 
+def _sglang_reports_node_listeners() -> bool:
+    """Does the installed SGLang report `DeploymentInfo.node_listeners`?
+
+    The SGLang sidecar needs that table to serve DP>1 (sgl-project/sglang#46637).
+    Like `_trtllm_serves_openengine`, this reads the package without importing
+    it, so the DP>1 case runs once the pinned image has the field.
+    """
+    spec = importlib.util.find_spec("sglang")
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    for root in locations or ():
+        api_types = pathlib.Path(root) / "api" / "v1" / "api_types.py"
+        if api_types.is_file() and "node_listeners" in api_types.read_text():
+            return True
+    return False
+
+
 def _trtllm_serves_openengine() -> bool:
     """Is the installed TensorRT-LLM new enough to serve `openengine.v1`?
 
@@ -632,6 +648,11 @@ sidecar_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.skipif(
+                not _sglang_reports_node_listeners(),
+                reason="the installed SGLang does not report "
+                "DeploymentInfo.node_listeners, which the sidecar needs for DP>1",
+            ),
         ],
         model="silence09/DeepSeek-R1-Small-2layers",
         health_check_workers=True,

@@ -2699,6 +2699,7 @@ dependencies = [
  "async-trait",
  "dynamo-kv-router",
  "fastrand",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
