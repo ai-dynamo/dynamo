@@ -1698,7 +1698,7 @@ def heartbeat_scheduler(monkeypatch):
 
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = deque()
-    stub.skipped_waiting = deque()
+    stub.kv_holding_waiting = deque()
     stub.running = []
     stub.requests = {}
     stub.finished_req_ids = set()
@@ -1733,7 +1733,7 @@ def heartbeat_scheduler(monkeypatch):
         """Remove scheduler-visible requests while batches may still be in flight."""
         aborted = list(self.waiting) + self.running
         self.waiting.clear()
-        self.skipped_waiting.clear()
+        self.kv_holding_waiting.clear()
         self.running.clear()
         return aborted
 
@@ -1756,12 +1756,15 @@ def heartbeat_scheduler(monkeypatch):
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "has_unfinished_requests",
-        lambda self: bool(self.running or self.waiting or self.skipped_waiting),
+        lambda self: bool(self.running or self.waiting or self.kv_holding_waiting),
     )
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "get_request_counts",
-        lambda self: (len(self.running), len(self.waiting) + len(self.skipped_waiting)),
+        lambda self: (
+            len(self.running),
+            len(self.waiting) + len(self.kv_holding_waiting),
+        ),
     )
 
     def heartbeat():
@@ -1932,9 +1935,7 @@ def test_waiting_abort_restores_idle_without_a_scheduled_batch(heartbeat_schedul
     assert heartbeat()[-1].is_idle()
 
 
-@pytest.mark.parametrize(
-    "queue_name", ["skipped_waiting", "kv_holding_waiting", "async_kv_waiting"]
-)
+@pytest.mark.parametrize("queue_name", ["kv_holding_waiting", "async_kv_waiting"])
 def test_secondary_waiting_queue_prevents_idle(heartbeat_scheduler, queue_name):
     """Supported vLLM secondary waiting queues contribute to heartbeats."""
     stub, _, heartbeat = heartbeat_scheduler
