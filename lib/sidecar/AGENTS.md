@@ -23,6 +23,12 @@ short version.
 | `testkit/` | Shared CPU integration tests that run real sidecars against fake engines |
 | `SUPPORT_NOTES.md` | User-visible limits; update it when you add or remove one |
 
+Each engine crate uses the same folders: `src/` for code and unit tests,
+`deploy/` for Kubernetes manifests, `launch/` for the scripts that end-to-end
+tests start, and `proto/` where the crate vendors protobuf files. We are
+investigating removing `tests/`; do not add anything to it. Do not add new
+folders.
+
 ## Writing sidecar code
 
 - **Let the engine own engine values.** Prefer values the engine reports, such
@@ -95,8 +101,7 @@ To add a backend, implement its `Protocol` adapter and fixture in
 End-to-end tests live outside `lib/sidecar`, in `tests/serve/test_sidecar.py`.
 They use the same config-and-payload format as the other serve tests
 (`tests/serve/test_vllm.py` and others). Inside `lib/sidecar`, they use only
-the `launch/*.sh` scripts they start. (`trtllm/ci/` holds a separate nightly
-image test.)
+the `launch/*.sh` scripts they start.
 
 - **Config.** Each entry in `sidecar_configs` is a `SidecarConfig`, which
   extends `EngineConfig` from `tests/utils/engine_process.py`. It names the
