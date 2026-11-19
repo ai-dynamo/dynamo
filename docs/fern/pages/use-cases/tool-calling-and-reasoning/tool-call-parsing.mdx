@@ -158,11 +158,19 @@ Returned `message.tool_calls` entries use `type: "custom"` with
 the assistant call followed by a `role: "tool"` result with its matching
 `tool_call_id`. Ordinary function tools can appear in the same request.
 
-Responses supports the same capability using its own
+The Responses API uses its own
 [custom-tool API format](https://developers.openai.com/api/docs/guides/function-calling#custom-tools).
-Custom grammar formats are rejected before generation. Streaming custom input is
-buffered until the call completes, then emitted as text in `custom.input`. This
-streamed custom delta is a Dynamo extension to the published
+It accepts `text` and regex/Lark `grammar` formats. Grammar descriptors are
+**advisory**: decoding does not enforce them. See
+[Custom-Tool Grammar Constraints](troubleshooting-tool-calls.md#custom-tool-grammar-constraints)
+for validation requirements and older frontend errors.
+
+Chat Completions accepts only the `text` custom-tool format. It rejects grammar
+formats before generation.
+
+For **Chat Completions streaming**, Dynamo buffers custom input until the call
+completes, then emits it in `custom.input`. This streamed custom delta is a
+Dynamo extension to the published
 [OpenAI Chat streaming schema](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
 The optional `tool_call_dispatch` events currently cover function tools only;
 custom calls arrive through ordinary data chunks.

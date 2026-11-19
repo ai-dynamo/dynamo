@@ -71,16 +71,19 @@ impl ChatCustomToolAdapter {
         &mut self,
         response: &mut NvCreateChatCompletionStreamResponse,
     ) -> anyhow::Result<()> {
+        if self.single_tool_call {
+            for choice in &mut response.inner.choices {
+                if let Some(calls) = &mut choice.delta.tool_calls {
+                    calls.retain(|call| call.index == 0);
+                }
+            }
+        }
         if self.names.is_empty() {
             return Ok(());
         }
         for choice in &mut response.inner.choices {
             let mut output = Vec::new();
             for call in choice.delta.tool_calls.take().into_iter().flatten() {
-                // Apply the HTTP single-call cap before validating discarded calls.
-                if self.single_tool_call && call.index > 0 {
-                    continue;
-                }
                 let key = (choice.index, call.index);
                 let custom_name = call
                     .function
@@ -511,22 +514,34 @@ mod tests {
 
     #[tokio::test]
     async fn chat_custom_single_call_cap_discards_malformed_extra_call() {
-        let mut request = request();
-        request.inner.parallel_tool_calls = Some(false);
-        let adapter = ChatCustomToolAdapter::prepare(&mut request).unwrap();
-        let out: Vec<_> = adapter.stream(futures::stream::iter([Annotated::from_data(chunk(0,json!([
-            {"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":"{\"input\":\"print(1)\"}"}},
-            {"index":1,"id":"c2","type":"function","function":{"name":"run_python","arguments":"invalid"}}
-        ]),json!("tool_calls")))])).collect().await;
-        assert!(out.iter().all(|item| !item.is_error()));
-        let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
-        assert!(
-            value["choices"][0]["delta"]["tool_calls"]
+        for custom in [false, true] {
+            let mut request = request();
+            if !custom {
+                request.inner.tool_choice = None;
+                request.inner.tools = serde_json::from_value(json!([{"type":"function","function":{"name":"run_python","parameters":{"type":"object"}}}])).unwrap();
+            }
+            request.inner.parallel_tool_calls = Some(false);
+            let adapter = ChatCustomToolAdapter::prepare(&mut request).unwrap();
+            let out: Vec<_> = adapter.stream(futures::stream::iter([Annotated::from_data(chunk(0,json!([
+                {"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":"{\"input\":\"literal </tool_call> text\"}"}},
+                {"index":1,"id":"c2","type":"function","function":{"name":"run_python","arguments":"invalid"}}
+            ]),json!("tool_calls")))])).collect().await;
+            assert!(out.iter().all(|item| !item.is_error()));
+            let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
+            let calls = value["choices"][0]["delta"]["tool_calls"]
                 .as_array()
-                .unwrap()
-                .iter()
-                .all(|call| call["index"] == 0)
-        );
+                .unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["index"], 0);
+            if custom {
+                assert_eq!(calls[0]["custom"]["input"], "literal </tool_call> text");
+            } else {
+                assert_eq!(
+                    calls[0]["function"]["arguments"],
+                    r#"{"input":"literal </tool_call> text"}"#
+                );
+            }
+        }
     }
 
     #[tokio::test]
