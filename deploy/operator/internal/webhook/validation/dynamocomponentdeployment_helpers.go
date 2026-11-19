@@ -18,12 +18,16 @@
 package validation
 
 import (
+	"context"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // invalidDynamoComponentDeploymentError converts allErrs for dcd into an API error.
@@ -67,4 +71,25 @@ func hasDynamoComponentDeploymentV1alpha1CompatibilityFields(
 		spec.EPPConfig != nil ||
 		spec.FrontendSidecar != nil ||
 		spec.Failover != nil
+}
+
+// controlledByDynamoGraphDeployment identifies DGD controller ownership, not caller authorization.
+// dcd must be non-nil.
+func controlledByDynamoGraphDeployment(dcd metav1.Object) bool {
+	owner := metav1.GetControllerOf(dcd)
+	if owner == nil || owner.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
+		return false
+	}
+	gv, err := schema.ParseGroupVersion(owner.APIVersion)
+	return err == nil && gv.Group == nvidiacomv1beta1.GroupVersion.Group
+}
+
+// operatorOwnedDCDNameExemption permits legacy child identities only for authenticated operator writes.
+// ctx and dcd must be non-nil. An empty operatorPrincipal disables the exemption.
+func operatorOwnedDCDNameExemption(ctx context.Context, dcd metav1.Object, operatorPrincipal string) bool {
+	if operatorPrincipal == "" || !controlledByDynamoGraphDeployment(dcd) {
+		return false
+	}
+	request, err := admission.RequestFromContext(ctx)
+	return err == nil && request.UserInfo.Username == operatorPrincipal
 }

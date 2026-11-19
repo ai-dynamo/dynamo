@@ -35,6 +35,25 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Generated Name Limits
+
+Admission checks the resource names and selector labels produced by the selected workload renderer.
+A single-node DCD uses its full `metadata.name` as the Pod's `nvidia.com/selector` value, limited
+to 63 characters. LeaderWorkerSet templates omit this label and use a bounded workload name.
+
+A frontend always has a component Service. Other components have one when their effective discovery
+backend is Kubernetes, the operator default. The Service uses the DCD name with dots replaced by
+hyphens and must be a DNS-1035 label: at most 63 characters, starting with a letter. For example,
+`70b-llama-production` is rejected for a frontend; `llama-production` is valid. A dotted name such
+as `model.v1` also needs an explicit valid `spec.name`, because defaulting otherwise copies
+`metadata.name` into that field. LeaderWorkerSet headless Services and enabled legacy Ingress
+backends are checked even with etcd discovery.
+
+Updates preserve an identical existing naming failure. Enabling a Service or changing the workload
+shape can introduce a new failure, which is rejected. Authenticated operator writes may retain
+legacy names for DGD-owned children so existing graphs can roll out. Removing the DGD owner rechecks
+names that were exempt. Deletion remains supported.
+
 ## Spec reference
 
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.

@@ -433,3 +433,17 @@ func difference(a, b map[string]struct{}) []string {
 	}
 	return result
 }
+
+// oldDynamoGraphDeploymentWithObservedProvider compares provider adoption under the observed lowering.
+// newDGD must be non-nil; oldDGD is nil on create. Neither input is mutated.
+func oldDynamoGraphDeploymentWithObservedProvider(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment) *nvidiacomv1beta1.DynamoGraphDeployment {
+	// Provider adoption records an existing lowering; compare both versions under that provider.
+	if oldDGD != nil && oldDGD.Annotations[consts.KubeAnnotationWorkloadProvider] == "" && newDGD.Annotations[consts.KubeAnnotationWorkloadProvider] != "" {
+		oldDGD = oldDGD.DeepCopy()
+		if oldDGD.Annotations == nil {
+			oldDGD.Annotations = make(map[string]string)
+		}
+		oldDGD.Annotations[consts.KubeAnnotationWorkloadProvider] = newDGD.Annotations[consts.KubeAnnotationWorkloadProvider]
+	}
+	return oldDGD
+}

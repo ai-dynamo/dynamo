@@ -48,6 +48,32 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Generated Name Limits
+
+Admission checks the names and selector labels produced by the selected workload renderer. The DGD
+name itself is the `nvidia.com/dynamo-graph-deployment-name` label value and is limited to 63 characters.
+Generated component names lowercase `spec.components[*].name`.
+
+Grove Pods use `<dgd>-<component>` as `nvidia.com/selector`. Outside Grove, worker DCD names add an
+eight-character hash suffix; single-node Pods use that full DCD name as their selector. Selector
+values allow at most 63 characters. LeaderWorkerSet and DisaggregatedSet Pod templates omit this
+selector, so their worker names can have a different limit.
+
+Each rendered Service name must be a DNS-1035 label: at most 63 characters, starting with a letter.
+Frontends always have a component Service; other components have one with Kubernetes discovery,
+the operator default. The corresponding Service names replace dots with hyphens. Provider headless
+Services and single-pod elastic-EP leader Services are checked independently of discovery. For
+example, an ordinary Grove PodCliqueSet whose name retains a dot produces an invalid headless
+Service name. LPX-only graphs do not create that ordinary PodCliqueSet.
+
+Errors identify the deployment or component field and the generated value. Worker hashes are shown
+as zeros in admission errors. On update, an identical failure for the same component remains allowed;
+adding a component, adding its worker hash, or enabling a Service can introduce a new failure.
+Generated resource names remain unchanged. If component rendering itself fails (for example, because
+`DYN_DEPLOYMENT_CONFIG` contains invalid JSON), new graphs and spec or annotation changes are rejected.
+Existing graphs still permit label maintenance and deletion. Repairing an unrenderable graph requires
+valid generated names: admission cannot grandfather identities it could not render from the old object.
+
 ## Grove update strategy
 
 Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. DGDs with LPX components accept only `Coherent` and `RollingRecreate`. Under `OnDelete`, running LPX Pods keep their old templates after an update; the LPX scheduler treats that drift as a lost dependency and releases the pipeline, which cannot recover until Grove replaces the Pods. Admission rejects other updates to an existing LPX DGD that still uses `OnDelete`, so remove the annotation first. Removing it changes only the strategy and does not replace Pods that already run an old template; then set a new `spec.restart.id` with `restart.strategy.type: Parallel`, or delete those Pods. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.

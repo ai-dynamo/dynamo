@@ -20,6 +20,7 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -61,8 +62,19 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
+	t.Log("Prepare legacy Ingress ownership transitions through both served API versions")
+	alphaIngressChild := alphaOwnedDCDNameForAdmission()
+	alphaIngressStandalone := alphaIngressChild.DeepCopy()
+	alphaIngressStandalone.OwnerReferences = nil
+	betaIngressChild := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, alphaIngressChild.ConvertTo(betaIngressChild))
+	betaIngressStandalone := betaIngressChild.DeepCopy()
+	betaIngressStandalone.OwnerReferences = nil
+
 	type dcdAdmissionTestCase struct {
 		name               string
+		username           string
+		lwsEnabled         bool
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
 		oldBeforeUpdate    runtime.Object
@@ -77,6 +89,57 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantRoleReplicas   map[string]int32
 	}
 	tests := []dcdAdmissionTestCase{
+		{name: "frontends keep their Service under etcd discovery", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "7frontend"
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "7frontend")}},
+
+		{name: "alpha Ingress names retain the authenticated operator exemption", username: admissionOperatorPrincipal, deployment: alphaOwnedDCDNameForAdmission()},
+		{name: "a forged owner cannot bypass alpha Ingress names", deployment: alphaOwnedDCDNameForAdmission(), wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "7b")}},
+		{name: "removing a graph owner rechecks an exempt alpha Ingress name", username: admissionOperatorPrincipal, oldDeployment: alphaIngressChild, deployment: alphaIngressStandalone, wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "7b")}},
+		{name: "removing a graph owner rechecks a preserved alpha Ingress name", username: admissionOperatorPrincipal, oldDeployment: betaIngressChild, deployment: betaIngressStandalone, wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "7b")}},
+
+		{name: "digit-leading frontend Service is rejected", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "70b-llama-production"
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		}), wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "70b-llama-production")}},
+		{name: "a 63-character component name is accepted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) { dcd.Name = strings.Repeat("a", 63) })},
+		{name: "a 64-character single-node name is rejected", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) { dcd.Name = strings.Repeat("a", 64) }), wantWebhookErrs: []string{selectorAdmissionError("metadata.name", strings.Repeat("a", 64)), serviceNameAdmissionError("metadata.name", strings.Repeat("a", 64))}},
+		{name: "an etcd worker can have a digit-leading name", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "7worker"
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "a long etcd LWS has no Deployment selector", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = strings.Repeat("a", 80)
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "LWS headless Service rejects a dotted name with etcd", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "model.v1"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "model.v1-0")}},
+		{name: "existing invalid names remain editable", seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) { dcd.Name = strings.Repeat("a", 64) }),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Name = strings.Repeat("a", 64)
+				dcd.Labels = map[string]string{"updated": "true"}
+			})},
+		{name: "enabling a Service rejects a new name failure", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "7worker"
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) { dcd.Name = "7worker" }), wantWebhookErrs: []string{serviceNameAdmissionError("metadata.name", "7worker")}},
+		{name: "authenticated operator can roll a legacy graph child", username: admissionOperatorPrincipal, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = strings.Repeat("a", 64)
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		})},
+		{name: "a forged graph owner does not bypass validation", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = strings.Repeat("a", 64)
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		}), wantWebhookErrs: []string{selectorAdmissionError("metadata.name", strings.Repeat("a", 64)), serviceNameAdmissionError("metadata.name", strings.Repeat("a", 64))}},
+
 		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
@@ -2177,9 +2240,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gates := features.Gates{Checkpoint: !tt.checkpointOff}
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, LWS: tt.lwsEnabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
+				username:           tt.username,
 				oldObject:          tt.oldDeployment,
 				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				gates:              gates,
@@ -2329,4 +2393,13 @@ func nativeDCDForAdmission(t *testing.T, alpha bool, mutate func(*nvidiacomv1bet
 		t.Fatal(err)
 	}
 	return spoke
+}
+
+func alphaOwnedDCDNameForAdmission() *nvidiacomv1alpha1.DynamoComponentDeployment {
+	return alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+		dcd.Name = "7b"
+		dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+	})
 }

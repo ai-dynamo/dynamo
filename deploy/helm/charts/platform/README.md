@@ -106,6 +106,32 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### CRD and admission breaking changes
+
+##### Generated resource names and selector labels
+
+**Change:** DGD and standalone DCD admission rejects generated names and selector values that
+Kubernetes would reject. Service names must be DNS-1035 labels: at most 63 characters, starting
+with a letter. Selector values and the DGD-name label allow at most 63 characters. Checks follow
+the selected workload's actual rendering, including worker hashes, optional discovery Services,
+and provider headless Services. Generated names remain unchanged.
+
+**Affected:** New objects and updates that introduce a new naming failure. A frontend DCD named
+`70b-llama-production`, for example, is rejected. This strict Service rule also applies on clusters
+that enable Kubernetes `RelaxedServiceNameValidation` and previously accepted digit-leading names.
+
+**Action:** Shorten the deployment or component name identified by the error, and choose a
+letter-leading name when it produces a Service. See the
+[DGD name limits](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#generated-name-limits)
+and [DCD name limits](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#generated-name-limits).
+
+**Existing deployments:** An identical existing failure remains editable when the old resources can
+be rendered, and deletion is supported. If component rendering itself fails, spec and annotation
+changes are rejected; label maintenance remains possible. Repairing an unrenderable graph requires
+valid generated names because old identities cannot be compared.
+Operator-authenticated DGD-child writes retain the exemption needed for legacy rollouts; removing
+that ownership rechecks exempt names. Creating a replacement object requires a valid name.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract
