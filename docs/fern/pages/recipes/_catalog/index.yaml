@@ -32,6 +32,7 @@ recipes:
 - qwen3-32b
 - qwen3-32b-fp8
 - nemotron-3-5-super-vl-120b-a12b
+- nemotron-3-5-super-vl-120b-a12b-certified
 - nemotron-3-5-lightning
 - cosmos3-nano-reasoner
 - cosmos3-super-reasoner

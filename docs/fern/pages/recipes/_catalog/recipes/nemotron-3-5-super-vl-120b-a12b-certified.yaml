@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: nemotron-3-5-super-vl-120b-a12b-certified
+title: Nemotron 3.5 Super VL Certified
+slug: nemotron-3-5-super-vl-certified
+page: pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b-certified.mdx
+provider: nvidia
+model:
+  name: Nemotron 3.5 Super VL 120B-A12B
+  hf_id: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+  precision: NVFP4 checkpoint, FP8 KV cache
+status: validated
+targets:
+- id: vllm-agg-b200
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - session-affinity
+  - mtp-speculative-decoding
+  - fp8-kv-cache
+  - cpu-kv-offload
+  workload:
+    type: swe-bench-pro-trace
+    sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
+  deploy:
+    asset: recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/agg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,419.88 output tok/s/GPU, 75.55 user tok/s P50, TTFT P50 0.370 s at concurrency 128 (4 workers,
+      text-only SWE-bench Pro replay, synthetic MTP acceptance 4.06; the recipe defaults to natural acceptance).
+  badge: nvidia-certified
+  certification:
+    source: nim-factory
+    ref: 01M7QFVFW5RVW2D8E6T8QTZNYJ
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+    date: "2026-11-18"
+- id: vllm-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 5
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+  topology: disaggregated
+  techniques:
+  - kv-aware-routing
+  - session-affinity
+  - mtp-speculative-decoding
+  - fp8-kv-cache
+  - disaggregated-prefill-decode
+  workload:
+    type: swe-bench-pro-trace
+    sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
+  deploy:
+    asset: recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,090.71 output tok/s/GPU, 84.63 user tok/s P50, TTFT P50 1.350 s at concurrency 128 (3P2D,
+      text-only SWE-bench Pro replay, synthetic MTP acceptance 4.06; the recipe defaults to natural acceptance).
+  badge: nvidia-certified
+  certification:
+    source: nim-factory
+    ref: 01M7QFVFW5RVW2D8E6T8QTZNYJ
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+    date: "2026-11-18"
+maintainer: Andy Henroid
+gaps:
+- The 1.7.0 enterprise images publish on NGC with the Dynamo 1.7.0 release.
+- No performance results for image and video requests; NIM Factory accuracy testing covered them.

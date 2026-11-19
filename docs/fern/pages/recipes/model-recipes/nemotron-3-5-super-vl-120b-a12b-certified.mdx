@@ -1,0 +1,158 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Nemotron 3.5 Super VL Certified"
+subtitle: "Serve Nemotron 3.5 Super VL on B200 with Dynamo 1.7.0 enterprise images, certified by NIM Factory."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below deploys NVIDIA Nemotron 3.5 Super VL with Dynamo and vLLM on B200, using only [Dynamo Enterprise Support](../../enterprise/overview.mdx) images pinned to release 1.7.0. Both targets were certified by NIM Factory; the aggregated target serves 1,419.88 output tokens/s per GPU on the text-only SWE-bench Pro trace, with synthetic MTP acceptance. Pick your serving topology. Every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4</span>
+<span><b>GPUs</b> 4x B200 (4 workers)</span>
+<span><b>Parallelism</b> TP1 per worker</span>
+<span><b>Speculative decoding</b> MTP5</span>
+<span><b>Images</b> vllm-runtime-enterprise:1.7.0, dynamo-frontend-enterprise:1.7.0</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4</span>
+<span><b>GPUs</b> 5x B200 (3P2D)</span>
+<span><b>Parallelism</b> TP1 per worker</span>
+<span><b>Speculative decoding</b> MTP5</span>
+<span><b>KV transfer</b> NIXL over UCX on RDMA</span>
+<span><b>Images</b> vllm-runtime-enterprise:1.7.0, dynamo-frontend-enterprise:1.7.0</span>
+</div>
+</div>
+
+These recipes are the certified subset of the [Nemotron 3.5 Super VL](nemotron-3-5-super-vl-120b-a12b.mdx) recipes. Commercial support covers the enterprise images, not the recipe or configurations derived from it; see [Scope Boundaries](../../enterprise/scope-boundaries.mdx).
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo platform 1.7.0 installed from the enterprise Helm chart. See [Install](../../enterprise/install.mdx).
+- A Hugging Face token with access to the checkpoint `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`.
+- Room for 16 CPUs and 16 GiB of memory for the frontend pod, and 16 CPUs and 328 GiB of memory per worker pod.
+
+<div data-variant="agg">
+
+- 4 B200 GPUs, and 64 GiB of ephemeral storage per worker pod.
+
+</div>
+
+<div data-variant="disagg">
+
+- 5 B200 GPUs, and 128 GiB of ephemeral storage per worker pod.
+- An RDMA device plugin that exposes `rdma/shared_hca`.
+
+</div>
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+## Deploy
+
+Each worker downloads the checkpoint into its own `emptyDir` volume at startup, so no model-cache PVC is needed. The startup probe waits up to 4 hours for the download.
+
+<div data-variant="agg">
+
+```bash
+export DGD=super-3-5-vllm-b200-agg-swebenchpro
+kubectl apply -f recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/agg-b200-swebenchpro/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+export DGD=super-3-5-vllm-b200-disagg-swebenchpro
+kubectl apply -f recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-b200-swebenchpro/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+## Smoke Test
+
+Forward the frontend port:
+
+```bash
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+Send a request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/nemotron-3.5-super-vl-120b-a12b","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+The model reasons before it answers. The deployment parses reasoning with `nemotron_v3` and tool calls with `qwen3_coder`.
+
+## Benchmark
+
+Use the SWE-bench Pro trace-replay workflow in [perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3.5-super-vl-120b-a12b/perf/README.md), with `ENDPOINT` set to `http://${DGD}-frontend:8000`. The benchmark Job reads the trace and tokenizer from the `shared-model-cache` PVC, which these recipes do not create; create it from the open-source recipe's [model-cache](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3.5-super-vl-120b-a12b/model-cache) manifests first.
+
+## Expected Performance
+
+Results from the NIM Factory certification runs on the SWE-bench Pro trace replay, which is text only. NIM Factory accuracy testing also covered image and video inputs; there are no performance results for image and video requests.
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr><th>Target</th><th>Concurrency</th><th>Output Tokens/s/GPU</th><th>User Output Tokens/s (P50)</th><th>TTFT P50 (ms)</th></tr>
+</thead>
+<tbody>
+<tr data-variant="agg"><td>Aggregated (4 workers)</td><td>128</td><td>1,419.88</td><td>75.55</td><td>370</td></tr>
+<tr data-variant="disagg"><td>Disaggregated (3P2D)</td><td>128</td><td>1,090.71</td><td>84.63</td><td>1,350</td></tr>
+</tbody>
+</table>
+</div>
+
+The runs used a synthetic MTP acceptance length of 4.06 with five draft tokens. The manifests default to natural acceptance; the synthetic setting is a commented line in each manifest.
+
+## Compare All Targets
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr><th>Topology</th><th>Total GPUs</th><th>Parallelism</th><th>Precision</th><th>Routing</th><th>Speculative Decoding</th><th>CPU KV Offload</th><th>Context length</th></tr>
+</thead>
+<tbody>
+<tr data-variant="agg"><td>4 workers</td><td>4</td><td>TP1 per worker</td><td>NVFP4 weights, FP8 KV</td><td>KV-aware</td><td>MTP5</td><td>200 GB per worker</td><td>1M</td></tr>
+<tr data-variant="disagg"><td>3P2D</td><td>5</td><td>TP1 per worker</td><td>NVFP4 weights, FP8 KV</td><td>KV-aware</td><td>MTP5</td><td>200 GB per prefill worker</td><td>1M</td></tr>
+</tbody>
+</table>
+</div>
+
+## Notes
+
+- The 1.7.0 enterprise images publish on NGC with the Dynamo 1.7.0 release.
+- To serve image or video requests, add `--mm-ipc-gpu-memory-gb 10` to every worker; see the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md#multimodal-workloads). NIM Factory image and video accuracy testing used this setting.
+- The disaggregated decode workers use `NixlConnector` alone, matching the open-source recipe.
+
+## Source
+
+- [Certified recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md)
+- [vLLM B200 aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/agg-b200-swebenchpro/deploy.yaml)
+- [vLLM B200 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-b200-swebenchpro/deploy.yaml)
+- [SWE-bench Pro benchmark Job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml)

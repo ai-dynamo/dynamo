@@ -978,6 +978,9 @@ navigation:
               - page: Nemotron 3.5 Super VL
                 path: pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b.mdx
                 slug: nemotron-3-5-super-vl
+              - page: Nemotron 3.5 Super VL Certified
+                path: pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b-certified.mdx
+                slug: nemotron-3-5-super-vl-certified
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
