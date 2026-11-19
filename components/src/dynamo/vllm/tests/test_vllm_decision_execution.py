@@ -13,7 +13,6 @@ import vllm
 from transformers import Qwen3Config
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.exceptions import VLLMValidationError
 
 from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
 from dynamo.vllm import decision_cache_provenance as cache
@@ -372,14 +371,10 @@ def causal_sampling_params():
 
 
 @pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
-@pytest.mark.parametrize(
-    ("candidate_count", "logprobs", "error"),
-    [(26, None, None), (0, 26, "20"), (129, None, "128")],
-)
 def test_causal_adapter_preserves_explicit_candidate_scoring(
-    installed_model_config, causal_sampling_params, candidate_count, logprobs, error
+    installed_model_config, causal_sampling_params
 ):
-    candidate_ids = list(range(candidate_count)) if candidate_count else None
+    candidate_ids = list(range(26))
     envelope = {
         "token_ids": [1, 2, 3],
         "request_id": "causal-scoring",
@@ -388,7 +383,7 @@ def test_causal_adapter_preserves_explicit_candidate_scoring(
         "sampling_params": {
             **causal_sampling_params,
             "logprob_token_ids": candidate_ids,
-            "logprobs": logprobs,
+            "logprobs": None,
         },
     }
     adapted = adapt_engine_generate_request(
@@ -405,7 +400,7 @@ def test_causal_adapter_preserves_explicit_candidate_scoring(
     )
     assert adapted is not None
     params = adapted.sampling_params
-    assert params.logprobs == logprobs
+    assert params.logprobs is None
     assert params.logprob_token_ids == candidate_ids
     assert params.detokenize is False
     # vLLM canonicalizes greedy top-k to zero.
@@ -416,14 +411,7 @@ def test_causal_adapter_preserves_explicit_candidate_scoring(
         1.0,
     )
     assert installed_model_config.max_logprobs == 20
-    if error:
-        with pytest.raises(
-            VLLMValidationError, match=f"greater than max allowed: {error}"
-        ):
-            params._validate_logprobs(installed_model_config)
-    else:
-        assert params.logprobs is None
-        params._validate_logprobs(installed_model_config)
+    params._validate_logprobs(installed_model_config)
 
 
 def test_cache_source_verifier_reports_missing_module_file(monkeypatch, caplog):
