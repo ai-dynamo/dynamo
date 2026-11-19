@@ -9,6 +9,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
 from dynamo.common.backend.logprobs import validate_sampled_logprobs
+from dynamo.llm.exceptions import WorkerUnavailable
 
 from .strict_termination import StrictRLTermination
 from .weight_transfer import WeightTransferSession
@@ -76,27 +77,54 @@ class StrictRLGenerationObserver:
         session: WeightTransferSession,
     ) -> None:
         self._session = session
-        self._version = session.require_generation()
+        try:
+            self._version = session.require_generation()
+        except ValueError as exc:
+            raise WorkerUnavailable(str(exc)) from exc
         self._template = StrictRLTermination.from_engine(
             engine, sampling_params, prompt_token_ids, request_id
         )
         self._require_logprobs = sampling_params.logprobs is not None
+        self._choice_count = sampling_params.n
         self._states: dict[int, StrictRLTermination] = {}
+        self._observed_prompt: list[int] | None = None
 
     def observe(self, response: RequestOutput) -> None:
-        self._session.require_version(self._version)
-        if tuple(response.prompt_token_ids or ()) != self._template.prompt_token_ids:
-            raise ValueError("strict RL engine prompt differs from the admitted prompt")
+        self._require_version()
+        if (
+            response.prompt_token_ids is not self._observed_prompt
+            or self._observed_prompt is None
+        ):
+            if (
+                tuple(response.prompt_token_ids or ())
+                != self._template.prompt_token_ids
+            ):
+                raise RuntimeError(
+                    "strict RL engine prompt differs from the admitted prompt"
+                )
+            self._observed_prompt = response.prompt_token_ids
         for output in response.outputs:
             index = output.index
-            state = self._states.get(index, self._template).observe(output)
-            if self._require_logprobs:
-                validate_sampled_logprobs(output)
+            if type(index) is not int or not 0 <= index < self._choice_count:
+                raise RuntimeError("strict RL received an invalid choice index")
+            try:
+                state = self._states.get(index, self._template).observe(output)
+                if self._require_logprobs:
+                    validate_sampled_logprobs(output)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
             self._states = {**self._states, index: state}
 
     def finish(self) -> None:
-        self._session.require_version(self._version)
-        if not self._states or not all(
+        if len(self._states) != self._choice_count or not all(
             state.finished for state in self._states.values()
         ):
-            raise ValueError("strict RL stream ended without terminal evidence")
+            raise RuntimeError("strict RL stream ended without terminal evidence")
+
+    def _require_version(self) -> None:
+        try:
+            self._session.require_version(self._version)
+        except ValueError as exc:
+            if self._states:
+                raise RuntimeError(str(exc)) from exc
+            raise WorkerUnavailable(str(exc)) from exc

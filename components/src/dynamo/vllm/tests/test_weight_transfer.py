@@ -21,33 +21,13 @@ def session():
     return WeightTransferSession()
 
 
-async def advance(session, through="flush"):
-    await session.pause(AsyncMock(), "abort")
-    if through == "pause":
-        return
-    await session.initialize({"init_info": {"packed": True}}, AsyncMock())
-    session.begin({"session_id": "round-1", "weight_version": "policy-1"})
-    if through == "begin":
-        return
-    await session.start({"session_id": "round-1", "seq": 0}, AsyncMock())
-    if through == "start":
-        return
-    await session.update(
-        {"session_id": "round-1", "seq": 1, "update_info": {}}, AsyncMock(), AsyncMock()
-    )
-    if through == "update":
-        return
-    await session.finish({"session_id": "round-1", "seq": 2}, AsyncMock(), AsyncMock())
-    if through == "finish":
-        return
-    await session.flush(AsyncMock(return_value=True))
-
-
 @pytest.mark.asyncio
-async def test_install_requires_finish_and_explicit_cache_reset(session):
+async def test_install_requires_finish_and_explicit_cache_reset(
+    session, advance_session
+):
     with pytest.raises(ValueError, match="installed"):
         session.require_generation()
-    await advance(session, "begin")
+    await advance_session(session, "begin")
     await session.start({"session_id": "round-1", "seq": 0}, AsyncMock())
     with pytest.raises(ValueError):
         await session.resume(AsyncMock())
@@ -85,10 +65,10 @@ async def test_install_requires_finish_and_explicit_cache_reset(session):
 )
 @pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
 async def test_dispatched_failure_permanently_latches(
-    session, phase, previous, error_type
+    session, advance_session, phase, previous, error_type
 ):
     bad = AsyncMock(side_effect=error_type())
-    await advance(session, previous)
+    await advance_session(session, previous)
     operations = {
         "initialize": lambda: session.initialize({"init_info": {}}, bad),
         "start": lambda: session.start({"session_id": "round-1", "seq": 0}, bad),
@@ -119,8 +99,10 @@ async def test_dispatched_failure_permanently_latches(
         {"session_id": "round-1", "seq": 0, "engine_rpc": "unsafe"},
     ],
 )
-async def test_start_rejects_invalid_sequence_without_dispatch(session, body):
-    await advance(session, "begin")
+async def test_start_rejects_invalid_sequence_without_dispatch(
+    session, advance_session, body
+):
+    await advance_session(session, "begin")
     rpc = AsyncMock()
     with pytest.raises(ValueError):
         await session.start(body, rpc)
@@ -139,8 +121,8 @@ async def test_init_and_cache_require_pause(session):
 
 
 @pytest.mark.asyncio
-async def test_empty_install_and_duplicate_session_rejected(session):
-    await advance(session, "begin")
+async def test_empty_install_and_duplicate_session_rejected(session, advance_session):
+    await advance_session(session, "begin")
     await session.start({"session_id": "round-1", "seq": 0}, AsyncMock())
     with pytest.raises(ValueError, match="chunk"):
         await session.finish(
@@ -151,16 +133,16 @@ async def test_empty_install_and_duplicate_session_rejected(session):
 
 
 @pytest.mark.asyncio
-async def test_false_cache_reset_is_failure(session):
-    await advance(session, "finish")
+async def test_false_cache_reset_is_failure(session, advance_session):
+    await advance_session(session, "finish")
     with pytest.raises(ValueError, match="cache"):
         await session.flush(AsyncMock(return_value=False))
     assert session.snapshot().failed is True
 
 
 @pytest.mark.asyncio
-async def test_device_sync_failure_latches_before_update_ack(session):
-    await advance(session, "start")
+async def test_device_sync_failure_latches_before_update_ack(session, advance_session):
+    await advance_session(session, "start")
     with pytest.raises(RuntimeError):
         await session.update(
             {"session_id": "round-1", "seq": 1, "update_info": {}},
@@ -186,8 +168,8 @@ def test_timeout_must_be_finite_and_positive(timeout):
 
 
 @pytest.mark.asyncio
-async def test_second_complete_round_requires_unique_identity(session):
-    await advance(session)
+async def test_second_complete_round_requires_unique_identity(session, advance_session):
+    await advance_session(session)
     for payload in (
         {"session_id": "round-1", "weight_version": "policy-2"},
         {"session_id": "round-2", "weight_version": "policy-1"},
@@ -213,8 +195,8 @@ async def test_invalid_init_never_dispatches(session, body):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_initialization_rejected(session):
-    await advance(session, "begin")
+async def test_duplicate_initialization_rejected(session, advance_session):
+    await advance_session(session, "begin")
     with pytest.raises(ValueError, match="already"):
         await session.initialize({"init_info": {}}, AsyncMock())
 
@@ -239,8 +221,10 @@ async def test_invalid_session_identity_rejected(session, field, value):
 
 
 @pytest.mark.asyncio
-async def test_invalid_update_payload_and_premature_flush_rejected(session):
-    await advance(session, "begin")
+async def test_invalid_update_payload_and_premature_flush_rejected(
+    session, advance_session
+):
+    await advance_session(session, "begin")
     with pytest.raises(ValueError):
         await session.flush(AsyncMock(return_value=True))
     await session.start({"session_id": "round-1", "seq": 0}, AsyncMock())
@@ -283,10 +267,10 @@ async def test_failed_session_can_pause_to_fence_traffic_but_never_reopen(sessio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["pause", "resume"])
-async def test_pause_resume_share_the_session_timeout(phase):
+async def test_pause_resume_share_the_session_timeout(phase, advance_session):
     session = WeightTransferSession(timeout_s=0.001)
     if phase == "resume":
-        await advance(session)
+        await advance_session(session)
         operation = session.resume(lambda: asyncio.Event().wait())
     else:
         operation = session.pause(lambda **_: asyncio.Event().wait(), "wait")
@@ -296,8 +280,10 @@ async def test_pause_resume_share_the_session_timeout(phase):
 
 
 @pytest.mark.asyncio
-async def test_installed_policy_stays_closed_until_successful_resume(session):
-    await advance(session)
+async def test_installed_policy_stays_closed_until_successful_resume(
+    session, advance_session
+):
+    await advance_session(session)
     with pytest.raises(ValueError, match="paused"):
         session.require_generation()
     with pytest.raises(RuntimeError):

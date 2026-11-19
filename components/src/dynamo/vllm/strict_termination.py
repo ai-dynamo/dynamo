@@ -9,6 +9,8 @@ from typing import Any
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 
+from dynamo.llm.exceptions import InvalidArgument
+
 try:
     from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 except ModuleNotFoundError as exc:
@@ -19,14 +21,30 @@ except ModuleNotFoundError as exc:
 
 
 @dataclass(frozen=True)
+class _Delta:
+    """Immutable chunks keep string-stop evidence without copying earlier output."""
+
+    token_ids: tuple[int, ...]
+    text: str
+    previous: "_Delta | None"
+
+
+def _deltas(history: _Delta | None):
+    while history is not None:
+        yield history
+        history = history.previous
+
+
+@dataclass(frozen=True)
 class StrictRLTermination:
     sampling_params: SamplingParams
     model_max_len: int
     prompt_token_ids: tuple[int, ...]
     request_id: str
     tokenizer: Any
-    token_ids: tuple[int, ...] = ()
-    text_parts: tuple[str, ...] = ()
+    token_count: int = 0
+    last_token: int | None = None
+    history: _Delta | None = None
     finished: bool = False
 
     @classmethod
@@ -39,21 +57,21 @@ class StrictRLTermination:
         )
         limit = engine.model_config.max_model_len
         if type(limit) is not int or limit < 1:
-            raise ValueError("strict RL requires the actual engine context limit")
+            raise RuntimeError("strict RL requires the actual engine context limit")
         if not prompt_token_ids or len(prompt_token_ids) >= limit:
-            raise ValueError(
+            raise InvalidArgument(
                 "strict RL requires a nonempty prompt below the context limit"
             )
         if effective.max_tokens is None:
             effective.max_tokens = limit - len(prompt_token_ids)
         if type(effective.max_tokens) is not int or effective.max_tokens < 1:
-            raise ValueError("strict RL requires a positive effective max_tokens")
+            raise InvalidArgument("strict RL requires a positive effective max_tokens")
         if effective.stop and (
             not effective.detokenize
             or processor.tokenizer is None
             or IncrementalDetokenizer is None
         ):
-            raise ValueError("strict RL string stops require the engine tokenizer")
+            raise InvalidArgument("strict RL string stops require the engine tokenizer")
         return cls(
             effective, limit, tuple(prompt_token_ids), request_id, processor.tokenizer
         )
@@ -68,10 +86,15 @@ class StrictRLTermination:
             raise ValueError("strict RL received invalid output text")
         state = replace(
             self,
-            token_ids=(*self.token_ids, *output.token_ids),
-            text_parts=(*self.text_parts, output.text),
+            token_count=self.token_count + len(output.token_ids),
+            last_token=output.token_ids[-1] if output.token_ids else self.last_token,
+            history=(
+                _Delta(tuple(output.token_ids), output.text, self.history)
+                if self.sampling_params.stop
+                else None
+            ),
         )
-        count = len(state.token_ids)
+        count = state.token_count
         params = self.sampling_params
         if (
             count > params.max_tokens
@@ -99,7 +122,7 @@ class StrictRLTermination:
 
     def _validate_stop(self, reason):
         params = self.sampling_params
-        if len(self.token_ids) <= params.min_tokens:
+        if self.token_count <= params.min_tokens:
             raise ValueError(
                 "strict RL stop termination lacks generated token evidence"
             )
@@ -112,16 +135,19 @@ class StrictRLTermination:
             accepted = set(params.stop_token_ids)
             if not params.ignore_eos and params.eos_token_id is not None:
                 accepted.add(params.eos_token_id)
-            if self.token_ids[-1] in accepted:
+            if self.last_token in accepted:
                 return
         elif type(reason) is int:
-            if reason in params.stop_token_ids and self.token_ids[-1] == reason:
+            if reason in params.stop_token_ids and self.last_token == reason:
                 return
         raise ValueError(
             "strict RL stop termination lacks an accepted EOS or stop token"
         )
 
     def _validate_string_stop(self, reason):
+        chunks = tuple(_deltas(self.history))
+        token_ids = [token for chunk in reversed(chunks) for token in chunk.token_ids]
+        text = "".join(chunk.text for chunk in reversed(chunks))
         request = EngineCoreRequest(
             request_id=self.request_id,
             prompt_token_ids=list(self.prompt_token_ids),
@@ -136,12 +162,11 @@ class StrictRLTermination:
         replay = IncrementalDetokenizer.from_new_request(self.tokenizer, request)
         # A string stop is detected by the frontend detokenizer, not EngineCore's
         # token-stop flag. Replaying with that flag would hide the trigger token.
-        matched = replay.update(list(self.token_ids), stop_terminated=False)
+        matched = replay.update(token_ids, stop_terminated=False)
         if (
             matched != reason
-            or replay.output_token_ids != list(self.token_ids)
-            or replay.get_next_output_text(finished=True, delta=False)
-            != "".join(self.text_parts)
+            or replay.output_token_ids != token_ids
+            or replay.get_next_output_text(finished=True, delta=False) != text
         ):
             raise ValueError(
                 "strict RL stop string does not match engine token/text evidence"
