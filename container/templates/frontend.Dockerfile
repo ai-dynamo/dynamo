@@ -72,11 +72,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
-    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    && rm -rf /var/lib/apt/lists/* \
+    && {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
