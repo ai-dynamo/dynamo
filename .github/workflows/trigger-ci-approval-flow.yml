@@ -347,7 +347,6 @@ jobs:
     concurrency:
       group: rerun-ci-${{ github.event.issue.number }}
       cancel-in-progress: false
-      queue: max
     steps:
       # issue_comment uses the default branch SHA. Never check out the PR head.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
