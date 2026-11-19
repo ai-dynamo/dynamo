@@ -43,4 +43,5 @@ tonic-build = { workspace = true }
 reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }

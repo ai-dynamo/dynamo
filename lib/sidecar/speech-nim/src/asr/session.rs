@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
+    time::Instant,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -29,7 +30,7 @@ struct OpenTurn {
     received: usize,
     // Unbounded in chunk count, bounded in bytes by validation::audio.
     audio: mpsc::UnboundedSender<Vec<u8>>,
-    closed: oneshot::Sender<()>,
+    closed: oneshot::Sender<Instant>,
     events: mpsc::Sender<Value>,
     cancelled: CancellationToken,
     finished: CancellationToken,
@@ -37,7 +38,7 @@ struct OpenTurn {
 
 impl OpenTurn {
     fn close(self) {
-        let _ = self.closed.send(());
+        let _ = self.closed.send(Instant::now());
         // Dropping the sole audio sender half-closes the gRPC request stream.
     }
 }
@@ -49,6 +50,7 @@ struct Session {
     active: Option<OpenTurn>,
     turns: JoinSet<()>,
     previous: Option<CancellationToken>,
+    configured: bool,
 }
 
 impl Session {
@@ -139,10 +141,21 @@ impl Session {
         match event["type"].as_str() {
             Some("session.update") => {
                 let response = match validation::session(&event["session"], &self.adapter.config) {
-                    Ok(()) => events::updated(event["session"].clone()),
+                    Ok(()) => {
+                        self.configured = true;
+                        events::updated(event["session"].clone())
+                    }
                     Err(message) => events::invalid("invalid_session", message, client_id),
                 };
                 self.emit(response).await;
+            }
+            Some("input_audio_buffer.append" | "input_audio_buffer.commit") if !self.configured => {
+                self.emit(events::invalid(
+                    "invalid_session",
+                    "send a valid session.update before submitting audio",
+                    client_id,
+                ))
+                .await;
             }
             Some("input_audio_buffer.append") => {
                 let Some(turn) = self.ensure_turn().await else {
@@ -255,7 +268,7 @@ pub(super) fn serve(
         let shutdown = adapter.shutdown.clone();
         let session = Session {
             adapter, control: control_tx, output: turn_tx, active: None, turns: JoinSet::new(),
-            previous: None,
+            previous: None, configured: false,
         };
         // Dropping the response stream aborts the input pump, whose JoinSet
         // then aborts every turn. No detached tasks or RPCs outlive a session.

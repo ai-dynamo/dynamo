@@ -4,7 +4,10 @@
 use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::{AsrAdapter, validation::SAMPLE_RATE};
@@ -25,7 +28,7 @@ pub(super) async fn run(
     adapter: &AsrAdapter,
     item_id: &str,
     audio: mpsc::UnboundedReceiver<Vec<u8>>,
-    mut closed: oneshot::Receiver<()>,
+    mut closed: oneshot::Receiver<Instant>,
     output: mpsc::Sender<Value>,
 ) {
     let Ok(_permit) = adapter.slots.try_acquire() else {
@@ -104,16 +107,29 @@ pub(super) async fn run(
         Ok::<_, tonic::Status>(segments.join(" "))
     };
     tokio::pin!(transcribe);
+    let deadline_exceeded =
+        || tonic::Status::deadline_exceeded("transcription completion deadline exceeded");
     let result = tokio::select! {
+        biased;
+        closed_at = &mut closed => {
+            let deadline = closed_at.unwrap_or_else(|_| Instant::now()).checked_add(adapter.config.timeout_s);
+            // A queued turn may have exhausted its budget before RPC admission.
+            match deadline {
+                Some(deadline) if deadline > Instant::now() => {
+                    match tokio::time::timeout_at(deadline, &mut transcribe).await {
+                        Ok(result) => result,
+                        Err(_) => Err(deadline_exceeded()),
+                    }
+                },
+                Some(_) => Err(deadline_exceeded()),
+                None => Err(tonic::Status::invalid_argument("transcription timeout exceeds clock range")),
+            }
+        },
         // A successful early response waits for commit, but a failed RPC must
         // free the open turn immediately so the session can recover.
         result = &mut transcribe => {
             if result.is_ok() { let _ = closed.await; }
             result
-        },
-        _ = &mut closed => match tokio::time::timeout(adapter.config.timeout_s, &mut transcribe).await {
-            Ok(result) => result,
-            Err(_) => Err(tonic::Status::deadline_exceeded("transcription completion deadline exceeded")),
         },
     };
     let event = match result {

@@ -124,19 +124,29 @@ async fn shutdown_asr(
     grace: Duration,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let shutdown = async {
-        let withdraw = withdraw.await;
-        tokio::time::sleep(grace).await;
-        let stop = drain.await;
-        withdraw.and(stop)
+    let deadline = tokio::time::sleep(timeout.saturating_add(grace));
+    tokio::pin!(deadline);
+    let withdraw = tokio::select! {
+        result = async {
+            let withdraw = withdraw.await;
+            tokio::time::sleep(grace).await;
+            withdraw
+        } => result,
+        _ = &mut deadline => {
+            tracing::warn!("ASR discovery withdrawal timed out");
+            Ok(())
+        },
     };
-    // Match Worker: discovery and drain share a budget, plus propagation grace.
-    tokio::time::timeout(timeout.saturating_add(grace), shutdown)
-        .await
-        .unwrap_or_else(|_| {
+    // Poll shutdown even if withdrawal spent the budget, so it cancels admission.
+    let stop = tokio::select! {
+        biased;
+        result = drain => result,
+        _ = &mut deadline => {
             tracing::warn!("ASR shutdown timed out; cancelling remaining sessions");
             Ok(())
-        })
+        },
+    };
+    withdraw.and(stop)
 }
 
 #[cfg(test)]
@@ -144,7 +154,7 @@ mod tests {
     use super::*;
     use std::{cell::Cell, future::pending};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn asr_shutdown_bounds_discovery_withdrawal_and_drain() {
         for is_discovery_stalled in [true, false] {
             let has_started_drain = Cell::new(false);
@@ -158,6 +168,7 @@ mod tests {
                 has_started_drain.set(true);
                 pending().await
             };
+            let started = tokio::time::Instant::now();
             tokio::time::timeout(
                 Duration::from_secs(1),
                 shutdown_asr(
@@ -170,7 +181,11 @@ mod tests {
             .await
             .expect("discovery and drain must both be bounded")
             .unwrap();
-            assert_eq!(has_started_drain.get(), !is_discovery_stalled);
+            assert!(
+                has_started_drain.get(),
+                "endpoint cancellation must always start"
+            );
+            assert_eq!(started.elapsed(), Duration::from_millis(50));
         }
     }
 }

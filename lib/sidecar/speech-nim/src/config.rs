@@ -94,7 +94,11 @@ fn duration(value: &str) -> Result<Duration, String> {
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err("seconds must be finite and positive".into());
     }
-    Duration::try_from_secs_f64(seconds).map_err(|_| "seconds are out of range".into())
+    let duration = Duration::try_from_secs_f64(seconds).map_err(|_| "seconds are out of range")?;
+    std::time::Instant::now()
+        .checked_add(duration)
+        .ok_or("seconds exceed clock range")?;
+    Ok(duration)
 }
 
 fn local_grpc_endpoint(raw: &str) -> Result<GrpcEndpoint, String> {
@@ -231,6 +235,7 @@ mod tests {
             ("asr", "--grpc-startup-deadline-secs", "0"),
             ("asr", "--timeout-s", "0"),
             ("asr", "--timeout-s", "NaN"),
+            ("asr", "--timeout-s", "1e19"),
             ("asr", "--max-concurrent-turns", "0"),
             ("asr", "--commit-padding-ms", "-1"),
             ("tts", "--sample-rate-hz", "0"),

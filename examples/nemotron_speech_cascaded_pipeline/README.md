@@ -376,6 +376,12 @@ with `--max-concurrent-turns`. Excess turns receive an immediate transcription
 failure. The Dynamo Speech NIM sidecar rejects unsupported TTS cloning and
 generation controls.
 
+For local deployments with [launch_workers.sh](https://github.com/ai-dynamo/dynamo/blob/main/examples/nemotron_speech_cascaded_pipeline/launch_workers.sh), set
+`ASR_NIM_PORT` and `TTS_NIM_PORT` to the NIM gRPC ports on localhost (defaults:
+`50152` and `50151`). If upgrading an existing launch environment, replace
+`ASR_NIM_SERVER` and `TTS_NIM_SERVER` with these port variables and unset the old
+variables before launching.
+
 ## External Orchestration
 
 Point your voice application at these endpoints through the forwarded frontend:

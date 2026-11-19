@@ -58,7 +58,7 @@ struct Session {
 }
 
 impl Session {
-    async fn start(adapter: &AsrAdapter) -> Self {
+    fn new(adapter: &AsrAdapter) -> Self {
         let (input, rx) = mpsc::unbounded_channel();
         let (tx, output) = mpsc::channel(1024);
         let context = mock_context();
@@ -71,12 +71,16 @@ impl Session {
                 }
             }
         }));
-        let mut result = Self {
+        Self {
             input,
             output,
             context,
             task,
-        };
+        }
+    }
+
+    async fn start(adapter: &AsrAdapter) -> Self {
+        let mut result = Self::new(adapter);
         result.send(session_update());
         assert_eq!(result.next().await["type"], "session.updated");
         result
@@ -330,6 +334,53 @@ async fn asr_completion_deadline_starts_after_commit() {
 }
 
 #[tokio::test]
+async fn asr_queued_turn_expires_from_commit_without_starting_rpc() {
+    let mut server = Server::start().await;
+    let mut config = server.asr_config();
+    config.timeout_s = Duration::from_secs(1);
+    let adapter = AsrAdapter::new(config, server.connection().await);
+    let mut session = Session::start(&adapter).await;
+    session.send(append());
+    let first = within(server.asr.recv()).await.unwrap();
+
+    tokio::time::pause();
+    let committed_at = tokio::time::Instant::now();
+    session.send(commit());
+    session.send(append());
+    session.send(commit());
+    // A control reply proves both commits were handled while A still owns admission.
+    session.send(session_update());
+    let mut events = Vec::new();
+    loop {
+        let event = session.next().await;
+        if event["type"] == "session.updated" {
+            break;
+        }
+        events.push(event);
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    while events.len() < 4 {
+        events.push(session.next().await);
+    }
+    assert!(tokio::time::Instant::now() <= committed_at + Duration::from_secs(2));
+    tokio::time::resume();
+    for turn in events.chunks_exact(2) {
+        assert_eq!(turn[0]["type"], "input_audio_buffer.committed");
+        assert_eq!(
+            turn[1]["type"],
+            "conversation.item.input_audio_transcription.failed"
+        );
+        assert_eq!(turn[0]["item_id"], turn[1]["item_id"]);
+    }
+    assert_ne!(events[0]["item_id"], events[2]["item_id"]);
+    within(first.responses.closed()).await;
+    assert!(
+        server.asr.try_recv().is_err(),
+        "expired queued turn reached NIM"
+    );
+}
+
+#[tokio::test]
 async fn asr_committed_turns_remain_ordered_when_next_input_arrives() {
     let mut server = Server::start().await;
     let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
@@ -463,6 +514,58 @@ async fn asr_validates_session_and_audio_without_breaking_connection() {
         session.next().await["error"]["message"],
         "input audio buffer is empty"
     );
+}
+
+#[tokio::test]
+async fn asr_requires_valid_initial_settings_and_keeps_last_valid_settings() {
+    let mut server = Server::start().await;
+    let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
+    let mut session = Session::new(&adapter);
+    let mut invalid = session_update();
+    invalid["session"]["audio"]["input"]["transcription"]["language"] = json!("de");
+    session.send(invalid.clone());
+    assert_eq!(session.next().await["error"]["code"], "invalid_session");
+    for mut event in [append(), commit()] {
+        event["event_id"] = json!("before-valid-settings");
+        session.send(event);
+        let error = session.next().await;
+        assert_eq!(error["error"]["code"], "invalid_session");
+        assert_eq!(error["error"]["event_id"], "before-valid-settings");
+    }
+    assert!(server.asr.try_recv().is_err());
+
+    session.send(session_update());
+    assert_eq!(session.next().await["type"], "session.updated");
+    // A rejected later update must not invalidate the accepted settings.
+    session.send(invalid);
+    assert_eq!(session.next().await["error"]["code"], "invalid_session");
+    session.send(append());
+    let mut call = within(server.asr.recv()).await.unwrap();
+    let config = within(call.request.get_mut().message())
+        .await
+        .unwrap()
+        .unwrap();
+    let Some(StreamingRequest::StreamingConfig(config)) = config.streaming_request else {
+        panic!("config must precede audio");
+    };
+    assert_eq!(config.config.unwrap().language_code, "en-US");
+    assert_eq!(
+        within(call.request.get_mut().message())
+            .await
+            .unwrap()
+            .unwrap()
+            .streaming_request,
+        Some(StreamingRequest::AudioContent(vec![1, 0, 2, 0]))
+    );
+    session.send(commit());
+    assert_eq!(session.next().await["type"], "input_audio_buffer.committed");
+    call.responses
+        .send(Ok(transcript("recovered", true)))
+        .await
+        .unwrap();
+    drop(call.responses);
+    assert_eq!(session.next().await["delta"], "recovered");
+    assert_eq!(session.next().await["transcript"], "recovered");
 }
 
 #[tokio::test]

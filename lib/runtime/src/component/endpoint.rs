@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use derive_builder::Builder;
@@ -283,25 +282,17 @@ impl EndpointConfigBuilder {
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
 
-            if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
-                tracing::warn!(%error, "Failed to unregister endpoint from discovery");
-            }
-
             tracing::debug!(
                 endpoint = %endpoint_name_for_cleanup,
-                "Unregistering endpoint from request plane server"
+                "Unregistering endpoint from discovery and request plane server"
             );
-
-            if let Err(e) = server_for_cleanup
-                .unregister_endpoint_instance(&endpoint_id, connection_id)
-                .await
-            {
-                tracing::warn!(
-                    endpoint = %endpoint_name_for_cleanup,
-                    error = %e,
-                    "Failed to unregister endpoint"
-                );
-            }
+            unregister_endpoint(
+                &endpoint_name_for_cleanup,
+                discovery_for_cleanup.unregister(discovery_instance),
+                server_for_cleanup.unregister_endpoint_instance(&endpoint_id, connection_id),
+                crate::runtime::graceful_shutdown_timeout(),
+            )
+            .await;
 
             if let Some(tracker) = tracker_clone {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
@@ -316,6 +307,26 @@ impl EndpointConfigBuilder {
             shutdown_token: endpoint_shutdown_token,
             task,
         })
+    }
+}
+
+async fn unregister_endpoint(
+    endpoint: &str,
+    discovery: impl Future<Output = Result<()>>,
+    drain: impl Future<Output = Result<()>>,
+    timeout: Duration,
+) {
+    // Discovery failure must not keep local admission open during shutdown.
+    let (discovery, drain) = tokio::join!(tokio::time::timeout(timeout, discovery), drain);
+    match discovery {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(endpoint, %error, "Failed to unregister endpoint from discovery")
+        }
+        Err(_) => tracing::warn!(endpoint, "Endpoint discovery cleanup timed out"),
+    }
+    if let Err(error) = drain {
+        tracing::warn!(endpoint, %error, "Failed to unregister endpoint from request plane");
     }
 }
 
@@ -479,6 +490,29 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn endpoint_cleanup_removes_local_admission_while_discovery_stalls() {
+        let removed = std::cell::Cell::new(false);
+        let cleanup = unregister_endpoint(
+            "stalled-discovery",
+            std::future::pending(),
+            async {
+                removed.set(true);
+                Ok(())
+            },
+            Duration::from_millis(10),
+        );
+        tokio::pin!(cleanup);
+        assert!(futures::poll!(&mut cleanup).is_pending());
+        assert!(
+            removed.get(),
+            "discovery must not block local endpoint removal"
+        );
+        tokio::time::timeout(Duration::from_secs(1), cleanup)
+            .await
+            .expect("discovery cleanup must be bounded");
+    }
 
     #[test]
     fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {

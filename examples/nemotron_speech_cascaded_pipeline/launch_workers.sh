@@ -23,6 +23,14 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../common/launch_utils.sh"
 
+for service in ASR TTS; do
+  legacy="${service}_NIM_SERVER"
+  if [[ -n "${!legacy:-}" ]]; then
+    echo "$legacy is no longer supported; set ${service}_NIM_PORT to the local gRPC port and unset $legacy" >&2
+    exit 1
+  fi
+done
+
 SPEECH_NIM_SIDECAR_BIN="${SPEECH_NIM_SIDECAR_BIN:-${SCRIPT_DIR}/../../target/release/dynamo-speech-nim-sidecar}"
 if ! command -v "$SPEECH_NIM_SIDECAR_BIN" >/dev/null 2>&1; then
   echo "Build the speech worker with cargo build --release --locked -p dynamo-speech-nim-sidecar, or set SPEECH_NIM_SIDECAR_BIN" >&2
