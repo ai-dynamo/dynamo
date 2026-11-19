@@ -218,10 +218,6 @@ impl GlobalCkfManifest {
         self.format
     }
 
-    pub const fn configured_lanes(&self) -> u16 {
-        self.configured_lanes
-    }
-
     pub fn pool_id(&self, lane: usize) -> Option<PoolId> {
         self.lanes.get(lane).copied().flatten()
     }
@@ -1196,7 +1192,7 @@ mod tests {
         let manifest =
             GlobalCkfManifest::new(ConsumerInstanceId::new(2), domain, format, lanes).unwrap();
 
-        assert_eq!(manifest.configured_lanes(), 0b11);
+        assert_eq!(manifest.configured_lanes, 0b11);
         assert_eq!(manifest.indexer_domain(), domain);
     }
 

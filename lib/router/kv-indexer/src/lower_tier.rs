@@ -16,6 +16,7 @@
 
 use crate::prelude::ResidencyOwnerKeyExt;
 use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -248,6 +249,10 @@ struct OwnerTable {
 struct OwnerSnapshot {
     owners: Vec<IndexedResidencyOwner>,
     ids: FxHashMap<IndexedResidencyOwner, OwnerId>,
+    /// Blocks each owner holds in this tier, index-aligned with `owners`. Only the
+    /// indexer thread that holds the owner's [`OwnerBlockState`] writes a count, so
+    /// snapshot clones share the counters and readers never lock.
+    block_counts: Vec<Arc<AtomicU64>>,
 }
 
 impl OwnerTable {
@@ -264,8 +269,14 @@ impl OwnerTable {
         let id = OwnerId(u32::try_from(next.owners.len()).expect("fewer than 2^32 owners"));
         next.owners.push(owner);
         next.ids.insert(owner, id);
+        next.block_counts.push(Arc::new(AtomicU64::new(0)));
         self.snapshot.store(Arc::new(next));
         id
+    }
+
+    /// Writer-side block counter for an interned owner.
+    fn block_count(&self, id: OwnerId) -> Arc<AtomicU64> {
+        self.snapshot.load().block_counts[id.0 as usize].clone()
     }
 
     /// Writer-side lookups; every id and owner passed here was interned.
@@ -324,7 +335,42 @@ impl<'a> OwnerView<'a> {
 struct OwnerBlockState {
     owner: ResidencyOwner,
     id: OwnerId,
+    /// This owner's counter in [`OwnerTable`], kept equal to `blocks.len()`.
+    block_count: Arc<AtomicU64>,
     blocks: OwnerBlockIndex,
+}
+
+impl OwnerBlockState {
+    fn publish_block_count(&self) {
+        self.block_count
+            .store(self.blocks.len() as u64, Ordering::Relaxed);
+    }
+}
+
+/// Reads how many blocks this tier indexes for each worker's attached cache owner.
+///
+/// Pins the owner-to-worker projection and the set of interned owners when taken;
+/// the counts themselves are read live, so two reads can differ.
+#[derive(Clone)]
+pub struct CacheOwnerBlockCounts {
+    owners: Arc<OwnerSnapshot>,
+    routing: Arc<ResidencyRoutingSnapshot>,
+}
+
+impl CacheOwnerBlockCounts {
+    /// Blocks indexed for the cache owner projected to `worker`, or None when no cache
+    /// owner is projected to it. An owner with no events yet reads 0.
+    pub fn get(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        let owner = self.routing.projection().cache_owner_of(worker)?;
+        Some(
+            self.owners
+                .ids
+                .get(&IndexedResidencyOwner::Exact(owner))
+                .map_or(0, |id| {
+                    self.owners.block_counts[id.0 as usize].load(Ordering::Relaxed)
+                }),
+        )
+    }
 }
 
 type WorkerBlockIndex = FxHashMap<IndexedResidencyOwner, OwnerBlockState>;
@@ -891,13 +937,15 @@ impl LowerTierIndexer {
     ) -> Result<(), KvCacheEventError> {
         let mut parent_hash = store_data.parent_hash;
         let indexed_owner = IndexedResidencyOwner::from_exact(owner);
-        let owner_state = worker_blocks
-            .entry(indexed_owner)
-            .or_insert_with(|| OwnerBlockState {
+        let owner_state = worker_blocks.entry(indexed_owner).or_insert_with(|| {
+            let id = self.owners.intern(indexed_owner);
+            OwnerBlockState {
                 owner,
-                id: self.owners.intern(indexed_owner),
+                id,
+                block_count: self.owners.block_count(id),
                 blocks: OwnerBlockIndex::default(),
-            });
+            }
+        });
         if owner_state.owner != owner {
             return Err(KvCacheEventError::UnsupportedResidencyDomain);
         }
@@ -940,6 +988,7 @@ impl LowerTierIndexer {
             self.lifecycle.insert(indexed_owner, block.block_hash);
             parent_hash = Some(block.block_hash);
         }
+        owner_state.publish_block_count();
         Ok(())
     }
 
@@ -969,7 +1018,8 @@ impl LowerTierIndexer {
                 self.lifecycle.remove(indexed_owner, *block_hash);
             }
 
-            worker_map.is_empty()
+            owner_state.publish_block_count();
+            owner_state.blocks.is_empty()
         };
 
         if remove_worker_entry {
@@ -1021,6 +1071,7 @@ impl LowerTierIndexer {
             return;
         }
 
+        owner_state.block_count.store(0, Ordering::Relaxed);
         for (hash, key) in owner_state.blocks {
             self.remove_owner_from_edge(key, owner_state.id, indexed_owner);
             self.lifecycle.remove(indexed_owner, hash);
@@ -1051,6 +1102,17 @@ impl LowerTierIndexer {
         dp_rank: u32,
     ) {
         self.remove_worker_dp_rank_impl(worker_blocks, WorkerWithDpRank::new(worker_id, dp_rank));
+    }
+
+    /// Per-worker cache-owner block counts for this tier under `routing`.
+    pub fn cache_owner_block_counts(
+        &self,
+        routing: Arc<ResidencyRoutingSnapshot>,
+    ) -> CacheOwnerBlockCounts {
+        CacheOwnerBlockCounts {
+            owners: self.owners.snapshot.load_full(),
+            routing,
+        }
     }
 
     pub fn root_workers(
@@ -2098,6 +2160,45 @@ mod tests {
                 .get(&worker),
             Some(&0)
         );
+    }
+
+    #[test]
+    fn cache_owner_block_counts_follow_owner_events() {
+        let attached = WorkerWithDpRank::new(7, 0);
+        let routing = || {
+            std::sync::Arc::new(ResidencyRoutingSnapshot::from_projection(projection(
+                attached,
+            )))
+        };
+        let owned = |event: RouterEvent| {
+            RouterEvent::with_cache_owner(7, event.event, StorageTier::HostPinned, cache_owner_id())
+        };
+        let mut index = TestLowerTierIndex::new();
+        let counts = index.index.cache_owner_block_counts(routing());
+        assert_eq!(counts.get(attached), Some(0));
+        assert_eq!(counts.get(WorkerWithDpRank::new(8, 0)), None);
+
+        // A repeated store and the worker's own host blocks do not count.
+        for (event_id, domain) in [
+            (1, ResidencyDomain::CacheOwner),
+            (2, ResidencyDomain::CacheOwner),
+            (3, ResidencyDomain::Worker),
+        ] {
+            let stored =
+                store_event_in_domain(7, event_id, None, &[11, 12, 13], &[101, 102, 103], domain);
+            index.apply_event(stored).unwrap();
+        }
+        // The owner was interned after `counts` was taken; a later view finds it.
+        let counts = index.index.cache_owner_block_counts(routing());
+        assert_eq!(counts.get(attached), Some(3));
+
+        let removed = remove_event(7, 4, 0, vec![ExternalSequenceBlockHash(103)]);
+        index.apply_event(owned(removed)).unwrap();
+        assert_eq!(counts.get(attached), Some(2), "counts are read live");
+
+        let cleared = router_event(7, 5, 0, KvCacheEventData::Cleared);
+        index.apply_event(owned(cleared)).unwrap();
+        assert_eq!(counts.get(attached), Some(0));
     }
 
     #[tokio::test]

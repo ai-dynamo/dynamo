@@ -318,13 +318,15 @@ async fn zero_weight_workers_do_not_bypass_queue_backpressure() {
     .unwrap();
     let current = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         control.update(RuntimePolicyUpdate::reset(0)).await.unwrap();
+        // Recheck the queue before GET can republish the disabled-worker snapshot.
+        partition.scheduler().admission_barrier().await.unwrap();
+        assert_eq!(partition.scheduler().pending_count(), 1);
         control.worker_weights(None).await.unwrap()
     })
     .await
     .unwrap();
     assert_eq!(current.weights(), changed.weights());
     assert_eq!(current.revision(), changed.revision());
-    assert_eq!(partition.scheduler().pending_count(), 1);
     control
         .worker_weights(Some(WorkerWeightUpdate::new(
             changed.revision(),
