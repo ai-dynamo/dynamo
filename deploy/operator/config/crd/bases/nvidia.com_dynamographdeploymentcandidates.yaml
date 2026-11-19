@@ -35,8 +35,7 @@ spec:
         openAPIV3Schema:
           description: |-
             DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
-            Experimental and not feature complete. Available without a feature gate; this API
-            may change incompatibly in future releases.
+            Available without a feature gate. This API is not feature complete.
           properties:
             apiVersion:
               description: |-

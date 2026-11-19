@@ -126,7 +126,9 @@ dynamo-operator:
         unsupportedDowngradeOverride: ""
 
   dgdrV1Beta2:
-    # -- EXPERIMENTAL, NOT FEATURE COMPLETE: Opt in to Planner live retune by granting every
+    # -- Legacy prerequisite for Planner live-retune RBAC. This does not gate DGDR v1beta2 API availability.
+    enabled: false
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
     # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
     # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
     # and read, create, update and delete any Lease in the namespace.

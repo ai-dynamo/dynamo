@@ -624,7 +624,7 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
-	// Experimental DGDR v1beta2 is available without an API feature gate.
+	// DGDR v1beta2 is available without an API feature gate.
 	if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
 		return err
 	}

@@ -107,7 +107,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		}
 	}
 
-	t.Log("Verify default installation serves Experimental DGDR v1beta2 with complete conversion schemas")
+	t.Log("Verify default installation serves DGDR v1beta2 with complete conversion schemas")
 	verifyInstalledDGDRV1Beta2(t, client, config)
 
 	t.Log("Verify installed schemas preserve DGD placement and keep model downloads on the private child")
