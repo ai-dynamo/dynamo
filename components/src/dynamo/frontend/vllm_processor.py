@@ -616,10 +616,10 @@ def _build_reasoning_parser_metadata(
         request_for_sampling=request_for_sampling,
     )
     if glm_open is not None:
+        # Hiding reasoning only changes the response. The worker must still
+        # wait for </think> before enforcing a tool or JSON grammar.
         return _ReasoningParserMetadata(
-            True
-            if not getattr(request_for_sampling, "include_reasoning", True)
-            else not glm_open,
+            not glm_open,
             not glm_open,
             {
                 "chat_template_kwargs": {

@@ -1011,17 +1011,20 @@ class TestReasoningParserMetadata:
         }
         assert chat_template_kwargs == {control: requested, "reasoning_effort": "low"}
 
-    def test_glm_open_prompt_keeps_include_reasoning_false_engine_hint(self, tokenizer):
-        """Hiding reasoning must preserve the worker hint while the prompt stays open."""
+    @pytest.mark.parametrize("parser_name", ["glm45", "glm47"])
+    def test_glm_open_prompt_keeps_hidden_reasoning_active(
+        self, tokenizer, parser_name
+    ):
+        """Hiding reasoning must not start the worker's grammar before </think>."""
         metadata = self._glm_metadata(
             tokenizer,
-            "glm45",
+            parser_name,
             _GLM_OPEN_PROMPT,
             {"enable_thinking": False},
             include_reasoning=False,
         )
 
-        assert metadata.engine_reasoning_ended is True
+        assert metadata.engine_reasoning_ended is False
         assert metadata.response_reasoning_ended is False
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
@@ -2245,6 +2248,14 @@ async def test_generator_inner_forwards_reasoning_parser_and_model_config(
         for choice_id, tool_choice, include_reasoning, stream_response in (
             ("plain", None, True, True),
             ("required-tool", "required", True, True),
+            ("required-tool-hidden-reasoning-stream", "required", False, True),
+            ("required-tool-hidden-reasoning-buffered", "required", False, False),
+            (
+                "named-tool-hidden-reasoning-stream",
+                {"type": "function", "function": {"name": "get_weather"}},
+                False,
+                True,
+            ),
             (
                 "named-tool-hidden-reasoning",
                 {"type": "function", "function": {"name": "get_weather"}},
@@ -2379,9 +2390,7 @@ async def test_generator_inner_follows_rendered_glm_reasoning_state(
         pass
 
     dynamo_preproc = captured["dynamo_preproc"]
-    assert dynamo_preproc["reasoning_ended"] is (
-        not prompt_open or not include_reasoning
-    )
+    assert dynamo_preproc["reasoning_ended"] is (not prompt_open)
     assert dynamo_preproc["reasoning_parser_kwargs"] == {
         "chat_template_kwargs": {
             "thinking": prompt_open,
@@ -2392,6 +2401,7 @@ async def test_generator_inner_follows_rendered_glm_reasoning_state(
     assert dynamo_preproc["output_options"]["skip_special_tokens"] is False
 
     post = captured["post"]
+    assert post.reasoning_is_done is dynamo_preproc["reasoning_ended"]
     assert post._uses_dynamo_json_tool_call_fallback is (tool_choice is not None)
     reasoning, content = "", ""
     tool_calls = []
@@ -2403,7 +2413,9 @@ async def test_generator_inner_follows_rendered_glm_reasoning_state(
             else '{"city":"Paris"}'
         )
     pieces = ["plan", "</think>", answer]
-    if tool_choice is not None and not prompt_open:
+    # Replay the worker's grammar gate: an ended state permits tool JSON first.
+    # Hidden reasoning on an open prompt must still generate the closing marker.
+    if tool_choice is not None and dynamo_preproc["reasoning_ended"]:
         pieces = [answer]
     if combined_chunk:
         pieces = ["".join(pieces)]
