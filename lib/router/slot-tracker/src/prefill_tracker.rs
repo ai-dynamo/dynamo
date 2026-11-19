@@ -258,14 +258,35 @@ impl PrefillLoadTracker {
             .anchored_prefill
             .as_ref()
             .is_some_and(|(anchored_id, _)| anchored_id == request_id);
-        if !removed_front && let Some(expected_prefill_duration) = prefill.expected_prefill_duration
-        {
-            self.shift_anchor_forward(expected_prefill_duration, decay_now);
+        if !removed_front && prefill.expected_prefill_duration.is_some() {
+            // The removal takes its own tokens' worth of progress with it. Progress left
+            // behind would be charged to the remaining prefills, including later arrivals.
+            let shift = self.anchor_time_for_tokens(prefill.initial_effective_prefill_tokens);
+            self.shift_anchor_forward(shift, decay_now);
         }
         if removed_front {
             self.set_anchor_to_front(decay_now);
         }
         Some(prefill)
+    }
+
+    /// Time the anchor's rate needs to complete `tokens`, rounded up so that a shift
+    /// by it takes back at least `tokens` of progress.
+    fn anchor_time_for_tokens(&self, tokens: usize) -> Duration {
+        let Some(PrefillLoadState {
+            initial_effective_prefill_tokens: anchor_tokens,
+            expected_prefill_duration: Some(anchor_duration),
+        }) = self.anchored_load
+        else {
+            return Duration::ZERO;
+        };
+        if anchor_tokens == 0 {
+            return Duration::ZERO;
+        }
+        let nanos = (tokens as u128)
+            .saturating_mul(anchor_duration.as_nanos())
+            .div_ceil(anchor_tokens as u128);
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
 
     fn shift_anchor_forward(&mut self, duration: Duration, max_anchor_time: Instant) {
@@ -760,9 +781,9 @@ mod tests {
     fn arrival_progress_survives_nonfront_completion_and_resets_with_new_front() {
         // Removing C shifts the anchor and bounds discarded progress. The capped
         // case leaves no elapsed progress; the partial shift leaves 20 tokens.
-        for (case, duration, remaining_tokens) in [
-            ("partial anchor shift", 10, 180),
-            ("anchor shift capped at completion", 100, 200),
+        for (case, c_tokens, remaining_tokens) in [
+            ("partial anchor shift", 100, 180),
+            ("anchor shift capped at completion", 1000, 200),
         ] {
             let epoch = Instant::now();
             let mut tracker = PrefillLoadTracker::default();
@@ -774,7 +795,7 @@ mod tests {
             );
             let next = epoch + Duration::from_millis(31);
             assert_eq!(tracker.snapshot().active_tokens_at(next), 90, "{case}");
-            tracker.insert(&"C".into(), prefill_state_ms(100, duration), next);
+            tracker.insert(&"C".into(), prefill_state_ms(c_tokens, 10), next);
             let completion = epoch + Duration::from_millis(32);
             tracker.remove(&"C".into(), completion);
             tracker.assert_consistent();
@@ -836,5 +857,48 @@ mod tests {
             300
         );
         assert_eq!(snapshot.active_tokens_at(arrival), 100);
+    }
+
+    #[test]
+    fn nonfront_removal_keeps_later_arrival_booked() {
+        // A is 100 tokens / 10 ms and stays live past its estimate. Z books at 1 ms,
+        // B books 100 tokens at `b_arrival_ms`, and Z completes 1 ms after B books.
+        for (case, z, b_arrival_ms, expected) in [
+            ("Z at the anchor's rate", prefill_state_ms(100, 10), 50, 90),
+            // Fewer than Z's 1000 tokens have decayed, so Z takes all of the progress.
+            (
+                "Z at 10x the anchor's rate",
+                prefill_state_ms(1000, 10),
+                50,
+                200,
+            ),
+            (
+                "Z at 10x, B arrives after the backlog drained",
+                prefill_state_ms(1000, 10),
+                200,
+                90,
+            ),
+            (
+                "Z at a tenth of the anchor's rate",
+                prefill_state_ms(100, 100),
+                50,
+                90,
+            ),
+        ] {
+            let epoch = Instant::now();
+            let ms = |n: u64| epoch + Duration::from_millis(n);
+            let mut tracker = PrefillLoadTracker::default();
+            tracker.insert(&"A".into(), prefill_state_ms(100, 10), ms(0));
+            tracker.insert(&"Z".into(), z, ms(1));
+            tracker.insert(&"B".into(), prefill_state_ms(100, 10), ms(b_arrival_ms));
+            let later = ms(b_arrival_ms + 1);
+            tracker.remove(&"Z".into(), later);
+            tracker.assert_consistent();
+            assert_eq!(
+                tracker.snapshot().active_tokens_at(later),
+                expected,
+                "{case}"
+            );
+        }
     }
 }
