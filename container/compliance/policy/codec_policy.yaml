@@ -17,6 +17,10 @@
 # vllm/sglang media-library cleanup. New third-party bundled media libraries must
 # be either removed or added to `exceptions` with a reason + owner — never
 # silently allowlisted.
+#
+# This scan cannot see a codec that is compiled into a Rust binary. The [bans]
+# list in the root deny.toml blocks Rust crates that carry these codecs, and the
+# pre-merge cargo-deny check enforces it. Keep the two lists in sync.
 
 # Filesystem globs (matched against absolute paths under the scan root) for
 # media-codec libraries / binaries that must not ship. libav*/libsw* are matched

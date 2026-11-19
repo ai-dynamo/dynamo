@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Stand-in for the `symphonia` facade crate, applied with [patch.crates-io] in
+# the root and lib/bindings/python manifests. llm-multimodal enables
+# `symphonia/all`, which pulls in symphonia-codec-aac, and it has no feature to
+# turn that off. This crate registers the same codecs and formats without AAC.
+# The media-codec allowlist in deny.toml bans symphonia-codec-aac.
+[package]
+name = "symphonia"
+version = "0.6.1+dynamo"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Symphonia's default codec and format registries, without AAC"
+
+[features]
+# llm-multimodal requests `all`. Every codec and format below is always on.
+all = []
+
+[dependencies]
+symphonia-core = "0.6.1"
+symphonia-bundle-flac = "0.6.1"
+symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp1", "mp2", "mp3"] }
+symphonia-codec-adpcm = "0.6.1"
+symphonia-codec-alac = "0.6.1"
+symphonia-codec-pcm = "0.6.1"
+symphonia-codec-vorbis = "0.6.1"
+symphonia-format-caf = "0.6.1"
+symphonia-format-isomp4 = "0.6.1"
+symphonia-format-mkv = "0.6.1"
+symphonia-format-ogg = "0.6.1"
+symphonia-format-riff = { version = "0.6.1", default-features = false, features = ["aiff", "wav"] }
+symphonia-metadata = { version = "0.6.1", default-features = false, features = ["ape", "id3v1", "id3v2"] }
