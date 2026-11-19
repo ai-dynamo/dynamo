@@ -926,8 +926,6 @@ impl PrefillRouter {
         Some((host, host.kv_router_if_enabled()?))
     }
 
-    /// Restrict prefill selection to workers whose required KV-transfer domain has an
-    /// available decode worker.
     fn steer_prefill_to_decode_reachable_workers(
         &self,
         request: &mut PreprocessedRequest,
@@ -1611,7 +1609,6 @@ mod tests {
         }
     }
 
-    /// A decode worker in topology zone `zone`.
     fn decode_in(zone: &str) -> ModelRuntimeConfig {
         let mut config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), zone.to_string())]),
