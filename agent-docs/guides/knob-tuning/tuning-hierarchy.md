@@ -94,7 +94,10 @@ configuration family whose condition is visible in the evidence.
 
 Use the exact engine catalog for engine-owned fields:
 [vLLM](vllm.md), [SGLang](sglang.md), or [TensorRT-LLM](tensorrt-llm.md). Use the
-[Dynamo catalog](dynamo.md) for DGD shape, routing, transport, and other Dynamo-owned controls.
+[Dynamo catalog](dynamo.md) for DGD shape, routing, transport, and other Dynamo-owned controls. None of these
+catalogs covers KVCR. For its settings, see the
+[vLLM KVCR deployment examples](../../../examples/backends/vllm/deploy/kvcr/README.md) and the
+[SGLang component README](../../../components/src/dynamo/sglang/README.md).
 
 
 ## Concurrency and Workload Overrides
