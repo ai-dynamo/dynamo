@@ -2404,7 +2404,7 @@ mod tests {
     use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_kv_hints::KvTransferCandidateSource;
+    use dynamo_kv_indexer::KvTransferCandidateSource;
     use dynamo_kv_indexer::host::RouterHintSourceMetadata;
     use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,

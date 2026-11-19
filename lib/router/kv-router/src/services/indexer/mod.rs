@@ -57,18 +57,6 @@ pub mod backend {
         pub use dynamo_kv_indexer::testing::{flush, flush_side, store_event};
     }
 }
-/// The indexer stage's lookup input at the path this service has always exposed it under.
-pub mod lookup {
-    pub use dynamo_kv_indexer::HashInput;
-}
-/// The indexer stage's routing-decision recording at the path this service has always exposed it under.
-pub mod recording {
-    pub use dynamo_kv_indexer::ApproximateRequestLease;
-}
-/// The indexer stage's session update sender at the path this service has always exposed it under.
-pub mod session_updates {
-    pub use dynamo_kv_indexer::SessionUpdateSender;
-}
 
 use crate::services::common::zmq::validate_endpoint as validate_zmq_endpoint;
 

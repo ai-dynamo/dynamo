@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"capnproto.org/go/capnp/v3"
-
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/testfixture"
 )
 
 const (
@@ -109,7 +108,7 @@ func TestEnsureCheckpointsDownloaded(t *testing.T) {
 
 func TestHybridCheckpointDownloadGatesRendering(t *testing.T) {
 	t.Log("Deploy a hybrid build whose deployment contract names a checkpoint that is still downloading")
-	child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+	child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, lpx.PipelineHybrid)
 	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry}
 	reconciler := newLPXCheckpointTestReconciler(t, registry, child, dgd)
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
@@ -144,7 +143,7 @@ func TestHybridCheckpointDownloadGatesRendering(t *testing.T) {
 
 func TestLPUOnlyBuildIgnoresItsCheckpoint(t *testing.T) {
 	t.Log("Deploy an LPU-only build whose deployment contract names a checkpoint")
-	child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpuOnly)
+	child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, lpx.PipelineSingle)
 	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry}
 	reconciler := newLPXCheckpointTestReconciler(t, registry, child, dgd)
 
@@ -159,7 +158,7 @@ func TestLPUOnlyBuildIgnoresItsCheckpoint(t *testing.T) {
 }
 
 func (r *fakeModelDownloadRegistry) EnsureCheckpointDownloaded(ctx context.Context, checkpoint *lpx.Checkpoint) (bool, error) {
-	key := lpx.CheckpointKey(checkpoint)
+	key := checkpoint.Key()
 	r.checkpointCalls = append(r.checkpointCalls, key)
 	deadline, _ := ctx.Deadline()
 	r.deadlines = append(r.deadlines, deadline)
@@ -279,7 +278,7 @@ func TestReadyCheckpointRefreshGatesAChangedCheckpoint(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Observe a Ready deployment whose stale record confirms one checkpoint")
-			child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+			child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, lpx.PipelineHybrid)
 			registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry}
 			reconciler := newLPXCheckpointTestReconciler(t, registry, child, dgd)
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
@@ -323,7 +322,7 @@ func TestPendingCheckpointKeepsReleasingAgentPods(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Publish a hybrid workload whose checkpoint is not downloaded")
 			ctx := t.Context()
-			child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+			child, dgd, baseRegistry := newLPXCheckpointTestDGD(t, lpx.PipelineHybrid)
 			registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, err: map[string]error{checkpointTestKey: test.err}}
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			r.config.Infrastructure.ModelExpressURL = checkpointTestModelExpressURL
@@ -361,7 +360,7 @@ func TestPendingCheckpointKeepsReleasingAgentPods(t *testing.T) {
 func TestPendingCheckpointHoldsAnAddedWorkload(t *testing.T) {
 	t.Log("Publish one hybrid workload whose checkpoint is downloaded")
 	ctx := t.Context()
-	_, dgd, baseRegistry := newLPXCheckpointTestDGD(t, deploymentcapnpv1.CompilationMode_lpx)
+	_, dgd, baseRegistry := newLPXCheckpointTestDGD(t, lpx.PipelineHybrid)
 	dgd.Spec.Components[0].Replicas = new(int32(1))
 	child := newLPXTestDeployment(t, dgd)
 	registry := &fakeModelDownloadRegistry{ModelRegistry: baseRegistry, ready: map[string]bool{checkpointTestKey: true}}
@@ -403,8 +402,8 @@ func TestPendingCheckpointReusesConfirmedCheckpoints(t *testing.T) {
 	t.Log("Deploy two hybrid workloads whose builds name different checkpoints")
 	const otherBuildID = "build-v1-other"
 	root := t.TempDir()
-	writeLPXCheckpointTestBuild(t, root, "build-v1", deploymentcapnpv1.CompilationMode_lpx, checkpointTestModel, checkpointTestRevision)
-	writeLPXCheckpointTestBuild(t, root, otherBuildID, deploymentcapnpv1.CompilationMode_lpx, "openai/gpt-oss-120b", "0000000000000000000000000000000000000000")
+	writeLPXCheckpointTestBuild(t, root, "build-v1", lpx.PipelineHybrid, checkpointTestModel, checkpointTestRevision)
+	writeLPXCheckpointTestBuild(t, root, otherBuildID, lpx.PipelineHybrid, "openai/gpt-oss-120b", "0000000000000000000000000000000000000000")
 	baseRegistry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
 	require.NoError(t, err)
 	dgd := loadTestDGD(t, lpx.PipelineHybrid, "build-v1")
@@ -439,19 +438,15 @@ func TestPendingCheckpointReusesConfirmedCheckpoints(t *testing.T) {
 // names the test checkpoint. The hybrid build adds a CUDA partition.
 func newLPXCheckpointTestDGD(
 	t *testing.T,
-	mode deploymentcapnpv1.CompilationMode,
+	pipeline lpx.Pipeline,
 ) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
 	const buildID = "build-v1"
 	root := t.TempDir()
-	writeLPXCheckpointTestBuild(t, root, buildID, mode, checkpointTestModel, checkpointTestRevision)
+	writeLPXCheckpointTestBuild(t, root, buildID, pipeline, checkpointTestModel, checkpointTestRevision)
 	registry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
 	require.NoError(t, err)
 
-	pipeline := lpx.PipelineSingle
-	if mode == deploymentcapnpv1.CompilationMode_lpx {
-		pipeline = lpx.PipelineHybrid
-	}
 	dgd := loadTestDGD(t, pipeline, buildID)
 	return newLPXTestDeployment(t, dgd), dgd, registry
 }
@@ -459,67 +454,23 @@ func newLPXCheckpointTestDGD(
 func writeLPXCheckpointTestBuild(
 	t *testing.T,
 	root, buildID string,
-	mode deploymentcapnpv1.CompilationMode,
+	pipeline lpx.Pipeline,
 	model, revision string,
 ) {
 	t.Helper()
-	partitionIDs := []int{7, 8}
-
-	t.Log("Encode a deployment.v1 build with one prop-sync chain and a checkpoint")
-	_, segment := capnp.NewSingleSegmentMessage(nil)
-	deployment, err := deploymentcapnpv1.NewRootDeployment(segment)
-	require.NoError(t, err)
-	deployment.SetContractRevision(deploymentcapnpv1.CurrentContractRevision)
-	config, err := deployment.NewConfig()
-	require.NoError(t, err)
-	config.SetCompilationMode(mode)
-	config.SetNumLpuNodes(uint32(len(partitionIDs) * 2))
-	program, err := config.NewProgram()
-	require.NoError(t, err)
-	program.SetBatchSize(1)
-	runtimeIO, err := config.NewRuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_fpgaRoce)
-	runtimeIO.SetIoFpgaCount(1)
-	runtimeIO.SetFanoutFactor(1)
-	chains, err := config.NewSelectedPropSyncChains(1)
-	require.NoError(t, err)
-	chainIDs, err := chains.At(0).NewPartitionIds(int32(len(partitionIDs)))
-	require.NoError(t, err)
-	for index, partitionID := range partitionIDs {
-		chainIDs.Set(index, uint32(partitionID))
+	partitions := []testfixture.Partition{
+		{ID: 7, DeviceType: commoncapnpv1.DeviceType_lpu, Architecture: deploymentcapnpv1.LpuArchitecture_lp20, DevicesPerNode: 8},
+		{ID: 8, DeviceType: commoncapnpv1.DeviceType_lpu, Architecture: deploymentcapnpv1.LpuArchitecture_lp20, DevicesPerNode: 8},
 	}
+	if pipeline == lpx.PipelineHybrid {
+		partitions = append(partitions, testfixture.Partition{ID: 2, DeviceType: commoncapnpv1.DeviceType_cuda})
+	}
+	deployment := testfixture.NewDeployment(t, partitions, connectedXTUnits(2, 7, 8), 1, 1)
 	checkpoint, err := deployment.NewCheckpoint()
 	require.NoError(t, err)
 	checkpoint.SetProvider(deploymentcapnpv1.CheckpointProvider_huggingface)
 	require.NoError(t, checkpoint.SetModel(model))
 	require.NoError(t, checkpoint.SetRevision(revision))
-
-	partitionCount := len(partitionIDs)
-	if mode == deploymentcapnpv1.CompilationMode_lpx {
-		partitionCount++
-	}
-	partitions, err := deployment.NewPartitions(int32(partitionCount))
-	require.NoError(t, err)
-	for index, partitionID := range partitionIDs {
-		ref, err := partitions.At(index).NewPartition()
-		require.NoError(t, err)
-		ref.SetDeviceType(commoncapnpv1.DeviceType_lpu)
-		ref.SetPartitionId(uint32(partitionID))
-		detail, err := partitions.At(index).Detail().NewLpu()
-		require.NoError(t, err)
-		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partitionID)))
-		require.NoError(t, detail.SetTopology("test-topology"))
-		detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp20)
-		detail.SetNumChips(16)
-		detail.SetDevicesPerNode(8)
-	}
-	if mode == deploymentcapnpv1.CompilationMode_lpx {
-		ref, err := partitions.At(len(partitionIDs)).NewPartition()
-		require.NoError(t, err)
-		ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
-		ref.SetPartitionId(uint32(len(partitionIDs)))
-	}
 
 	t.Log("Publish the build in the file registry")
 	payload, err := deployment.Message().Marshal()

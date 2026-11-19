@@ -398,6 +398,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
     dp_ranks: Mutex<Vec<Option<u32>>>,
+    elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
     fails: AtomicBool,
     unfinished: AtomicBool,
 }
@@ -416,6 +417,10 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(content.routing.as_ref().and_then(|routing| routing.dp_rank));
+        self.elapsed_since_arrival_ms
+            .lock()
+            .unwrap()
+            .push(content.elapsed_since_arrival_ms);
         self.worker_ids
             .lock()
             .unwrap()
@@ -1912,6 +1917,162 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn decode_progress_collection_follows_picker_declaration() {
+    use dynamo_kv_router::plugins::prelude::{
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+    };
+    use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+        DECODE_PROGRESS, DecodeProgressByRow,
+    };
+    use dynamo_worker_selection::host::WorkerSelectionPolicyError;
+
+    struct Probe {
+        declare: bool,
+        seen: Arc<Mutex<Option<(usize, usize)>>>,
+    }
+    impl WorkerPicker for Probe {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            if self.declare {
+                DECODE_PROGRESS
+            } else {
+                WorkerInputs::NONE
+            }
+        }
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {
+                (
+                    progress.observed_requests(),
+                    progress.remaining_token_budget(),
+                )
+            });
+            Ok(0)
+        }
+    }
+
+    for declare in [false, true] {
+        let seen = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&seen);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: true,
+            router_track_output_blocks: false,
+            ..Default::default()
+        };
+        let (router, runtime) = router_with_config_classifier_and_policy(
+            None,
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+            config,
+            None::<RecordingClassifier>,
+            SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    role.as_str(),
+                    Vec::new(),
+                    Box::new(Probe {
+                        declare,
+                        seen: Arc::clone(&capture),
+                    }),
+                )
+            })),
+        )
+        .await;
+        let mut input = request();
+        input.token_ids = vec![1; 15].into();
+        input.stop_conditions.max_tokens = Some(128);
+        input.stop_conditions.ignore_eos = Some(false);
+        input.stop_conditions.stop = Some(vec!["stop".to_string()]);
+        let input = Context::new(input);
+        let (mut selection, _) = router
+            .select_with_affinity(
+                &input,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let mut guard = track_selection(
+            &router,
+            &input,
+            &mut selection,
+            RequestPhase::Aggregated,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+        let initial_loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let initial_blocks = initial_loads[0].potential_decode_blocks;
+        for (output, expected) in [
+            (
+                LLMEngineOutput {
+                    token_ids: vec![10; 8],
+                    ..Default::default()
+                },
+                declare.then_some((1, 120)),
+            ),
+            (
+                LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Stop),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            guard.on_item(&Annotated::from_data(output)).await;
+            router
+                .kv_router()
+                .find_best_match_details_with_policy_class(
+                    None,
+                    &[1],
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(*seen.lock().unwrap(), expected);
+            let loads = router
+                .kv_router()
+                .get_potential_loads(&[], None, None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(loads[0].active_requests, 1);
+            assert_eq!(loads[0].potential_decode_blocks, initial_blocks);
+        }
+        guard.complete().await;
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(loads[0].active_requests, 0);
+        drop(router);
+        runtime.shutdown();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn output_block_accounting_tracks_grouped_chunks() {
     for (track_output_blocks, expected_output_tokens, expected_output_blocks) in
         [(true, None, 3), (true, Some(66), 3), (false, None, 0)]
@@ -2106,6 +2267,23 @@ async fn router_with_config_and_classifier(
     config: KvRouterConfig,
     classifier: Option<impl RequestClassifier>,
 ) -> (RoutingHost, Runtime) {
+    router_with_config_classifier_and_policy(
+        session_affinity_ttl,
+        workers,
+        config,
+        classifier,
+        SelectionPolicySource::Registry,
+    )
+    .await
+}
+
+async fn router_with_config_classifier_and_policy(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    config: KvRouterConfig,
+    classifier: Option<impl RequestClassifier>,
+    policy: SelectionPolicySource,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -2126,7 +2304,7 @@ async fn router_with_config_and_classifier(
         workers,
         None,
         16,
-        SelectionPolicySource::Registry,
+        policy,
         Some(config),
         None,
         "decode",
@@ -2308,6 +2486,7 @@ async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking()
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
 }
 
 #[async_trait]
@@ -2320,7 +2499,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         tokio::task::yield_now().await;
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.elapsed_since_arrival_ms
+            .lock()
+            .unwrap()
+            .push(content.elapsed_since_arrival_ms);
         self.worker_ids
             .lock()
             .unwrap()
@@ -2371,6 +2554,72 @@ async fn kv_rejects_partial_runtime_metadata_before_dispatch() {
         serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
     assert!(router.generate(Context::new(input)).await.is_err());
     assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The router stamps how long the frontend has held a request as it dispatches it, so a backend
+/// can order admission by the original arrival. A request without a tracker, one this process
+/// did not receive from a client, keeps the stamp it arrived with.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_stamps_elapsed_since_arrival() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-elapsed-since-arrival").await;
+    let tracker = Arc::new(RequestTracker::new());
+    let mut received = request();
+    received.tracker = Some(Arc::clone(&tracker));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut forwarded = request();
+    forwarded.elapsed_since_arrival_ms = Some(1234.5);
+    for input in [received, forwarded] {
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 2, "{stamps:?}");
+    assert!(
+        stamps[0].is_some_and(|ms| (5.0..=age_ms).contains(&ms)),
+        "{stamps:?}, tracker age {age_ms} ms"
+    );
+    assert_eq!(stamps[1], Some(1234.5));
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A request another router stamped crosses the wire without its tracker, and the receiving
+/// process gives it a new one. A dispatch then reports the upstream age plus the time spent
+/// here, and a retry of the stamped request does not count the first stamp again.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_adds_local_time_to_an_upstream_stamp() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-elapsed-upstream-stamp").await;
+    let mut upstream = request();
+    upstream.elapsed_since_arrival_ms = Some(1500.0);
+    let mut relayed: PreprocessedRequest =
+        serde_json::from_value(serde_json::to_value(upstream).unwrap()).unwrap();
+    assert!(relayed.tracker.is_none());
+    let tracker = Arc::clone(relayed.ensure_tracker());
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut retried = relayed.clone();
+    retried.stamp_elapsed_since_arrival();
+    for input in [relayed, retried] {
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 2, "{stamps:?}");
+    for stamp in &stamps {
+        assert!(
+            stamp.is_some_and(|ms| (1505.0..=age_ms).contains(&ms)),
+            "{stamps:?}, tracker age {age_ms} ms"
+        );
+    }
     drop(router);
     runtime.shutdown();
 }
@@ -3164,9 +3413,9 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 
     // `find_best_match_details_with_policy_class` with `update_states` is a tracked admission
     // that never calls `begin_request_lifecycle` — the same funnel as the
-    // Python bindings `best_worker` and the standalone `RouterRequest::New`
-    // path. The plugin would receive no lifecycle events for it, so admission
-    // must use the default queue inputs instead of the classifier.
+    // Python bindings `best_worker`. The plugin would receive no lifecycle
+    // events for it, so admission must use the default queue inputs instead of
+    // the classifier.
     let outcome = router
         .kv_router()
         .find_best_match_details_with_policy_class(
@@ -4342,7 +4591,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     let dispatch = Arc::new(RejectFirstDispatch::default());
     let harness =
         two_worker_migration_harness("worker-overload-migration", dispatch.clone(), None).await;
-    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+    let metrics = Arc::new(Metrics::new());
+    let migration = Migration::new(1, None, "test".to_string(), metrics.clone());
 
     let responses: Vec<_> = migration
         .generate(Context::new(request()), harness.engine.clone())
@@ -4354,6 +4604,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     assert_eq!(responses.len(), 1);
     assert!(responses[0].error.is_none());
     assert_eq!(responses[0].data.as_ref().unwrap().token_ids, vec![2]);
+    assert_eq!(metrics.get_migration_ongoing_request_count("test"), 1);
+    assert_eq!(metrics.get_migration_new_request_count("test"), 0);
     let attempts = {
         let attempts = dispatch.attempts.lock().unwrap();
         attempts.clone()
@@ -5185,6 +5437,49 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     assert_eq!(
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[live_worker]
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_dispatch_stamps_elapsed_since_arrival() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-elapsed-since-arrival")
+        .unwrap()
+        .component("workers")
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    client.wait_for_instances().await.unwrap();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
+    let tracker = Arc::new(RequestTracker::new());
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let mut stream = host.generate(Context::new(input)).await.unwrap();
+    while stream.next().await.is_some() {}
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    assert!(
+        stamps[0].is_some_and(|ms| (5.0..=age_ms).contains(&ms)),
+        "{stamps:?}, tracker age {age_ms} ms"
     );
     drop(host);
     runtime.shutdown();

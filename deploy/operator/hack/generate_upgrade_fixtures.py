@@ -267,7 +267,7 @@ def check(base=None):
             raise ValueError(
                 "Compatibility input inventory or bytes changed; regenerate through production controllers"
             )
-    for path in fixture_inputs("history"):
+    for path in fixture_inputs("history") + fixture_inputs("compatibility"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
     latest = fixture_inputs("latest")
@@ -499,17 +499,23 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
             if not captured.is_file():
                 raise ValueError(f"Capture incomplete: {relative}")
             if relative.parts[0] == "compatibility":
-                dgds = [
-                    obj
-                    for obj in yaml.safe_load_all(captured.read_text())
-                    if obj["kind"] == "DynamoGraphDeployment"
+                # A takeover must leave the recorded origin as it was: absent or its release.
+                origins = [
+                    [
+                        obj["metadata"]
+                        .get("annotations", {})
+                        .get("nvidia.com/dynamo-operator-origin-version")
+                        for obj in yaml.safe_load_all(path.read_text())
+                        if obj["kind"] == "DynamoGraphDeployment"
+                    ]
+                    for path in (original, captured)
                 ]
-                if len(dgds) != 1 or (
-                    "nvidia.com/dynamo-operator-origin-version"
-                    in dgds[0]["metadata"].get("annotations", {})
+                if (
+                    any(len(found) != 1 for found in origins)
+                    or origins[0] != origins[1]
                 ):
                     raise ValueError(
-                        f"Compatibility capture must contain exactly one DGD without an origin annotation: {relative}"
+                        f"Compatibility capture must contain exactly one DGD with its recorded origin unchanged: {relative}"
                     )
             captures[relative] = captured
         if candidate_sha:
@@ -540,11 +546,10 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 destination = stage / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(captured, destination)
-                if relative.parts[0] != "compatibility":
-                    write_golden(
-                        destination.with_name("output.yaml"),
-                        list(yaml.safe_load_all(captured.read_text())),
-                    )
+                write_golden(
+                    destination.with_name("output.yaml"),
+                    list(yaml.safe_load_all(captured.read_text())),
+                )
             # Latest describes the development tree; release capture never rewrites it.
             namespaces = set()
             for historical in (
