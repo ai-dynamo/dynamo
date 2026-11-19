@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing, asynccontextmanager, closing, nullcontext
 from typing import (
     Any,
+    AsyncGenerator,
     AsyncIterator,
     Callable,
     Dict,
@@ -1061,16 +1062,17 @@ ResponseT = TypeVar("ResponseT")
 
 
 async def _translate_vllm_client_errors(
-    generator: AsyncIterator[ResponseT],
-) -> AsyncIterator[ResponseT]:
-    """Keep request-side vLLM errors client-visible on worker endpoints."""
+    generator: AsyncGenerator[ResponseT, None],
+) -> AsyncGenerator[ResponseT, None]:
+    """Translate request-side vLLM errors and close the input generator on exit."""
     from vllm.exceptions import VLLMClientError
 
     from .errors import vllm_client_error_to_http_error
 
     try:
-        async for chunk in generator:
-            yield chunk
+        async with aclosing(generator):
+            async for chunk in generator:
+                yield chunk
     except VLLMClientError as exc:
         raise vllm_client_error_to_http_error(exc) from exc
 
@@ -3648,10 +3650,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async with (
-                aclosing(generator),
-                aclosing(_translate_vllm_client_errors(generator)) as responses,
-            ):
+            async with aclosing(_translate_vllm_client_errors(generator)) as responses:
                 extra_args = request.get("extra_args")
                 native_tito = isinstance(extra_args, dict) and "vllm_tito" in extra_args
                 if native_tito or _get_kv_transfer_params(request):

@@ -4,6 +4,7 @@
 """Cancellation must stop preprocessing before a request can enter EngineCore."""
 
 import asyncio
+from contextlib import aclosing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,7 +12,7 @@ import pytest
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.handlers import DecodeWorkerHandler
+from dynamo.vllm.handlers import DecodeWorkerHandler, _translate_vllm_client_errors
 from dynamo.vllm.multimodal_utils.request_processor import PreparedMultimodalInput
 
 pytestmark = [
@@ -23,6 +24,25 @@ pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.timeout(10),
 ]
+
+
+async def test_closing_error_translation_stream_closes_input():
+    closed = asyncio.Event()
+
+    async def generate():
+        try:
+            yield {"token_ids": [1]}
+            yield {"token_ids": [2]}
+        finally:
+            closed.set()
+
+    generator = generate()
+    try:
+        async with aclosing(_translate_vllm_client_errors(generator)) as responses:
+            assert (await anext(responses))["token_ids"] == [1]
+        assert closed.is_set()
+    finally:
+        await generator.aclose()
 
 
 @pytest.fixture(params=[DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE])
