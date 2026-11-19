@@ -20,11 +20,13 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import supports_fpm_idle_heartbeat
 from dynamo.sglang.args import Config
 from dynamo.sglang.drain_controls import (
     configure_worker_drain,
     unregister_worker_drain_controls,
 )
+from dynamo.sglang.drain_scheduler import scheduler_idle_probe
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
     gateway_child_index,
@@ -340,6 +342,11 @@ async def init_decode(
             terminal_event or shutdown_event,
             enable_admin=attached_engine is None,
             disaggregated=decode_worker_type == WorkerType.Decode,
+            scheduler_idle=(
+                scheduler_idle_probe(handler, supports_fpm_idle_heartbeat)
+                if attached_engine is None and decode_worker_type == WorkerType.Decode
+                else None
+            ),
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:
@@ -517,6 +524,11 @@ async def init_prefill(
             terminal_event or shutdown_event,
             enable_admin=attached_engine is None,
             disaggregated=True,
+            scheduler_idle=(
+                scheduler_idle_probe(handler, supports_fpm_idle_heartbeat)
+                if attached_engine is None
+                else None
+            ),
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:

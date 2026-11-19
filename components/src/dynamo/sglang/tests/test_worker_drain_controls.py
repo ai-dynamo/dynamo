@@ -9,6 +9,7 @@ import pytest
 
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.drain_controls import configure_worker_drain
+from dynamo.sglang.drain_scheduler import SchedulerIdleProbe
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -107,16 +108,17 @@ async def test_status_waits_for_ingress_and_sglang_before_reporting_drained(cont
 
 
 @pytest.mark.asyncio
-async def test_pd_drain_requires_fresh_scheduler_idle_after_a_canary(
-    controls, monkeypatch
-):
+async def test_pd_drain_requires_fresh_scheduler_idle_after_a_canary(controls):
     handler, runtime, ready, terminal = controls
     confirm = AsyncMock(side_effect=[False, True, True, True])
-    monkeypatch.setattr(
-        "dynamo.sglang.drain_controls.scheduler_idle_probe", lambda handler: confirm
-    )
     drain = configure_worker_drain(
-        handler, runtime, ready, asyncio.Event(), terminal, disaggregated=True
+        handler,
+        runtime,
+        ready,
+        asyncio.Event(),
+        terminal,
+        disaggregated=True,
+        scheduler_idle=confirm,
     )
     try:
         handler.generate_endpoint.inflight_requests.return_value = 1
@@ -156,6 +158,33 @@ async def test_pd_drain_requires_fresh_scheduler_idle_after_a_canary(
         assert (await call(runtime, "resume", "POST"))["body"]["state"] == "serving"
         response = await call(runtime, "drain", "POST")
         assert response["body"]["reason"] == "scheduler_idle_pending"
+    finally:
+        await drain.close()
+
+
+@pytest.mark.asyncio
+async def test_pd_drain_surfaces_an_unexpected_scheduler_probe_error(controls):
+    handler, runtime, ready, terminal = controls
+    read = AsyncMock(side_effect=TypeError("unexpected scheduler reply"))
+    confirm = SchedulerIdleProbe(
+        SimpleNamespace(get_internal_state=read), "ipc://unused", "7"
+    )
+    drain = configure_worker_drain(
+        handler,
+        runtime,
+        ready,
+        asyncio.Event(),
+        terminal,
+        disaggregated=True,
+        scheduler_idle=confirm,
+    )
+    try:
+        assert (await call(runtime, "drain", "POST"))["status"] == 202
+        with pytest.raises(TypeError, match="unexpected scheduler reply"):
+            await asyncio.wait_for(drain._idle_probe, 1)
+        for _ in range(2):
+            assert (await call(runtime, "status", "GET"))["status"] == 503
+        read.assert_awaited_once()
     finally:
         await drain.close()
 
@@ -222,7 +251,6 @@ async def test_quic_rejects_unpublish_without_changing_worker_state(controls):
 @pytest.mark.parametrize("disaggregated", [False, True])
 def test_unsupported_worker_does_not_expose_manual_drain(controls, disaggregated):
     handler, runtime, ready, terminal = controls
-    handler.config.server_args = SimpleNamespace(enable_forward_pass_metrics=False)
     configure_worker_drain(
         handler,
         runtime,

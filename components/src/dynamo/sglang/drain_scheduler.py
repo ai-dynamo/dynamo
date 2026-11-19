@@ -5,17 +5,19 @@
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 import zmq
 import zmq.asyncio
 
 from dynamo.common.forward_pass_metrics import decode
-from dynamo.sglang._compat import supports_fpm_idle_heartbeat
 
 logger = logging.getLogger(__name__)
 
 
-def scheduler_idle_probe(handler) -> "SchedulerIdleProbe | None":
+def scheduler_idle_probe(
+    handler, supports_idle_heartbeat: Callable[[], bool]
+) -> "SchedulerIdleProbe | None":
     args = handler.config.server_args
     if not getattr(args, "enable_forward_pass_metrics", False):
         return None
@@ -27,7 +29,7 @@ def scheduler_idle_probe(handler) -> "SchedulerIdleProbe | None":
         or args.pp_size != 1
         or getattr(args, "attn_cp_size", 1) != 1
         or args.tokenizer_worker_num != 1
-        or not supports_fpm_idle_heartbeat()
+        or not supports_idle_heartbeat()
     ):
         return None
 
@@ -93,9 +95,6 @@ class SchedulerIdleProbe:
             logger.debug(
                 "SGLang scheduler idle confirmation unavailable", exc_info=True
             )
-            return False
-        except Exception:
-            logger.warning("SGLang scheduler idle confirmation failed", exc_info=True)
             return False
 
     @staticmethod
