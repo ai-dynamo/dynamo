@@ -39,6 +39,7 @@ type TtsCall = Call<SynthesizeSpeechRequest, SynthesizeSpeechResponse>;
 #[derive(Clone)]
 struct SpeechNim {
     ready: Arc<AtomicBool>,
+    asr_models: Vec<riva_speech_recognition_config_response::Config>,
     asr: mpsc::UnboundedSender<AsrCall>,
     tts: mpsc::UnboundedSender<TtsCall>,
 }
@@ -67,14 +68,16 @@ impl riva_speech_recognition_server::RivaSpeechRecognition for SpeechNim {
 
     async fn get_riva_speech_recognition_config(
         &self,
-        _: Request<RivaSpeechRecognitionConfigRequest>,
+        request: Request<RivaSpeechRecognitionConfigRequest>,
     ) -> Result<Response<RivaSpeechRecognitionConfigResponse>, Status> {
+        let model_name = request.into_inner().model_name;
         Ok(Response::new(RivaSpeechRecognitionConfigResponse {
             model_config: if self.ready.load(Ordering::SeqCst) {
-                vec![riva_speech_recognition_config_response::Config {
-                    model_name: "asr".into(),
-                    ..Default::default()
-                }]
+                self.asr_models
+                    .iter()
+                    .filter(|model| model_name.is_empty() || model.model_name == model_name)
+                    .cloned()
+                    .collect()
             } else {
                 vec![]
             },
@@ -131,6 +134,16 @@ pub struct Server {
 
 impl Server {
     pub async fn start() -> Self {
+        Self::start_with_asr_models(vec![riva_speech_recognition_config_response::Config {
+            model_name: "asr".into(),
+            ..Default::default()
+        }])
+        .await
+    }
+
+    pub async fn start_with_asr_models(
+        asr_models: Vec<riva_speech_recognition_config_response::Config>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (asr_tx, asr) = mpsc::unbounded_channel();
@@ -138,6 +151,7 @@ impl Server {
         let ready = Arc::new(AtomicBool::new(true));
         let service = SpeechNim {
             ready: ready.clone(),
+            asr_models,
             asr: asr_tx,
             tts: tts_tx,
         };

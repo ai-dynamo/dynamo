@@ -69,7 +69,26 @@ async fn model_ready(mode: &Mode, channel: Channel) -> Result<bool, Status> {
                     model_name: config.nim_model.clone(),
                 })
                 .await?;
-            Ok(!response.into_inner().model_config.is_empty())
+            let models = response.into_inner().model_config;
+            if !config.nim_model.is_empty()
+                && models.iter().any(|model| {
+                    model.model_name == config.nim_model
+                        && (model
+                            .parameters
+                            .get("offline")
+                            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                            || model
+                                .parameters
+                                .get("type")
+                                .is_some_and(|value| value.eq_ignore_ascii_case("offline")))
+                })
+            {
+                return Err(Status::invalid_argument(format!(
+                    "Speech NIM ASR model '{}' is offline-only; realtime transcription requires a streaming model",
+                    config.nim_model
+                )));
+            }
+            Ok(!models.is_empty())
         }
         Mode::Tts(_) => {
             let response = RivaSpeechSynthesisClient::new(channel)

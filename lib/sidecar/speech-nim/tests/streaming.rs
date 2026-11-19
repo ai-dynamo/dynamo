@@ -18,7 +18,10 @@ use dynamo_speech_nim_sidecar::{
     client,
     config::Mode,
     proto::{
-        AudioEncoding, asr::streaming_recognize_request::StreamingRequest,
+        AudioEncoding,
+        asr::{
+            riva_speech_recognition_config_response, streaming_recognize_request::StreamingRequest,
+        },
         tts::SynthesizeSpeechResponse,
     },
     tts::TtsEngine,
@@ -393,6 +396,44 @@ async fn asr_validates_session_and_audio_without_breaking_connection() {
 }
 
 #[tokio::test]
+async fn asr_empty_and_duplicate_commits_preserve_client_event_ids() {
+    let mut server = Server::start().await;
+    let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
+    let mut session = Session::start(&adapter).await;
+    for client_id in [json!("empty-commit"), Value::Null] {
+        session.send(json!({"type": "input_audio_buffer.commit", "event_id": client_id}));
+        let error = session.next().await;
+        assert_eq!(error["error"]["code"], "invalid_audio");
+        assert_eq!(error["error"]["event_id"], client_id);
+    }
+    assert!(server.asr.try_recv().is_err());
+
+    session.send(append());
+    let call = within(server.asr.recv()).await.unwrap();
+    session.send(commit());
+    let committed = session.next().await;
+    assert_eq!(committed["type"], "input_audio_buffer.committed");
+    session.send(json!({"type": "input_audio_buffer.commit", "event_id": "duplicate-commit"}));
+    let error = session.next().await;
+    assert_eq!(error["error"]["code"], "invalid_audio");
+    assert_eq!(error["error"]["event_id"], "duplicate-commit");
+
+    call.responses
+        .send(Ok(transcript("completed", true)))
+        .await
+        .unwrap();
+    drop(call.responses);
+    assert_eq!(session.next().await["delta"], "completed");
+    let completed = session.next().await;
+    assert_eq!(
+        completed["type"],
+        "conversation.item.input_audio_transcription.completed"
+    );
+    assert_eq!(completed["item_id"], committed["item_id"]);
+    assert_eq!(completed["transcript"], "completed");
+}
+
+#[tokio::test]
 async fn tts_preserves_pcm_chunks_and_config() {
     let mut server = Server::start().await;
     let mut config = server.tts_config();
@@ -667,6 +708,45 @@ async fn asr_control_backpressure_does_not_block_commit_or_clear() {
         }
         session.context.kill();
     }
+}
+
+#[tokio::test]
+async fn startup_rejects_explicit_offline_asr_profiles() {
+    let models = [
+        ("offline-flag", [("streaming", "True"), ("offline", "True")]),
+        ("offline-type", [("streaming", "True"), ("type", "offline")]),
+        ("streaming", [("streaming", "True"), ("offline", "False")]),
+    ]
+    .into_iter()
+    .map(
+        |(name, parameters)| riva_speech_recognition_config_response::Config {
+            model_name: name.into(),
+            parameters: parameters
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
+        },
+    )
+    .collect();
+    let server = Server::start_with_asr_models(models).await;
+    let mut config = server.asr_config();
+    within(client::connect(&Mode::Asr(config.clone())))
+        .await
+        .unwrap();
+
+    for name in ["offline-flag", "offline-type"] {
+        config.nim_model = name.into();
+        let error = within(client::connect(&Mode::Asr(config.clone())))
+            .await
+            .err()
+            .expect("explicit offline model must fail startup");
+        let status = error.downcast_ref::<Status>().unwrap();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains(name), "{status}");
+        assert!(status.message().contains("streaming model"), "{status}");
+    }
+    config.nim_model = "streaming".into();
+    within(client::connect(&Mode::Asr(config))).await.unwrap();
 }
 
 #[tokio::test]

@@ -169,7 +169,7 @@ impl Session {
                     self.emit(events::invalid(
                         "invalid_audio",
                         "input audio buffer is empty",
-                        &Value::Null,
+                        client_id,
                     ))
                     .await;
                 }
