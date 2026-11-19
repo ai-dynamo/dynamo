@@ -197,6 +197,27 @@ def _dgd_name(case_name: str) -> str:
     return f"{prefix}-{digest}"
 
 
+def _normalize_profiler_dgd(rendered: str, case: ComparisonCase) -> str:
+    document = yaml.safe_load(rendered)
+    if not isinstance(document, dict):
+        raise TypeError("profiler output must contain one YAML mapping")
+    metadata = document.get("metadata")
+    if not isinstance(metadata, dict):
+        raise TypeError("profiler output must contain metadata")
+    generated_name = metadata.get("name")
+    if not isinstance(generated_name, str):
+        raise TypeError("profiler output metadata.name must be a string")
+    match = re.fullmatch(r"(?P<prefix>.+)-[0-9a-f]{8}", generated_name)
+    if match is None:
+        raise ValueError(
+            f"profiler output metadata.name has unexpected format: {generated_name}"
+        )
+    row = f"{case.hardware.name}/{case.name}"
+    digest = hashlib.sha1(row.encode(), usedforsecurity=False).hexdigest()[:8]
+    metadata["name"] = f"{match.group('prefix')}-{digest}"
+    return yaml.safe_dump(document, sort_keys=False)
+
+
 def _case_path(name: str) -> Path:
     name = _required_name(name, field="case", path=_CASES_ROOT)
     path = _CASES_ROOT / name
@@ -670,7 +691,9 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
             raise RuntimeError(
                 f"v1beta1 profiler succeeded without writing {final_config}"
             )
-        _write_generated_dgd(output_path, final_config.read_text())
+        _write_generated_dgd(
+            output_path, _normalize_profiler_dgd(final_config.read_text(), case)
+        )
 
 
 def _candidate_document(candidate: Any) -> dict[str, Any]:
