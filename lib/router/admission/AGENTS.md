@@ -35,7 +35,8 @@ PolicyClassQueue
 
 The scheduler supplies `QueueLane` and answers each head with a `LaneCheck`: `Dispatch`, or
 `Blocked(reason)`; a `bool` answer blocks on capacity. A head whose eligible workers are the
-class's, with no pin, allow-list, LoRA, or exclusive target, is refused as `SharedCapacity`:
+class's, with no pin, allow-list, LoRA, required taint, or exclusive target, is refused as
+`SharedCapacity`:
 every such head gets the same answer, so the group keeps its own order and a capacity recheck
 asks only its best head. Refused, nothing else is visited. Allowed, that one lane is promoted to
 the candidates as the group's stand-in and the rest stay where they are: one free slot admits

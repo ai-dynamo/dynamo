@@ -531,11 +531,11 @@ fn capacity_recheck_skips_gate_held_lanes() {
 }
 
 #[test]
-fn shared_group_stand_in_is_handed_on_when_it_leaves_without_dispatching() {
-    // Three session lanes refused as SharedCapacity; the pinned lane keeps its own reason.
+fn shared_group_stand_in_is_handed_on_when_it_is_cancelled() {
+    // Three keyed lanes refused as SharedCapacity; the pinned lane keeps its own reason.
     let mut queue = PolicyQueue::new(&edf_profile());
-    for id in 1..=3 {
-        enqueue_due(&mut queue, None, None, lane_of(id), "session");
+    for (id, payload) in [(1, "s1"), (2, "s2"), (3, "s3")] {
+        enqueue_due(&mut queue, None, None, lane_of(id), payload);
     }
     enqueue_due(
         &mut queue,
@@ -545,30 +545,30 @@ fn shared_group_stand_in_is_handed_on_when_it_leaves_without_dispatching() {
         "pinned",
     );
     let room = std::cell::Cell::new(false);
-    let predicate =
-        |_: usize, _: &PolicyClassConfig, payload: &&'static str| match (*payload, room.get()) {
-            ("session", false) => LaneCheck::Blocked(BlockReason::SharedCapacity),
-            ("session", true) => LaneCheck::Dispatch,
-            _ => LaneCheck::Blocked(BlockReason::Capacity),
-        };
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        if *payload == "pinned" {
+            LaneCheck::Blocked(BlockReason::Capacity)
+        } else if room.get() {
+            LaneCheck::Dispatch
+        } else {
+            LaneCheck::Blocked(BlockReason::SharedCapacity)
+        }
+    };
     assert!(queue.pop_next(predicate).is_none());
     assert_eq!(queue.class_blocked_lane_count(0), 4);
 
-    // Room appears: the recheck promotes the group's best head as the stand-in. Before it
-    // dispatches, a cancellation removes it (any removal rebuilds the lane indexes).
+    // Room appears: the recheck promotes lane 1, it dispatches, and lane 2 becomes the
+    // stand-in, a candidate waiting for the next pass.
     room.set(true);
     queue.recheck_blocked_lanes(RecheckScope::Capacity);
-    let (removed, _) = queue.take_if_in_class(0, |payload| *payload == "session");
-    // `take_if_in_class` removes every matching entry; put two sessions back so the group
-    // still has members, which is the state a single cancellation leaves behind.
-    assert_eq!(removed.len(), 3);
-    for id in 2..=3 {
-        enqueue_due(&mut queue, None, None, lane_of(id), "session");
-    }
-    // The dropped stand-in did not take the room with it: the next pass still dispatches a
-    // session, and the chain continues to the last one.
-    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
-    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s1");
+    assert_eq!(queue.class_blocked_lane_count(0), 2);
+
+    // The stand-in is cancelled between passes. Without a handoff lane 3 would wait for the
+    // next capacity change; with it the next pass promotes and dispatches lane 3.
+    let (removed, _) = queue.take_if_in_class(0, |payload| *payload == "s2");
+    assert_eq!(removed.len(), 1);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s3");
     assert!(queue.pop_next(predicate).is_none());
     assert_eq!(
         queue.class_lane_block_reason(0, QueueLane::Exact(WorkerWithDpRank::new(9, 0))),
@@ -578,25 +578,15 @@ fn shared_group_stand_in_is_handed_on_when_it_leaves_without_dispatching() {
 
 #[test]
 fn shared_group_stand_in_expiry_hands_the_role_on() {
-    let mut queue = PolicyQueue::new(&edf_profile());
+    // A class whose budget expires lane roots through `expiring_roots`, so an expired
+    // stand-in leaves by `pop_expiring_root`.
+    let mut queue = PolicyQueue::with_class_budget_expiry(&controlled_delay_profile());
     let now = Instant::now();
-    // Lane 1's only entry expires first; lanes 2 and 3 live on.
-    enqueue_due(
-        &mut queue,
-        Some(now + std::time::Duration::from_secs(1)),
-        None,
-        lane_of(1),
-        "session",
-    );
-    for id in 2..=3 {
-        enqueue_due(
-            &mut queue,
-            Some(now + std::time::Duration::from_secs(60)),
-            None,
-            lane_of(id),
-            "session",
-        );
-    }
+    let after = |secs| now + std::time::Duration::from_secs(secs);
+    // EDF puts lane 1 first, then lane 2, then lane 3.
+    enqueue_due(&mut queue, None, Some(after(1)), lane_of(1), "s1");
+    enqueue_due(&mut queue, None, Some(after(30)), lane_of(2), "s2");
+    enqueue_due(&mut queue, None, Some(after(60)), lane_of(3), "s3");
     let room = std::cell::Cell::new(false);
     let predicate = |_: usize, _: &PolicyClassConfig, _: &&'static str| {
         if room.get() {
@@ -608,15 +598,17 @@ fn shared_group_stand_in_expiry_hands_the_role_on() {
     assert!(queue.pop_next(predicate).is_none());
     assert_eq!(queue.class_blocked_lane_count(0), 3);
 
-    // EDF order puts lane 1 at the front of the group, so it becomes the stand-in; then it
-    // expires before the dispatch pass runs.
+    // Room appears: lane 1 dispatches and lane 2 becomes the stand-in.
     room.set(true);
     queue.recheck_blocked_lanes(RecheckScope::Capacity);
-    let expired = queue.take_expired(0, now + std::time::Duration::from_secs(2));
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s1");
+    assert_eq!(queue.class_blocked_lane_count(0), 1);
+
+    // The stand-in's only entry expires before the next pass; the role moves to lane 3.
+    let expired = queue.take_expired(0, after(31));
     assert_eq!(expired.len(), 1);
-    // The role moved to the next lane: both remaining sessions dispatch in turn.
-    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
-    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert_eq!(expired[0].payload(), &"s2");
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "s3");
     assert!(queue.pop_next(predicate).is_none());
 }
 
