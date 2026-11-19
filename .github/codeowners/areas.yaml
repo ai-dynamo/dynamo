@@ -426,7 +426,7 @@ areas:
   - DCO.md
   - LICENSE
   - SECURITY.md
-  - skills
+  - skills/
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
   path_globs:

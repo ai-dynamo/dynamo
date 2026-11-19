@@ -342,8 +342,8 @@
 # === process  (@ai-dynamo/dynamo-process-codeowners) ===
 /.ai/                                                                                                   @ai-dynamo/dynamo-process-codeowners
 /DCO.md                                                                                                 @ai-dynamo/dynamo-process-codeowners
-/skills                                                                                                 @ai-dynamo/dynamo-process-codeowners
 /LICENSE                                                                                                @ai-dynamo/dynamo-process-codeowners
+/skills/                                                                                                @ai-dynamo/dynamo-process-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners
 /.claude/                                                                                               @ai-dynamo/dynamo-process-codeowners
 /AGENTS.md                                                                                              @ai-dynamo/dynamo-process-codeowners
