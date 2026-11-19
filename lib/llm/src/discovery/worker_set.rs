@@ -215,6 +215,7 @@ pub struct WorkerSet {
 
     /// The model deployment card used to build this set's pipeline
     card: ModelDeploymentCard,
+    pub(crate) native_parser_overrides: crate::local_model::NativeParserOverrides,
 
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
@@ -272,6 +273,7 @@ impl WorkerSet {
             topology_target: None,
             mdcsum,
             card,
+            native_parser_overrides: Default::default(),
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -588,7 +590,9 @@ impl WorkerSet {
     }
 
     /// Share base-set engines, admission, and lifecycle under a LoRA model card.
-    pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
+    pub(crate) fn adapter_view(&self, mut card: ModelDeploymentCard) -> Self {
+        self.native_parser_overrides
+            .apply_parser_names(&mut card.runtime_config);
         let lora_name = card
             .lora
             .as_ref()
@@ -607,6 +611,7 @@ impl WorkerSet {
             topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
+            native_parser_overrides: Default::default(),
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),

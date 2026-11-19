@@ -29,7 +29,7 @@ use dynamo_llm::frontend_config::{
 };
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
-use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
+use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, NativeParserOverrides};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
@@ -525,6 +525,7 @@ pub(crate) struct EntrypointArgs {
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
     chat_template_defaults: ChatTemplateDefaults,
+    native_parser_overrides: NativeParserOverrides,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
@@ -545,7 +546,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None, native_tool_call_parser=None, native_reasoning_parser=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -585,6 +586,8 @@ impl EntrypointArgs {
         reject_media: Option<bool>,
         reject_media_status_code: Option<u16>,
         default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
+        native_tool_call_parser: Option<String>,
+        native_reasoning_parser: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -677,6 +680,18 @@ impl EntrypointArgs {
             );
         }
 
+        let native_parser_overrides = NativeParserOverrides {
+            tool_call_parser: native_tool_call_parser.filter(|name| !name.is_empty()),
+            reasoning_parser: native_reasoning_parser.filter(|name| !name.is_empty()),
+        };
+        if !native_parser_overrides.is_empty()
+            && (!matches!(engine_type, EngineType::Dynamic) || chat_engine_factory.is_some())
+        {
+            return Err(PyValueError::new_err(
+                "Parser overrides require the native Dynamo chat processor",
+            ));
+        }
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -692,6 +707,7 @@ impl EntrypointArgs {
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
             frontend_api_config,
             chat_template_defaults,
+            native_parser_overrides,
             tls_cert_path,
             tls_key_path,
             tls_client_ca_cert_path,
@@ -751,6 +767,7 @@ pub fn make_engine<'p>(
         builder.frontend_api_config(frontend_api_config);
     }
     builder.chat_template_defaults(args.chat_template_defaults.clone());
+    builder.native_parser_overrides(args.native_parser_overrides.clone());
     builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())

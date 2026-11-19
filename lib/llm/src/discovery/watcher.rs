@@ -30,6 +30,7 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
+    local_model::NativeParserOverrides,
     local_model::runtime_config::{
         DISAGG_PREFILL_CANCEL_ANYTIME_V1, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -218,6 +219,7 @@ pub struct ModelWatcher {
     tokenizer_backend: Option<TokenizerBackend>,
     /// Frontend-level tokenizer fallback override for discovered model cards.
     tokenizer_fallback_enabled: Option<bool>,
+    native_parser_overrides: NativeParserOverrides,
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
@@ -333,6 +335,7 @@ impl ModelWatcher {
             local_model_path: None,
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
+            native_parser_overrides: NativeParserOverrides::default(),
             generate_engine_capabilities: Vec::new(),
             systemone_enabled: false,
             plugins,
@@ -341,6 +344,10 @@ impl ModelWatcher {
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
         self.model_update_tx = Some(tx);
+    }
+
+    pub fn set_native_parser_overrides(&mut self, overrides: NativeParserOverrides) {
+        self.native_parser_overrides = overrides;
     }
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
@@ -440,6 +447,14 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        let native_parser_overrides = (self.chat_engine_factory.is_none()
+            && card.model_input == ModelInput::Tokens
+            && should_validate_parser_version(card))
+        .then_some(&self.native_parser_overrides);
+        // The preprocessor and the HTTP response parser both consume the serving card.
+        if let Some(overrides) = native_parser_overrides {
+            overrides.apply_parser_names(&mut card.runtime_config);
+        }
         validate_card_parser_version(card, self.chat_engine_factory.is_some())?;
 
         validate_policy_worker_role(card, &self.plugins)?;
@@ -488,6 +503,9 @@ impl ModelWatcher {
         // Build the WorkerSet with all applicable engines
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
+        if let Some(overrides) = native_parser_overrides {
+            worker_set.native_parser_overrides = overrides.clone();
+        }
         worker_set.set_input_policy(crate::chat_input::ChatInputPolicy::from_card(card));
         let mut tokenizer = None;
         check_unified_family_tokens(card, &mut tokenizer)?;
@@ -1757,6 +1775,77 @@ mod tests {
         }
         assert!(check_unified_family_tokens(&card, &mut None).is_err());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_parser_overrides_are_visible_to_output_parsing() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        watcher.set_native_parser_overrides(NativeParserOverrides {
+            tool_call_parser: Some("glm47".to_string()),
+            ..Default::default()
+        });
+
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.model_type = ModelType::Chat;
+        card.model_input = ModelInput::Tokens;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.runtime_config.reasoning_parser = Some("glm45".to_string());
+
+        let DiscoveryEvent::Added(discovery) =
+            discovered_card("parser-overrides", worker_id, &card)
+        else {
+            unreachable!()
+        };
+        let desired = watcher
+            .normalize(discovery, &NamespaceFilter::Global)
+            .unwrap()
+            .unwrap();
+        let spec = GroupSpec {
+            key: desired.group_key.clone(),
+            mdc_checksum: desired.mdc_checksum.clone(),
+            fingerprint: desired.mdc_checksum.clone(),
+            generation: 1,
+            video_contract: desired.video_contract.clone(),
+            representative: desired,
+        };
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
+        let prepared = watcher
+            .prepare_worker_set(&spec, admission_rx, runtime.child_token())
+            .await
+            .unwrap();
+        let worker_set = prepared.worker_set.as_ref().unwrap();
+        assert!(worker_set.chat_engine.is_some());
+        let options = worker_set.parsing_options();
+        assert_eq!(options.tool_call_parser.as_deref(), Some("glm47"));
+        assert_eq!(options.reasoning_parser.as_deref(), Some("glm45"));
+        assert_eq!(worker_set.mdcsum(), spec.mdc_checksum);
+        assert_eq!(
+            spec.representative
+                .card
+                .runtime_config
+                .tool_call_parser
+                .as_deref(),
+            Some("hermes")
+        );
+
+        runtime.shutdown();
     }
 
     #[test]

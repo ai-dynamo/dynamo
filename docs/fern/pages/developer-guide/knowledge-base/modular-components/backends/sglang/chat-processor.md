@@ -58,8 +58,13 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 
 ### Environment Variables
 
+For each parser, an explicit CLI argument takes precedence over its environment variable.
+When neither is set, Dynamo reads the parser name from the worker's model card.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DYN_TOOL_CALL_PARSER` | `None` | Same as `--tool-call-parser`. |
+| `DYN_REASONING_PARSER` | `None` | Same as `--reasoning-parser`. |
 | `DYN_ISOLATE_TOOL_CALL_MARKERS` | `false` | Same as `--isolate-tool-call-markers`. |
 | `DYN_SGLANG_STREAM_INTERVAL` | `20` | Number of tokens to accumulate before detokenizing. Higher values improve throughput. The first chunk always emits immediately (interval=1) to minimize time-to-first-token. |
 

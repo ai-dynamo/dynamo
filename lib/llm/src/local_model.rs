@@ -53,6 +53,28 @@ fn self_host_metadata_default(value: Option<&str>) -> bool {
         .unwrap_or(true)
 }
 
+/// Frontend-local overrides for chat preprocessing and output parsing.
+#[derive(Clone, Debug, Default)]
+pub struct NativeParserOverrides {
+    pub tool_call_parser: Option<String>,
+    pub reasoning_parser: Option<String>,
+}
+
+impl NativeParserOverrides {
+    pub(crate) fn apply_parser_names(&self, runtime: &mut ModelRuntimeConfig) {
+        if let Some(parser) = &self.tool_call_parser {
+            runtime.tool_call_parser = Some(parser.clone());
+        }
+        if let Some(parser) = &self.reasoning_parser {
+            runtime.reasoning_parser = Some(parser.clone());
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tool_call_parser.is_none() && self.reasoning_parser.is_none()
+    }
+}
+
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
@@ -68,6 +90,7 @@ pub struct LocalModelBuilder {
     batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    native_parser_overrides: NativeParserOverrides,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
@@ -95,6 +118,7 @@ impl Default for LocalModelBuilder {
             batch_gateway_url: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
+            native_parser_overrides: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             tls_client_ca_cert_path: Default::default(),
@@ -189,6 +213,11 @@ impl LocalModelBuilder {
 
     pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
         self.frontend_api_config = frontend_api_config;
+        self
+    }
+
+    pub fn native_parser_overrides(&mut self, overrides: NativeParserOverrides) -> &mut Self {
+        self.native_parser_overrides = overrides;
         self
     }
 
@@ -387,6 +416,7 @@ impl LocalModelBuilder {
                 batch_gateway_url: self.batch_gateway_url.take(),
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
+                native_parser_overrides: self.native_parser_overrides.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
@@ -451,6 +481,7 @@ impl LocalModelBuilder {
             batch_gateway_url: self.batch_gateway_url.take(),
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
+            native_parser_overrides: self.native_parser_overrides.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
@@ -477,6 +508,7 @@ pub struct LocalModel {
     batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    native_parser_overrides: NativeParserOverrides,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
@@ -638,6 +670,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn native_parser_overrides(&self) -> &NativeParserOverrides {
+        &self.native_parser_overrides
     }
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
