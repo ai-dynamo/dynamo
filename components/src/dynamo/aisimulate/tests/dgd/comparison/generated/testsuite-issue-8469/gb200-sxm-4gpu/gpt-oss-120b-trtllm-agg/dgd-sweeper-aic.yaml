@@ -25,7 +25,7 @@ spec:
               name: hf-token-secret
   - name: TRTLLMWorker
     type: worker
-    replicas: 1
+    replicas: 2
     podTemplate:
       spec:
         containers:
@@ -38,11 +38,11 @@ spec:
           - dynamo.trtllm
           args:
           - --tensor-parallel-size
-          - '4'
+          - '2'
           - --pipeline-parallel-size
           - '1'
           - --expert-parallel-size
-          - '4'
+          - '2'
           - --max-batch-size
           - '512'
           - --max-num-tokens
@@ -52,7 +52,7 @@ spec:
           - --trtllm.moe_tensor_parallel_size
           - '1'
           - --trtllm.moe_config.backend
-          - WIDEEP
+          - AUTO
           - --trtllm.kv_cache_config.dtype
           - auto
           - --trtllm.kv_cache_config.tokens_per_block
@@ -73,10 +73,10 @@ spec:
           - 'true'
           resources:
             limits:
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '2'
             requests:
               ephemeral-storage: 2Gi
-              nvidia.com/gpu: '4'
+              nvidia.com/gpu: '2'
           envFrom:
           - secretRef:
               name: hf-token-secret

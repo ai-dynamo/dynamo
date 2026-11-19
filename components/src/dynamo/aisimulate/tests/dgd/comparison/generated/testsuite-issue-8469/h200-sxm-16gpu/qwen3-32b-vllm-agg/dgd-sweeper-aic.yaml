@@ -23,7 +23,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmDecodeWorker
+  - name: worker
     type: worker
     replicas: 2
     podTemplate:
@@ -45,6 +45,8 @@ spec:
           - '1'
           - --block-size
           - '64'
+          - --gpu-memory-utilization
+          - '0.9'
           - --max-num-seqs
           - '512'
           - --max-num-batched-tokens
@@ -567,7 +569,7 @@ spec:
           - --served-model-name
           - Qwen/Qwen3-32B
           - --max-model-len
-          - '40960'
+          - '131072'
           resources:
             limits:
               nvidia.com/gpu: '4'
