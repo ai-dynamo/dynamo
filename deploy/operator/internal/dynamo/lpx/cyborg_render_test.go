@@ -247,11 +247,11 @@ func TestHybridCyborgBindingsPrecedeAuthoredReferences(t *testing.T) {
 			}
 
 			t.Log("Publish the operator bindings before references while preserving other bindings")
-			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}))
+			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}, nil))
 			require.Equal(t, test.want, cyborg.Spec.PodSpec.Containers[0].Env)
 
 			t.Log("Repeat rendering without duplicating or reordering environment bindings")
-			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}))
+			require.NoError(t, configureHybridCyborg(cyborg, projection, "digest", "/models", []string{testAgentTemplateName}, nil))
 			require.Equal(t, test.want, cyborg.Spec.PodSpec.Containers[0].Env)
 		})
 	}

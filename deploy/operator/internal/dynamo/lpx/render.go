@@ -8,7 +8,6 @@ package lpx
 import (
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -294,14 +293,4 @@ func roleAnnotations(base map[string]string, role string, workloadDigest string)
 	annotations[WorkloadDigestAnnotation] = workloadDigest
 	annotations[lpxv1alpha1.PodRoleAnnotation] = role
 	return annotations
-}
-
-// prependEnv puts operator-owned variables first and removes authored entries
-// with the same names. Kubernetes expands references in order, so authored
-// variables can refer to them.
-func prependEnv(container *corev1.Container, vars ...corev1.EnvVar) {
-	authored := slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool {
-		return slices.ContainsFunc(vars, func(owned corev1.EnvVar) bool { return owned.Name == variable.Name })
-	})
-	container.Env = slices.Concat(vars, authored)
 }

@@ -23,6 +23,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// renderStoredEnvironment passes a persisted DCD's sources through the shared renderer.
+// Controller tests cover adapter-specific origin propagation and workload selection.
+func renderStoredEnvironment(dcd *v1beta1.DynamoComponentDeployment, config *configv1alpha1.OperatorConfiguration, role Role) (*corev1.PodSpec, error) {
+	backend, err := GetBackendFrameworkFromDynamoComponent(dcd)
+	if err != nil {
+		return nil, err
+	}
+	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
+	return GenerateBasePodSpec(component, backend, nil, dcd.GetParentGraphDeploymentName(), dcd.Namespace,
+		role, component.GetNumberOfNodes(), config, commonconsts.MultinodeDeploymentTypeLWS, GetDCDComponentName(dcd), nil,
+		staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env,
+			KVTransferPolicy: DCDKVTransferPolicyEnvironment(dcd, component)})
+}
+
 func TestEnvironmentLayersThroughDCD(t *testing.T) {
 	for _, origin := range []string{"1.8.0", "1.7.0", "1.6.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
@@ -59,7 +73,7 @@ func TestEnvironmentLayersThroughDCD(t *testing.T) {
 			t.Log("Grove and the DCD/LWS entrypoint must produce the same effective environment")
 			grovePod, err := GeneratePodSpecForComponent(&component, BackendFrameworkVLLM, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
 			require.NoError(t, err)
-			lwsPod, err := GenerateBasePodSpecForController(child, nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			lwsPod, err := renderStoredEnvironment(child, config, RoleMain)
 			require.NoError(t, err)
 			require.Equal(t, grovePod.Containers[0].Env, lwsPod.Containers[0].Env)
 			var names []string
@@ -105,7 +119,7 @@ func TestEnvironmentCyclesFailBeforeRenderingWorkloads(t *testing.T) {
 	t.Log("The materialized child retains the cycle rather than flattening it away")
 	children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
-	pod, err = GenerateBasePodSpecForController(children["worker"], nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+	pod, err = renderStoredEnvironment(children["worker"], config, RoleMain)
 	require.Nil(t, pod)
 	require.ErrorContains(t, err, "environment dependency cycle")
 }
@@ -142,7 +156,7 @@ func TestKVPolicyKeepsComputeOnlyRoleEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	child := children["worker"]
 	child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
-	pod, err = GenerateBasePodSpecForController(child, nil, config, RoleWorker, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+	pod, err = renderStoredEnvironment(child, config, RoleWorker)
 	require.NoError(t, err)
 	require.Empty(t, pod.InitContainers)
 	require.Equal(t, "/engine-data", envVarsToMap(pod.Containers[0].Env)[commonconsts.EnvTopologyMountPath])
@@ -161,7 +175,7 @@ func TestStandaloneTopologySourceDoesNotOwnEnvironment(t *testing.T) {
 			},
 		},
 	}
-	pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+	pod, err := renderStoredEnvironment(dcd, &configv1alpha1.OperatorConfiguration{}, RoleMain)
 	require.NoError(t, err)
 	require.Equal(t, "0.75", envVarsToMap(pod.Containers[0].Env)[commonconsts.EnvKvTransferPreferredWeight])
 }
@@ -303,7 +317,7 @@ func TestFrontendDeploymentConfigKeepsGeneralSource(t *testing.T) {
 			require.NoError(t, err)
 			ds, err := GenerateBasePodSpec(normalized["frontend"], BackendFrameworkNoop, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeLWS, "frontend", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env})
 			require.NoError(t, err)
-			stored, err := GenerateBasePodSpecForController(child, nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			stored, err := renderStoredEnvironment(child, config, RoleMain)
 			require.NoError(t, err)
 			for _, pod := range []*corev1.PodSpec{grove, ds, stored} {
 				var names []string
@@ -361,7 +375,7 @@ func TestFrontendDeploymentConfigPreservesSourceDiagnostics(t *testing.T) {
 	t.Log("Persisting the projected general source preserves the same diagnostic indexes")
 	children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
-	_, err = GenerateBasePodSpecForController(children["frontend"], nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+	_, err = renderStoredEnvironment(children["frontend"], config, RoleMain)
 	require.ErrorContains(t, err, "spec.env[1]")
 	require.ErrorContains(t, err, "podTemplate.spec.containers[name=main].env[0]")
 }
@@ -545,7 +559,7 @@ func TestEnvironmentKVPolicyOwnsAbsentGraphSettings(t *testing.T) {
 					require.Equal(t, dgd.Spec.Env, child.Spec.Env, "the DCD must retain the unfiltered graph source")
 				}
 				child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
-				pod, err = GenerateBasePodSpecForController(child, nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+				pod, err = renderStoredEnvironment(child, config, RoleMain)
 				require.NoError(t, err)
 				pods = append(pods, pod)
 				for _, rendered := range pods {
@@ -578,7 +592,7 @@ func TestEnvironmentKVPolicyOwnsAbsentGraphSettings(t *testing.T) {
 					child := children["worker"]
 					child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
 					index := len(child.Spec.PodTemplate.Spec.Containers[0].Env) - 1
-					_, err = GenerateBasePodSpecForController(child, nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+					_, err = renderStoredEnvironment(child, config, RoleMain)
 					require.ErrorContains(t, err, fmt.Sprintf("podTemplate.spec.containers[name=main].env[%d]", index))
 				}
 			})
