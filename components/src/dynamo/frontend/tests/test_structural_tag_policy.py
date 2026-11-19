@@ -3,6 +3,8 @@
 
 import copy
 import importlib.util
+import json
+from pathlib import Path
 
 import pytest
 
@@ -70,60 +72,23 @@ def test_effective_tool_strict(request_strict, schema_mode, expected):
     assert effective_tool_strict(request_strict, schema_mode) is expected
 
 
-# Each verdict matches XGrammar 0.2.7. The Rust preprocessor test shares this
-# table, so this also keeps its hand-written list in step with the compiler.
+# The verdicts are shared with the Rust preprocessor test, which checks its
+# hand-written list against them. This test checks them against XGrammar itself,
+# so that list cannot drift from the compiler unnoticed.
+# components/src/dynamo/frontend/tests -> the repository root.
+_REGEX_CONSTRUCT_CASES = [
+    tuple(case)
+    for case in json.loads(
+        (
+            Path(__file__).resolve().parents[5]
+            / "lib/llm/tests/data/structural_tag/unsupported_regex_constructs.json"
+        ).read_text(encoding="utf-8")
+    )["cases"]
+]
+
+
 @requires_xgrammar
-@pytest.mark.parametrize(
-    ("pattern", "expected"),
-    [
-        (r"^(?!\s*$).+", "lookahead"),
-        (r"^(?=.*\d).+$", "lookahead"),
-        (r"\\(?=x)", "lookahead"),
-        (r"(?<=a)b", "lookbehind"),
-        (r"(?<!a)b", "lookbehind"),
-        (r"(a)\1", "backreference"),
-        (r"\8", "backreference"),
-        (r"(?<n>a)\k<n>", "backreference"),
-        (r"[^]\1]x", "backreference"),
-        (r"(?>ab)", "group modifier"),
-        (r"(?i)abc", "group modifier"),
-        (r"(?i:a)", "group modifier"),
-        (r"(?P<year>\d{4})", "group modifier"),
-        (r"(?#note)a", "group modifier"),
-        (r"a\b", "word boundary"),
-        (r"\Ba", "word boundary"),
-        (r"\p{L}+", "Unicode property escape"),
-        (r"[]a", "empty character class"),
-        (r"a++", "consecutive quantifiers"),
-        (r"a{2}*", "consecutive quantifiers"),
-        (r"a+??", "consecutive quantifiers"),
-        (r"a{,3}", "malformed repetition"),
-        (r"a{x}", "malformed repetition"),
-        (r"a{ 2}", "malformed repetition"),
-        (r"a{3,2}", "malformed repetition"),
-        (r"x{", "malformed repetition"),
-        (r"{2}a", "quantifier without an element"),
-        (r"a{1000000000000001}", "malformed repetition"),
-        (r"a{1,1000000000000001}", "malformed repetition"),
-        (r"a{99999999999999999}", "malformed repetition"),
-        (r"é+(?=ø)", "lookahead"),
-        (r"^[a-z]+$", None),
-        (r"(?<year>\d{4})", None),
-        (r"(?:ab)+", None),
-        (r"\(\?=x\)", None),
-        (r"[(?=]+", None),
-        (r"[\b\p{L}]", None),
-        (r"[^]a", None),
-        (r"a+?b*?c??d{2}?", None),
-        (r"a{2}b{2,}c{2,3}d{02}", None),
-        (r"a{1000000000000000}b{1,1000000000000000}", None),
-        (r"\u{1F600}+", None),
-        (r"a}", None),
-        (r"[ä-ö]+ø{2}\é", None),
-        (r"\{2}", None),
-        (r"\0\cA\x41\u0041", None),
-    ],
-)
+@pytest.mark.parametrize(("pattern", "expected"), _REGEX_CONSTRUCT_CASES)
 def test_unsupported_regex_constructs_match_the_grammar_compiler(pattern, expected):
     assert (unsupported_regex_construct(pattern) is None) == (expected is None)
 

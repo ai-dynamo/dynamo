@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import logging
 from typing import Any, Literal
 
@@ -93,13 +94,15 @@ def should_attempt_structural_tag(
     return any_explicit_strict or parallel_tool_calls_explicitly_false
 
 
+@functools.lru_cache(maxsize=4096)
 def unsupported_regex_construct(pattern: str) -> str | None:
     """Return XGrammar's error for ``pattern``, or ``None`` when it compiles.
 
     Asks the installed XGrammar instead of mirroring its regex syntax, so the
     verdict follows the version the vLLM or SGLang backend ships with. Its regex
     converter is the strictest path any tag format takes. The Rust preprocessor
-    has no XGrammar and keeps a list of constructs instead.
+    has no XGrammar and keeps a list of constructs instead. Cached because tool
+    catalogs repeat across requests, and a rejected pattern is checked twice.
     """
     import xgrammar
 

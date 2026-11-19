@@ -2221,58 +2221,23 @@ mod tests {
         ));
     }
 
-    // Each verdict matches XGrammar 0.2.7. The Python frontend test shares this table.
+    // The verdicts live in a file the Python frontend test checks against XGrammar
+    // itself, so this hand-written list cannot drift from the compiler unnoticed.
     #[test]
     fn unsupported_regex_constructs_match_the_grammar_compiler() {
-        for (pattern, expected) in [
-            (r"^(?!\s*$).+", Some("lookahead")),
-            (r"^(?=.*\d).+$", Some("lookahead")),
-            (r"\\(?=x)", Some("lookahead")),
-            (r"(?<=a)b", Some("lookbehind")),
-            (r"(?<!a)b", Some("lookbehind")),
-            (r"(a)\1", Some("backreference")),
-            (r"\8", Some("backreference")),
-            (r"(?<n>a)\k<n>", Some("backreference")),
-            (r"[^]\1]x", Some("backreference")),
-            (r"(?>ab)", Some("group modifier")),
-            (r"(?i)abc", Some("group modifier")),
-            (r"(?i:a)", Some("group modifier")),
-            (r"(?P<year>\d{4})", Some("group modifier")),
-            (r"(?#note)a", Some("group modifier")),
-            (r"a\b", Some("word boundary")),
-            (r"\Ba", Some("word boundary")),
-            (r"\p{L}+", Some("Unicode property escape")),
-            (r"[]a", Some("empty character class")),
-            (r"a++", Some("consecutive quantifiers")),
-            (r"a{2}*", Some("consecutive quantifiers")),
-            (r"a+??", Some("consecutive quantifiers")),
-            (r"a{,3}", Some("malformed repetition")),
-            (r"a{x}", Some("malformed repetition")),
-            (r"a{ 2}", Some("malformed repetition")),
-            (r"a{3,2}", Some("malformed repetition")),
-            (r"x{", Some("malformed repetition")),
-            (r"{2}a", Some("quantifier without an element")),
-            (r"a{1000000000000001}", Some("malformed repetition")),
-            (r"a{1,1000000000000001}", Some("malformed repetition")),
-            (r"a{99999999999999999}", Some("malformed repetition")),
-            (r"é+(?=ø)", Some("lookahead")),
-            (r"^[a-z]+$", None),
-            (r"(?<year>\d{4})", None),
-            (r"(?:ab)+", None),
-            (r"\(\?=x\)", None),
-            (r"[(?=]+", None),
-            (r"[\b\p{L}]", None),
-            (r"[^]a", None),
-            (r"a+?b*?c??d{2}?", None),
-            (r"a{2}b{2,}c{2,3}d{02}", None),
-            (r"a{1000000000000000}b{1,1000000000000000}", None),
-            (r"\u{1F600}+", None),
-            (r"a}", None),
-            (r"[ä-ö]+ø{2}\é", None),
-            (r"\{2}", None),
-            (r"\0\cA\x41\u0041", None),
-        ] {
-            assert_eq!(unsupported_regex_construct(pattern), expected, "{pattern}");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/structural_tag/unsupported_regex_constructs.json");
+        let table: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let cases: Vec<(String, Option<String>)> =
+            serde_json::from_value(table["cases"].clone()).unwrap();
+        assert!(!cases.is_empty(), "{}", path.display());
+        for (pattern, expected) in cases {
+            assert_eq!(
+                unsupported_regex_construct(&pattern),
+                expected.as_deref(),
+                "{pattern}"
+            );
         }
     }
 

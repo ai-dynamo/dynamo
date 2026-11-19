@@ -312,8 +312,8 @@ rejected grammar fails the whole request. Backend compilation errors do not
 trigger Dynamo's builder fallback, so Dynamo checks `pattern` values and
 `patternProperties` keys before building the tag. The Python vLLM and SGLang
 preprocessors compile each regex with the installed XGrammar. The Rust
-preprocessor has no XGrammar, so it checks for the constructs XGrammar 0.2.7
-rejects in at least one tag format:
+preprocessor has no XGrammar, so it checks for the constructs XGrammar rejects
+in at least one tag format:
 
 - lookahead `(?=` `(?!` and lookbehind `(?<=` `(?<!`
 - backreferences `\1`–`\9` and `\k<name>`
@@ -336,13 +336,14 @@ schema, and the backend reports the rejection. This also applies to the Kimi K3
 named-call tags that the deployment opt-out retains. The adjustment is logged
 at debug level.
 
-The Rust list is measured against XGrammar 0.2.7 for valid patterns. Older
-versions reject more: 0.2.1 also rejects lookahead in the JSON format, which this
-check covers, but other differences are not checked. Both checks use XGrammar's
-regex converter, the strictest path. The JSON format of 0.2.7 accepts
-lookahead (ignoring it), `(?P<name>`, `(?i)`, and possessive quantifiers, so for
-parsers that use it these patterns are left out although the backend would
-accept them.
+The Rust list was fuzzed against XGrammar 0.2.7 for valid patterns, and its
+test table gets the same verdicts from 0.1.33 and 0.2.8. Both checks use
+XGrammar's regex converter, the strictest path. The JSON format of 0.2.7 and
+0.2.8 is more lenient: it accepts some lookaheads, such as a leading `^(?!…)`
+or `^(?=…)`, and `(?P<name>`, `(?i)`, and possessive quantifiers. For parsers
+that use it, these patterns are left out although the backend would accept
+them. The JSON format of 0.1.33 and 0.2.1 rejects lookahead, which this check
+covers; other differences between versions are not checked.
 
 In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`
