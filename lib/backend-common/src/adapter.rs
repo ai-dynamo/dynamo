@@ -713,28 +713,19 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
     }
 }
 
-/// The local health registry uses single inputs. Probe the same bidirectional
-/// adapter with a finite, one-event stream instead of a separate health engine.
-pub(crate) struct BidirectionalProbeAdapter {
-    pub(crate) inner: Arc<BidirectionalEngineAdapter>,
-}
-
 #[async_trait]
 impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
-    for BidirectionalProbeAdapter
+    for BidirectionalEngineAdapter
 {
     async fn generate(
         &self,
         input: SingleIn<serde_json::Value>,
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
         let (request, handle) = input.into_parts();
-        self.inner
-            .generate(
-                handle.map(|_| {
-                    RequestStream::new(Box::pin(futures::stream::once(async { request })))
-                }),
-            )
-            .await
+        self.generate(
+            handle.map(|_| RequestStream::new(Box::pin(futures::stream::once(async { request })))),
+        )
+        .await
     }
 }
 
@@ -2464,8 +2455,7 @@ mod tests {
         assert_eq!(output.len(), 3);
         assert_eq!(output[2].data.as_ref().unwrap()["drained"], true);
         assert_eq!(engine.abort_calls.load(Ordering::SeqCst), 0);
-        let probe = BidirectionalProbeAdapter { inner: adapter };
-        let output = probe
+        let output = adapter
             .generate(Context::new(serde_json::json!({"probe": true})))
             .await
             .unwrap()

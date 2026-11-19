@@ -25,16 +25,16 @@ use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
+use dynamo_runtime::pipeline::{ManyIn, ManyOut};
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::system_health::ReadinessHold;
 use dynamo_runtime::telemetry::LifecycleOperationRole;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
-use crate::adapter::{
-    BidirectionalEngineAdapter, BidirectionalProbeAdapter, EngineAdapter, RawEngineAdapter,
-};
+use crate::adapter::{BidirectionalEngineAdapter, EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
     BidirectionalEngine, EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx,
@@ -1139,9 +1139,9 @@ impl Worker {
         // Build the request adapter and a JSON-shaped health-check probe
         // engine for the worker's modality. The token pipeline
         // (`EngineAdapter`) needs a `JsonProbeAdapter` wrapper to expose a
-        // `serde_json::Value` probe surface; the raw pipeline
-        // (`RawEngineAdapter`) is already JSON-shaped, so it serves as its
-        // own probe. The tuple annotation drives the trait-object coercions.
+        // `serde_json::Value` probe surface; the raw and bidirectional
+        // adapters serve their own probes. The tuple annotation drives
+        // the trait-object coercions.
         let (ingress, probe_engine): (
             Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>,
             dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
@@ -1195,14 +1195,17 @@ impl Worker {
             }
             EngineKind::Bidirectional(engine) => {
                 let adapter = Arc::new(BidirectionalEngineAdapter::new(engine.clone()));
-                let ingress = Ingress::for_engine(adapter.clone()).map_err(|e| {
+                let ingress = Ingress::<
+                    ManyIn<serde_json::Value>,
+                    ManyOut<Annotated<serde_json::Value>>,
+                >::for_engine(adapter.clone())
+                .map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("bidirectional ingress: {e}"),
                     )
                 })?;
-                let probe = Arc::new(BidirectionalProbeAdapter { inner: adapter });
-                (ingress, probe)
+                (ingress, adapter)
             }
         };
 

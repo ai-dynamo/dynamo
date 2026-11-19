@@ -48,13 +48,13 @@ impl Session {
             limit: client.inner.limits.max_buffered_output_bytes.get(),
         };
         let driver = Coordinator {
-            permits: Arc::new(Semaphore::new(client.inner.limits.concurrent_turns.get())),
             client: client.clone(),
             protocol,
             input,
             output: emitter,
             cancel: cancel.clone(),
             turns: VecDeque::new(),
+            pending: VecDeque::new(),
             tasks: JoinSet::new(),
             active: None,
             session: None,
@@ -93,7 +93,7 @@ struct BufferedEvent {
 
 struct TurnOutput {
     events: mpsc::Receiver<BufferedEvent>,
-    cancel: CancellationToken,
+    clears: usize,
 }
 
 struct Turn {
@@ -105,14 +105,13 @@ struct Turn {
 struct InputState {
     audio: VecDeque<Vec<u8>>,
     received: usize,
-    clear: bool,
     committed: bool,
     acknowledge_commit: bool,
     finished: bool,
 }
 
-/// Audio is bounded by both bytes and event count. Commit and clear have their
-/// own slots so a full audio queue cannot prevent control messages.
+/// Audio is bounded by bytes and event count. Commit has a separate slot;
+/// the coordinator clears a turn by dropping its input and output buffers.
 #[derive(Default)]
 struct TurnInput {
     state: Mutex<InputState>,
@@ -121,7 +120,6 @@ struct TurnInput {
 
 enum Command {
     Audio(Vec<u8>),
-    Clear,
     Commit { acknowledge: bool },
 }
 
@@ -171,24 +169,11 @@ impl TurnInput {
         self.changed.notify_one();
     }
 
-    fn clear(&self) {
-        let mut state = self.state.lock();
-        state.audio.clear();
-        state.received = 0;
-        state.clear = true;
-        drop(state);
-        self.changed.notify_one();
-    }
-
     async fn next(&self) -> Command {
         loop {
             let notified = self.changed.notified();
             {
                 let mut state = self.state.lock();
-                if state.clear {
-                    state.clear = false;
-                    return Command::Clear;
-                }
                 if let Some(pcm) = state.audio.pop_front() {
                     return Command::Audio(pcm);
                 }
@@ -209,8 +194,8 @@ struct Coordinator {
     input: BoxStream<'static, Value>,
     output: Emitter,
     cancel: CancellationToken,
-    permits: Arc<Semaphore>,
     turns: VecDeque<TurnOutput>,
+    pending: VecDeque<TurnDriver>,
     tasks: JoinSet<()>,
     active: Option<Turn>,
     session: Option<Value>,
@@ -244,6 +229,7 @@ impl Coordinator {
     async fn drive(&mut self) -> Result<(), Error> {
         let mut eof = false;
         loop {
+            self.start_ready_turns();
             if eof && self.turns.is_empty() {
                 return Ok(());
             }
@@ -262,11 +248,11 @@ impl Coordinator {
                 event = async { self.turns.front_mut().expect("guarded by nonempty").events.recv().await },
                     if !self.turns.is_empty() => {
                     if let Some(event) = event {
-                        if !self.turns.front().expect("nonempty").cancel.is_cancelled() {
-                            self.output.output.send(event).await.map_err(|_| Error::Closed)?;
+                        self.output.output.send(event).await.map_err(|_| Error::Closed)?;
+                    } else if let Some(turn) = self.turns.pop_front() {
+                        for _ in 0..turn.clears {
+                            self.emit(events::event("input_audio_buffer.cleared", json!({}))).await?;
                         }
-                    } else {
-                        self.turns.pop_front();
                     }
                 }
                 result = self.tasks.join_next(), if !self.tasks.is_empty() => {
@@ -293,22 +279,12 @@ impl Coordinator {
         }
         match event["type"].as_str() {
             Some("session.update") => {
-                let mut session = event["session"].clone();
-                if self.protocol == Protocol::Omni {
-                    if let Some(current) = &self.session {
-                        // Validate a complete candidate before publishing it:
-                        // a rejected patch must leave the accepted state intact.
-                        let mut candidate = current.clone();
-                        merge_session_update(&mut candidate, session);
-                        session = candidate;
-                    }
-                    if session.is_object() && session["output_modalities"].is_null() {
-                        session["output_modalities"] = json!(["audio"]);
-                    }
-                }
-                if let Err(error) =
-                    validate_session(&session, self.protocol, &self.client.inner.model)
-                {
+                if let Err(error) = update_session(
+                    &mut self.session,
+                    event["session"].clone(),
+                    self.protocol,
+                    &self.client.inner.model,
+                ) {
                     return self
                         .emit(events::invalid(
                             "invalid_session",
@@ -317,10 +293,9 @@ impl Coordinator {
                         ))
                         .await;
                 }
-                self.session = Some(session.clone());
                 self.emit(events::event(
                     "session.updated",
-                    json!({"session": session}),
+                    json!({"session": self.session}),
                 ))
                 .await?;
             }
@@ -342,7 +317,7 @@ impl Coordinator {
                     });
                 match pcm {
                     Ok(pcm) => {
-                        if self.active.is_none() && !self.open_turn().await? {
+                        if self.active.is_none() && !self.open_turn() {
                             return self
                                 .emit(events::invalid(
                                     "session_busy",
@@ -353,8 +328,7 @@ impl Coordinator {
                         }
                         let turn = self.active.as_ref().expect("turn opened");
                         if let Err(error) = turn.input.append(pcm, &self.client.inner.limits) {
-                            turn.cancel.cancel();
-                            self.active = None;
+                            self.cancel_active();
                             self.emit(events::invalid("invalid_audio", &error.to_string(), &event))
                                 .await?;
                         }
@@ -378,15 +352,20 @@ impl Coordinator {
                 }
             }
             Some("input_audio_buffer.clear") => {
-                if self.protocol == Protocol::VllmTranscription {
-                    if let Some(turn) = self.active.take() {
-                        turn.cancel.cancel();
-                    }
-                } else if let Some(turn) = &self.active {
-                    turn.input.clear();
+                self.cancel_active();
+                if self.protocol == Protocol::VllmTranscription
+                    && let Some(turn) = self.turns.back_mut()
+                {
+                    // Recovery reconciles clears with earlier transcription
+                    // output. Counts keep repeated clears allocation-bounded.
+                    turn.clears = turn
+                        .clears
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Invalid("too many clear acknowledgements".into()))?;
+                } else {
+                    self.emit(events::event("input_audio_buffer.cleared", json!({})))
+                        .await?;
                 }
-                self.emit(events::event("input_audio_buffer.cleared", json!({})))
-                    .await?;
             }
             // Preserve the existing Omni bridge's independent-utterance contract.
             Some(kind)
@@ -404,10 +383,41 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn open_turn(&mut self) -> Result<bool, Error> {
+    fn cancel_active(&mut self) {
+        if let Some(turn) = self.active.take() {
+            turn.cancel.cancel();
+            turn.input.state.lock().audio.clear();
+            // The only uncommitted turn is the tail. Discard its output before
+            // acknowledging clear; a running task retains its slot until exit.
+            self.turns.pop_back();
+            if self
+                .pending
+                .back()
+                .is_some_and(|driver| Arc::ptr_eq(&driver.input, &turn.input))
+            {
+                self.pending.pop_back();
+            }
+        }
+    }
+
+    fn start_ready_turns(&mut self) {
+        while self.tasks.len() < self.client.inner.limits.concurrent_turns.get() {
+            let Some(driver) = self.pending.front() else {
+                break;
+            };
+            if self.protocol == Protocol::Omni && !driver.input.state.lock().committed {
+                break;
+            }
+            if let Some(driver) = self.pending.pop_front() {
+                self.tasks.spawn(driver.run().in_current_span());
+            }
+        }
+    }
+
+    fn open_turn(&mut self) -> bool {
         let limits = &self.client.inner.limits;
         if self.turns.len() >= limits.concurrent_turns.get() + limits.queued_turns {
-            return Ok(false);
+            return false;
         }
         let input = Arc::new(TurnInput::default());
         let cancel = self.cancel.child_token();
@@ -428,15 +438,10 @@ impl Coordinator {
             item: events::id("item"),
             response: events::id("resp"),
         };
-        let permits = self.permits.clone();
-        self.tasks
-            .spawn(async move { driver.run(permits).await }.in_current_span());
-        self.turns.push_back(TurnOutput {
-            events,
-            cancel: cancel.clone(),
-        });
+        self.pending.push_back(driver);
+        self.turns.push_back(TurnOutput { events, clears: 0 });
         self.active = Some(Turn { input, cancel });
-        Ok(true)
+        true
     }
 }
 
@@ -482,7 +487,7 @@ struct TurnDriver {
 }
 
 impl TurnDriver {
-    async fn run(self, permits: Arc<Semaphore>) {
+    async fn run(self) {
         // Publish completion even if a connection attempt fails or a task is
         // dropped during runtime shutdown, so later input cannot enter a dead turn.
         struct Finished(Arc<TurnInput>);
@@ -493,10 +498,6 @@ impl TurnDriver {
         }
         let _finished = Finished(self.input.clone());
         let operation = async {
-            let _slot = tokio::select! {
-                _ = self.cancel.cancelled() => return Ok(()),
-                permit = permits.acquire_owned() => permit.map_err(|_| Error::Closed)?,
-            };
             let mut socket = tokio::select! {
                 _ = self.cancel.cancelled() => return Ok(()),
                 result = self.client.connect() => result?,
@@ -575,7 +576,6 @@ impl TurnDriver {
                             };
                             append(socket, pcm).await?;
                         }
-                        Command::Clear => send(socket, json!({"type": "input_audio_buffer.clear"})).await?,
                         Command::Commit { acknowledge } => {
                             if let Some(converter) = &mut converter {
                                 append(socket, converter.finish()?).await?;
@@ -655,6 +655,27 @@ fn merge_session_update(current: &mut Value, update: Value) {
     }
 }
 
+fn update_session(
+    current: &mut Option<Value>,
+    mut update: Value,
+    protocol: Protocol,
+    model: &str,
+) -> Result<(), Error> {
+    if protocol == Protocol::Omni {
+        if let Some(session) = current.as_ref() {
+            let mut candidate = session.clone();
+            merge_session_update(&mut candidate, update);
+            update = candidate;
+        }
+        if update.is_object() && update["output_modalities"].is_null() {
+            update["output_modalities"] = json!(["audio"]);
+        }
+    }
+    validate_session(&update, protocol, model)?;
+    *current = Some(update);
+    Ok(())
+}
+
 fn validate_session(session: &Value, protocol: Protocol, model: &str) -> Result<(), Error> {
     let invalid = |message: &str| Error::Invalid(message.into());
     if !session.is_object() {
@@ -729,6 +750,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn omni_session_updates_preserve_only_accepted_configuration() {
+        use dynamo_protocols::types::realtime::DynamoRealtimeClientEvent;
+
+        let typed_session = |session: Value| {
+            let event: DynamoRealtimeClientEvent =
+                serde_json::from_value(json!({"type": "session.update", "session": session}))
+                    .unwrap();
+            serde_json::to_value(event).unwrap()["session"].take()
+        };
+        for repeated_model in [None, Some("model")] {
+            let mut state = None;
+            assert!(
+                update_session(
+                    &mut state,
+                    typed_session(json!({
+                        "type": "realtime", "max_output_tokens": 1,
+                    })),
+                    Protocol::Omni,
+                    "model"
+                )
+                .is_err()
+            );
+            assert!(state.is_none());
+            update_session(
+                &mut state,
+                typed_session(json!({
+                    "type": "realtime", "model": "model", "output_modalities": ["text"],
+                    "instructions": "Keep replies short."
+                })),
+                Protocol::Omni,
+                "model",
+            )
+            .unwrap();
+            let mut patch = json!({"type": "realtime", "max_output_tokens": 123});
+            if let Some(model) = repeated_model {
+                patch["model"] = model.into();
+            }
+            update_session(&mut state, typed_session(patch), Protocol::Omni, "model").unwrap();
+            assert_eq!(
+                state,
+                Some(json!({
+                    "type": "realtime", "model": "model", "output_modalities": ["text"],
+                    "instructions": "Keep replies short.", "max_output_tokens": 123
+                }))
+            );
+            let accepted = state.clone();
+            for patch in [
+                json!({"type": "realtime", "model": "other-model", "instructions": "discard"}),
+                json!({"type": "realtime", "output_modalities": ["invalid"], "instructions": "discard"}),
+                json!({"type": "realtime", "audio": {
+                    "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+                    "output": {"format": {"type": "audio/pcmu"}, "speed": 1.0, "voice": "alloy"}
+                }, "instructions": "discard"}),
+                json!({"type": "realtime", "audio": {
+                    "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+                    "output": {"format": {"type": "audio/pcm", "rate": 16000}, "speed": 1.0, "voice": "alloy"}
+                }, "instructions": "discard"}),
+            ] {
+                assert!(
+                    update_session(&mut state, typed_session(patch), Protocol::Omni, "model")
+                        .is_err()
+                );
+                assert_eq!(state, accepted);
+            }
+        }
+    }
+
+    #[test]
     fn omni_session_update_merges_nested_objects_and_replaces_other_values() {
         // The typed frontend schema requires complete audio input/output
         // objects and omits some explicit nulls. Pin the internal merge rule
@@ -774,7 +863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audio_backpressure_does_not_block_clear_or_commit() {
+    async fn audio_backpressure_does_not_block_commit() {
         let mut limits = Limits::for_protocol(Protocol::Omni);
         limits.event_capacity = std::num::NonZeroUsize::new(1).unwrap();
         limits.max_audio_chunk_bytes = std::num::NonZeroUsize::new(4).unwrap();
@@ -782,12 +871,8 @@ mod tests {
         input.append(vec![0, 0], &limits).unwrap();
         input.append(vec![0, 0], &limits).unwrap();
         assert!(input.append(vec![0, 0], &limits).is_err());
-        input.clear();
-        assert_eq!(input.state.lock().received, 0);
-        input.append(vec![1, 1], &limits).unwrap();
         input.commit(true);
-        assert!(matches!(input.next().await, Command::Clear));
-        assert!(matches!(input.next().await, Command::Audio(pcm) if pcm == vec![1, 1]));
+        assert!(matches!(input.next().await, Command::Audio(pcm) if pcm == vec![0, 0, 0, 0]));
         assert!(matches!(
             input.next().await,
             Command::Commit { acknowledge: true }
@@ -799,8 +884,7 @@ mod tests {
         let limits = Limits::for_protocol(Protocol::VllmTranscription);
         let input = TurnInput::default();
         let mut expected = Vec::new();
-        // The real 7.1-second burst uses 71 100 ms chunks, exceeding 64 slots
-        // while remaining well below the default 60-second turn byte bound.
+        // Exceed the 64 event slots while staying within the turn byte limit.
         for value in 0..71 {
             let pcm = vec![value; 4800];
             expected.extend_from_slice(&pcm);
@@ -858,10 +942,5 @@ mod tests {
         assert!(input.append(vec![10, 11], &limits).is_err());
         assert_eq!(input.state.lock().received, 10);
         assert!(input.state.lock().audio.is_empty());
-        input.clear();
-        input.append(vec![12, 13], &limits).unwrap();
-        assert!(matches!(input.next().await, Command::Clear));
-        assert!(matches!(input.next().await, Command::Audio(pcm) if pcm == vec![12, 13]));
-        assert_eq!(input.state.lock().received, 2);
     }
 }

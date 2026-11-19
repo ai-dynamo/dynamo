@@ -407,10 +407,12 @@ fn validate_passthrough(value: &Value) -> Result<(), DynamoError> {
 }
 
 fn response(id: &str, model: &str, created: u64, status: &str, data: Value) -> Value {
-    json!({
+    let mut result = json!({
         "id": id, "object": "audio.speech", "model": model, "created": created,
-        "status": status, "progress": if status == "completed" { 100 } else { 0 }, "data": data,
-    })
+        "status": status, "progress": if status == "completed" { 100 } else { 0 },
+    });
+    result["data"] = data;
+    result
 }
 
 async fn resolve_reference(
@@ -423,15 +425,21 @@ async fn resolve_reference(
         let (metadata, encoded) = reference
             .split_once(',')
             .ok_or_else(|| invalid_argument("invalid reference-audio data URI"))?;
-        if !metadata.ends_with(";base64")
-            || encoded.len().div_ceil(4).saturating_mul(3) > limit.saturating_add(2)
-        {
+        let max_encoded_bytes = limit.div_ceil(3).saturating_mul(4);
+        // Each base64 byte can occupy three URI bytes when percent-escaped.
+        if !metadata.ends_with(";base64") || encoded.len() > max_encoded_bytes.saturating_mul(3) {
             return Err(invalid_argument(
                 "reference audio must be bounded base64 data",
             ));
         }
+        let encoded = percent_encoding::percent_decode_str(encoded)
+            .decode_utf8()
+            .map_err(|_| invalid_argument("invalid reference-audio base64"))?;
+        if encoded.len() > max_encoded_bytes {
+            return Err(invalid_argument("reference audio exceeds the byte limit"));
+        }
         let bytes = BASE64_STANDARD
-            .decode(encoded)
+            .decode(encoded.as_bytes())
             .map_err(|_| invalid_argument("invalid reference-audio base64"))?;
         if bytes.len() > limit || bytes.is_empty() {
             return Err(invalid_argument(
@@ -508,6 +516,13 @@ async fn write_output(
     file.flush()
         .await
         .map_err(|error| engine_shutdown(format!("flush audio output: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))
+            .await
+            .map_err(|error| engine_shutdown(format!("set audio output permissions: {error}")))?;
+    }
     drop(file);
     temporary
         .persist_noclobber(store.directory.join(&filename))
@@ -532,6 +547,43 @@ mod tests {
     };
     use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
     use futures::TryStreamExt;
+
+    #[test]
+    fn speech_response_preserves_audio_allocation() {
+        let data = json!([{"b64_json": "AAAA".repeat(4096)}]);
+        let audio = data[0]["b64_json"].as_str().unwrap().as_ptr();
+        let result = response("id", "model", 0, "completed", data);
+        assert_eq!(
+            result["data"][0]["b64_json"].as_str().unwrap().as_ptr(),
+            audio
+        );
+    }
+
+    #[tokio::test]
+    async fn reference_audio_accepts_percent_escaped_base64_at_decoded_limit() {
+        let policy = MediaFetcher::from_env();
+        let client = policy.build_http_client().unwrap();
+        for encoded in ["+/8=", "%2B%2F8%3D", "%2b%2f%38%3d"] {
+            let uri = format!("data:audio/wav;base64,{encoded}");
+            assert_eq!(
+                resolve_reference(&uri, &policy, &client, 2).await.unwrap(),
+                "data:application/octet-stream;base64,+/8="
+            );
+            assert!(resolve_reference(&uri, &policy, &client, 1).await.is_err());
+        }
+        for encoded in ["%GG", "%FF", ""] {
+            assert!(
+                resolve_reference(
+                    &format!("data:audio/wav;base64,{encoded}"),
+                    &policy,
+                    &client,
+                    2
+                )
+                .await
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn speech_preserves_typed_options_and_legacy_frontend_aggregation() {
@@ -794,6 +846,16 @@ mod tests {
             .parse()
             .unwrap();
         let filename = url.path_segments().unwrap().next_back().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = tokio::fs::metadata(directory.path().join(filename))
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o644);
+        }
         assert_eq!(
             tokio::fs::read(directory.path().join(filename))
                 .await

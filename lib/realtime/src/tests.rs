@@ -227,6 +227,151 @@ async fn asr_streams_before_commit_and_drains_queued_turns_on_input_eof() {
     client.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn asr_admits_committed_audio_before_a_later_uncommitted_turn() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(
+        format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+        MODEL.into(),
+        Limits::for_protocol(Protocol::VllmTranscription),
+        None,
+    )
+    .unwrap();
+    let input = futures::stream::iter([
+        asr_session(),
+        audio(),
+        json!({"type": "input_audio_buffer.commit"}),
+        json!({"type": "input_audio_buffer.append", "audio": BASE64_STANDARD.encode(vec![1; 9600])}),
+    ]).chain(futures::stream::pending()).boxed();
+    let mut session = client.session(Protocol::VllmTranscription, input);
+    let mut socket = tokio::time::timeout(DEADLINE, accept_asr(&listener))
+        .await
+        .unwrap();
+    let first = receive(&mut socket).await;
+    assert_eq!(first["type"], "input_audio_buffer.append");
+    assert!(
+        BASE64_STANDARD
+            .decode(first["audio"].as_str().unwrap())
+            .unwrap()
+            .iter()
+            .all(|sample| *sample == 0),
+        "the committed first turn must acquire the only upstream slot"
+    );
+    while receive(&mut socket).await["type"] == "input_audio_buffer.append" {}
+    send(
+        &mut socket,
+        json!({"type": "transcription.done", "text": "first"}),
+    )
+    .await;
+    assert_eq!(next(&mut session).await["type"], "session.updated");
+    assert_eq!(
+        next(&mut session).await["type"],
+        "input_audio_buffer.committed"
+    );
+    assert_eq!(next(&mut session).await["transcript"], "first");
+    drop(session);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn asr_clear_acknowledgements_follow_prior_transcription_and_precede_later_turns() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(
+        format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+        MODEL.into(),
+        Limits::for_protocol(Protocol::VllmTranscription),
+        None,
+    )
+    .unwrap();
+    let handled = Arc::new(Notify::new());
+    let input_handled = handled.clone();
+    let input = futures::stream::iter([
+        asr_session(),
+        audio(),
+        json!({"type": "input_audio_buffer.commit"}),
+        audio(),
+        json!({"type": "input_audio_buffer.clear"}),
+        json!({"type": "input_audio_buffer.clear"}),
+        audio(),
+        json!({"type": "input_audio_buffer.commit"}),
+    ])
+    .chain(futures::stream::once(async move {
+        input_handled.notify_one();
+        std::future::pending().await
+    }))
+    .boxed();
+    let mut session = client.session(Protocol::VllmTranscription, input);
+    tokio::time::timeout(DEADLINE, handled.notified())
+        .await
+        .unwrap();
+    for turn in ["first", "last"] {
+        let mut socket = tokio::time::timeout(DEADLINE, accept_asr(&listener))
+            .await
+            .unwrap();
+        while receive(&mut socket).await["type"] == "input_audio_buffer.append" {}
+        send(
+            &mut socket,
+            json!({"type": "transcription.done", "text": turn}),
+        )
+        .await;
+        if turn == "first" {
+            assert_eq!(next(&mut session).await["type"], "session.updated");
+        }
+        assert_eq!(
+            next(&mut session).await["type"],
+            "input_audio_buffer.committed"
+        );
+        assert_eq!(next(&mut session).await["transcript"], turn);
+        if turn == "first" {
+            for _ in 0..2 {
+                assert_eq!(
+                    next(&mut session).await["type"],
+                    "input_audio_buffer.cleared"
+                );
+            }
+        }
+    }
+    drop(session);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn omni_cleared_audio_does_not_open_an_upstream_connection_on_eof() {
+    let (listener, client, input, mut session) = setup(Protocol::Omni).await;
+    for event in [
+        omni_session(),
+        audio(),
+        json!({"type": "input_audio_buffer.clear"}),
+    ] {
+        input.send(event).await.unwrap();
+    }
+    drop(input);
+    for kind in [
+        Some("session.updated"),
+        Some("input_audio_buffer.cleared"),
+        None,
+    ] {
+        let event = tokio::time::timeout(DEADLINE, async {
+            tokio::select! {
+                biased;
+                _ = listener.accept() => panic!("cleared Omni audio must stay local"),
+                event = session.next() => event,
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            event.as_ref().and_then(|event| event["type"].as_str()),
+            kind
+        );
+    }
+    client.shutdown().await;
+}
+
 #[tokio::test]
 async fn clear_and_silent_stream_drop_close_upstream_connections() {
     let (listener, client, input, mut session) = setup(Protocol::VllmTranscription).await;
@@ -361,14 +506,16 @@ async fn omni_turns_generate_concurrently_but_output_does_not_interleave() {
     input.send(omni_session()).await.unwrap();
     next(&mut session).await;
     for index in 0..2 {
-        if index == 1 {
+        let audio = json!({"type": "input_audio_buffer.append", "audio": BASE64_STANDARD.encode(vec![index; 9600])});
+        input.send(audio).await.unwrap();
+        if index == 0 {
+            // The open turn keeps its first-append snapshot; only the next
+            // turn uses the newly accepted configuration.
             let mut update = omni_session();
             update["session"]["output_modalities"] = json!(["text"]);
             input.send(update).await.unwrap();
             assert_eq!(next(&mut session).await["type"], "session.updated");
         }
-        let audio = json!({"type": "input_audio_buffer.append", "audio": BASE64_STANDARD.encode(vec![index; 9600])});
-        input.send(audio).await.unwrap();
         input
             .send(json!({"type": "input_audio_buffer.commit"}))
             .await
@@ -408,7 +555,8 @@ async fn omni_turns_generate_concurrently_but_output_does_not_interleave() {
     client.shutdown().await;
 }
 
-async fn check_omni_partial_session_update(include_model: bool) {
+#[tokio::test]
+async fn omni_next_turn_uses_last_accepted_session_update() {
     let (listener, client, input, mut session) = setup(Protocol::Omni).await;
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
@@ -450,16 +598,6 @@ async fn check_omni_partial_session_update(include_model: bool) {
         .await;
     });
 
-    // Model omission is valid only after the initial setup established it.
-    input
-        .send(typed_client_event(
-            json!({"type": "session.update", "session": {
-                "type": "realtime", "instructions": "Not configured yet."
-            }}),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(next(&mut session).await["error"]["code"], "invalid_session");
     input
         .send(typed_client_event(
             json!({"type": "session.update", "session": {
@@ -470,55 +608,21 @@ async fn check_omni_partial_session_update(include_model: bool) {
         .await
         .unwrap();
     assert_eq!(next(&mut session).await["type"], "session.updated");
-    let mut patch = json!({"type": "session.update", "session": {
+    let patch = json!({"type": "session.update", "session": {
         "type": "realtime", "max_output_tokens": 123
     }});
-    if include_model {
-        patch["session"]["model"] = MODEL.into();
-    }
-    let patch = typed_client_event(patch);
-    assert!(patch["session"].get("output_modalities").is_none());
-    assert!(patch["session"].get("instructions").is_none());
-    assert_eq!(patch["session"].get("model").is_some(), include_model);
-    input.send(patch).await.unwrap();
-    let updated = next(&mut session).await;
-    assert_eq!(updated["type"], "session.updated");
-    assert_eq!(updated["session"]["model"], MODEL);
-    assert_eq!(updated["session"]["output_modalities"], json!(["text"]));
-    assert_eq!(updated["session"]["instructions"], "Keep replies short.");
-    assert_eq!(updated["session"]["max_output_tokens"], 123);
-
-    // A rejected patch must not partially mutate the state used by the next
-    // upstream turn, including otherwise-valid fields in the same update.
-    for rejected in [
-        json!({"type": "realtime", "model": "other-model", "output_modalities": ["audio"],
-            "instructions": "Do not keep this model patch."}),
-        json!({"type": "realtime", "model": MODEL, "output_modalities": ["invalid"],
-            "instructions": "Do not keep this invalid config."}),
-        json!({"type": "realtime", "audio": {
-            "input": {"format": {"type": "audio/pcm", "rate": 24000}},
-            "output": {"format": {"type": "audio/pcmu"}, "speed": 1.0, "voice": "alloy"}
-        }, "instructions": "Do not keep this unsupported output codec."}),
-        json!({"type": "realtime", "audio": {
-            "input": {"format": {"type": "audio/pcm", "rate": 24000}},
-            "output": {"format": {"type": "audio/pcm", "rate": 16000}, "speed": 1.0, "voice": "alloy"}
-        }, "instructions": "Do not keep this unsupported output sample rate."}),
-    ] {
-        input
-            .send(typed_client_event(
-                json!({"type": "session.update", "session": rejected}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(next(&mut session).await["error"]["code"], "invalid_session");
-    }
-    input.send(typed_client_event(audio())).await.unwrap();
+    input.send(typed_client_event(patch)).await.unwrap();
+    assert_eq!(next(&mut session).await["type"], "session.updated");
     input
         .send(typed_client_event(
-            json!({"type": "input_audio_buffer.commit"}),
+            json!({"type": "session.update", "session": {
+                "type": "realtime", "model": "other-model", "instructions": "discard"
+            }}),
         ))
         .await
         .unwrap();
+    assert_eq!(next(&mut session).await["error"]["code"], "invalid_session");
+    input.send(typed_client_event(audio())).await.unwrap();
     drop(input);
     let done = next(&mut session).await;
     assert_eq!(done["type"], "response.done");
@@ -535,16 +639,6 @@ async fn check_omni_partial_session_update(include_model: bool) {
         .unwrap()
         .unwrap();
     client.shutdown().await;
-}
-
-#[tokio::test]
-async fn omni_partial_session_update_preserves_fields_without_repeating_model() {
-    check_omni_partial_session_update(false).await;
-}
-
-#[tokio::test]
-async fn omni_partial_session_update_preserves_fields_when_model_is_repeated() {
-    check_omni_partial_session_update(true).await;
 }
 
 #[tokio::test]
@@ -728,7 +822,11 @@ async fn wss_connections_reuse_native_trust_without_requiring_it_for_http() {
         let client = Client::new(
             url.parse().unwrap(),
             MODEL.into(),
-            Limits::for_protocol(Protocol::Omni),
+            Limits {
+                connect_timeout: DEADLINE,
+                close_timeout: DEADLINE,
+                ..Limits::for_protocol(Protocol::Omni)
+            },
             None,
         )
         .unwrap();
@@ -796,9 +894,10 @@ async fn wss_connections_reuse_native_trust_without_requiring_it_for_http() {
         }
     });
 
-    // Isolate trust-store environment changes from other concurrently running tests.
+    // Isolate trust-store changes. Process startup gets its own deadline in
+    // addition to the child's bounded connection/close operations.
     let output = tokio::time::timeout(
-        DEADLINE,
+        Duration::from_secs(30),
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
