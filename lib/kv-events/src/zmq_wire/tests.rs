@@ -2003,6 +2003,60 @@ fn test_host_pinned_removal_keeps_cache_namespace() {
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
+/// A salted KVCR HostPinned store inserts into the cache-owner normalizer's
+/// map. Its own removal must clear that entry. The HostPinned skip is only
+/// for framework CPU offload copies of a device block.
+#[test]
+fn test_kvcr_host_pinned_removal_clears_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let mut salted = namespaced_block_stored(1, None, Some("tenant-a"), "CPU");
+    if let RawKvEvent::BlockStored { ownership, .. } = &mut salted {
+        *ownership = Some("kvcr".to_string());
+    }
+    assert!(
+        normalizer
+            .preprocess_residency_with_reason(salted, worker)
+            .is_ok()
+    );
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    let kvcr_eviction = RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(1)],
+        medium: Some("CPU".to_string()),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: Some("kvcr".to_string()),
+    };
+    assert!(
+        normalizer
+            .preprocess_residency_with_reason(kvcr_eviction, worker)
+            .is_ok()
+    );
+    assert!(!normalizer.cache_namespaces.contains_key(&(worker, 1)));
+
+    let mut child = namespaced_block_stored(2, Some(1), None, "CPU");
+    if let RawKvEvent::BlockStored { ownership, .. } = &mut child {
+        *ownership = Some("kvcr".to_string());
+    }
+    let child = normalizer
+        .preprocess_residency_with_reason(child, worker)
+        .expect("KVCR removal must drop the salted parent entry");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace, None);
+}
+
 /// A device-tier store without a salt reusing a salted hash is still ambiguous.
 #[test]
 fn test_device_unsalted_store_still_marks_cache_namespace_ambiguous() {
