@@ -586,6 +586,8 @@ fn status_error(status: StatusCode, detail: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
+    use tonic_v14 as tonic;
+
     use std::time::Duration;
 
     use dynamo_backend_common::engine::RoutingHints;

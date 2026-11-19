@@ -1,7 +1,4 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(clippy::all)]
-#![allow(missing_docs)]
-
-tonic::include_proto!("sglang.api.v1");
+pub use sglang_api_types::api::v1::*;

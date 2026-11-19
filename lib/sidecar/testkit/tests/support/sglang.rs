@@ -4,6 +4,8 @@
 //! The SGLang fixture for `sglang.api.v1`, the gRPC contract of SGLang's Rust
 //! server.
 
+use tonic_v14 as tonic;
+
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_v14 as tonic;
+
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -9,8 +11,8 @@ use clap::Parser;
 use dynamo_mocker::common::protocols::EngineType;
 use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
-use dynamo_sglang_sidecar::proto::sglang_service_server::SglangServiceServer;
 use serde_json::{Map, Value};
+use sglang_api_types::api::v1::sglang_service_server::SglangServiceServer;
 
 #[derive(Parser, Debug)]
 #[command(

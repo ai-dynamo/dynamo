@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dynamo_sglang_sidecar::proto::generate_stream_item::Item;
-use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
 use serde_json::json;
+use sglang_api_types::api::v1::generate_stream_item::Item;
+use sglang_api_types::api::v1::sglang_service_server::SglangService;
 
 fn engine_args() -> MockerConfig {
     MockerConfig::from_value(serde_json::json!({
