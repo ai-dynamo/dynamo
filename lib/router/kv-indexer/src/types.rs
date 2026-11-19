@@ -27,9 +27,6 @@ pub enum KvRouterError {
     #[error("Indexer dropped the request")]
     IndexerDroppedRequest,
 
-    #[error("Prune operation failed: {0}")]
-    PruneFailed(String),
-
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
 }
@@ -276,6 +273,7 @@ impl WorkerLookupStats {
             .sum()
     }
 
+    #[cfg(test)]
     pub fn block_count_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.worker_blocks
             .iter()

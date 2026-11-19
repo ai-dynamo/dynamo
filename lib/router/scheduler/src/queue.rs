@@ -24,7 +24,7 @@ use super::overlap_refresh::{
 };
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
-    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs, WorkerLoadInputExt,
+    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
     WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{
@@ -36,26 +36,23 @@ use super::types::{
 use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
-use dynamo_admission::classifier::{ClassificationOverrides, ClassifyRequest};
-use dynamo_admission::queue::{
-    PolicyQueue, QueueLane, QueueMetadata, QueueReadiness, QueueSnapshot,
-};
+use dynamo_admission::{ClassificationOverrides, ClassifyRequest};
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
+use dynamo_admission::{PolicyQueue, QueueMetadata, QueueSnapshot};
+use dynamo_admission::{QueueLane, QueueReadiness};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
-use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
 };
+use dynamo_slot_tracker::{BusyThresholds, FullRankCounts};
+use dynamo_worker_selection::WorkerInputs;
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
 use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
-
-// The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
-pub use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 
 mod capacity;
 
@@ -617,7 +614,7 @@ impl RuntimePolicyControl {
     }
 }
 
-pub use dynamo_slot_tracker::booking::SchedulerBookingDescriptor;
+pub use dynamo_slot_tracker::SchedulerBookingDescriptor;
 
 #[derive(Debug)]
 enum SchedulerCleanupTarget {
@@ -1429,7 +1426,7 @@ impl<
                 ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
                     .with_pinned_worker(request.pinned_worker)
                     .with_sequence_hashes(request.token_seq.as_deref())
-                    .with_busy_thresholds(Arc::clone(&self.profile), reject_thresholds);
+                    .with_busy_thresholds(reject_thresholds);
             if let Some(request_id) = request.mode.request_id() {
                 classification = classification.with_request_id(request_id);
             }
@@ -1557,6 +1554,8 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            // Returned with the admitted response; the queue does not use it.
+            backend_priority: _,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
@@ -2839,6 +2838,7 @@ impl<
                 } else {
                     None
                 };
+                let progress = |worker| self.slots.decode_progress_for(worker);
                 // Held for this selection, so the snapshot the policy reads borrows live counters.
                 let resident_blocks = self
                     .resident_blocks
@@ -2852,7 +2852,8 @@ impl<
                             eligibility,
                             self.block_size,
                         )
-                        .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
+                        .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
+                        .with_decode_progress(Some(&progress)),
                         prepared,
                         trace,
                     )
@@ -3300,9 +3301,10 @@ mod tests {
     use crate::protocols::WorkerSelectionResult;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::wire::ActiveSequenceEvent;
+    use dynamo_slot_tracker::ActiveSequenceEvent;
 
-    use crate::selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+    use crate::selector::{DefaultWorkerSelector, WorkerSelector};
+    use dynamo_worker_selection::WorkerInputs;
 
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
@@ -3310,12 +3312,12 @@ mod tests {
 
     use crate::RefreshedOverlap;
 
-    use dynamo_admission::classifier::WorkerView;
+    use dynamo_admission::WorkerView;
     use dynamo_admission::{PolicyClassConfig, RouterQueuePolicy};
-    use dynamo_slot_tracker::busy::BusyThresholds;
+    use dynamo_slot_tracker::BusyThresholds;
     use std::num::NonZeroU32;
 
-    use dynamo_slot_tracker::topology::WorkerDpRange;
+    use dynamo_slot_tracker::WorkerDpRange;
 
     use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SequencePublisher};
 
@@ -3802,7 +3804,7 @@ mod tests {
     ) {
         slots.set_worker_capacities(configs.iter().map(|(&id, cfg)| {
             (
-                dynamo_slot_tracker::topology::WorkerDpRange::new(
+                dynamo_slot_tracker::WorkerDpRange::new(
                     id,
                     cfg.data_parallel_start_rank(),
                     cfg.data_parallel_size(),
@@ -4860,7 +4862,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::{ClassifyFuture, RequestClassifier};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
@@ -4906,7 +4908,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
     async fn classifier_input_projection_benchmark() {
-        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::{ClassifyFuture, RequestClassifier};
         use std::hint::black_box;
         use std::task::Context;
         use std::time::Instant as WallClock;
@@ -5355,6 +5357,119 @@ mod tests {
             );
             assert_eq!(prepared_queue.prepared_selections(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_read_decode_progress_at_actor_selection() {
+        use dynamo_slot_tracker::host::DecodeProgressUpdate;
+        use dynamo_worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        };
+
+        struct ProgressPicker;
+        impl WorkerPicker for ProgressPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::DECODE_PROGRESS
+            }
+
+            fn pick(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, dynamo_worker_selection::host::WorkerSelectionPolicyError>
+            {
+                use dynamo_worker_selection::experimental::decode_progress::DecodeProgressByRow;
+                let row = input
+                    .candidates()
+                    .iter()
+                    .position(|row| row.worker().worker_id == 0)
+                    .unwrap();
+                assert_eq!(
+                    input.decode_progress(row).unwrap().remaining_token_budget(),
+                    48
+                );
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .position(|row| row.worker().worker_id == 1)
+                    .unwrap())
+            }
+        }
+        let prepared_selections = Arc::new(AtomicUsize::new(0));
+        let policy = || CountingPreparedPolicy {
+            inner: WorkerSelectionPolicy::new(
+                dynamo_worker_selection::SelectionConfig::default(),
+                "test",
+                vec![],
+                Box::new(ProgressPicker),
+            ),
+            prepared_selections: Arc::clone(&prepared_selections),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, None, policy());
+        let mut actor = actor_with_selector_for_test(&queue, &slots, policy());
+        let request_id = "background".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt = slots
+            .add_request_if_registered_admitted(
+                dynamo_slot_tracker::host::SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: None,
+                    expected_output_tokens: None,
+                    track_prefill_tokens: false,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+        slots
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        slots
+            .update_output_if_booking(
+                &request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 8)),
+            )
+            .unwrap();
+        let (request, mut rx) = make_request("prepared-progress", 16);
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        slots
+            .update_output_if_booking(
+                &request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 80)),
+            )
+            .unwrap();
+        actor.refresh_workers_generation();
+        assert_eq!(
+            actor.with_projected_loads(
+                request,
+                Instant::now(),
+                prepared,
+                |actor, request, prepared| {
+                    actor.admit_one_projected(
+                        AdmissionContext::untracked(0, None),
+                        request,
+                        prepared,
+                    )
+                }
+            ),
+            Admission::Booked
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
+        assert_eq!(prepared_selections.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -6316,7 +6431,7 @@ mod tests {
             16,
             1_000_000,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::busy::BusyThresholds {
+            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
                 decode_busy_threshold_frac: Some(0.5),
                 ..Default::default()
             })),
@@ -6390,7 +6505,7 @@ mod tests {
             16,
             100,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::busy::BusyThresholds {
+            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
                 prefill_busy_threshold_frac: Some(0.5),
                 ..Default::default()
             })),
@@ -6403,7 +6518,7 @@ mod tests {
         };
         cfg_tx.send(HashMap::from([(0, worker_config)])).unwrap();
         slots
-            .reconcile_workers([dynamo_slot_tracker::topology::WorkerDpRange::new(0, 0, 2)])
+            .reconcile_workers([dynamo_slot_tracker::WorkerDpRange::new(0, 0, 2)])
             .unwrap();
         set_worker_capacities_from_configs(&slots, &cfg_tx.borrow());
         let rank0 = WorkerWithDpRank::new(0, 0);
@@ -6436,7 +6551,7 @@ mod tests {
 
     #[tokio::test]
     async fn reject_thresholds_follow_the_live_provider_on_prefill_tokens() {
-        let live = Arc::new(Mutex::new(dynamo_slot_tracker::busy::BusyThresholds {
+        let live = Arc::new(Mutex::new(dynamo_slot_tracker::BusyThresholds {
             prefill_busy_threshold_frac: Some(0.5),
             ..Default::default()
         }));
@@ -6475,7 +6590,7 @@ mod tests {
         slots.free(&"free".to_string(), decay_now()).unwrap();
 
         // Lifting the thresholds through the live provider takes effect at the next selection.
-        *live.lock() = dynamo_slot_tracker::busy::BusyThresholds::default();
+        *live.lock() = dynamo_slot_tracker::BusyThresholds::default();
         let (mut again, again_rx) = make_request("again", 16);
         again.pinned_worker = Some(first);
         queue.enqueue(again).await;

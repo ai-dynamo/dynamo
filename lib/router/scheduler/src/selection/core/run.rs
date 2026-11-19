@@ -198,6 +198,7 @@ impl SelectionCore {
             routing_hashes: _,
             shared_cache_hits: _,
             booking: _,
+            backend_priority: _,
         } = selected;
         let booked = sequence_hashes.is_some();
         let potential_decode_blocks = response.potential_decode_blocks as u64;
@@ -472,16 +473,25 @@ impl SelectionCore {
                 .select_without_admission(schedule_request)
                 .instrument(tracing::info_span!("kv_router.select_without_admission"))
                 .await
-                .map(|advisory| (advisory.response, Some(advisory.selected_worker_load), None))
+                .map(|advisory| {
+                    (
+                        advisory.response,
+                        Some(advisory.selected_worker_load),
+                        None,
+                        None,
+                    )
+                })
         } else {
             entry
                 .scheduler
                 .schedule_request_with_booking(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
-                .map(|(admitted, booking)| (admitted.response, None, booking))
+                .map(|(admitted, booking)| {
+                    (admitted.response, None, booking, admitted.backend_priority)
+                })
         };
-        let (response, advisory_load, booking) = match scheduled {
+        let (response, advisory_load, booking, backend_priority) = match scheduled {
             Ok(scheduled) => scheduled,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok(SelectionOutcome::QueueRejected { rejection });
@@ -609,6 +619,7 @@ impl SelectionCore {
             routing_hashes: returned_routing_hashes,
             shared_cache_hits: host_shared_cache_hits,
             booking,
+            backend_priority,
         }))
     }
 

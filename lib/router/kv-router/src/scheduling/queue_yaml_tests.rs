@@ -14,16 +14,15 @@ use tokio::time::Instant;
 
 use dynamo_admission::{PolicyProfile, QueueSnapshot, RouterQueuePolicy};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
-use dynamo_scheduler::OverlapSignals;
-use dynamo_scheduler::protocols::WorkerConfigLike;
-use dynamo_scheduler::queue::*;
-use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerCapacityExt, WorkerInputs};
 use dynamo_scheduler::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-use dynamo_scheduler::types::{
-    KvSchedulerError, RejectThresholdsProvider, ScheduleMode, SchedulingRequest, SchedulingResponse,
+use dynamo_scheduler::{
+    ClassQueueStats, DefaultWorkerSelector, KvSchedulerError, OverlapSignals,
+    RejectThresholdsProvider, ScheduleMode, SchedulerQueue, SchedulingRequest, SchedulingResponse,
+    WorkerCapacityExt, WorkerConfigLike,
 };
-use dynamo_slot_tracker::ActiveSequencesMultiWorker;
+use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SchedulerBookingDescriptor};
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 use crate::scheduling::policy_config::RouterPolicyConfig;
 
@@ -134,7 +133,7 @@ fn set_worker_capacities_from_configs(
 ) {
     slots.set_worker_capacities(configs.iter().map(|(&id, cfg)| {
         (
-            dynamo_slot_tracker::topology::WorkerDpRange::new(
+            dynamo_slot_tracker::WorkerDpRange::new(
                 id,
                 cfg.data_parallel_start_rank(),
                 cfg.data_parallel_size(),
@@ -149,9 +148,7 @@ fn make_request(
     isl_tokens: usize,
 ) -> (
     SchedulingRequest,
-    tokio::sync::oneshot::Receiver<
-        Result<SchedulingResponse, dynamo_scheduler::types::KvSchedulerError>,
-    >,
+    tokio::sync::oneshot::Receiver<Result<SchedulingResponse, dynamo_scheduler::KvSchedulerError>>,
 ) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let req = SchedulingRequest {
@@ -176,7 +173,7 @@ fn make_request(
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
-        routing_constraints: dynamo_scheduler::protocols::RoutingConstraints::default(),
+        routing_constraints: dynamo_scheduler::RoutingConstraints::default(),
         shared_cache_hits: None,
         resp_tx: Some(tx),
     };
@@ -184,7 +181,7 @@ fn make_request(
 }
 
 #[tokio::test]
-async fn classifiers_read_class_and_reject_thresholds() {
+async fn classifiers_read_reject_thresholds() {
     let profile = policy_profile(
         r#"
 default_policy_class: latency
@@ -197,7 +194,7 @@ policy_classes:
     prefill_busy_threshold_frac: 0.25
 "#,
     );
-    let reject = dynamo_slot_tracker::busy::BusyThresholds {
+    let reject = dynamo_slot_tracker::BusyThresholds {
         prefill_busy_threshold_frac: Some(1.0),
         ..Default::default()
     };
@@ -210,30 +207,15 @@ policy_classes:
     );
     let (mut request, _rx) = make_request("classified", 16);
     request.policy_class = Some("latency".to_string());
-    let (mut classified, _workers) =
+    let (classified, _workers) =
         queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
-
-    let latency = dynamo_slot_tracker::busy::BusyThresholds {
-        decode_busy_threshold_frac: Some(0.5),
-        ..Default::default()
-    };
-    let bulk = dynamo_slot_tracker::busy::BusyThresholds {
-        prefill_busy_threshold_frac: Some(0.25),
-        ..Default::default()
-    };
-    assert_eq!(classified.queue_thresholds(), latency);
-    assert_eq!(classified.queue_thresholds_for("bulk"), Some(bulk));
-    assert_eq!(classified.queue_thresholds_for("missing"), None);
     assert_eq!(classified.reject_thresholds(), reject);
 
-    classified.set_policy_class("bulk");
-    assert_eq!(classified.queue_thresholds(), bulk);
-
-    // An unknown requested class reads the default class's thresholds.
+    // The reject thresholds are router-wide: the requested class does not change them.
     request.policy_class = Some("unknown".to_string());
     let (classified, _workers) =
         queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
-    assert_eq!(classified.queue_thresholds(), latency);
+    assert_eq!(classified.reject_thresholds(), reject);
 }
 
 #[tokio::test]
@@ -786,7 +768,7 @@ policy_classes:
     assert_eq!(rejection.policy_class, "capped");
     assert_eq!(
         rejection.limit_kind,
-        dynamo_admission::queue::QueueLimitKind::Requests
+        dynamo_admission::QueueLimitKind::Requests
     );
     assert_eq!(rejection.current, 1);
     assert_eq!(rejection.limit, 1);
