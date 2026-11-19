@@ -955,7 +955,6 @@ fn otlp_export_families(drt_metrics: &dynamo_runtime::metrics::MetricsRegistry) 
     family_names(&drt_metrics.metric_families_combined().families)
 }
 
-/// Starts `service` on `listener`; returns its cancel token and task.
 fn spawn_service(
     service: HttpService,
     listener: tokio::net::TcpListener,
