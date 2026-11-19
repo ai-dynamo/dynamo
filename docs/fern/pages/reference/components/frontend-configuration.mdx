@@ -21,6 +21,8 @@ For a qualified vLLM 0.33.0 causal worker, enable `--systemone-serial` or set `D
 
 The vLLM profile rejects forward-pass instrumentation enabled by `DYN_FORWARDPASS_METRIC_PORT`, `--fpm-trace`, or `DYN_FPM_TRACE`, including operator-injected settings. Startup also verifies installed cache-accounting source files against the qualified vLLM 0.33.0 release; patches to those files require requalification. Each question generates one internal engine token, so `usage.output_tokens` equals the question count in either public contract. SGLang's non-generating profile reports zero output tokens.
 
+The Dynamo Kubernetes operator sets `DYN_FORWARDPASS_METRIC_PORT` on every worker, and a DynamoGraphDeployment (DGD) cannot unset it. Operator-managed vLLM workers therefore cannot use this decision profile yet. Run the qualified profile outside operator management; operator support requires a separate change to forward-pass instrumentation.
+
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
 | `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |
