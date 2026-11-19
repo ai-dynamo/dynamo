@@ -30,6 +30,13 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
 _SGLANG_ALIAS_REMOVAL = "Dynamo 1.8.0 (two releases after 1.6.0)"
+# The directory value of --planner-profile-data and what replaces it.
+_PROFILE_DIRECTORY = "--planner-profile-data with a profiler results directory"
+_PROFILE_DIRECTORY_DEPRECATED = Deprecated(
+    "--ais-perf-model with the file that `python -m "
+    "dynamo.mocker.utils.profile_results_ais_perf_model` writes for the directory",
+    remove_in=AIS_OLD_INPUTS_REMOVE_IN,
+)
 
 
 class ProfileDataResult:
@@ -58,7 +65,8 @@ def resolve_planner_profile_data(
 
     Handles backward compatibility by accepting either:
     1. A mocker-format NPZ file (returned as-is)
-    2. A profiler-style results directory (converted to mocker-format NPZ)
+    2. A profiler-style results directory (converted to mocker-format NPZ).
+       Deprecated: it warns once the directory is converted.
 
     Args:
         planner_profile_data: Path from --planner-profile-data argument.
@@ -91,6 +99,8 @@ def resolve_planner_profile_data(
         tmpdir = tempfile.TemporaryDirectory(prefix="mocker_perf_data_")
         npz_path = Path(tmpdir.name) / "perf_data.npz"
         convert_profile_results_to_npz(planner_profile_data, npz_path)
+        # Last, so that an error above is reported without a warning before it.
+        _PROFILE_DIRECTORY_DEPRECATED.warn(_PROFILE_DIRECTORY)
         return ProfileDataResult(npz_path=npz_path, tmpdir=tmpdir)
 
     # Case 3: Invalid path - neither mocker-format NPZ nor profiler-style directory
@@ -342,8 +352,12 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to profile results directory containing selected_prefill_interpolation/ and "
-        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
+        help="Path to a mocker-format .npz file with timing lookup tables, or to a "
+        "profiler results directory containing selected_prefill_interpolation/ and "
+        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded "
+        "polynomials). "
+        # argparse reads % in a help text as a format.
+        + _PROFILE_DIRECTORY_DEPRECATED.message(_PROFILE_DIRECTORY).replace("%", "%%"),
     )
     parser.add_argument(
         "--ais-perf-model",

@@ -206,6 +206,12 @@ file that changes only the scheduling of a default Mocker is:
   Path to either a mocker-format `.npz` file or a profiler results directory. Cannot be combined
   with `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL`; see
   [AIS performance model](#ais-performance-model).
+
+  **The directory form is deprecated** and removed in v1.9. It still works: the mocker fits one
+  line to the prefill points and one plane to the decode points, builds lookup tables from them,
+  and prints one warning. To use the measured points through the AIS perf model instead, see
+  [Profiler results as an AIS perf model](#profiler-results-as-an-ais-perf-model). A `.npz` file
+  is not deprecated.
 </ParamField>
 
 <ParamField path="--reasoning" type="JSON string" default="null">
@@ -260,6 +266,48 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   `DYN_AIS_PERF_MODEL` to an empty value for that mocker; an empty value counts as not set. With
   `--extra-engine-args` the profile data is not used for timing, so the combination is accepted.
 </ParamField>
+
+### Profiler results as an AIS perf model
+
+Available since v1.8.
+
+A profiler results directory holds the prefill and decode points that the profiler's thorough mode
+measured: `selected_prefill_interpolation/raw_data.npz` and
+`selected_decode_interpolation/raw_data.npz`, or `prefill_raw_data.json` and
+`decode_raw_data.json`. This command turns the directory into an AIS perf model:
+
+```bash
+python -m dynamo.mocker.utils.profile_results_ais_perf_model \
+    PROFILE_RESULTS_DIR OUTPUT_DIR --model MODEL
+python -m dynamo.mocker --ais-perf-model OUTPUT_DIR/ais_perf_model.json --model-path MODEL
+```
+
+`OUTPUT_DIR` must not exist. The command tunes one AISimulate `fpm_regression` model for each
+worker type (`prefill`, `decode`, `aggregated`) with the measured points, as the Planner reads the
+same directory, and saves each model's state in `OUTPUT_DIR`. `ais_perf_model.json` names the three
+states, so a mocker of any worker type takes the same file, and so does `ais_perf_model=` of the
+Python replay API. The states are tied to the AISimulate version that wrote them; write them with
+the Dynamo release that reads them.
+
+`--model` is recorded as the model name and `--backend` (default `vllm`) as the backend. The
+hardware and the parallelism are recorded as unknown. Each phase needs at least five measured
+points; with fewer, or with points that do not allow a fit, the command stops and does not create
+`OUTPUT_DIR`.
+
+Timing differs from the lookup tables of the deprecated directory form:
+
+- Prefill time depends on the number of requests in the batch and on their cached prefix, not
+  only on the total of new tokens, and it is not a straight line in the input length. For the
+  profile `H200_TP1P_TP1D` in the repository, one request of 100 input tokens takes 18.0 ms
+  (measured 19.5 ms; the lookup table gives 0.6 ms) and one of 8,000 takes 164.9 ms (lookup
+  table 175.3 ms).
+- Decode time for the same profile is within 2.5% of the lookup table for contexts of 350 tokens
+  and more, the range that was profiled, and within 0.3% from 1,000 tokens. For shorter contexts
+  the lookup table is higher, because it interpolates between a context of 1 token and the next
+  grid point: 64 requests with 50 tokens each take 7.5 ms through the AIS perf model and 48.2 ms
+  through the lookup table.
+- A mocker without `--num-gpu-blocks-override` takes its KV capacity from the profiled decode
+  engine (`max_kv_tokens` of the decode data) instead of the default of 16,384 blocks.
 
 The inputs below are deprecated. They still work and print one warning that names the inputs in
 use, for example

@@ -555,8 +555,6 @@ module = [
     "kubernetes.*",
     "scipy",
     "scipy.*",
-    "sklearn",
-    "sklearn.*",
     "pmdarima",
     "pmdarima.*",
     "filterpy",

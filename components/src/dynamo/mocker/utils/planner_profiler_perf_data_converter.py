@@ -4,9 +4,13 @@
 """
 Convert planner profiler results to mocker-compatible NPZ format.
 
-Uses the FPM-based regression models from ``dynamo.planner.core.perf_model``
-to evaluate prefill TTFT and decode ITL on a regular grid, producing the
-lookup tables that the mocker uses for latency simulation.
+Deprecated with the profiler results directory form of ``--planner-profile-data``
+and removed with it: ``dynamo.mocker.utils.profile_results_ais_perf_model``
+turns the same directory into an AIS perf model.
+
+Fits one linear model to the prefill points and one to the decode points and
+evaluates them on a regular grid, producing the lookup tables that the mocker
+uses for latency simulation.
 
 Example prefill query:
     input:
@@ -28,11 +32,52 @@ Example decode query:
 
 import logging
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# A slope of the decode batch size this far below zero is kept as noise; one
+# further below is set to zero.
+_BATCH_SLOPE_NOISE = 1e-6
+# No prediction is below this many seconds.
+_MIN_WALL_TIME = 1e-6
+
+
+def _fit_wall_time(
+    features: list[list[float]], wall_times: list[float], *, batch_column: int | None
+) -> tuple[np.ndarray, float] | None:
+    """Fit ``wall_time = features @ slopes + intercept`` by least squares.
+
+    Returns ``(slopes, intercept)``, or ``None`` without a point or when the
+    slope of a token count is negative: more tokens cannot take less time.
+    The slope of ``batch_column``, the decode batch size, may be negative
+    next to the KV token count; it is kept as noise or set to zero.
+    """
+    if not wall_times:
+        return None
+    x = np.array(features, dtype=float)
+    y = np.array(wall_times, dtype=float)
+    if not (np.isfinite(x).all() and np.isfinite(y).all()):
+        raise ValueError("Profiling data contains NaN or infinity")
+    x_mean = x.mean(axis=0)
+    y_mean = y.mean()
+    # The minimum-norm solution on centered data with the singular value
+    # cutoff of the scikit-learn regression this replaced, so that the tables
+    # keep their values, also for points on one line.
+    cutoff = max(x.shape) * float(np.finfo(float).eps)
+    slopes = np.linalg.lstsq(x - x_mean, y - y_mean, rcond=cutoff)[0]
+    intercept = float(y_mean - np.dot(x_mean, slopes))
+    for column in np.flatnonzero(slopes < 0):
+        if column != batch_column:
+            logger.warning(
+                "Regression produced negative coefficients %s, model rejected",
+                slopes.tolist(),
+            )
+            return None
+        if slopes[column] < -_BATCH_SLOPE_NOISE:
+            slopes[column] = 0.0
+    return slopes, intercept
 
 
 def convert_profile_results_to_npz(
@@ -42,9 +87,9 @@ def convert_profile_results_to_npz(
 ) -> Path:
     """Convert planner profiler results to mocker-compatible NPZ format.
 
-    Loads the profiler's raw data (npz or JSON), fits FPM regression
-    models, and evaluates them on a regular grid to produce the lookup
-    tables the mocker expects.
+    Loads the profiler's raw data (npz or JSON), fits one linear model for
+    prefill and one for decode, and evaluates them on a regular grid to
+    produce the lookup tables the mocker expects.
 
     Args:
         profile_results_dir: Path containing selected_prefill_interpolation
@@ -55,10 +100,6 @@ def convert_profile_results_to_npz(
     Returns:
         Path to the generated NPZ file.
     """
-    from dynamo.planner.core.perf_model import (
-        DecodeRegressionModel,
-        PrefillRegressionModel,
-    )
     from dynamo.planner.monitoring.perf_metrics import (
         _convert_decode_profiling,
         _convert_prefill_profiling,
@@ -69,8 +110,6 @@ def convert_profile_results_to_npz(
 
     logger.info(f"Converting profile results from {profile_results_dir}...")
 
-    result: dict[str, Any] = {}
-
     # --- Prefill: fit 1D model, evaluate TTFT on ISL grid ---
     prefill_fpms = _convert_prefill_profiling(profile_results_dir)
     if not prefill_fpms:
@@ -78,24 +117,24 @@ def convert_profile_results_to_npz(
             f"No prefill profiling data found in {profile_results_dir}"
         )
 
-    prefill_model = PrefillRegressionModel(
-        max_num_fpm_samples=len(prefill_fpms) + 10,
-        min_observations=1,
+    # A point without a wall time is not an observation.
+    timed = [fpm for fpm in prefill_fpms if fpm.wall_time != 0.0]
+    prefill_fit = _fit_wall_time(
+        [[float(fpm.scheduled_requests.sum_prefill_tokens)] for fpm in timed],
+        [fpm.wall_time for fpm in timed],
+        batch_column=None,
     )
-    prefill_model.load_benchmark_fpms(prefill_fpms)
-    if not prefill_model._ensure_fitted():
+    if prefill_fit is None:
         raise RuntimeError("Failed to fit prefill regression from profiling data")
+    slopes, intercept = prefill_fit
 
     isl_values = [
         float(fpm.scheduled_requests.sum_prefill_tokens) for fpm in prefill_fpms
     ]
-    prefill_x = np.linspace(min(isl_values), max(isl_values), resolution)
-    prefill_y = np.array(
-        [prefill_model._predict_wall_time(isl) * 1000.0 for isl in prefill_x]
+    prefill_isl = np.linspace(min(isl_values), max(isl_values), resolution)
+    prefill_ttft_ms = (
+        np.maximum(_MIN_WALL_TIME, prefill_isl * slopes[0] + intercept) * 1000.0
     )
-
-    result["prefill_isl"] = prefill_x.tolist()
-    result["prefill_ttft_ms"] = prefill_y.tolist()
 
     # --- Decode: fit 2D model, evaluate ITL on (kv_tokens, context_length) grid ---
     decode_fpms = _convert_decode_profiling(profile_results_dir)
@@ -104,13 +143,21 @@ def convert_profile_results_to_npz(
             f"No decode profiling data found in {profile_results_dir}"
         )
 
-    decode_model = DecodeRegressionModel(
-        max_num_fpm_samples=len(decode_fpms) + 10,
-        min_observations=1,
+    timed = [fpm for fpm in decode_fpms if fpm.wall_time != 0.0]
+    decode_fit = _fit_wall_time(
+        [
+            [
+                float(fpm.scheduled_requests.num_decode_requests),
+                float(fpm.scheduled_requests.sum_decode_kv_tokens),
+            ]
+            for fpm in timed
+        ],
+        [fpm.wall_time for fpm in timed],
+        batch_column=0,
     )
-    decode_model.load_benchmark_fpms(decode_fpms)
-    if not decode_model._ensure_fitted():
+    if decode_fit is None:
         raise RuntimeError("Failed to fit decode regression from profiling data")
+    slopes, intercept = decode_fit
 
     max_kv = max(
         float(fpm.scheduled_requests.sum_decode_kv_tokens) for fpm in decode_fpms
@@ -126,17 +173,35 @@ def convert_profile_results_to_npz(
     decode_active_kv_tokens = np.linspace(0, max_kv, resolution)
     decode_context_length = np.linspace(1, max_ctx, resolution)
 
-    decode_itl = np.zeros((resolution, resolution))
-    for i, kv in enumerate(decode_active_kv_tokens):
-        for j, ctx in enumerate(decode_context_length):
-            bs = max(1, kv / ctx) if ctx > 0 else 1
-            decode_itl[i, j] = decode_model._predict_2d(bs, kv) * 1000.0
+    # Rows are KV token counts and columns context lengths. A context length
+    # of zero, which only data without KV usage gives, counts as one request.
+    kv_tokens = decode_active_kv_tokens[:, np.newaxis]
+    context = decode_context_length[np.newaxis, :]
+    batch_size = np.maximum(
+        1,
+        np.divide(
+            kv_tokens,
+            context,
+            out=np.zeros((resolution, resolution)),
+            where=context > 0,
+        ),
+    )
+    decode_itl = (
+        np.maximum(
+            _MIN_WALL_TIME,
+            batch_size * slopes[0] + kv_tokens * slopes[1] + intercept,
+        )
+        * 1000.0
+    )
 
-    result["decode_active_kv_tokens"] = decode_active_kv_tokens.tolist()
-    result["decode_context_length"] = decode_context_length.tolist()
-    result["decode_itl"] = decode_itl.tolist()
-
-    np.savez(output_path, **result)
+    np.savez(
+        output_path,
+        prefill_isl=prefill_isl,
+        prefill_ttft_ms=prefill_ttft_ms,
+        decode_active_kv_tokens=decode_active_kv_tokens,
+        decode_context_length=decode_context_length,
+        decode_itl=decode_itl,
+    )
 
     logger.info(f"Wrote perf data to {output_path}")
     return output_path
@@ -192,6 +257,8 @@ def is_mocker_format_npz(path: Path) -> bool:
 if __name__ == "__main__":
     import argparse
 
+    from dynamo.common.ais_perf_model import AIS_OLD_INPUTS_REMOVE_IN
+    from dynamo.common.configuration.utils import Deprecated
     from dynamo.runtime.logging import configure_dynamo_logging
 
     configure_dynamo_logging()
@@ -213,3 +280,7 @@ if __name__ == "__main__":
     convert_profile_results_to_npz(
         args.profile_results_dir, output_path, args.resolution
     )
+    Deprecated(
+        "python -m dynamo.mocker.utils.profile_results_ais_perf_model",
+        remove_in=AIS_OLD_INPUTS_REMOVE_IN,
+    ).warn("python -m dynamo.mocker.utils.planner_profiler_perf_data_converter")

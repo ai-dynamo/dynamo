@@ -58,6 +58,10 @@ With one config that has no `worker_type` and without `--router-prefill-load-wor
 
   > **Migrate:** Write the values of the old inputs into one perf model config per worker type, under the config keys of the table above. Add the values that the old inputs filled in, and pass the config through the new input of the component. A key copied from a flag name, such as `tp_size` or `model_path`, is an error. For the other keys of a config, see [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input) in the AISimulate documentation.
 
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the profiler results directory as a value of the mocker's `--planner-profile-data`.** The mocker still turns the directory into the same lookup tables and prints one warning; the form is scheduled for removal in v1.9.0. A mocker-format `.npz` file is not deprecated. The module `dynamo.mocker.utils.planner_profiler_perf_data_converter`, which writes the lookup tables as an `.npz` file, is deprecated with it.
+
+  > **Migrate:** Turn the directory into an AIS perf model with `python -m dynamo.mocker.utils.profile_results_ais_perf_model PROFILE_RESULTS_DIR OUTPUT_DIR --model MODEL` and pass `--ais-perf-model OUTPUT_DIR/ais_perf_model.json` instead of `--planner-profile-data`. Prefill timing and the default KV capacity differ from the lookup tables; see [Profiler results as an AIS perf model](../../components/mocker-cli-reference.mdx#profiler-results-as-an-ais-perf-model).
+
 <a id="v170"></a>
 
 ## v1.7.0 - Upcoming

@@ -191,11 +191,7 @@ Interpolators 使用 profiling sweep granularity 来决定精度。granularity �
 
 ### Regression Models
 
-三个专用 regression models 位于 `components/src/dynamo/planner/core/perf_model/`：
-
-- **PrefillRegressionModel**：1D regression `sum_prefill_tokens -> wall_time`。通过模拟 chunked prefill scheduling（chunk 大小为 `max_num_batched_tokens`）估算 TTFT。
-- **DecodeRegressionModel**：1D regression `sum_decode_kv_tokens -> wall_time`。估算 total decode load（scheduled + queued + avg decode length）的 ITL。
-- **AggRegressionModel**：2D regression `(sum_prefill_tokens, sum_decode_kv_tokens) -> wall_time`。估算 TTFT（带 piggybacked decode 的 simulated prefill）和 ITL（带 average piggybacked prefill 的 decode）。
+从 FPM observations 到 forward-pass 时间的 regression 由 AISimulate 的 `fpm_regression` estimator 完成。`components/src/dynamo/planner/core/perf_model/` 中的 `PlannerEnginePerfModel` 为每种 worker type 构建一个 estimator，并用观测到的 FPMs 对它进行 tune。Planner 根据它的 forward-pass 估算推导 TTFT（模拟 chunked prefill scheduling，chunk 大小为 `max_num_batched_tokens`）、total decode load 的 ITL，以及单个 engine 的 capacity。
 
 ### Scaling Decisions
 
