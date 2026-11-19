@@ -36,7 +36,6 @@ from build_codeowners import (  # noqa: E402
     split_coverage,
     strict_failure,
 )
-from check_ownership_approvals import fingerprint, merge_tree  # noqa: E402
 from codeowners_match import (  # noqa: E402
     Area,
     ResolvedModel,
@@ -1876,8 +1875,8 @@ class TestRenderCodeownersWithExternals:
         assert not any("@jane" in ln for ln in plain)
 
 
-class TestApprovalPolicySnapshots:
-    def test_unrelated_commit_preserves_review_but_policy_change_does_not(
+class TestApprovalCurrentHead:
+    def test_policy_requires_fresh_head_approval_and_keeps_enforcement(
         self, tmp_path, monkeypatch
     ):
         repo = tmp_path / "policy"
@@ -1924,13 +1923,7 @@ class TestApprovalPolicySnapshots:
         _git(repo, "add", ".github/codeowners/areas.yaml", "CODEOWNERS", "src/a.py")
         _git(repo, "commit", "-q", "-s", "-m", "ownership transfer")
         reviewed = _head(repo)
-        (repo / "src/a.py").write_text("print('unrelated implementation change')\n")
-        _git(repo, "add", "src/a.py")
-        _git(repo, "commit", "-q", "-s", "-m", "implementation")
         monkeypatch.chdir(repo)
-        assert fingerprint(merge_tree(base, reviewed), False) == fingerprint(
-            "HEAD", False
-        )
         pr = {
             "number": 1,
             "state": "open",
@@ -1967,40 +1960,19 @@ class TestApprovalPolicySnapshots:
 
         monkeypatch.setattr(approval_gate, "api", fake_api)
         monkeypatch.setattr(approval_gate, "command", local_command)
-        summary = approval_gate.evaluate("org/repo", pr, {})
+        summary = approval_gate.evaluate("org/repo", pr, reviews)
         assert "✅ @org/old" in summary
         assert "✅ @org/new" in summary
         assert "process-codeowners" not in summary
-        _git(repo, "switch", "-c", "new-target", base)
-        (repo / "src/a.py").write_text("print('concurrent target edit')\n")
+        (repo / "src/a.py").write_text("print('unrelated implementation change')\n")
         _git(repo, "add", "src/a.py")
-        _git(repo, "commit", "-q", "-s", "-m", "target advances")
-        base = _head(repo)
-        _git(repo, "switch", "codeowners-test")
-        _git(
-            repo,
-            "merge",
-            "-s",
-            "ours",
-            "--signoff",
-            "-m",
-            "resolve source conflict",
-            "new-target",
-        )
-        pr["base"]["sha"], pr["head"]["sha"] = base, _head(repo)
-        assert "✅ @org/new" in approval_gate.evaluate("org/repo", pr, {})
-        policy["shared"].append({"glob": "src/b.py", "owners": ["old", "new"]})
-        (repo / "src/b.py").write_text("pass\n")
-        (source / "areas.yaml").write_text(yaml.safe_dump(policy))
-        (repo / "CODEOWNERS").write_text(rendered_policy(policy, []))
-        _git(repo, "add", ".github/codeowners/areas.yaml", "CODEOWNERS", "src/b.py")
-        _git(repo, "commit", "-q", "-s", "-m", "another transfer to the same groups")
-        assert fingerprint(
-            merge_tree(base, reviewed, tolerate_conflicts=True), False
-        ) != fingerprint("HEAD", False)
+        _git(repo, "commit", "-q", "-s", "-m", "implementation")
         pr["head"]["sha"] = _head(repo)
         with pytest.raises(ValueError, match="❌ @org/new"):
-            approval_gate.evaluate("org/repo", pr, {})
+            approval_gate.evaluate("org/repo", pr, reviews)
+        for review in reviews:
+            review["commit_id"] = _head(repo)
+        assert "✅ @org/new" in approval_gate.evaluate("org/repo", pr, reviews)
         _git(
             repo,
             "mv",
@@ -2010,4 +1982,4 @@ class TestApprovalPolicySnapshots:
         _git(repo, "commit", "-q", "-s", "-m", "rename approval workflow")
         pr["head"]["sha"] = _head(repo)
         with pytest.raises(ValueError, match="Disable delegation"):
-            approval_gate.evaluate("org/repo", pr, {})
+            approval_gate.evaluate("org/repo", pr, reviews)

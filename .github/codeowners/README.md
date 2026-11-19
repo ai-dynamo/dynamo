@@ -75,40 +75,35 @@ individual co-owners must approve personally; a sole individual owner who author
 the PR cannot self-approve. Email-only owners cannot be resolved by this check;
 use GitHub team or user handles for delegated policy changes.
 
-Approvals are bound to the ownership policy, so unrelated code pushes do not
-invalidate them. A later ownership edit does. Changes to enforcement Python or its
-workflows additionally require Ops and Process, and bind approvals to the actual
-enforcement file contents. Contract/default/delegation-setting changes require
-Process. Added or removed directory/wildcard scopes and precedence changes with no
-tracked witness also require Process: they can affect future files whose owners
-cannot be established from the current tree alone. Reassigning an existing scope
-or adding an exact-file override uses the affected owners directly.
+Approvals count only for the current PR head commit. Every push or rebase requires
+fresh approvals. Changes to enforcement Python or its workflows additionally
+require Ops and Process. Contract/default/delegation-setting changes, added or
+removed directory/wildcard scopes, and reordered broad scopes also require Process:
+they can affect future files absent from the tracked tree. Reassigning an existing
+scope without reordering or adding an exact-file override uses the affected owners
+directly. Adding a shared directory rule can move it past other broad scopes and
+therefore require Process.
 
 The trusted workflow reads policy blobs as data and never checks out or executes
 PR code with membership/write credentials. Its separately named check cannot be
-satisfied by rerunning an old structural `codeowners` job. It refreshes on PR
-updates, submitted/dismissed reviews and pushes to `main`. Missing API access or
-memberships blocks approval. Ownership-changing PRs sharing a head are blocked
-until they use distinct commits, because GitHub check-runs are commit-scoped.
+satisfied by rerunning an old structural `codeowners` job. PR updates and
+submitted/dismissed reviews refresh the live PR; base-policy/tree changes refresh
+open policy PRs in one runner. Source-only base edits need no refresh. Missing
+API access or memberships blocks approval. Ownership-changing PRs sharing a head
+are blocked until they use distinct commits, because checks are commit-scoped.
 
 #### Rollout
 
-1. Provide `ORG_READ_TOKEN`, a token limited to organization **Members: read**, to
-   the trusted approval workflow. Its checks are published with `GITHUB_TOKEN`
-   (`checks: write`), preserving the GitHub Actions App identity.
-2. Add **`ownership-approvals` from GitHub Actions (App ID 15368)** to the required
-   checks for `main`. Retain the existing `codeowners` requirement. The structural
-   job rejects enabling delegation before this distinct requirement is present.
-3. Merge this rollout PR after normal native Ops/Process review. Its bootstrap job
-   supplies the new check only while live `main` explicitly disables delegation,
-   so native file owners still protect the policy change. Other open PRs
-   may wait for the new check until this merge installs the trusted workflow.
-4. The rollout push seeds existing open PRs in at most eight batches, with only two
-   runners active. Non-policy PRs receive a lightweight pass without a full fetch
-   or membership lookup. Later base-policy/tree changes refresh policy PRs only.
-   Review events use a lightweight relay with a different job name, so they cannot
-   replace a failed structural check. The workflow can also be dispatched manually
-   to refresh membership changes without a new PR commit.
+1. Provide `ORG_READ_TOKEN`, limited to organization **Members: read**, to the
+   trusted workflow. Publish checks with `GITHUB_TOKEN` (`checks: write`).
+2. Require **`ownership-approvals` from GitHub Actions (App ID 15368)** on `main`,
+   keeping `codeowners` required. The activation guard rejects delegation until
+   both checks are required.
+3. Merge after native Ops/Process review. The bootstrap supplies the new check
+   only while live `main` disables delegation. Other open PRs may wait for it.
+4. Existing PRs are **not automatically migrated**. Re-run their `codeowners`
+   workflow or dispatch the new workflow with a single `pr` number. The same
+   single-PR dispatch refreshes membership changes without a new commit.
 
 Branch-rule administration and secret provisioning are separate from changing
 repository files. Do not remove native protection or the activation guard before

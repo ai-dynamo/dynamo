@@ -5,10 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
-import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 import yaml
 from ownership_approvals import (
@@ -17,7 +16,6 @@ from ownership_approvals import (
     enforcement_changed,
     governance,
     missing_approvals,
-    policy_fingerprint,
     rendered_policy,
     required_approvals,
 )
@@ -74,21 +72,12 @@ def policy_path(path: str) -> bool:
     } or enforcement_changed([path])
 
 
-def changed_paths(repo: str, number: int) -> list[str]:
-    return [
-        path
-        for f in pages(f"repos/{repo}/pulls/{number}/files")
-        for path in (f["filename"], f.get("previous_filename", ""))
-        if path
-    ]
-
-
-def open_policies(repo: str) -> list[dict]:
+def open_policies(repo: str) -> list[int]:
     owner, name = repo.split("/")
     query = """query($owner:String!,$name:String!,$cursor:String) {
       repository(owner:$owner,name:$name) {
         pullRequests(states:OPEN,baseRefName:"main",first:100,after:$cursor) {
-          nodes { number headRefOid files(first:100) { nodes { path changeType } pageInfo { hasNextPage } } }
+          nodes { number files(first:100) { nodes { path changeType } pageInfo { hasNextPage } } }
           pageInfo { hasNextPage endCursor }
         }
       }
@@ -109,84 +98,55 @@ def open_policies(repo: str) -> list[dict]:
         connection = response["data"]["repository"]["pullRequests"]
         for pr in connection["nodes"]:
             paths = [f["path"] for f in pr["files"]["nodes"]]
-            if pr["files"]["pageInfo"]["hasNextPage"] or any(
-                f["changeType"] == "RENAMED" for f in pr["files"]["nodes"]
+            if (
+                pr["files"]["pageInfo"]["hasNextPage"]
+                or any(f["changeType"] == "RENAMED" for f in pr["files"]["nodes"])
+                or any(map(policy_path, paths))
             ):
-                paths = changed_paths(repo, pr["number"])
-            result.append(
-                {
-                    "pr": pr["number"],
-                    "head": pr["headRefOid"],
-                    "policy": any(map(policy_path, paths)),
-                }
-            )
+                result.append(pr["number"])
         if not connection["pageInfo"]["hasNextPage"]:
             return result
         cursor = connection["pageInfo"]["endCursor"]
 
 
-def batches(prs: list[dict]) -> list[dict]:
-    count = min(8, len(prs))
-    return [{"key": f"refresh-{i}", "prs": prs[i::count]} for i in range(count)]
-
-
-def discover(repo: str, event: dict) -> list[dict]:
+def discover(repo: str, event: dict) -> list[int]:
+    if "inputs" in event:
+        number = int(event["inputs"]["pr"])
+        if number < 1:
+            raise ValueError("A positive PR number is required")
+        return [number]
     run = event.get("workflow_run")
     if run:
-        if run["name"] != "codeowners" or run["event"] not in {
-            "pull_request",
-            "pull_request_review",
-        }:
+        if run["event"] not in {"pull_request", "pull_request_review"}:
             return []
         workflow = api(f"repos/{repo}/actions/workflows/codeowners.yml")
         if run["workflow_id"] != workflow["id"]:
             return []
-        numbers = {p["number"] for p in run.get("pull_requests", [])}
-        opened = (
-            [api(f"repos/{repo}/pulls/{n}") for n in numbers]
-            if numbers
-            else pages(f"repos/{repo}/pulls?state=open&base=main")
+        if run["pull_requests"]:
+            return sorted({p["number"] for p in run["pull_requests"]})
+
+        # Fork review events may omit pull_requests; query only the source branch.
+        source = run["head_repository"]
+        query = urlencode(
+            {
+                "state": "open",
+                "base": "main",
+                "head": f"{source['owner']['login']}:{run['head_branch']}",
+            }
         )
-        opened = [
-            p
-            for p in opened
-            if p["number"] in numbers
-            or p["head"]["sha"] == run["head_sha"]
-            or (
-                p["head"]["ref"] == run["head_branch"]
-                and p["head"]["repo"]["id"] == run["head_repository"]["id"]
-            )
+        return [
+            p["number"]
+            for p in pages(f"repos/{repo}/pulls?{query}")
+            if p["head"]["repo"]["id"] == source["id"]
+            and p["head"]["ref"] == run["head_branch"]
         ]
-        tasks = []
-        for pr in opened:
-            if pr["state"] == "open" and pr["base"]["ref"] == "main":
-                paths = changed_paths(repo, pr["number"])
-                tasks.append(
-                    {
-                        "pr": pr["number"],
-                        "head": pr["head"]["sha"],
-                        "policy": any(map(policy_path, paths)),
-                    }
-                )
-        return [{"key": p["head"], "prs": [p]} for p in tasks]
-    seed = "before" not in event
-    if "before" in event:
-        before = event["before"]
-        command("git", "fetch", "--no-tags", "--depth=1", "origin", before)
-        changed = command("git", "diff", "--name-only", "-z", before, "HEAD").split(
-            "\0"
-        )
-        tree_changed = command(
-            "git", "diff", "--name-only", "--diff-filter=ADRT", before, "HEAD"
-        ).strip()
-        if not any(map(policy_path, changed)) and not tree_changed:
-            return []
-        seed = (
-            ".github/workflows/codeowners-approval.yml"
-            not in command("git", "ls-tree", "-r", "--name-only", before).splitlines()
-        )
-    tasks = open_policies(repo)
-    return batches([p for p in tasks if seed or p["policy"]])
+    before = event["before"]
+    command("git", "fetch", "--no-tags", "origin", before)
+    changed = command("git", "diff", "--name-only", "-z", before, "HEAD").split("\0")
+    tree_changed = command(
+        "git", "diff", "--name-only", "--diff-filter=ADRT", before, "HEAD"
+    ).strip()
+    return open_policies(repo) if tree_changed or any(map(policy_path, changed)) else []
 
 
 def blob(ref: str, path: str) -> str:
@@ -199,35 +159,6 @@ def inputs(ref: str) -> tuple[dict, list[dict]]:
     if not isinstance(spec, dict) or not isinstance(external, list):
         raise ValueError("Malformed ownership policy")
     return spec, external
-
-
-def merge_tree(base: str, head: str, *, tolerate_conflicts: bool = False) -> str:
-    try:
-        return command("git", "merge-tree", "--write-tree", base, head).splitlines()[0]
-    except subprocess.CalledProcessError as error:
-        tree = (error.stdout or "").splitlines()[0] if error.stdout else ""
-        if (
-            not tolerate_conflicts
-            or error.returncode != 1
-            or not re.fullmatch(r"[a-f0-9]{40,64}", tree)
-        ):
-            raise
-        # Conflicts outside policy/enforcement inputs do not invalidate a policy
-        # approval. Conflicted inputs themselves fail parsing or the fingerprint.
-        return tree
-
-
-def fingerprint(ref: str, protected: bool) -> str:
-    spec, external = inputs(ref)
-    files = None
-    if protected:
-        files = {}
-        for entry in command("git", "ls-tree", "-rz", ref).split("\0"):
-            if entry:
-                metadata, path = entry.split("\t", 1)
-                if enforcement_changed([path]) or path.startswith(".github/workflows/"):
-                    files[path] = metadata.split()[2]
-    return policy_fingerprint(spec, external, files)
 
 
 def check_run(
@@ -255,9 +186,7 @@ def check_run(
         return api(endpoint, method="POST", body=body)["id"]
 
 
-def evaluate(
-    repo: str, pr: dict, event: dict, reviews: list[dict] | None = None
-) -> str:
+def evaluate(repo: str, pr: dict, reviews: list[dict]) -> str:
     number, base, head = pr["number"], pr["base"]["sha"], pr["head"]["sha"]
     duplicates = [
         p
@@ -266,18 +195,12 @@ def evaluate(
         and p["base"]["ref"] == "main"
         and p["head"]["sha"] == head
     ]
-    if not duplicates:
-        duplicates = [
-            p
-            for p in pages(f"repos/{repo}/pulls?state=open&base=main")
-            if p["head"]["sha"] == head
-        ]
-    if len(duplicates) != 1:
+    if [p["number"] for p in duplicates] != [number]:
         raise ValueError(
-            "This head SHA belongs to multiple open PRs; use distinct commits for independent approvals"
+            "Policy PRs must have a unique head SHA for commit-scoped checks"
         )
     command("git", "fetch", "--no-tags", "origin", base, f"refs/pull/{number}/head")
-    proposed = merge_tree(base, head)
+    proposed = command("git", "merge-tree", "--write-tree", base, head).splitlines()[0]
     # Read both snapshots without checking out code from the PR.
     before_paths = set(
         command("git", "ls-tree", "-rz", "--name-only", base).split("\0")
@@ -321,36 +244,7 @@ def evaluate(
     required, changes = required_approvals(before, after, paths, protected=protected)
     if governance(old_spec) != governance(new_spec):
         required.add(PROCESS)
-    expected_fingerprint = fingerprint(proposed, protected)
-    approvals = approved_reviewers(
-        reviews
-        if reviews is not None
-        else pages(f"repos/{repo}/pulls/{number}/reviews"),
-        pr["user"]["login"],
-    )
-    approved = set()
-    fingerprints = {}
-    for login, review in approvals.items():
-        if not required:
-            break
-        commit = review["commit_id"]
-        if commit not in fingerprints:
-            try:
-                command("git", "fetch", "--no-tags", "origin", commit)
-                fingerprints[commit] = fingerprint(
-                    merge_tree(base, commit, tolerate_conflicts=True), protected
-                )
-            except (
-                subprocess.SubprocessError,
-                ValueError,
-                KeyError,
-                TypeError,
-                yaml.YAMLError,
-                SystemExit,
-            ):
-                fingerprints[commit] = None
-        if fingerprints[commit] == expected_fingerprint:
-            approved.add(login)
+    approved = approved_reviewers(reviews, pr["user"]["login"], head)
     members = {}
     for principal in sorted(required):
         if "/" not in principal:
@@ -385,7 +279,7 @@ def evaluate(
     if missing:
         raise ValueError(
             result
-            + "\n\nApprovals must cover the current ownership policy; unrelated commits do not invalidate them."
+            + "\n\nApprovals must reference the current head commit; every push requires fresh approvals."
         )
     return result
 
@@ -418,51 +312,29 @@ def review_version(reviews: list[dict]) -> list[tuple]:
     )
 
 
-def evaluate_one(repo: str, task: dict, event: dict) -> None:
-    number, head = task["pr"], task["head"]
+def evaluate_one(repo: str, number: int) -> None:
     pr = api(f"repos/{repo}/pulls/{number}")
-    if (
-        pr["state"] != "open"
-        or pr["base"]["ref"] != "main"
-        or pr["head"]["sha"] != head
-    ):
+    if pr["state"] != "open" or pr["base"]["ref"] != "main":
         return
-    if not task["policy"]:
-        # Discovery is an optimization, not authority to skip review. Compare
-        # immutable commits again before issuing a lightweight result.
-        comparison = api(f"repos/{repo}/compare/{pr['base']['sha']}...{head}")
-        files = comparison["files"]
-        if len(files) >= 300 or any(
-            policy_path(path)
-            for f in files
-            for path in (f["filename"], f.get("previous_filename", ""))
-        ):
-            task = dict(task, policy=True)
-    if not task["policy"]:
-        api(
-            f"repos/{repo}/check-runs",
-            method="POST",
-            body={
-                "name": CHECK_NAME,
-                "head_sha": head,
-                "external_id": "delegated-codeowners-noop",
-                "status": "completed",
-                "conclusion": "success",
-                "output": {
-                    "title": "No ownership change",
-                    "summary": "This PR changes no ownership policy or enforcement files. The separate required codeowners check validates structure.",
-                },
-            },
-        )
-        return
+    head = pr["head"]["sha"]
     check_id = check_run(
         repo, head, conclusion=None, summary="Checking ownership approvals."
     )
-    base = pr["base"]["sha"]
     reviews = None
     try:
-        reviews = pages(f"repos/{repo}/pulls/{number}/reviews")
-        summary = evaluate(repo, pr, event, reviews=reviews)
+        comparison = api(f"repos/{repo}/compare/{pr['base']['sha']}...{head}")
+        files = comparison["files"]
+        paths = [
+            p for f in files for p in (f["filename"], f.get("previous_filename", ""))
+        ]
+        # The compare API caps files at 300; a full evaluation handles larger diffs.
+        if len(files) >= 300 or any(map(policy_path, paths)):
+            reviews = pages(f"repos/{repo}/pulls/{number}/reviews")
+            summary = evaluate(repo, pr, reviews)
+        else:
+            summary = (
+                "No ownership change; native GitHub CODEOWNERS reviews still apply."
+            )
         conclusion = "success"
     except (
         ValueError,
@@ -475,7 +347,12 @@ def evaluate_one(repo: str, task: dict, event: dict) -> None:
         summary = str(error)
         conclusion = "failure"
     current = api(f"repos/{repo}/pulls/{number}")
-    if current["head"]["sha"] != head or current["base"]["sha"] != base:
+    if (
+        current["head"]["sha"],
+        current["base"]["sha"],
+        current["base"]["ref"],
+        current["state"],
+    ) != (head, pr["base"]["sha"], "main", "open"):
         return
     if reviews is not None and review_version(reviews) != review_version(
         pages(f"repos/{repo}/pulls/{number}/reviews")
@@ -497,10 +374,6 @@ def evaluate_one(repo: str, task: dict, event: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--discover", action="store_true")
-    parser.add_argument("--pr", type=int)
-    parser.add_argument("--head")
-    parser.add_argument("--batch")
     parser.add_argument("--check-activation", action="store_true")
     args = parser.parse_args()
     repo = os.environ["GITHUB_REPOSITORY"]
@@ -508,18 +381,8 @@ def main() -> None:
         check_activation(repo)
         return
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    if args.discover:
-        print(json.dumps(discover(repo, event)))
-        return
-    if args.batch:
-        for task in json.loads(args.batch):
-            evaluate_one(repo, task, event)
-            if "workflow_run" not in event:
-                time.sleep(1)
-        return
-    if not args.pr or not args.head:
-        parser.error("--pr and --head are required")
-    evaluate_one(repo, {"pr": args.pr, "head": args.head, "policy": True}, event)
+    for number in discover(repo, event):
+        evaluate_one(repo, number)
 
 
 if __name__ == "__main__":

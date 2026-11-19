@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 
 from codeowners_match import (
     DELEGATED_POLICY_PATHS,
     compute_resolution,
-    match,
     parse_codeowners,
     resolve_owners,
 )
@@ -41,17 +38,6 @@ def governance(spec: dict) -> dict:
     return {key: value for key, value in spec.items() if key not in {"areas", "shared"}}
 
 
-def policy_fingerprint(
-    spec: dict, external: list[dict], enforcement: dict | None = None
-) -> str:
-    rules = [
-        (glob, sorted(owners))
-        for glob, owners in parse_codeowners(rendered_policy(spec, external))
-    ]
-    payload = json.dumps([rules, governance(spec), enforcement], sort_keys=True)
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 def enforcement_changed(paths: list[str]) -> bool:
     return any(
         path in ENFORCEMENT_WORKFLOWS
@@ -61,21 +47,9 @@ def enforcement_changed(paths: list[str]) -> bool:
 
 
 def broad(glob: str) -> bool:
-    return glob.endswith("/") or any(c in glob for c in "*?[")
-
-
-def may_overlap(left: str, right: str) -> bool:
-    if left.startswith("/") and not broad(left):
-        return match(right, left[1:])
-    if right.startswith("/") and not broad(right):
-        return match(left, right[1:])
-    prefixes = []
-    for glob in (left, right):
-        prefix = glob if glob.startswith("/") else ""
-        for char in "*?[":
-            prefix = prefix.split(char, 1)[0]
-        prefixes.append(prefix)
-    return prefixes[0].startswith(prefixes[1]) or prefixes[1].startswith(prefixes[0])
+    return (
+        not glob.startswith("/") or glob.endswith("/") or any(c in glob for c in "*?[")
+    )
 
 
 def required_approvals(
@@ -116,32 +90,21 @@ def required_approvals(
             and not principals <= required
         ):
             required.add(PROCESS)
-    # Compare surviving pattern order separately from owner values. An unrelated
-    # tracked transfer must not conceal a changed, currently empty intersection.
-    old_order = list(dict.fromkeys(g for g, _ in reversed(old_rules)))[::-1]
-    new_order = list(dict.fromkeys(g for g, _ in reversed(new_rules)))[::-1]
-    old_pos, new_pos = {g: i for i, g in enumerate(old_order)}, {
-        g: i for i, g in enumerate(new_order)
-    }
-    common = sorted(old_globs & new_globs)
-    for i, left in enumerate(common):
-        for right in common[i + 1 :]:
-            if (
-                (old_pos[left] < old_pos[right]) != (new_pos[left] < new_pos[right])
-                and may_overlap(left, right)
-                and not (
-                    old_map[left] | old_map[right] | new_map[left] | new_map[right]
-                )
-                <= required
-            ):
-                required.add(PROCESS)
-    if any(broad(glob) for glob in changed_scopes):
+    # Scope/order edits can affect future files absent from the tracked tree.
+    common = old_globs & new_globs
+    old_order = list(
+        dict.fromkeys(g for g, _ in reversed(old_rules) if g in common and broad(g))
+    )
+    new_order = list(
+        dict.fromkeys(g for g, _ in reversed(new_rules) if g in common and broad(g))
+    )
+    if old_order != new_order or any(broad(glob) for glob in changed_scopes):
         required.add(PROCESS)
     return required, changes
 
 
-def approved_reviewers(reviews: list[dict], author: str) -> dict[str, dict]:
-    """Comments preserve the last decisive review; dismissals revoke it."""
+def approved_reviewers(reviews: list[dict], author: str, head: str) -> set[str]:
+    """Require a current-head approval; comments preserve it, dismissals revoke it."""
     latest = {}
     for review in sorted(reviews, key=lambda r: (r.get("submitted_at") or "", r["id"])):
         user = review["user"]
@@ -150,7 +113,11 @@ def approved_reviewers(reviews: list[dict], author: str) -> dict[str, dict]:
             continue
         if review["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
             latest[login] = review
-    return {login: r for login, r in latest.items() if r["state"] == "APPROVED"}
+    return {
+        login
+        for login, review in latest.items()
+        if review["state"] == "APPROVED" and review["commit_id"] == head
+    }
 
 
 def missing_approvals(

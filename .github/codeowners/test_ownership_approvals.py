@@ -21,7 +21,6 @@ from ownership_approvals import (
     enforcement_changed,
     governance,
     missing_approvals,
-    policy_fingerprint,
     rendered_policy,
     required_approvals,
 )
@@ -145,15 +144,6 @@ def test_an_area_cannot_clear_native_owners_with_an_empty_or_invalid_team(spec, 
         compute_resolution(spec)
 
 
-def test_bulk_rollout_stays_below_the_matrix_limit():
-    prs = [{"pr": i, "head": str(i), "policy": False} for i in range(1075)]
-    grouped = gate.batches(prs)
-    assert len(grouped) == 8
-    assert sorted(p["pr"] for group in grouped for p in group["prs"]) == list(
-        range(1075)
-    )
-
-
 def test_delegation_is_opt_in_and_rejects_string_flags(spec):
     spec["meta"]["delegated_policy_reviews"] = False
     assert compute_resolution(spec).delegated_paths() == frozenset()
@@ -162,23 +152,11 @@ def test_delegation_is_opt_in_and_rejects_string_flags(spec):
         compute_resolution(spec)
 
 
-def test_fingerprint_ignores_yaml_mapping_order_and_comments(spec):
-    reverse = dict(reversed(list(spec.items())))
-    assert policy_fingerprint(spec, []) == policy_fingerprint(reverse, [])
-
-
-def test_another_transfer_invalidates_prior_policy_approval(spec):
-    changed = deepcopy(spec)
-    changed["shared"] = [{"glob": "src/new.py", "owners": ["a", "b"]}]
-    assert policy_fingerprint(spec, []) != policy_fingerprint(changed, [])
-
-
 def test_contract_changes_require_process_even_without_new_routing(spec):
     changed = deepcopy(spec)
     changed["required_owners"] = [{"glob": "src/", "owners": ["a"]}]
     assert rendered_policy(spec, []) == rendered_policy(changed, [])
     assert governance(spec) != governance(changed)
-    assert policy_fingerprint(spec, []) != policy_fingerprint(changed, [])
 
 
 @pytest.mark.parametrize(
@@ -200,15 +178,15 @@ def review(review_id, login, state, *, user_type="User"):
         "user": {"login": login, "type": user_type},
         "state": state,
         "submitted_at": f"2026-11-{review_id:02d}T00:00:00Z",
-        "commit_id": "same-policy",
+        "commit_id": "head",
     }
 
 
 def test_comments_preserve_approval_but_changes_requested_revoke_it():
     reviews = [review(1, "alice", "APPROVED"), review(2, "alice", "COMMENTED")]
-    assert set(approved_reviewers(reviews, "author")) == {"alice"}
+    assert set(approved_reviewers(reviews, "author", "head")) == {"alice"}
     reviews.append(review(3, "alice", "CHANGES_REQUESTED"))
-    assert approved_reviewers(reviews, "author") == {}
+    assert approved_reviewers(reviews, "author", "head") == set()
 
 
 def test_dismissed_author_and_bot_approvals_do_not_count():
@@ -217,7 +195,7 @@ def test_dismissed_author_and_bot_approvals_do_not_count():
         review(2, "author", "APPROVED"),
         review(3, "bot", "APPROVED", user_type="Bot"),
     ]
-    assert approved_reviewers(reviews, "author") == {}
+    assert approved_reviewers(reviews, "author", "head") == set()
 
 
 def test_one_person_can_approve_for_multiple_groups():
@@ -254,38 +232,12 @@ def test_failed_api_reads_do_not_turn_into_empty_membership(monkeypatch):
         gate.pages("orgs/org/teams/team/members")
 
 
-def test_noop_discovery_cannot_hide_an_ownership_edit(monkeypatch):
-    pr = {
-        "state": "open",
-        "head": {"sha": "head"},
-        "base": {"ref": "main", "sha": "base"},
-    }
-    published = []
-
-    def fake_api(endpoint, **kwargs):
-        if "/reviews?" in endpoint:
-            return []
-        if "/check-runs?" in endpoint:
-            return {"check_runs": [{"id": 42, "app": {"id": 15368}}]}
-        if "/pulls/1" in endpoint:
-            return pr
-        if "/compare/" in endpoint:
-            return {"files": [{"filename": "CODEOWNERS"}]}
-        raise AssertionError(endpoint)
-
-    def needs_review(*args, **kwargs):
-        raise ValueError("Missing affected owners")
-
-    monkeypatch.setattr(gate, "api", fake_api)
-    monkeypatch.setattr(gate, "evaluate", needs_review)
-
-    def publish(*a, **kw):
-        published.append(kw["conclusion"])
-        return 42
-
-    monkeypatch.setattr(gate, "check_run", publish)
-    gate.evaluate_one("org/repo", {"pr": 1, "head": "head", "policy": False}, {})
-    assert published == [None, "failure"]
+def test_only_current_head_approvals_count():
+    old = dict(review(1, "alice", "APPROVED"), commit_id="old")
+    current = review(2, "bob", "APPROVED")
+    assert approved_reviewers([old, current], "author", "head") == {"bob"}
+    withdrawn = dict(review(3, "bob", "CHANGES_REQUESTED"), commit_id="old")
+    assert approved_reviewers([current, withdrawn], "author", "head") == set()
 
 
 def test_review_relay_and_bootstrap_cannot_replace_native_structure():
@@ -304,7 +256,9 @@ def test_review_relay_and_bootstrap_cannot_replace_native_structure():
 
 
 @pytest.mark.parametrize("newer_check", [False, True])
-def test_bulk_cannot_publish_stale_green_after_a_dismissal(monkeypatch, newer_check):
+def test_concurrent_evaluation_cannot_restore_a_withdrawn_approval(
+    monkeypatch, newer_check
+):
     pr = {
         "state": "open",
         "head": {"sha": "head"},
@@ -316,6 +270,8 @@ def test_bulk_cannot_publish_stale_green_after_a_dismissal(monkeypatch, newer_ch
 
     def fake_api(endpoint, **kwargs):
         nonlocal reads
+        if "/compare/" in endpoint:
+            return {"files": [{"filename": "CODEOWNERS"}]}
         if "/reviews?" in endpoint:
             reads += 1
             return [reviewed if reads == 1 else dict(reviewed, state="DISMISSED")]
@@ -334,16 +290,8 @@ def test_bulk_cannot_publish_stale_green_after_a_dismissal(monkeypatch, newer_ch
     monkeypatch.setattr(gate, "api", fake_api)
     monkeypatch.setattr(gate, "evaluate", lambda *a, **kw: "approved before dismissal")
     monkeypatch.setattr(gate, "check_run", publish)
-    gate.evaluate_one("org/repo", {"pr": 1, "head": "head", "policy": True}, {})
+    gate.evaluate_one("org/repo", 1)
     assert published == ([None] if newer_check else [None, "failure"])
-
-
-def test_approval_of_enforcement_code_cannot_be_reused_after_code_changes(spec):
-    approved = {".github/codeowners/ownership_approvals.py": "reviewed-blob"}
-    changed = {".github/codeowners/ownership_approvals.py": "new-enforcement-blob"}
-    assert policy_fingerprint(spec, [], approved) != policy_fingerprint(
-        spec, [], changed
-    )
 
 
 def test_native_exemptions_require_a_separately_required_check(
@@ -372,3 +320,139 @@ def test_native_exemptions_require_a_separately_required_check(
     rules[0]["parameters"]["required_status_checks"][0]["integration_id"] = None
     with pytest.raises(ValueError, match="Before enabling delegation"):
         gate.check_activation("org/repo")
+
+
+def test_dispatch_targets_one_pr_and_review_events_use_live_source_branch(monkeypatch):
+    assert gate.discover("org/repo", {"inputs": {"pr": "42"}}) == [42]
+    with pytest.raises(ValueError, match="positive PR"):
+        gate.discover("org/repo", {"inputs": {"pr": "0"}})
+    run = {
+        "workflow_id": 17,
+        "event": "pull_request_review",
+        "pull_requests": [],
+        "head_sha": "old-head",
+        "head_branch": "feature/x?look=1",
+        "head_repository": {"id": 2, "owner": {"login": "fork"}},
+    }
+    calls = []
+
+    def fake_api(endpoint, **kwargs):
+        calls.append(endpoint)
+        if endpoint.endswith("/actions/workflows/codeowners.yml"):
+            return {"id": 17}
+        assert "head=fork%3Afeature%2Fx%3Flook%3D1" in endpoint
+        head = {"ref": run["head_branch"], "sha": "new-head"}
+        return [
+            {"number": i, "head": dict(head, repo={"id": repo_id})}
+            for i, repo_id in [(42, 2), (99, 3)]
+        ]
+
+    monkeypatch.setattr(gate, "api", fake_api)
+    assert gate.discover("org/repo", {"workflow_run": run}) == [42]
+    assert len(calls) == 2
+    run["workflow_id"] = 18
+    assert gate.discover("org/repo", {"workflow_run": run}) == []
+
+
+@pytest.mark.parametrize("policy,tree", [(False, False), (True, False), (False, True)])
+def test_main_refreshes_only_policy_prs_when_policy_or_tree_changes(
+    monkeypatch, policy, tree
+):
+    def git(*args):
+        if "--diff-filter=ADRT" in args:
+            return "new.py" if tree else ""
+        return "CODEOWNERS\0" if policy and "diff" in args else ""
+
+    monkeypatch.setattr(gate, "command", git)
+    monkeypatch.setattr(gate, "open_policies", lambda repo: [42])
+    assert gate.discover("org/repo", {"before": "old-base"}) == (
+        [42] if policy or tree else []
+    )
+
+
+def test_policy_discovery_checks_large_diffs_and_renames(monkeypatch):
+    def node(number, path, kind="MODIFIED", more=False):
+        return {
+            "number": number,
+            "files": {
+                "nodes": [{"path": path, "changeType": kind}],
+                "pageInfo": {"hasNextPage": more},
+            },
+        }
+
+    def api(endpoint, **kwargs):
+        if endpoint == "graphql":
+            nodes = [
+                node(1, "source.py"),
+                node(2, "CODEOWNERS"),
+                node(3, "source.py", more=True),
+                node(4, "renamed.yml", "RENAMED"),
+            ]
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "nodes": nodes,
+                            "pageInfo": {"hasNextPage": False},
+                        }
+                    }
+                }
+            }
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(gate, "api", api)
+    assert gate.open_policies("org/repo") == [2, 3, 4]
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_noop_check_uses_captured_commits_and_full_evaluation_at_api_cap(
+    monkeypatch, large
+):
+    pr = {
+        "state": "open",
+        "head": {"sha": "head"},
+        "base": {"ref": "main", "sha": "base"},
+    }
+    published = []
+
+    def api(endpoint, **kwargs):
+        if endpoint.endswith("/pulls/1"):
+            return pr
+        if endpoint.endswith("/compare/base...head"):
+            return {
+                "files": [{"filename": "source.py"}] * 300
+                if large
+                else [{"filename": "CODEOWNERS"}]
+            }
+        if "/reviews?" in endpoint:
+            return []
+        if "/check-runs?" in endpoint:
+            return {"check_runs": [{"id": 42, "app": {"id": 15368}}]}
+        raise AssertionError(endpoint)
+
+    def evaluate(*args):
+        raise ValueError("Missing affected-owner approvals")
+
+    def publish(*args, **kwargs):
+        published.append(kwargs["conclusion"])
+        return 42
+
+    monkeypatch.setattr(gate, "api", api)
+    monkeypatch.setattr(gate, "evaluate", evaluate)
+    monkeypatch.setattr(gate, "check_run", publish)
+    gate.evaluate_one("org/repo", 1)
+    assert published == [None, "failure"]
+
+
+@pytest.mark.parametrize(
+    "glob,path", [("Cargo.toml", "Cargo.toml"), ("src/", "src/a.py")]
+)
+def test_rendered_shared_owner_uses_affected_groups_without_process(spec, glob, path):
+    spec["areas"][0]["path_globs"] = [glob]
+    spec["areas"][1]["path_globs"] = []
+    changed = deepcopy(spec)
+    changed["shared"] = [{"glob": glob, "owners": ["a", "b"]}]
+    required, _ = required_approvals(
+        rendered_policy(spec, []), rendered_policy(changed, []), [path]
+    )
+    assert required == {"@org/a", "@org/b"}
