@@ -75,15 +75,10 @@ spec:
                         InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
                         the typed fields. It uses the upstream AISimulate JSON contract, including
                         snake_case names. Values here take precedence, and null deletes a lowered
-                        field. Dynamo also accepts the exact object {"$null":true} as a deletion alias
-                        only as an object-field value outside arrays. $null is reserved: other values,
-                        additional keys in its object, the document root, and every occurrence inside
-                        an array are rejected, including on updates with unchanged specs.
-                        The operator expands valid aliases before merging and
-                        AISimulate schema validation without changing stored overrides.
-                        Client-side kubectl apply (observed with kubectl 1.34) removes native
-                        null values; use the alias with client-side apply, or submit native nulls with
-                        kubectl create or kubectl apply --server-side. A native-null document supplies
+                        field. The exact {"$null":true} alias is valid only as an object-field value
+                        outside arrays; all other uses of $null are rejected on every write.
+                        Use the alias with client-side kubectl apply, which removes native nulls;
+                        kubectl create and server-side apply preserve them. A null document supplies
                         no overrides. The dgdr_run member must remain an object, and its operator-owned
                         transport, identity, and runtime fields name, max_candidates, snapshot_dir,
                         runtime_image, runtime_version_override, derive_runtime_images,
