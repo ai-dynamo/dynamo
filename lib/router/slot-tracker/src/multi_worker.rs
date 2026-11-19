@@ -3455,7 +3455,6 @@ mod tests {
         assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
-    /// `event` as its worker publishes it.
     fn from_worker(mut event: ActiveSequenceEvent) -> ActiveSequenceEvent {
         event.origin = crate::wire::ActiveSequenceEventOrigin::Worker;
         event
