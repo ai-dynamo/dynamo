@@ -12,7 +12,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::classifier_rows::ClassifierRows;
-use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
@@ -23,10 +22,9 @@ use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PairedPoolRoom,
-    PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse,
-    TierOverlapBlocks, WorkerAvailabilityProvider,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse,
+    WorkerAvailabilityProvider,
 };
-use crate::protocols::RoutingConstraints;
 use crate::protocols::WorkerConfigLike;
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
@@ -400,6 +398,9 @@ where
         let tracked = request.mode.is_tracked();
         let request_id = request.mode.request_id().map(str::to_owned);
         let classified_request = self.classify_request(&mut request, ingress_at).await?;
+        let backend_priority = classified_request
+            .as_ref()
+            .and_then(ClassifyRequest::backend_priority);
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -435,7 +436,14 @@ where
         let booking = lifecycle_lease
             .and_then(|lease| lease.commit())
             .map(|booking| self.queue.booking_handle(booking));
-        Ok((AdmittedSchedulingResponse { response, attempt }, booking))
+        Ok((
+            AdmittedSchedulingResponse {
+                response,
+                attempt,
+                backend_priority,
+            },
+            booking,
+        ))
     }
 
     async fn classify_request(
@@ -577,149 +585,6 @@ where
     /// Returns `false` when counts are already installed.
     pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
         self.queue.set_resident_block_counts(counts)
-    }
-
-    #[expect(clippy::too_many_arguments)]
-    pub async fn schedule(
-        &self,
-        maybe_request_id: Option<String>,
-        isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
-        tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
-        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
-        router_config_override: Option<&super::config::RouterConfigOverride>,
-        update_states: bool,
-        lora_name: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        expected_output_tokens: Option<u32>,
-        pinned_worker: Option<WorkerWithDpRank>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<dynamo_worker_selection::SharedCacheHits>,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
-        self.schedule_with_block_hashes(
-            maybe_request_id,
-            isl_tokens,
-            token_seq,
-            None,
-            tier_overlap_blocks,
-            effective_overlap_blocks,
-            effective_cached_tokens,
-            router_config_override,
-            update_states,
-            lora_name,
-            priority_jump,
-            strict_priority,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            shared_cache_hits,
-        )
-        .await
-    }
-
-    /// Like [`schedule`](Self::schedule) but also forwards the block hashes used to compute
-    /// the initial overlap scores. When the scheduler was constructed with an
-    /// [`OverlapScoresRefresh`], queued requests can be re-scored at dequeue time using
-    /// these hashes.
-    #[expect(clippy::too_many_arguments)]
-    pub async fn schedule_with_block_hashes(
-        &self,
-        maybe_request_id: Option<String>,
-        isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
-        block_hashes: Option<Vec<LocalBlockHash>>,
-        tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
-        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
-        router_config_override: Option<&super::config::RouterConfigOverride>,
-        update_states: bool,
-        lora_name: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        expected_output_tokens: Option<u32>,
-        pinned_worker: Option<WorkerWithDpRank>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<dynamo_worker_selection::SharedCacheHits>,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
-        self.schedule_with_policy_class_and_block_hashes(
-            maybe_request_id,
-            isl_tokens,
-            token_seq,
-            block_hashes,
-            tier_overlap_blocks,
-            effective_overlap_blocks,
-            effective_cached_tokens,
-            router_config_override,
-            update_states,
-            lora_name,
-            priority_jump,
-            strict_priority,
-            None,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            shared_cache_hits,
-        )
-        .await
-    }
-
-    #[expect(clippy::too_many_arguments)]
-    pub async fn schedule_with_policy_class_and_block_hashes(
-        &self,
-        maybe_request_id: Option<String>,
-        isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
-        block_hashes: Option<Vec<LocalBlockHash>>,
-        tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
-        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
-        router_config_override: Option<&super::config::RouterConfigOverride>,
-        update_states: bool,
-        lora_name: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        policy_class: Option<String>,
-        expected_output_tokens: Option<u32>,
-        pinned_worker: Option<WorkerWithDpRank>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<dynamo_worker_selection::SharedCacheHits>,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
-        let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
-        self.schedule_request(ScheduleRequest {
-            accounting_attribution: Default::default(),
-            mode,
-            token_seq,
-            block_hashes,
-            isl_tokens,
-            overlap: OverlapSignals {
-                tier_overlap_blocks,
-                effective_overlap_blocks,
-                effective_cached_tokens,
-            },
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            routing_constraints,
-            router_config_override: router_config_override.cloned(),
-            lora_name,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_context: None,
-            expected_output_tokens,
-            affinity_target: None,
-            pinned_worker,
-            allowed_worker_ids,
-            shared_cache_hits,
-            admitted_upstream: false,
-        })
-        .await
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
@@ -1023,7 +888,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -1032,8 +897,10 @@ mod tests {
 
     use super::*;
     use crate::PrefillLoadEstimator;
+    use crate::overlap::OverlapSignals;
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::types::{ScheduleMode, TierOverlapBlocks};
     use dynamo_admission::ClassifyFuture;
     use dynamo_admission::WorkerView;
     use dynamo_slot_tracker::BusyThresholds;
@@ -1338,6 +1205,12 @@ mod tests {
             shared_cache_hits: None,
             admitted_upstream: false,
         }
+    }
+
+    fn tracked(request_id: &str) -> ScheduleRequest {
+        request(ScheduleMode::Tracked {
+            request_id: request_id.to_string(),
+        })
     }
 
     #[tokio::test(start_paused = true)]
@@ -1723,39 +1596,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_tracked_request_without_id_fails_before_enqueue() {
-        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
-        let (scheduler, _slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.0), true, None);
-
-        let error = scheduler
-            .schedule(
-                None,
-                64,
-                None,
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, KvSchedulerError::BookingFailed(_)));
-        assert_eq!(scheduler.pending_count(), 0);
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
     async fn test_schedule_override_can_disable_prefill_tracking() {
         let mut workers = HashMap::new();
         workers.insert(
@@ -1768,27 +1608,13 @@ mod tests {
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
         scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                Some(&crate::config::RouterConfigOverride {
+            .schedule_request(ScheduleRequest {
+                router_config_override: Some(crate::config::RouterConfigOverride {
                     track_prefill_tokens: Some(false),
                     ..Default::default()
                 }),
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
+                ..tracked("req-1")
+            })
             .await
             .unwrap();
 
@@ -1819,28 +1645,18 @@ mod tests {
         let worker = WorkerWithDpRank::new(0, 0);
 
         let response = scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks {
-                    host_pinned: FxHashMap::from_iter([(worker, 2)]),
-                    disk: FxHashMap::from_iter([(worker, 1)]),
-                    ..Default::default()
+            .schedule_request(ScheduleRequest {
+                overlap: OverlapSignals {
+                    tier_overlap_blocks: TierOverlapBlocks {
+                        host_pinned: FxHashMap::from_iter([(worker, 2)]),
+                        disk: FxHashMap::from_iter([(worker, 1)]),
+                        ..Default::default()
+                    },
+                    effective_overlap_blocks: FxHashMap::from_iter([(worker, 0.75)]),
+                    effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
                 },
-                FxHashMap::from_iter([(worker, 0.75)]),
-                FxHashMap::from_iter([(worker, 48)]),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
+                ..tracked("req-1")
+            })
             .await
             .unwrap();
 
@@ -1884,50 +1700,16 @@ mod tests {
         let (scheduler, _slots, _cfg_tx, cancel_token) =
             make_scheduler(workers, Some(0.5), true, None);
 
-        scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
-            .await
-            .unwrap();
+        scheduler.schedule_request(tracked("req-1")).await.unwrap();
 
         let queued = {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
                 scheduler
-                    .schedule(
-                        Some("req-2".to_string()),
-                        64,
-                        Some(vec![5, 6, 7, 8]),
-                        TierOverlapBlocks::default(),
-                        Default::default(),
-                        Default::default(),
-                        None,
-                        true,
-                        None,
-                        0.0,
-                        0,
-                        None,
-                        None,
-                        None,
-                        crate::protocols::RoutingConstraints::default(),
-                        None,
-                    )
+                    .schedule_request(ScheduleRequest {
+                        token_seq: Some(vec![5, 6, 7, 8]),
+                        ..tracked("req-2")
+                    })
                     .await
             })
         };
@@ -1955,50 +1737,16 @@ mod tests {
             make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
-        scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
-            .await
-            .unwrap();
+        scheduler.schedule_request(tracked("req-1")).await.unwrap();
 
         let queued = {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
                 scheduler
-                    .schedule(
-                        Some("req-2".to_string()),
-                        64,
-                        Some(vec![5, 6, 7, 8]),
-                        TierOverlapBlocks::default(),
-                        Default::default(),
-                        Default::default(),
-                        None,
-                        true,
-                        None,
-                        0.0,
-                        0,
-                        None,
-                        None,
-                        None,
-                        crate::protocols::RoutingConstraints::default(),
-                        None,
-                    )
+                    .schedule_request(ScheduleRequest {
+                        token_seq: Some(vec![5, 6, 7, 8]),
+                        ..tracked("req-2")
+                    })
                     .await
             })
         };
@@ -2040,50 +1788,16 @@ mod tests {
         let event_tx = start_replica_sync(&slots, &cancel_token);
         let mut queue_updates = scheduler.subscribe_queue_updates();
 
-        scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
-            .await
-            .unwrap();
+        scheduler.schedule_request(tracked("req-1")).await.unwrap();
 
         let queued = {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
                 scheduler
-                    .schedule(
-                        Some("req-2".to_string()),
-                        64,
-                        Some(vec![5, 6, 7, 8]),
-                        TierOverlapBlocks::default(),
-                        Default::default(),
-                        Default::default(),
-                        None,
-                        true,
-                        None,
-                        0.0,
-                        0,
-                        None,
-                        None,
-                        None,
-                        crate::protocols::RoutingConstraints::default(),
-                        None,
-                    )
+                    .schedule_request(ScheduleRequest {
+                        token_seq: Some(vec![5, 6, 7, 8]),
+                        ..tracked("req-2")
+                    })
                     .await
             })
         };
@@ -2124,50 +1838,16 @@ mod tests {
             make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
-        scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
-            .await
-            .unwrap();
+        scheduler.schedule_request(tracked("req-1")).await.unwrap();
 
         let queued = {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
                 scheduler
-                    .schedule(
-                        Some("req-2".to_string()),
-                        64,
-                        Some(vec![5, 6, 7, 8]),
-                        TierOverlapBlocks::default(),
-                        Default::default(),
-                        Default::default(),
-                        None,
-                        true,
-                        None,
-                        0.0,
-                        0,
-                        None,
-                        None,
-                        None,
-                        crate::protocols::RoutingConstraints::default(),
-                        None,
-                    )
+                    .schedule_request(ScheduleRequest {
+                        token_seq: Some(vec![5, 6, 7, 8]),
+                        ..tracked("req-2")
+                    })
                     .await
             })
         };
@@ -2207,24 +1887,10 @@ mod tests {
         let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
         scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                Some("adapter-a".to_string()),
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
+            .schedule_request(ScheduleRequest {
+                lora_name: Some("adapter-a".to_string()),
+                ..tracked("req-1")
+            })
             .await
             .unwrap();
         assert_eq!(
@@ -2312,24 +1978,10 @@ mod tests {
             make_scheduler(workers, None, true, Some(estimator));
 
         scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                100,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
+            .schedule_request(ScheduleRequest {
+                isl_tokens: 100,
+                ..tracked("req-1")
+            })
             .await
             .unwrap();
 
@@ -2540,24 +2192,10 @@ mod tests {
         let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
         scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![11, 22]),
-                TierOverlapBlocks::default(),
-                Default::default(),
-                Default::default(),
-                None,
-                true,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
+            .schedule_request(ScheduleRequest {
+                token_seq: Some(vec![11, 22]),
+                ..tracked("req-1")
+            })
             .await
             .unwrap();
 

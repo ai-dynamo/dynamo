@@ -2487,6 +2487,7 @@ async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking()
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
     elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
+    priorities: Mutex<Vec<Option<i32>>>,
 }
 
 #[async_trait]
@@ -2508,6 +2509,12 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(instance.expect("selected worker instance").id());
+        self.priorities.lock().unwrap().push(
+            content
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.priority),
+        );
         let output = Annotated::from_data(LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
@@ -2628,14 +2635,18 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
-    router_with_recorded_dispatch_affinity_and_classifier(namespace, session_affinity_ttl, None)
-        .await
+    router_with_recorded_dispatch_affinity_and_classifier(
+        namespace,
+        session_affinity_ttl,
+        None::<RecordingClassifier>,
+    )
+    .await
 }
 
 async fn router_with_recorded_dispatch_affinity_and_classifier(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
-    classifier: Option<RecordingClassifier>,
+    classifier: Option<impl RequestClassifier>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -2821,6 +2832,58 @@ impl RequestClassifier for RecordingClassifier {
             self.observations.send(observation).unwrap();
         }
     }
+}
+
+struct BackendPriorityClassifier(i32);
+
+impl RequestClassifier for BackendPriorityClassifier {
+    fn classify(
+        &mut self,
+        mut request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> ClassifyFuture {
+        request.set_backend_priority(self.0);
+        Box::pin(async move { Ok(request) })
+    }
+}
+
+async fn dispatched_priority(
+    namespace: &str,
+    classifier: Option<BackendPriorityClassifier>,
+) -> Option<i32> {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch_affinity_and_classifier(namespace, None, classifier).await;
+    let mut input = request();
+    input.routing_mut().priority = Some(7);
+    let mut stream = router.generate(Context::new(input)).await.unwrap();
+    while stream.next().await.is_some() {}
+    let priorities = dispatch.priorities.lock().unwrap().clone();
+    drop(router);
+    runtime.shutdown();
+    assert_eq!(priorities.len(), 1);
+    priorities[0]
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn dispatch_forwards_the_classifiers_backend_priority() {
+    assert_eq!(
+        dispatched_priority(
+            "kv-classifier-backend-priority",
+            Some(BackendPriorityClassifier(-250))
+        )
+        .await,
+        Some(-250)
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn dispatch_keeps_the_request_priority_without_a_classifier_override() {
+    assert_eq!(
+        dispatched_priority("kv-request-backend-priority", None).await,
+        Some(7)
+    );
 }
 
 #[derive(Debug, thiserror::Error)]

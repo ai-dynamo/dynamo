@@ -594,23 +594,12 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
         })
     }
 
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.runtime_data
-            .get("native_offloading_capacity")?
-            .get("total_tokens")?
-            .as_u64()
-    }
-
     fn cache_owner_capacity_blocks(&self) -> Option<u64> {
         self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
-    }
-
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -627,10 +616,6 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 }
 
@@ -1276,21 +1261,6 @@ mod tests {
 
         let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
         assert!(error.contains("basetenkenizer"));
-    }
-
-    #[test]
-    fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_scheduler::host::WorkerConfigLike;
-
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .set_engine_specific(
-                "native_offloading_capacity",
-                serde_json::json!({"total_tokens": 300}),
-            )
-            .unwrap();
-
-        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]

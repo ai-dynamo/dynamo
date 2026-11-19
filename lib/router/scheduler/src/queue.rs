@@ -1674,6 +1674,8 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            // Returned with the admitted response; the queue does not use it.
+            backend_priority: _,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
@@ -5073,96 +5075,6 @@ mod tests {
         }
     }
 
-    /// Measures real queue projection with snapshots held in pending classifier futures.
-    /// Run in release mode with CLASSIFIER_BENCH_HASHES ("none" or a count) and
-    /// CLASSIFIER_BENCH_PENDING set; source setup and cancellation are not timed.
-    #[tokio::test]
-    #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
-    async fn classifier_input_projection_benchmark() {
-        use dynamo_admission::{ClassifyFuture, RequestClassifier};
-        use std::hint::black_box;
-        use std::task::Context;
-        use std::time::Instant as WallClock;
-
-        struct Park;
-        impl RequestClassifier for Park {
-            fn classify(
-                &mut self,
-                request: ClassifyRequest,
-                _workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
-                Box::pin(async move {
-                    std::future::pending::<()>().await;
-                    Ok(black_box(request))
-                })
-            }
-        }
-
-        let hash_count = std::env::var("CLASSIFIER_BENCH_HASHES").unwrap();
-        let hashes = if hash_count == "none" {
-            None
-        } else {
-            Some(hash_count.parse::<usize>().unwrap())
-        };
-        let retained: usize = std::env::var("CLASSIFIER_BENCH_PENDING")
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!(retained > 0 && retained <= 1024);
-        assert!(hashes.unwrap_or(0) <= 62_500);
-        let profile = PolicyProfile::synthetic(None, dynamo_admission::RouterQueuePolicy::Fcfs);
-        let (queue, _slots) = make_queue_with_profile(1, 16, 1_000_000, profile);
-        let sources: Vec<_> = (0..retained)
-            .map(|i| {
-                let (mut request, rx) = make_request(
-                    &format!("copy-bench-{i}"),
-                    hashes.unwrap_or(0).saturating_mul(16).max(1),
-                );
-                request.token_seq = hashes.map(|n| (0..n as u64).collect());
-                (request, rx)
-            })
-            .collect();
-        let mut classifier = Park;
-        let mut futures = Vec::with_capacity(retained);
-        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
-        let ingress_at = Instant::now();
-        let repeats = (1024 / retained).max(1);
-        let mut samples = Vec::with_capacity(40);
-        for sample in 0..45 {
-            let mut elapsed = std::time::Duration::ZERO;
-            for _ in 0..repeats {
-                let start = WallClock::now();
-                for (request, _) in &sources {
-                    let (input, workers) = queue.build_classify_request(
-                        black_box(request),
-                        ingress_at,
-                        WorkerInputs::NONE,
-                    );
-                    let mut future = classifier.classify(input, &ClassifierRows(workers));
-                    assert!(future.as_mut().poll(&mut cx).is_pending());
-                    futures.push(future);
-                }
-                elapsed += start.elapsed();
-                // Keep every snapshot live until the batch ends; cancellation is excluded.
-                black_box(&futures);
-                futures.clear();
-            }
-            if sample >= 5 {
-                samples.push(elapsed.as_secs_f64() * 1e9 / (retained * repeats) as f64);
-            }
-        }
-        println!(
-            "CLASSIFIER_BENCH {}",
-            serde_json::json!({
-                "hashes": hashes,
-                "pending": retained,
-                "repeats_per_sample": repeats,
-                "classify_request_bytes": std::mem::size_of::<ClassifyRequest>(),
-                "ns_per_request_samples": samples,
-            })
-        );
-    }
-
     #[tokio::test]
     async fn classifier_targets_preserve_pins_and_caller_eligibility() {
         let (queue, _slots) = make_queue(2, 16, 64, None);
@@ -8219,13 +8131,14 @@ mod tests {
         let block_size = 16u32;
         let isl = 64usize;
         let worker = WorkerWithDpRank::new(0, 0);
-        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::from_overlap(
-            OverlapSignals {
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap {
+            overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks: FxHashMap::from_iter([(worker, 7.0)]),
                 effective_cached_tokens: FxHashMap::from_iter([(worker, 56)]),
             },
-        )));
+            kv_transfer_candidates: None,
+        }));
         let (queue, slots) = make_queue_with_blocking_refresher(
             1,
             block_size,
@@ -8963,11 +8876,14 @@ mod tests {
             ],
         );
         let worker = WorkerWithDpRank::new(0, 0);
-        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
-            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
-        });
+        let refreshed = RefreshedOverlap {
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+            },
+            kv_transfer_candidates: None,
+        };
         let refresher = Arc::new(BlockingRefresher::new(refreshed));
         let (queue, slots) = make_queue_with_profile_and_blocking_refresher(
             1,
@@ -9096,11 +9012,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_pending_refresh_completes_under_ordinary_command_traffic() {
         let worker = WorkerWithDpRank::new(0, 0);
-        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
-            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
-        });
+        let refreshed = RefreshedOverlap {
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+            },
+            kv_transfer_candidates: None,
+        };
         let refresher = Arc::new(BlockingRefresher::new(refreshed));
         let (queue, slots) = make_queue_with_blocking_refresher(
             1,
@@ -9183,11 +9102,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_refresh_timeout_runs_from_the_refresh_start_through_scheduler_traffic() {
         let worker = WorkerWithDpRank::new(0, 0);
-        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
-            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
-        });
+        let refreshed = RefreshedOverlap {
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+            },
+            kv_transfer_candidates: None,
+        };
         // A lookup released before the timeout supplies its scores. One never released is
         // dropped at the timeout, counted from the refresh start, and the candidate keeps its
         // queued scores.
