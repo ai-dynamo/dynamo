@@ -704,6 +704,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
+        self._validate_structural_tag_backend(sampling_params)
         _apply_model_default_sampling_params(
             sampling_params,
             request,

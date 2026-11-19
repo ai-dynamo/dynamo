@@ -6,7 +6,6 @@ import base64
 import binascii
 import functools
 import importlib
-import json
 import logging
 import math
 import os
@@ -79,7 +78,10 @@ from dynamo.common.utils.input_params import (
     InputParamManager,
     resolve_thinking_token_budget,
 )
-from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.common.utils.structural_tag import (
+    serialize_structural_tag,
+    validate_structural_tag_backend,
+)
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import (
@@ -1042,21 +1044,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         # The selected worker knows the effective backend, even when workers
         # serving the same model have different structured-output settings.
-        backend = self.engine_client.vllm_config.structured_outputs_config.backend
-        if backend in ("auto", "xgrammar"):
-            return
-        if backend == "guidance":
-            try:
-                tag = json.loads(structured_outputs.structural_tag)
-            except json.JSONDecodeError:
-                # vLLM owns validation of malformed client-supplied tags.
-                return
-            if isinstance(tag, dict) and {"triggers", "structures"} <= tag.keys():
-                return
-
-        raise InvalidArgument(
-            f"vLLM structured-output backend {backend!r} does not support this "
-            "structural tag. Configure the worker to use 'auto' or 'xgrammar'."
+        validate_structural_tag_backend(
+            structured_outputs.structural_tag,
+            self.engine_client.vllm_config.structured_outputs_config.backend,
+            backend_label="vLLM structured-output backend",
+            supported_backends=("auto", "xgrammar"),
+            legacy_backend="guidance",
         )
 
     @property
