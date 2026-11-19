@@ -324,8 +324,10 @@ G2 requires a resolved, positive physical cache size. Set the transfer size
 separately when the geometries differ.
 
 The Python `run_trace_replay` API also accepts `agentic_snapshot` (a mapping
-containing `seed`), `agentic_warmup` (default `False`), and `agentic_profile`
-(AISimulate's duration, response-grace, and cancellation-drain options).
+containing `seed`), `agentic_warmup` (default `False`), `agentic_warmup_policy`, and
+`agentic_profile` (AISimulate's duration, response-grace, and cancellation-drain options).
+`agentic_warmup_policy` is `repeated_prefixes` (default) or `live_trajectory_v1`, which
+advances each trajectory during warmup and requires `agentic_warmup=True` and `agentic_profile`.
 These phase controls require offline replay. Snapshots require positive
 `agentic_lanes`; warmup and profiling require a
 snapshot. Profiling cannot be combined with `max_sim_time_ms`. Warmup retains
@@ -375,6 +377,10 @@ hardware offload recipe.
   `round_robin` sends no hints, and neither does `router.overlap_score_credit: 0`, which reads no KV
   index; the router then logs one warning. Replay treats all workers as one transfer island and
   models no cache-owner sources.
+- An aggregated or prefill worker that sets `engine.workers.<role>.kv_cache.prefix_match_unit`
+  cannot replay behind a `kv_router` that reads engine KV events, even with
+  `router.overlap_score_credit: 0`, because AISimulate does not yet export KV events with
+  `prefix_match_unit`. `round_robin` replays it.
 - `planner.policy` is `disabled` or `enabled`. Enabled settings use the production
   `PlannerConfig` defaults and normalization. The default target is `throughput`, which enables
   load scaling and disables throughput scaling. Throughput scaling with `target: sla` requires
