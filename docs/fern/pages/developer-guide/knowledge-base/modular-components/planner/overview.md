@@ -65,13 +65,13 @@ The Planner offers four optimization targets:
 | **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
 | **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
 | **`load`** | Uses user-defined prefill queue token and decode KV cache utilization thresholds. | No | No |
-| **`sla`** | Targets specific TTFT/ITL SLA values through the Planner engine-query layer and the AIConfigurator compatibility API in the `aisimulate` wheel: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
+| **`sla`** | Targets specific TTFT/ITL SLA values through the Planner engine-query layer and the AIConfigurator compatibility API in the `aisim` wheel: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
 
 ### Scaling Methods
 
 The Planner implements two scaling methods:
 
-- **Throughput-based scaling (`sla` target only)**: Uses the Planner engine-query layer and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Forward-pass estimates come from the AIConfigurator compatibility API in the `aisimulate` wheel, with self-benchmark or profiler FPM bootstrap data and live FPM tuning. Adjusts on a longer interval (default 180s). The default `throughput` target instead uses load-based queue and KV-utilization thresholds.
+- **Throughput-based scaling (`sla` target only)**: Uses the Planner engine-query layer and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Forward-pass estimates come from the AIConfigurator compatibility API in the `aisim` wheel, with self-benchmark or profiler FPM bootstrap data and live FPM tuning. Adjusts on a longer interval (default 180s). The default `throughput` target instead uses load-based queue and KV-utilization thresholds.
 - **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and queries the same Planner engine-query layer for short-term TTFT/ITL estimates. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
 
 When both methods are enabled for the `sla` target, throughput-based scaling provides a capacity floor for long-term planning while load-based scaling handles real-time adjustments above that floor.

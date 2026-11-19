@@ -15,6 +15,11 @@ export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 source "$DYNAMO_HOME/examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/launch_utils.sh"
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/common.sh"
+
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
 
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "Usage: NODE_RANK=<rank> DIST_INIT_ADDR=<leader-ip:port> bash $0 [SGLang options...]"
@@ -24,9 +29,10 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "          DP_SIZE must be divisible by NNODES so every node owns publishers."
     echo "Model:    MODEL=Qwen/Qwen3-32B, MAX_MODEL_LEN=4096, MAX_CONCURRENT_SEQS=32"
     echo "Role:     ROLE=aggregated|prefill|decode (default: aggregated)"
-    echo "PD:       SGLANG_BOOTSTRAP_HOST=<reachable prefill leader IP> on prefill node 0"
-    echo "Ports:    SGLANG_HTTP_PORT=30000, SGLANG_GRPC_PORT=30001, SGLANG_KV_EVENT_PORT=5557"
-    echo "          SGLANG_DISAGGREGATION_BOOTSTRAP_PORT=8998, DYN_SYSTEM_PORT=8081"
+    echo "PD:       SGLANG_BOOTSTRAP_HOST=<this node's reachable IP> on a prefill node (optional);"
+    echo "          prefill serves its bootstrap registries on SGLANG_HTTP_PORT + k"
+    echo "Ports:    SGLANG_HTTP_PORT=30000, SGLANG_GRPC_PORT=30010 (listener k: + k),"
+    echo "          SGLANG_KV_EVENT_PORT=5557, DYN_SYSTEM_PORT=8081"
     echo "          DYN_HTTP_PORT=8000 is the separately launched frontend's port."
     echo "Other:    SGLANG_PYTHON=python3, SGLANG_HOST=0.0.0.0, SGLANG_PAGE_SIZE=64"
     echo "          CUDA_VISIBLE_DEVICES is inherited. Extra arguments go to SGLang only."
@@ -59,13 +65,14 @@ ROLE="${ROLE:-aggregated}"
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="${SGLANG_HOST:-0.0.0.0}"
 SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
-SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-30001}"
+SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-30010}"
 SGLANG_KV_EVENT_PORT="${SGLANG_KV_EVENT_PORT:-5557}"
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-32}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+sglang_check_listener_ports "$SGLANG_HTTP_PORT" "$SGLANG_GRPC_PORT" $((DP_SIZE / NNODES))
 ENGINE_ROLE_ARGS=()
 SIDECAR_ARGS=()
 case "$SGLANG_HOST" in
@@ -78,10 +85,10 @@ esac
 case "$ROLE" in
     aggregated) ;;
     prefill|decode)
-        ENGINE_ROLE_ARGS=(--disaggregation-mode "$ROLE" --disaggregation-transfer-backend nixl
-            --disaggregation-bootstrap-port "${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}")
-        if [[ "$ROLE" == prefill && "$NODE_RANK" == 0 ]]; then
-            : "${SGLANG_BOOTSTRAP_HOST:?Set SGLANG_BOOTSTRAP_HOST to the reachable prefill leader address}"
+        ENGINE_ROLE_ARGS=(--disaggregation-mode "$ROLE" --disaggregation-transfer-backend nixl)
+        # Each prefill node's sidecar advertises its own node's registries:
+        # decode bootstraps against the node and rank that hold its KV.
+        if [[ "$ROLE" == prefill && -n "${SGLANG_BOOTSTRAP_HOST:-}" ]]; then
             SIDECAR_ARGS+=(--bootstrap-host "$SGLANG_BOOTSTRAP_HOST")
         fi
         ;;
@@ -91,12 +98,12 @@ resolve_sidecar sglang SIDECAR_CMD
 
 print_launch_banner --no-curl "SGLang multinode KV sidecar ($ROLE, node $NODE_RANK)" "$MODEL" "$HTTP_PORT" \
     "Topology: NNODES=$NNODES, TP_SIZE=$TP_SIZE, DP_SIZE=$DP_SIZE (attention DP)" \
-    "Rendezvous: $DIST_INIT_ADDR; local gRPC: $SGLANG_GRPC_PORT" \
+    "Rendezvous: $DIST_INIT_ADDR; local gRPC: $SGLANG_GRPC_PORT + k (local listener k)" \
     "Start the frontend separately. Restart all nodes and sidecars together after failure."
 
 trap dynamo_exit_trap EXIT
 
-# Sidecars retry gRPC startup; no sleep or inference health check is needed on followers.
+# Sidecars retry gRPC startup; no sleep or inference health check is needed.
 # Bind KV events only on loopback; engine and sidecar share a network namespace.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 "$SGLANG_PYTHON" -m sglang.launch_server \
@@ -104,7 +111,7 @@ trap dynamo_exit_trap EXIT
     --host "$SGLANG_HOST" --port "$SGLANG_HTTP_PORT" --grpc-port "$SGLANG_GRPC_PORT" \
     --incremental-streaming-output \
     --nnodes "$NNODES" --node-rank "$NODE_RANK" --dist-init-addr "$DIST_INIT_ADDR" \
-    --tp-size "$TP_SIZE" --dp-size "$DP_SIZE" --enable-dp-attention \
+    --tp-size "$TP_SIZE" --attn-dp-size "$DP_SIZE" \
     --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:${SGLANG_KV_EVENT_PORT}\",\"bind\":true,\"topic\":\"\"}" \
     --page-size "$SGLANG_PAGE_SIZE" --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \

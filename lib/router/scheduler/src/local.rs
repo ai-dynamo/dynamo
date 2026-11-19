@@ -19,7 +19,7 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{WorkerInputs, WorkerSelector, log_selection};
+use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -33,11 +33,12 @@ use crate::types::RejectThresholdsProvider;
 use dynamo_admission::PolicyProfile;
 #[cfg(test)]
 use dynamo_admission::RouterQueuePolicy;
-use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
-use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
+use dynamo_admission::{ClassifyRequest, RequestClassifier};
+use dynamo_admission::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_slot_tracker::topology::WorkerDpRange;
+use dynamo_slot_tracker::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
     SequenceError, SequencePublisher, SequenceRequest,
@@ -45,6 +46,7 @@ use dynamo_slot_tracker::{
 use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -391,6 +393,9 @@ where
         let tracked = request.mode.is_tracked();
         let request_id = request.mode.request_id().map(str::to_owned);
         let classified_request = self.classify_request(&mut request, ingress_at).await?;
+        let backend_priority = classified_request
+            .as_ref()
+            .and_then(ClassifyRequest::backend_priority);
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -425,7 +430,14 @@ where
         let booking = lifecycle_lease
             .and_then(|lease| lease.commit())
             .map(|booking| self.queue.booking_handle(booking));
-        Ok((AdmittedSchedulingResponse { response, attempt }, booking))
+        Ok((
+            AdmittedSchedulingResponse {
+                response,
+                attempt,
+                backend_priority,
+            },
+            booking,
+        ))
     }
 
     async fn classify_request(
@@ -440,7 +452,7 @@ where
             return Ok(None);
         };
         // A tracked admission with no registered lifecycle (Python bindings
-        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // `best_worker`) never emits lifecycle events, so
         // classifying it would corrupt plugin bookkeeping. It uses the default
         // queue inputs, exactly as if no classifier were installed.
         let Some(overrides_cached) = classifier.cached_overrides(request_id) else {
@@ -531,6 +543,14 @@ where
     /// Returns `false` when a spec is already installed.
     pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
         self.queue.set_selection_trace(spec)
+    }
+
+    /// Lend the partition's live resident block counts to every selection, for a policy that
+    /// declared [`WorkerInputs::RESIDENT_BLOCKS`].
+    ///
+    /// Returns `false` when counts are already installed.
+    pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
+        self.queue.set_resident_block_counts(counts)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -881,23 +901,6 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
-    /// Apply output updates before returning, without waiting for admission.
-    ///
-    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
-    /// does not mutate state or emit load observations. Queue shutdown is checked
-    /// first, including for zero counts.
-    pub async fn add_output_blocks_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        num_blocks: usize,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.queue.ensure_running()?;
-        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
-    }
-
     /// Apply output updates directly without checking queue shutdown.
     ///
     /// Zero counts and stale or missing bookings return `NoChange`. A zero count
@@ -915,6 +918,29 @@ where
             num_blocks,
             decay_fraction,
         )
+    }
+
+    /// Apply block and progress updates for a current booking without waiting for admission.
+    /// Progress-only updates leave output blocks and published load unchanged.
+    pub async fn update_output_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
+        decay_fraction: Option<f64>,
+        progress: Option<dynamo_slot_tracker::host::DecodeProgressUpdate>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue.ensure_running()?;
+        self.slots
+            .update_output_if_booking(
+                &booking.request_id,
+                booking.worker,
+                booking.attempt_id,
+                num_blocks,
+                decay_fraction,
+                progress,
+            )
+            .map(|_| ())
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
     pub fn get_potential_loads(
@@ -981,11 +1007,11 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use dynamo_admission::classifier::ClassifyFuture;
-    use dynamo_admission::classifier::WorkerView;
+    use dynamo_admission::ClassifyFuture;
+    use dynamo_admission::WorkerView;
+    use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
-    use dynamo_slot_tracker::busy::BusyThresholds;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1021,7 +1047,7 @@ mod tests {
                     token_sequence: None,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                    prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                         initial_effective_prefill_tokens: 64,
                         expected_prefill_duration: None,
                     }),
@@ -1033,7 +1059,7 @@ mod tests {
             let before = slots.active_blocks()[&worker];
             // A single poll on this current-thread runtime cannot run the actor.
             assert!(matches!(
-                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
+                poll_once(scheduler.update_output_if_booking(&booking, 3, None, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             assert_eq!(slots.active_blocks()[&worker], before + 3);
@@ -1051,7 +1077,7 @@ mod tests {
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
             ));
             assert!(matches!(
-                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
+                poll_once(scheduler.update_output_if_booking(&booking, 3, None, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());
@@ -1581,7 +1607,7 @@ mod tests {
                 token_sequence: None,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                     initial_effective_prefill_tokens: 64,
                     expected_prefill_duration: None,
                 }),

@@ -57,4 +57,21 @@ var (
 		Name:             "MultinodeTopologyAliases",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
 	}
+
+	// TRTLLMMpirunMapByNode places GPUs-per-pod mpirun ranks on each TRT-LLM node. Enabled for
+	// DGDs created by operator >= 1.7.0 so an upgrade does not roll existing multinode workloads.
+	TRTLLMMpirunMapByNode = Gate{
+		Name:             "TRTLLMMpirunMapByNode",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
+
+	// FrontendSidecarProbeReplacement makes an authored frontend-sidecar probe
+	// replace the operator default as a complete value, matching main and the
+	// runtime sidecar. The published 1.6 operator field-merged these probes with
+	// its defaults, so older workloads keep that merge to preserve their rendered
+	// pod template across an operator-only upgrade.
+	FrontendSidecarProbeReplacement = Gate{
+		Name:             "FrontendSidecarProbeReplacement",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
 )

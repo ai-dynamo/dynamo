@@ -1625,6 +1625,25 @@ impl ModelManager {
             .get_chat_engine_with_parsing()
     }
 
+    pub fn get_chat_completions_engine_with_parsing_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_parsing_for_capability(capability)
+    }
+
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
@@ -2433,9 +2452,11 @@ impl ModelManager {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // A policy that does not consume cache input must not create a shared-cache client or
-        // subscribe to its updates.
-        let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
+        // A configured hint policy that reads KV copy sources starts the KV index and its event
+        // subscription even when the worker-selection policy reads none. Only the
+        // worker-selection policy reads cache input; without it, create no shared-cache client.
+        let index_inputs = policy.prepare_inputs();
+        let wants_cache = index_inputs.contains(WorkerInputs::CACHE);
         let shared_cache: Option<Arc<dyn dynamo_scheduler::host::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
@@ -2461,7 +2482,7 @@ impl ModelManager {
         let kv_event_source_requirement = KvEventSourceRequirement::derive(
             worker_role,
             &effective_kv_router_config,
-            policy.inputs(),
+            index_inputs,
         );
         let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(

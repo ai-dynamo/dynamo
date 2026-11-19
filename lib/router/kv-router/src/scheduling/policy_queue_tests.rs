@@ -8,14 +8,33 @@ use tokio::time::Instant;
 
 use crate::scheduling::policy_config::RouterPolicyConfig;
 use crate::scheduling::policy_config::RouterQueuePolicy;
-use dynamo_admission::queue::*;
-use dynamo_admission::{PolicyClassConfig, PolicyProfile, WorkerPlacement};
+use dynamo_admission::{
+    PolicyClassConfig, PolicyProfile, PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLane,
+    QueueLimitKind, QueueMetadata, QueueReadiness, QueueSnapshot, WorkerPlacement,
+};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_session_affinity::WorkerAffinityTarget;
 
 fn profile(yaml: &str) -> PolicyProfile {
     RouterPolicyConfig::from_yaml(yaml)
         .unwrap()
         .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+}
+
+/// Metadata for an entry with no explicit or class due time: how the kernel enqueues a
+/// request outside EDF.
+fn no_due_metadata(
+    class_index: usize,
+    snapshot: QueueSnapshot,
+    arrival_offset_secs: f64,
+) -> QueueMetadata {
+    QueueMetadata {
+        class_index,
+        snapshot,
+        due_at: None,
+        class_due_at: None,
+        arrival_offset_secs,
+    }
 }
 
 fn admission_profile() -> PolicyProfile {
@@ -42,11 +61,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(8, 4), 0.0),
             2,
-            QueueSnapshot::new(8, 4),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -54,11 +71,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(100, 100), 1.0),
             2,
-            QueueSnapshot::new(100, 100),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -66,11 +81,9 @@ policy_classes:
         )
         .unwrap();
     let (rejection, payload) = queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 2.0),
             2,
-            QueueSnapshot::new(1, 0),
-            2.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -191,11 +204,9 @@ fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
     let mut queue = PolicyQueue::new(&admission_profile());
     let due_at = Instant::now() + std::time::Duration::from_secs(10);
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 0.0),
             2,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -789,34 +800,64 @@ fn class_budget_expiry_reaches_every_lane_root_including_blocked_lanes() {
     let mut queue = PolicyQueue::with_class_budget_expiry(&controlled_delay_profile());
     let now = Instant::now();
     let at = |millis| Some(now + std::time::Duration::from_millis(millis));
-    let worker = |id| WorkerPlacement::Exact(WorkerWithDpRank::new(id, 0));
-    for (payload, millis, placement) in [
-        ("shared-30", 30, WorkerPlacement::Any),
-        ("full-10", 10, worker(1)),
-        ("full-40", 40, worker(1)),
-        ("idle-20", 20, worker(2)),
-        ("shared-50", 50, WorkerPlacement::Any),
+    let exact = |id| QueueLane::Exact(WorkerWithDpRank::new(id, 0));
+    let ranked = QueueLane::Affinity(WorkerAffinityTarget::new(1, Some(0)));
+    let worker_only = QueueLane::Affinity(WorkerAffinityTarget::new(1, None));
+    for (payload, millis, lane) in [
+        ("shared-30", 30, QueueLane::Shared),
+        ("full-10", 10, exact(1)),
+        ("full-40", 40, exact(1)),
+        ("idle-20", 20, exact(2)),
+        ("shared-50", 50, QueueLane::Shared),
+        ("soft-15", 15, ranked),
+        ("soft-45", 45, ranked),
+        ("worker-17", 17, worker_only),
+        ("worker-60", 60, worker_only),
     ] {
-        push_to(&mut queue, timed(1, None, at(millis)), placement, payload);
+        queue
+            .enqueue_in_lane(timed(1, None, at(millis)), 1, 0.0, 0, lane, payload)
+            .unwrap();
     }
-    // Worker 1 is full: its lane is blocked, and its root still sets the class due time.
-    let full = |_: usize, _: &PolicyClassConfig, payload: &&str| !payload.starts_with("full");
-    assert_eq!(queue.pop_next(full).unwrap().into_payload(), "idle-20");
-    assert!(queue.class_blocks_worker(0, WorkerWithDpRank::new(1, 0)));
+    let readiness = |_: usize, _: &PolicyClassConfig, payload: &&str| {
+        if payload.starts_with("soft") {
+            QueueReadiness::FallbackBlocked
+        } else if payload.starts_with("full") || payload.starts_with("worker") {
+            QueueReadiness::Blocked
+        } else {
+            QueueReadiness::Ready
+        }
+    };
+    let (entry, charge) = queue.extract_next_with_readiness(readiness).unwrap();
+    queue.settle(charge, true);
+    assert_eq!(entry.into_payload(), "idle-20");
+    assert_eq!(queue.expiring_root_count(0), 4);
+    assert_eq!(queue.class_lane_counts(0), [3, 3, 1, 0]);
+    let deficit = queue.class_deficit(0);
     assert_eq!(queue.next_due_at(0), at(10));
     queue.assert_indexes_match_entries();
 
-    // Expiry takes each lane's overdue prefix in due order, the blocked lane's included.
     assert_eq!(
         take_expired_payloads(&mut queue, 0, now + std::time::Duration::from_millis(35)),
-        ["full-10", "shared-30"]
+        ["full-10", "soft-15", "worker-17", "shared-30"]
     );
+    assert_eq!(queue.pending_count(), 4);
+    assert_eq!(queue.class_deficit(0), deficit);
+    assert_eq!(queue.class_lane_counts(0), [3, 0, 0, 3]);
+    assert_eq!(queue.expiring_root_count(0), 4);
     assert_eq!(queue.next_due_at(0), at(40));
-    // The blocked lane is checked again at the next dispatch, with its next head.
-    assert!(!queue.class_blocks_worker(0, WorkerWithDpRank::new(1, 0)));
     queue.assert_indexes_match_entries();
-    assert_eq!(drain_all(&mut queue), ["full-40", "shared-50"]);
-    assert_eq!(queue.expiring_root_count(0), 0);
+
+    queue.retain(|payload| *payload != "worker-60");
+    assert_eq!(queue.class_lane_counts(0)[0], 2);
+    assert_eq!(queue.pending_count(), 3);
+    assert_eq!(queue.expiring_root_count(0), 3);
+    assert!(queue.has_affinity_backlog());
+    queue.assert_indexes_match_entries();
+    assert_eq!(drain_all(&mut queue), ["full-40", "soft-45", "shared-50"]);
+    assert!(!queue.has_affinity_backlog());
+    assert!(queue.expiring_root_count(0) == 0);
+    assert_eq!(queue.class_lane_counts(0), [0, 0, 0, 0]);
+    assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
 }
 
 /// A removal that takes a blocked lane's root, by explicit-deadline expiry or cancellation,
@@ -1061,11 +1102,9 @@ fn drr_charges_cost_when_the_queue_was_empty() {
     let mut snapshot = QueueSnapshot::new(100, 0);
     snapshot.scheduling_cost_tokens = 7;
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, snapshot, 0.0),
             1,
-            snapshot,
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1073,11 +1112,9 @@ fn drr_charges_cost_when_the_queue_was_empty() {
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 1.0),
             1,
-            QueueSnapshot::new(1, 0),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1102,11 +1139,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(8, 4), 0.0),
             1,
-            QueueSnapshot::new(8, 4),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1114,11 +1149,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(16, 6), 1.0),
             1,
-            QueueSnapshot::new(16, 6),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1143,11 +1176,9 @@ fn blocked_worker_lane_does_not_block_another_lane() {
     let mut queue = PolicyQueue::new(&admission_profile());
     for (worker, payload) in [(1, "blocked"), (2, "ready")] {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), worker as f64),
                 2,
-                QueueSnapshot::new(1, 0),
-                worker as f64,
                 0.0,
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
@@ -1168,33 +1199,43 @@ fn worker_update_rechecks_only_that_blocked_lane() {
     let mut queue = PolicyQueue::new(&admission_profile());
     let worker_1 = WorkerWithDpRank::new(1, 0);
     let worker_2 = WorkerWithDpRank::new(2, 0);
-    for (worker, payload) in [(worker_1, "worker-1"), (worker_2, "worker-2")] {
+    for (sequence, (lane, payload)) in [
+        (QueueLane::Exact(worker_1), "worker-1"),
+        (QueueLane::Affinity(worker_1.into()), "soft-1"),
+        (
+            QueueLane::Affinity(WorkerAffinityTarget::new(1, None)),
+            "host-1",
+        ),
+        (QueueLane::Affinity(worker_2.into()), "soft-2"),
+        (QueueLane::Exact(worker_2), "worker-2"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         queue
-            .enqueue(
-                0,
+            .enqueue_in_lane(
+                QueueMetadata {
+                    arrival_offset_secs: sequence as f64,
+                    ..timed(1, None, None)
+                },
                 2,
-                QueueSnapshot::new(1, 0),
-                worker.worker_id as f64,
                 0.0,
                 0,
-                WorkerPlacement::Exact(worker),
+                lane,
                 payload,
             )
             .unwrap();
     }
 
     assert!(queue.pop_next(|_, _, _| false).is_none());
+    queue.recheck_worker(WorkerWithDpRank::new(1, 1));
+    assert_eq!(drain_all(&mut queue), ["host-1"]);
     queue.recheck_worker(worker_1);
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "worker-1"
-    );
-    assert!(queue.pop_next(|_, _, _| true).is_none());
+    assert_eq!(drain_all(&mut queue), ["worker-1", "soft-1"]);
+    queue.recheck_affinity_target(worker_2.into());
+    assert_eq!(drain_all(&mut queue), ["soft-2"]);
     queue.recheck_worker(worker_2);
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "worker-2"
-    );
+    assert_eq!(drain_all(&mut queue), ["worker-2"]);
 }
 
 #[test]
@@ -1202,11 +1243,9 @@ fn exact_lane_index_tracks_a_new_higher_priority_head() {
     let mut queue = PolicyQueue::new(&admission_profile());
     let worker = WorkerWithDpRank::new(1, 0);
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 0.0),
             1,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Exact(worker),
@@ -1214,11 +1253,9 @@ fn exact_lane_index_tracks_a_new_higher_priority_head() {
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 1.0),
             1,
-            QueueSnapshot::new(1, 0),
-            1.0,
             10.0,
             0,
             WorkerPlacement::Exact(worker),
@@ -1242,11 +1279,9 @@ fn exact_lane_head_index_checks_each_blocked_lane_once() {
     let mut queue = PolicyQueue::new(&admission_profile());
     for lane in 0..LANES {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), lane as f64),
                 LANES,
-                QueueSnapshot::new(1, 0),
-                lane as f64,
                 0.0,
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
@@ -1277,11 +1312,9 @@ fn global_recheck_dispatches_workers_as_they_become_available() {
     let mut queue = PolicyQueue::new(&admission_profile());
     for lane in 0..3 {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), lane as f64),
                 3,
-                QueueSnapshot::new(1, 0),
-                lane as f64,
                 0.0,
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(lane, 0)),
@@ -1318,11 +1351,9 @@ fn global_recheck_preserves_priority_for_multiple_available_workers() {
     let mut queue = PolicyQueue::new(&admission_profile());
     for (worker, strict_priority, payload) in [(1, 0, "low"), (2, 1, "high")] {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), 0.0),
                 2,
-                QueueSnapshot::new(1, 0),
-                0.0,
                 0.0,
                 strict_priority,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
@@ -1349,11 +1380,9 @@ fn pending_global_recheck_survives_retain_removing_blocked_lane() {
     let mut queue = PolicyQueue::new(&admission_profile());
     for (worker, payload) in [(1, "remove"), (2, "keep")] {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), 0.0),
                 2,
-                QueueSnapshot::new(1, 0),
-                0.0,
                 0.0,
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
@@ -1395,11 +1424,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(11, 0), 0.0),
             2,
-            QueueSnapshot::new(11, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1407,11 +1434,9 @@ policy_classes:
         )
         .unwrap();
     let (raw_rejection, _) = queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 1.0),
             1,
-            QueueSnapshot::new(1, 0),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1424,11 +1449,9 @@ policy_classes:
     assert_eq!(queue.class_stats(0).raw_isl_tokens, 11);
 
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(10, 0), 2.0),
             2,
-            QueueSnapshot::new(10, 0),
-            2.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1436,11 +1459,9 @@ policy_classes:
         )
         .unwrap();
     let (grown_rejection, _) = queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 3.0),
             2,
-            QueueSnapshot::new(1, 0),
-            3.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1451,11 +1472,9 @@ policy_classes:
     assert_eq!(grown_rejection.limit, 20);
 
     queue
-        .enqueue(
-            1,
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(8, 6), 0.0),
             2,
-            QueueSnapshot::new(8, 6),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1463,11 +1482,9 @@ policy_classes:
         )
         .unwrap();
     let (cached_rejection, _) = queue
-        .enqueue(
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(1, 1), 1.0),
             1,
-            1,
-            QueueSnapshot::new(1, 1),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1479,11 +1496,9 @@ policy_classes:
     assert_eq!(cached_rejection.limit, 5);
 
     let (zero_rejection, _) = queue
-        .enqueue(
-            2,
+        .enqueue_with_due_at(
+            no_due_metadata(2, QueueSnapshot::new(1, 0), 0.0),
             4,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1494,11 +1509,9 @@ policy_classes:
     assert_eq!(zero_rejection.limit, 0);
 
     let (no_workers_rejection, _) = queue
-        .enqueue(
-            3,
+        .enqueue_with_due_at(
+            no_due_metadata(3, QueueSnapshot::new(1, 0), 0.0),
             0,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1521,11 +1534,9 @@ policy_classes:
         usize::MAX
     )));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 0.0),
             2,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1549,11 +1560,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(50, 0), 0.0),
             1,
-            QueueSnapshot::new(50, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1561,11 +1570,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 1.0),
             1,
-            QueueSnapshot::new(1, 0),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1573,11 +1580,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(50, 0), 0.0),
             1,
-            1,
-            QueueSnapshot::new(50, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1585,11 +1590,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(1, 0), 1.0),
             1,
-            1,
-            QueueSnapshot::new(1, 0),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1617,11 +1620,9 @@ policy_classes:
     ));
     for index in 0..6 {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), index as f64),
                 1,
-                QueueSnapshot::new(1, 0),
-                index as f64,
                 0.0,
                 0,
                 WorkerPlacement::Any,
@@ -1629,11 +1630,9 @@ policy_classes:
             )
             .unwrap();
         queue
-            .enqueue(
+            .enqueue_with_due_at(
+                no_due_metadata(1, QueueSnapshot::new(1, 0), index as f64),
                 1,
-                1,
-                QueueSnapshot::new(1, 0),
-                index as f64,
                 0.0,
                 0,
                 WorkerPlacement::Any,
@@ -1667,11 +1666,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(5, 0), 0.0),
             2,
-            QueueSnapshot::new(5, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1679,11 +1676,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(1, 0), 1.0),
             2,
-            QueueSnapshot::new(1, 0),
-            1.0,
             0.0,
             0,
             WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
@@ -1691,11 +1686,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(10, 0), 2.0),
             2,
-            QueueSnapshot::new(10, 0),
-            2.0,
             0.0,
             0,
             WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
@@ -1703,11 +1696,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
-            1,
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(1, 0), 0.0),
             2,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1743,11 +1734,9 @@ policy_classes:
     ));
     for index in 0..20 {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), index as f64),
                 1,
-                QueueSnapshot::new(1, 0),
-                index as f64,
                 0.0,
                 0,
                 WorkerPlacement::Any,
@@ -1757,11 +1746,9 @@ policy_classes:
     }
     for index in 0..60 {
         queue
-            .enqueue(
+            .enqueue_with_due_at(
+                no_due_metadata(1, QueueSnapshot::new(1, 0), index as f64),
                 1,
-                1,
-                QueueSnapshot::new(1, 0),
-                index as f64,
                 0.0,
                 0,
                 WorkerPlacement::Any,
@@ -1799,11 +1786,9 @@ policy_classes:
     for round in 0..5 {
         for cost in [300, 500] {
             queue
-                .enqueue(
-                    0,
+                .enqueue_with_due_at(
+                    no_due_metadata(0, QueueSnapshot::new(cost, 0), round as f64),
                     1,
-                    QueueSnapshot::new(cost, 0),
-                    round as f64,
                     0.0,
                     0,
                     WorkerPlacement::Any,
@@ -1814,11 +1799,9 @@ policy_classes:
     }
     for (round, cost) in [200, 200, 200, 150].into_iter().enumerate() {
         queue
-            .enqueue(
+            .enqueue_with_due_at(
+                no_due_metadata(1, QueueSnapshot::new(cost, 0), round as f64),
                 1,
-                1,
-                QueueSnapshot::new(cost, 0),
-                round as f64,
                 0.0,
                 0,
                 WorkerPlacement::Any,
@@ -1858,11 +1841,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(100, 0), 0.0),
             1,
-            QueueSnapshot::new(100, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1870,11 +1851,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(100, 0), 0.0),
             1,
-            1,
-            QueueSnapshot::new(100, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1902,11 +1881,9 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
+        .enqueue_with_due_at(
+            no_due_metadata(0, QueueSnapshot::new(101, 0), 0.0),
             1,
-            QueueSnapshot::new(101, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
@@ -1914,11 +1891,9 @@ policy_classes:
         )
         .unwrap();
     queue
-        .enqueue(
+        .enqueue_with_due_at(
+            no_due_metadata(1, QueueSnapshot::new(1, 0), 0.0),
             1,
-            1,
-            QueueSnapshot::new(1, 0),
-            0.0,
             0.0,
             0,
             WorkerPlacement::Any,
