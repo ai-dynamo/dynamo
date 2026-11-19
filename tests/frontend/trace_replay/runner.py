@@ -414,13 +414,16 @@ def _exchange(
             result["infra_errors"].append({"stage": "http", "error": str(exc)})
     observation = options.output_dir / "worker" / f"{execution_id}.request.json"
     emission = options.output_dir / "worker" / f"{execution_id}.emission.json"
+    # A client error without worker ingress is the frontend's own rejection, already
+    # judged at /http_status; a 5xx can come from a missing worker, so it stays infra.
+    rejected = status is not None and 400 <= status < 500 and not observation.is_file()
     if observation.is_file():
         result["preprocessed"] = loads(observation.read_bytes())
         result["failures"].extend(
             {"boundary": "preprocessed", **failure}
             for failure in judge_preprocessed(case, result["preprocessed"])
         )
-    else:
+    elif not rejected:
         result["infra_errors"].append(
             {"stage": "worker", "error": "missing worker-ingress observation"}
         )
@@ -442,7 +445,7 @@ def _exchange(
                     "error": "worker did not emit the complete selected token sequence",
                 }
             )
-    else:
+    elif not rejected:
         result["infra_errors"].append(
             {"stage": "worker", "error": "missing emission receipt"}
         )

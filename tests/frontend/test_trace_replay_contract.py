@@ -596,6 +596,48 @@ def test_malformed_wire_response_is_a_product_failure_with_complete_worker_recei
     assert result["failures"][0]["path"] == "/wire"
 
 
+@pytest.mark.parametrize("mode", ["unary", "sse"])
+@pytest.mark.parametrize("http_status,expected", [(400, "fail"), (503, "infra_error")])
+def test_frontend_rejection_without_worker_ingress_is_a_product_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    http_status: int,
+    expected: str,
+) -> None:
+    corpus = load_corpus(FIXTURES, 1)
+
+    def rejected(
+        session: requests.Session, url: str, **kwargs: Any
+    ) -> requests.Response:
+        response = requests.Response()
+        response.status_code = http_status
+        response.encoding = "utf-8"
+        response._content = b'{"error":"rejected"}'
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(requests.Session, "post", rejected)
+    result = runner._exchange(
+        corpus.cases[0],
+        mode,
+        "whole",
+        corpus,
+        RunOptions(FIXTURES, tmp_path, tmp_path),
+        "http://unused",
+    )
+    assert result["status"] == expected
+    assert result["failures"] == [
+        {
+            "boundary": "response",
+            "path": "/http_status",
+            "actual": http_status,
+            "expected": 200,
+        }
+    ]
+    assert bool(result["infra_errors"]) == (expected == "infra_error")
+
+
 @pytest.mark.parametrize(
     "variant", ["no_done", "after_finish", "double_finish", "changed_id"]
 )
