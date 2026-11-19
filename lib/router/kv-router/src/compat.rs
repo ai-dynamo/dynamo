@@ -444,12 +444,6 @@ pub mod indexer {
         note = "moved to dynamo_kv_indexer::KvIndexer; removed in 1.10.0"
     )]
     pub type KvIndexer = dynamo_kv_indexer::KvIndexer;
-    #[deprecated(
-        since = "1.8.0",
-        note = "moved to dynamo_kv_indexer::KvIndexerBuilder; removed in 1.10.0"
-    )]
-    pub type KvIndexerBuilder = dynamo_kv_indexer::KvIndexerBuilder;
-    pub use dynamo_kv_indexer::KvIndexerDelegate;
     pub use dynamo_kv_indexer::KvIndexerInterface;
     #[deprecated(
         since = "1.8.0",
