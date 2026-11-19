@@ -113,8 +113,9 @@ request_classifier:
 ```
 
 - Turn on engine priority scheduling as described in [Backend engine](#2-backend-engine). An engine that does not order by priority ignores the prediction.
-- The prediction replaces any `priority` the client sent. `strict_priority` is unchanged.
-- The prediction is also the request's scheduling cost in the router queue, in every policy class. A `wspt` class dispatches the shortest predicted reply first, and deficit round robin charges each class in predicted reply tokens, so size `quantum` in those; see [Hold requests in the router](#hold-requests-in-the-router).
+- With the classifier on, every request reaches the engine with a priority. Do not enable it for an engine that is set to reject such requests while its priority scheduling is off, such as SGLang started with `--abort-on-priority-when-disabled`.
+- The prediction replaces the `priority` the engine receives, including one the client sent. The router's own queue priority and `strict_priority` are unchanged.
+- The prediction is also the request's scheduling cost in the router queue, in every policy class. Among requests of equal router priority, a `wspt` class dispatches the shortest predicted reply first, and deficit round robin charges each class in predicted reply tokens, so size `quantum` in those; see [Hold requests in the router](#hold-requests-in-the-router).
 - Predictions use the [session ID](session-ids.mdx). A request without one is predicted from its prompt length and the replies of all sessions.
 - Each frontend learns on its own and starts from scratch when it restarts. The first requests use a fixed prior of 400 tokens.
 - Long replies wait longer. Bound that wait with the engine's own starvation control, if it has one.
@@ -137,7 +138,7 @@ request_classifier:
 ```
 
 - `request_busy_threshold_frac: 1.0` holds a request while every worker already runs as many requests as its engine runs together (`max_num_seqs`). Once a worker has room, worker selection places the request by its usual cost.
-- `queue_policy: wspt` dispatches the shortest predicted reply first.
+- `queue_policy: wspt` dispatches the shortest predicted reply first among requests of equal router priority.
 - `slo_ttft_ms` bounds how long a long reply is held back: a request that has waited that long moves ahead of the requests in its priority tier that have not.
 
 Workers that advertise their own router mode (`--router-mode` on the worker) replace the frontend's router settings for their worker set, the policy file path included. Give those workers the same `--router-policy-config` path: the worker reads the file when it starts, and each frontend reads that path from its own filesystem. The request classifier always comes from the frontend's own policy file.

@@ -10,8 +10,8 @@
 //! sent.
 //!
 //! The prediction is also the request's scheduling cost, so a `wspt` policy class that holds
-//! requests in the router dispatches the shortest predicted reply first, and deficit round robin
-//! charges classes in predicted reply tokens.
+//! requests in the router dispatches the shortest predicted reply first among requests of equal
+//! router priority, and deficit round robin charges classes in predicted reply tokens.
 //!
 //! Ported from TensorRT-LLM's `tensorrt_llm/serve/output_length_predictor.py`.
 

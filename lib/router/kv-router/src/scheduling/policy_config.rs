@@ -837,6 +837,13 @@ policy_classes:
         };
         assert!(inexact.has_room(&running(54), slots(Some(100))));
         assert!(!inexact.has_room(&running(55), slots(Some(100))));
+        // A fraction below one slot still lets an idle rank take a request.
+        let tiny = BusyThresholds {
+            request_busy_threshold_frac: Some(1e-7),
+            ..Default::default()
+        };
+        assert!(tiny.has_room(&running(0), slots(Some(1))));
+        assert!(!tiny.has_room(&running(1), slots(Some(1))));
 
         for invalid in ["0", "-1.0", ".nan", ".inf"] {
             let error = RouterPolicyConfig::from_yaml(&format!(

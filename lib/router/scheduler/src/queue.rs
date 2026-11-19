@@ -2444,7 +2444,6 @@ impl<
             let decay_now = Instant::now();
             // An expired head is rejected here rather than dispatched.
             self.expire_due_classes(decay_now);
-            // Entries past their class budget take their place before this pass picks a head.
             self.pending.promote_overdue(decay_now);
             // Load is read after the previous admission booked, so this one sees that
             // reservation. Frees and peer bookings from other tasks can land between
@@ -6830,7 +6829,6 @@ mod tests {
         );
         let (queue, slots, cfg_tx) =
             make_queue_with_profile_sender_and_reject(2, 16, 1_000_000, profile, None);
-        // Each worker runs one request at a time.
         let worker_config = SimpleWorkerConfig {
             max_num_batched_tokens: Some(1_000_000),
             max_num_seqs: Some(1),

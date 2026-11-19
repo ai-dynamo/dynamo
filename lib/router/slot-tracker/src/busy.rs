@@ -96,8 +96,10 @@ impl BusyThresholds {
             .request_busy_threshold_frac
             .zip(capacity.max_num_seqs())
             .is_some_and(|(threshold, max_num_seqs)| {
-                (load.active_requests() as f64)
-                    >= threshold * (max_num_seqs as f64) - REQUEST_LIMIT_SLACK
+                let active = load.active_requests();
+                // An idle rank has room however small the fraction, or the class never dispatches.
+                active > 0
+                    && (active as f64) >= threshold * (max_num_seqs as f64) - REQUEST_LIMIT_SLACK
             });
         !(absolute_full || fractional_full || decode_full || requests_full)
     }
