@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="498" viewBox="0 0 1000 498" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="412" viewBox="0 0 1000 412" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Workloads that don't fit GPU fractions</title>
-  <desc id="desc">Five workloads that don't fit, each with a better choice. Keeps a whole GPU busy: dedicated GPUs. Replicas or LoRA adapters of one model: one engine per base model. Needs most of the GPU's memory: dedicated GPUs. Strict tail-latency targets: dedicated GPUs or MIG. Tenants that don't trust each other: MIG or separate GPUs.</desc>
+  <desc id="desc">Four workloads that don't fit, each with a better choice. Keeps a whole GPU busy: dedicated GPUs. Replicas or LoRA adapters of one model: one engine per base model. Needs most of the GPU's memory: dedicated GPUs. Strict tail-latency targets: dedicated GPUs or MIG.</desc>
   <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
-  <rect x="0.0" y="0.0" width="1000.0" height="498.0" fill="#FFFFFF"/>
+  <rect x="0.0" y="0.0" width="1000.0" height="412.0" fill="#FFFFFF"/>
   <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Workloads that don't fit GPU fractions</text>
   <rect x="24.0" y="60.0" width="560.0" height="76.0" fill="#FFFFFF" rx="10" stroke="#D1D5DB" stroke-width="1.5"/>
   <rect x="34.0" y="68.0" width="88.0" height="60.0" fill="#FBE3E3" rx="8"/>
@@ -44,15 +44,4 @@
   <line x1="594.0" y1="356.0" x2="666.0" y2="356.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
   <rect x="676.0" y="318.0" width="300.0" height="76.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
   <text x="826.0" y="361.6" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="middle">Dedicated GPUs or MIG</text>
-  <rect x="24.0" y="404.0" width="560.0" height="76.0" fill="#FFFFFF" rx="10" stroke="#D1D5DB" stroke-width="1.5"/>
-  <rect x="34.0" y="412.0" width="88.0" height="60.0" fill="#FBE3E3" rx="8"/>
-  <rect x="42.0" y="424.0" width="32.0" height="36.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.2"/>
-  <text x="58.0" y="446.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
-  <rect x="82.0" y="424.0" width="32.0" height="36.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
-  <text x="98.0" y="446.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
-  <line x1="78.0" y1="418.0" x2="78.0" y2="468.0" stroke="#1A1A1A" stroke-width="4" stroke-linecap="round"/>
-  <text x="140.0" y="448.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Tenants that don't trust each other</text>
-  <line x1="594.0" y1="442.0" x2="666.0" y2="442.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
-  <rect x="676.0" y="404.0" width="300.0" height="76.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
-  <text x="826.0" y="447.6" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="middle">MIG or separate GPUs</text>
 </svg>
