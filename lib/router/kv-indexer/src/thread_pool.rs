@@ -16,12 +16,13 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+use super::approximate_lru::{ApproximateLruCommandSink, await_lane_reply};
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
-    ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
-    ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask, panic_payload_message,
+    ApproximateLruClient, ApproximateLruIncarnation, ApproximateLruLease, ApproximateLruStats,
+    ApproximateLruTask, ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
+    KvRouterError, ResidentBlockCountsHandle, ShardSizeSnapshot, SyncIndexer, WorkerLookupStats,
+    WorkerTask, panic_payload_message,
 };
 #[cfg(feature = "bench")]
 use super::{
@@ -84,6 +85,12 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Handles to worker threads for joining on shutdown.
     thread_handles: Mutex<Vec<JoinHandle<()>>>,
 
+    /// Cancelled when the matching worker thread exits, including by panic.
+    thread_exited: Vec<tokio_util::sync::CancellationToken>,
+
+    /// Live per-rank block counts, once a policy reads them.
+    resident_blocks: std::sync::OnceLock<ResidentBlockCountsHandle>,
+
     /// Approximate-mode TTL pruning manager. None for normal event-driven mode.
     prune_manager: Option<WorkerPruneManager>,
 
@@ -140,6 +147,8 @@ impl MaintenanceThread {
 struct ThreadPoolLruSink {
     sender: flume::Sender<WorkerTask>,
     fallback_prune_manager: WorkerPruneManager,
+    /// The owning lane's `thread_exited` token.
+    lane_exited: tokio_util::sync::CancellationToken,
 }
 
 impl ApproximateLruCommandSink for ThreadPoolLruSink {
@@ -149,6 +158,10 @@ impl ApproximateLruCommandSink for ThreadPoolLruSink {
         self.sender
             .send(WorkerTask::ApproximateLru(task))
             .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn lane_exited(&self) -> &tokio_util::sync::CancellationToken {
+        &self.lane_exited
     }
 }
 
@@ -283,7 +296,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_approximate_retention(
-        mut backend: T,
+        backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
@@ -295,27 +308,26 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             None => (None, false),
         };
         assert!(num_workers > 0, "Number of workers must be greater than 0");
-        assert!(
-            prune_config.is_none() || backend.supports_routing_decision_pruning(),
-            "backend does not support routing-decision pruning"
-        );
         super::warn_on_unit_block_size("thread_pool", kv_block_size);
-        backend.configure_metrics(metrics.as_deref());
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
+        let mut thread_exited = Vec::new();
         let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
         for worker_idx in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
+            let exited = tokio_util::sync::CancellationToken::new();
+            thread_exited.push(exited.clone());
 
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
 
             let handle = std::thread::spawn(move || {
+                let _exited = exited.drop_guard();
                 // This is observability, not recovery: if the worker panics, log
                 // through tracing and then preserve the panic for join().
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -367,6 +379,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             num_workers,
             kv_block_size,
             thread_handles: Mutex::new(thread_handles),
+            thread_exited,
+            resident_blocks: std::sync::OnceLock::new(),
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
@@ -397,6 +411,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 .as_ref()
                 .expect("LRU fallback TTL requires a prune manager")
                 .clone(),
+            lane_exited: self.thread_exited[thread_idx].clone(),
         })))
     }
 
@@ -439,7 +454,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             return Ok(ApproximateLruStats::default());
         }
         let mut total = ApproximateLruStats::default();
-        for sender in &self.worker_event_channels {
+        for (sender, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let client = ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
                 sender: sender.clone(),
                 fallback_prune_manager: self
@@ -447,6 +462,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     .as_ref()
                     .expect("LRU fallback TTL requires a prune manager")
                     .clone(),
+                lane_exited: exited.clone(),
             }));
             let stats = client.stats().await?;
             total.ranks += stats.ranks;
@@ -570,9 +586,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         }
 
         for (worker_idx, receiver) in install_receivers.into_iter().enumerate() {
-            let accepted = receiver
-                .await
-                .map_err(|_| ObservationError::InstallCanceled(worker_idx))?;
+            let accepted = await_observation_reply(
+                receiver,
+                &self.thread_exited[worker_idx],
+                worker_idx,
+                ObservationError::InstallCanceled,
+            )
+            .await?;
             if !accepted {
                 return Err(ObservationError::InstallRejected(worker_idx));
             }
@@ -630,25 +650,61 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         }
     }
 
+    /// Each worker thread's per-rank block counts, or `None` for a thread that has exited.
+    async fn lane_lookup_stats(&self) -> Vec<Option<WorkerLookupStats>> {
+        // Every request goes out before the first wait, so the threads answer in parallel and
+        // the wait is the slowest lane's, not their sum.
+        let pending: Vec<_> = self
+            .worker_event_channels
+            .iter()
+            .zip(&self.thread_exited)
+            .map(|(channel, exited)| {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                channel
+                    .send(WorkerTask::Stats(resp_tx))
+                    .ok()
+                    .map(|()| (resp_rx, exited))
+            })
+            .collect();
+        let mut stats = Vec::with_capacity(pending.len());
+        for lane in pending {
+            let Some((resp_rx, exited)) = lane else {
+                stats.push(None);
+                continue;
+            };
+            stats.push(await_lane_reply(resp_rx, exited).await.ok());
+        }
+        stats
+    }
+
     pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
-        let mut receivers = Vec::new();
-        for channel in &self.worker_event_channels {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Stats(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
-            }
-        }
-
         let mut worker_blocks = BTreeMap::new();
-        for receiver in receivers {
-            if let Ok(stats) = receiver.await {
-                for (worker, block_count) in stats.worker_blocks {
-                    *worker_blocks.entry(worker).or_insert(0usize) += block_count;
-                }
+        for stats in self.lane_lookup_stats().await.into_iter().flatten() {
+            for (worker, block_count) in stats.worker_blocks {
+                *worker_blocks.entry(worker).or_insert(0usize) += block_count;
             }
         }
-
         WorkerLookupStats::from_worker_block_counts(worker_blocks)
+    }
+
+    /// [`Self::track_resident_blocks`], for benchmarking the event threads' cost of tracking.
+    #[cfg(feature = "bench")]
+    pub fn bench_track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.track_resident_blocks()
+    }
+
+    /// Live per-rank block counts, which every worker thread starts keeping on the first call.
+    pub(crate) fn track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.resident_blocks
+            .get_or_init(|| {
+                let counts = ResidentBlockCountsHandle::default();
+                for channel in &self.worker_event_channels {
+                    // An exited thread never sees this, and its ranks read None.
+                    let _ = channel.send(WorkerTask::TrackResidentBlocks(counts.clone()));
+                }
+                counts
+            })
+            .clone()
     }
 
     pub async fn get_workers(&self) -> Vec<WorkerId> {
@@ -753,7 +809,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     resp: resp_tx,
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            Ok::<_, KvRouterError>(resp_rx)
+            Ok::<_, KvRouterError>((idx, resp_rx))
         };
         let receivers = if let Some(second_idx) = second_idx {
             vec![
@@ -763,10 +819,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         } else {
             vec![enqueue(thread_idx, event)?]
         };
-        for receiver in receivers {
-            let applied = receiver
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        for (idx, receiver) in receivers {
+            let applied = await_lane_reply(receiver, &self.thread_exited[idx]).await?;
             if !applied {
                 return Err(KvRouterError::IndexerDroppedRequest);
             }
@@ -780,17 +834,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
     pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
         let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
-        for channel in &self.worker_event_channels {
+        for (channel, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let (resp_tx, resp_rx) = oneshot::channel();
             channel
                 .send(WorkerTask::Flush(resp_tx))
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            receivers.push(resp_rx);
+            receivers.push((resp_rx, exited));
         }
-        for receiver in receivers {
-            receiver
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        for (receiver, exited) in receivers {
+            await_lane_reply(receiver, exited).await?;
         }
         Ok(())
     }
@@ -814,9 +866,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Flush(resp_tx))
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        await_lane_reply(resp_rx, &self.thread_exited[thread_idx]).await
     }
 
     /// Wait until all previously queued worker tasks have completed.
@@ -872,7 +922,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         worker_id: WorkerId,
     ) -> Result<(), KvRouterError> {
         let mut lane_receivers = Vec::with_capacity(self.worker_event_channels.len());
-        for channel in &self.worker_event_channels {
+        for (channel, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let (resp_tx, resp_rx) = oneshot::channel();
             channel
                 .send(WorkerTask::RemoveWorker {
@@ -881,12 +931,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     resp: resp_tx,
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            lane_receivers.push(resp_rx);
+            lane_receivers.push((resp_rx, exited));
         }
-        for receiver in lane_receivers {
-            receiver
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        for (receiver, exited) in lane_receivers {
+            await_lane_reply(receiver, exited).await?;
         }
 
         // NOTE: The lifecycle caller stops this worker's source before removal. Broadcasting
@@ -900,9 +948,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 resp: resp_tx,
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        await_lane_reply(resp_rx, &self.thread_exited[0]).await?;
         Ok(())
     }
 
@@ -1091,9 +1137,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
-        let applied = resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        let applied = await_lane_reply(resp_rx, &self.thread_exited[thread_idx]).await?;
         if applied {
             prune_manager.insert_worker_block_entries(worker, prune_entries);
         }
@@ -1141,9 +1185,7 @@ impl ThreadPoolIndexer<ConcurrentRadixTreeCompressed> {
                 resp: resp_tx,
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        await_lane_reply(resp_rx, &self.thread_exited[thread_idx]).await
     }
 }
 
@@ -1175,6 +1217,21 @@ impl<'a, T: SyncIndexer> ThreadPoolObservationSession<'a, T> {
 }
 
 #[cfg(feature = "bench")]
+async fn await_observation_reply<R>(
+    reply: oneshot::Receiver<R>,
+    lane_exited: &tokio_util::sync::CancellationToken,
+    worker_idx: usize,
+    canceled: fn(usize) -> ObservationError,
+) -> Result<R, ObservationError> {
+    await_lane_reply(reply, lane_exited)
+        .await
+        .map_err(|error| match error {
+            KvRouterError::IndexerOffline => ObservationError::WorkerOffline(worker_idx),
+            _ => canceled(worker_idx),
+        })
+}
+
+#[cfg(feature = "bench")]
 impl<'a, T: SyncIndexer> ThreadPoolObservationDrain<'a, T> {
     pub async fn seal(mut self) -> Result<ThreadPoolSealedObservation<'a, T>, ObservationError> {
         for worker_idx in 0..self.indexer.num_workers {
@@ -1188,10 +1245,14 @@ impl<'a, T: SyncIndexer> ThreadPoolObservationDrain<'a, T> {
 
         let mut seals = Vec::with_capacity(self.indexer.num_workers);
         for (worker_idx, receiver) in self.seal_receivers.into_iter().enumerate() {
-            let seal = receiver
-                .await
-                .map_err(|_| ObservationError::SealCanceled(worker_idx))?
-                .ok_or(ObservationError::SealRejected(worker_idx))?;
+            let seal = await_observation_reply(
+                receiver,
+                &self.indexer.thread_exited[worker_idx],
+                worker_idx,
+                ObservationError::SealCanceled,
+            )
+            .await?
+            .ok_or(ObservationError::SealRejected(worker_idx))?;
             seals.push(seal);
         }
 
@@ -1229,9 +1290,13 @@ impl<T: SyncIndexer> ThreadPoolSealedObservation<'_, T> {
         let mut buffers = Vec::with_capacity(self.indexer.num_workers);
         for (worker_idx, receiver) in self.harvest_receivers.into_iter().enumerate() {
             buffers.push(
-                receiver
-                    .await
-                    .map_err(|_| ObservationError::HarvestCanceled(worker_idx))?,
+                await_observation_reply(
+                    receiver,
+                    &self.indexer.thread_exited[worker_idx],
+                    worker_idx,
+                    ObservationError::HarvestCanceled,
+                )
+                .await?,
             );
         }
 
@@ -1415,35 +1480,28 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        if !self.backend.supports_event_dump() {
-            return Err(KvRouterError::Unsupported(
-                "backend cannot reconstruct router events".to_string(),
-            ));
-        }
-
         // Send DumpEvents to every worker as a FIFO barrier: each worker must
         // finish processing all previously queued Events before it handles
         // DumpEvents, so by the time all workers respond we know the shared
         // tree (if any) reflects every event that was enqueued before this call.
         let mut receivers = Vec::new();
 
-        for channel in &self.worker_event_channels {
+        for (channel, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<Vec<RouterEvent>>>();
             let dump_req = WorkerTask::DumpEvents(resp_tx);
 
             channel
                 .send(dump_req)
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            receivers.push(resp_rx);
+            receivers.push((resp_rx, exited));
         }
 
         let mut all_events = Vec::new();
         let mut event_id_counter = 0u64;
 
-        for resp_rx in receivers {
-            let mut events = resp_rx
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+        for (resp_rx, exited) in receivers {
+            let mut events = await_lane_reply(resp_rx, exited)
+                .await?
                 .map_err(|_| KvRouterError::IndexerOffline)?;
             for event in &mut events {
                 event.event.event_id = event_id_counter;
@@ -1523,12 +1581,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             shard_idx: 0,
             worker_count: stats.worker_count(),
             block_count: stats.block_count(),
-            node_count: self.backend.node_count(),
         }]
-    }
-
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        self.backend.node_edge_lengths()
     }
 }
 
@@ -1606,6 +1659,145 @@ mod tests {
         indexer.flush().await;
         assert_score(&indexer, &[10], rank0, 1).await;
         assert_score(&indexer, &[20], rank1, 1).await;
+    }
+
+    /// Holds each worker thread until the gate's sender drops, so a test can queue tasks behind
+    /// `Terminate`.
+    struct GatedBackend(flume::Receiver<()>);
+
+    impl SyncIndexer for GatedBackend {
+        fn worker(
+            &self,
+            tasks: flume::Receiver<WorkerTask>,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            let _ = self.0.recv();
+            while let Ok(task) = tasks.recv() {
+                if let WorkerTask::Terminate = task {
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn find_matches(&self, _sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+            OverlapScores::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_read_skips_a_thread_that_exits_with_it_queued() {
+        let (open_gate, gate) = flume::bounded::<()>(1);
+        let indexer = ThreadPoolIndexer::new(GatedBackend(gate), 1, 16);
+        indexer.worker_event_channels[0]
+            .send(WorkerTask::Terminate)
+            .unwrap();
+        // The request queues behind Terminate before the gate opens, so it is never answered.
+        let (read, ()) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                indexer.worker_lookup_stats()
+            ),
+            async {
+                tokio::task::yield_now().await;
+                drop(open_gate);
+            },
+        );
+        assert_eq!(read.expect("stats read hung").worker_count(), 0);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AckedWait {
+        ApplyEvent,
+        Flush,
+        FlushWorkerLane,
+        RemoveWorker,
+        DumpEvents,
+        TtlRoutingDecision,
+        LruStats,
+        LruRelease,
+    }
+
+    /// Queues one acknowledged wait behind `Terminate` on a single gated lane, then opens the
+    /// gate so the lane exits without answering or dropping it.
+    async fn acknowledged_wait_after_lane_exit(wait: AckedWait) -> Result<(), KvRouterError> {
+        let (open_gate, gate) = flume::bounded::<()>(1);
+        let fallback_ttl = PruneConfig {
+            ttl: std::time::Duration::from_secs(120),
+        };
+        let retention = match wait {
+            AckedWait::TtlRoutingDecision => Some(ApproximateRetentionConfig::Ttl(fallback_ttl)),
+            AckedWait::LruStats | AckedWait::LruRelease => {
+                Some(ApproximateRetentionConfig::Lru { fallback_ttl })
+            }
+            _ => None,
+        };
+        let indexer = ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+            GatedBackend(gate),
+            1,
+            16,
+            None,
+            retention,
+        );
+        indexer.worker_event_channels[0]
+            .send(WorkerTask::Terminate)
+            .unwrap();
+        let worker = WorkerWithDpRank::new(1, 0);
+        // Created before the wait so its drop-time release does not race the assertion.
+        let lease = indexer.begin_approximate_lru_request(worker, 1, AttemptId::for_testing(1));
+        let wait = async {
+            match wait {
+                AckedWait::ApplyEvent => {
+                    indexer
+                        .apply_event_and_wait(make_store_event(1, &[1]))
+                        .await
+                }
+                AckedWait::Flush => indexer.flush_and_wait().await,
+                AckedWait::FlushWorkerLane => indexer.flush_worker_lane_and_wait(worker).await,
+                AckedWait::RemoveWorker => indexer.remove_worker_across_lanes_and_wait(1).await,
+                AckedWait::DumpEvents => indexer.dump_events().await.map(drop),
+                AckedWait::TtlRoutingDecision => {
+                    indexer
+                        .record_ttl_fallback_hashes(worker, &[LocalBlockHash(1)], &[1])
+                        .await
+                }
+                AckedWait::LruStats => indexer.approximate_lru_stats().await.map(drop),
+                AckedWait::LruRelease => {
+                    let ack = lease
+                        .as_ref()
+                        .expect("LRU retention is enabled")
+                        .begin_finish()?
+                        .expect("lease is not yet released");
+                    ack.wait().await
+                }
+            }
+        };
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), wait),
+            async {
+                tokio::task::yield_now().await;
+                drop(open_gate);
+            },
+        );
+        result.expect("acknowledged wait hung after its lane exited")
+    }
+
+    #[rstest::rstest]
+    #[case::apply_event(AckedWait::ApplyEvent)]
+    #[case::flush(AckedWait::Flush)]
+    #[case::flush_worker_lane(AckedWait::FlushWorkerLane)]
+    #[case::remove_worker(AckedWait::RemoveWorker)]
+    #[case::dump_events(AckedWait::DumpEvents)]
+    #[case::ttl_routing_decision(AckedWait::TtlRoutingDecision)]
+    #[case::lru_stats(AckedWait::LruStats)]
+    #[case::lru_release(AckedWait::LruRelease)]
+    #[tokio::test]
+    async fn acknowledged_wait_fails_when_its_lane_exits_with_it_queued(#[case] wait: AckedWait) {
+        let result = acknowledged_wait_after_lane_exit(wait).await;
+        assert!(
+            matches!(result, Err(KvRouterError::IndexerOffline)),
+            "{wait:?} returned {result:?}"
+        );
     }
 
     #[tokio::test]

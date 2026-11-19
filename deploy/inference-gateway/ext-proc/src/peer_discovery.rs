@@ -266,7 +266,7 @@ mod tests {
         use axum::response::IntoResponse;
         use axum::routing::get;
         use axum::{Json, Router};
-        use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
+        use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
         use dynamo_kv_router::services::selection::SelectionServiceBuilder;
         use dynamo_router_protocol::WorkerType;
         use kube::Config;
@@ -281,7 +281,7 @@ mod tests {
             .port();
         let service = Arc::new(
             SelectionServiceBuilder::new(
-                kv_router_config_from_dynamo_env(),
+                try_kv_router_config_from_dynamo_env().expect("router env config"),
                 WorkerType::Aggregated,
                 dynamo_router_policies::default_registry(),
             )

@@ -701,6 +701,32 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
+    async fn input_audio_is_forwarded_once_as_audio_url() {
+        let messages = r#"[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Transcribe this"},
+                {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}}
+            ]
+        }]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+        let preprocessor = make_preprocessor();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let media = preprocessed.multi_modal_data.as_ref().unwrap();
+        assert_eq!(media["audio_url"].len(), 1);
+        assert!(matches!(
+            &media["audio_url"][0],
+            MultimodalData::Url(url) if url.as_str() == "data:audio/wav;base64,AA=="
+        ));
+        let messages = &preprocessed.extra_args.as_ref().unwrap()["messages"];
+        assert_eq!(messages[0]["content"][1]["input_audio"]["data"], "");
+    }
+
+    #[tokio::test]
     async fn preserves_multimodal_cache_uuid_alignment() {
         let messages = r#"[
             {
@@ -1714,5 +1740,25 @@ mod embedding_without_chat_template {
             }
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn frontend_tokenization_rejects_chat_input() {
+        let preprocessor = embedding_preprocessor_without_template();
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        let error = preprocessor
+            .preprocess_embedding_request(&request)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--embedding-frontend-tokenization"),
+            "{error}"
+        );
     }
 }
