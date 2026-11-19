@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! KV transfer hints attached to backend requests, the runtime-config keys that advertise
-//! them, and, re-exported from the indexer that produces it, who can be the source of a fetch.
+//! KV transfer hints attached to backend requests and the runtime-config keys that advertise
+//! them. Who can be the source of a fetch is `dynamo-kv-indexer`'s vocabulary; see the crate doc.
 
 use std::collections::BTreeMap;
 
@@ -52,29 +52,19 @@ pub struct KvHintAction {
 }
 
 impl KvHintAction {
-    /// An action with an explicit ID. When the router composes a hint, it numbers every action
-    /// again (see [`KvHint::append_numbered`]), so a hint policy can use [`Self::unnumbered`].
-    pub fn new(
-        action_id: impl Into<String>,
-        action_type: impl Into<String>,
-        action_version: impl Into<String>,
-        payload: BTreeMap<String, serde_json::Value>,
-    ) -> Self {
-        Self {
-            action_id: action_id.into(),
-            action_type: action_type.into(),
-            action_version: action_version.into(),
-            payload,
-        }
-    }
-
-    /// An action without an ID. The router numbers it when it composes the hint.
+    /// An action without an ID. The router numbers every action when it composes the hint
+    /// (see [`KvHint::append_numbered`]), so a hint policy never chooses one.
     pub fn unnumbered(
         action_type: impl Into<String>,
         action_version: impl Into<String>,
         payload: BTreeMap<String, serde_json::Value>,
     ) -> Self {
-        Self::new(String::new(), action_type, action_version, payload)
+        Self {
+            action_id: String::new(),
+            action_type: action_type.into(),
+            action_version: action_version.into(),
+            payload,
+        }
     }
 }
 
@@ -156,18 +146,18 @@ impl std::fmt::Display for KvHintActionLimitError {
 
 impl std::error::Error for KvHintActionLimitError {}
 
-/// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner by its compact
-/// residency key. The indexer produces it with a match and owns it; this crate keeps the
-/// public path because [`crate::transfer`] names it in every source choice.
-pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferSourceInterval};
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn appended_actions_are_numbered_and_bounded() {
-        let action = |id: &str| KvHintAction::new(id, "test.action", "1", BTreeMap::new());
+        let action = |id: &str| KvHintAction {
+            action_id: id.to_string(),
+            action_type: "test.action".to_string(),
+            action_version: "1".to_string(),
+            payload: BTreeMap::new(),
+        };
         let mut hint = KvHint::for_request("request-1");
         assert!(hint.is_empty());
         hint.append_numbered(vec![

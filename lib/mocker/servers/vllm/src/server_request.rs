@@ -509,14 +509,14 @@ fn selected_logprob(token_id: u32) -> f32 {
 fn candidate_info(selected: u32, request: Option<&pb::CandidateTokens>) -> pb::CandidateTokenInfo {
     let ids: Vec<u32> = match request.and_then(|request| request.select.as_ref()) {
         None => Vec::new(),
-        Some(pb::candidate_tokens::Select::TopN(count)) => (1..=(*count as usize)
+        Some(pb::candidate_tokens::Select::TopN(count)) => (0..(*count as usize)
             .min(MAX_CANDIDATES))
             .map(|offset| selected.wrapping_add(offset as u32))
             .collect(),
         Some(pb::candidate_tokens::Select::TokenIds(ids)) => {
             ids.ids.iter().copied().take(MAX_CANDIDATES).collect()
         }
-        Some(pb::candidate_tokens::Select::All(true)) => (1..=MAX_CANDIDATES)
+        Some(pb::candidate_tokens::Select::All(true)) => (0..MAX_CANDIDATES)
             .map(|offset| selected.wrapping_add(offset as u32))
             .collect(),
         Some(pb::candidate_tokens::Select::All(false)) => Vec::new(),
@@ -527,8 +527,8 @@ fn candidate_info(selected: u32, request: Option<&pb::CandidateTokens>) -> pb::C
             .enumerate()
             .map(|(index, id)| pb::candidate_token_info::TokenInfo {
                 id,
-                logprob: selected_logprob(selected) - 0.1 * (index + 1) as f32,
-                rank: index as u32 + 2,
+                logprob: selected_logprob(selected) - 0.1 * index as f32,
+                rank: index as u32 + 1,
             })
             .collect(),
     }

@@ -12,6 +12,11 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/common.sh"
+
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -42,10 +47,9 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1                        Prefill sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                        Decode sidecar system port (default: 8082)"
             echo "  SGLANG_PREFILL_HTTP_PORT                Prefill HTTP port (default: 30000)"
-            echo "  SGLANG_PREFILL_GRPC_PORT                Prefill gRPC port (default: 30001)"
-            echo "  SGLANG_DECODE_HTTP_PORT                 Decode HTTP port (default: 30010)"
-            echo "  SGLANG_DECODE_GRPC_PORT                 Decode gRPC port (default: 30011)"
-            echo "  SGLANG_DISAGGREGATION_BOOTSTRAP_PORT    KV-transfer bootstrap port (default: 8998)"
+            echo "  SGLANG_PREFILL_GRPC_PORT                Prefill gRPC port (default: 30010)"
+            echo "  SGLANG_DECODE_HTTP_PORT                 Decode HTTP port (default: 30020)"
+            echo "  SGLANG_DECODE_GRPC_PORT                 Decode gRPC port (default: 30030)"
             echo "  SGLANG_BOOTSTRAP_HOST                   Advertised bootstrap host (default: 127.0.0.1)"
             echo "  MAX_MODEL_LEN                           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS                     Maximum concurrent sequences per engine (default: 2)"
@@ -65,12 +69,14 @@ trap dynamo_exit_trap EXIT
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
 SGLANG_BOOTSTRAP_HOST="${SGLANG_BOOTSTRAP_HOST:-$SGLANG_HOST}"
-SGLANG_DISAGGREGATION_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}}"
 # Managed ports are indexed like DYN_SYSTEM_PORT{N}: worker 1 is prefill, 2 is decode.
 SGLANG_PREFILL_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_PREFILL_HTTP_PORT:-30000}")
-SGLANG_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_PREFILL_GRPC_PORT:-30001}")
-SGLANG_DECODE_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${SGLANG_DECODE_HTTP_PORT:-30010}")
-SGLANG_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${SGLANG_DECODE_GRPC_PORT:-30011}")
+SGLANG_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_PREFILL_GRPC_PORT:-30010}")
+SGLANG_DECODE_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${SGLANG_DECODE_HTTP_PORT:-30020}")
+SGLANG_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${SGLANG_DECODE_GRPC_PORT:-30030}")
+SGLANG_LISTENERS=$(sglang_listener_count "${EXTRA_ARGS[@]}")
+sglang_check_listener_ports "$SGLANG_PREFILL_HTTP_PORT" "$SGLANG_PREFILL_GRPC_PORT" "$SGLANG_LISTENERS"
+sglang_check_listener_ports "$SGLANG_DECODE_HTTP_PORT" "$SGLANG_DECODE_GRPC_PORT" "$SGLANG_LISTENERS"
 SGLANG_PREFILL_GPU="${SGLANG_PREFILL_GPU:-0}"
 SGLANG_DECODE_GPU="${SGLANG_DECODE_GPU:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -82,10 +88,11 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 print_launch_banner "Launching SGLang Native-gRPC Sidecar (Disaggregated, 2 workers)" "$MODEL" "$HTTP_PORT" \
     "Prefill:     GPU ${SGLANG_PREFILL_GPU}, HTTP http://${SGLANG_HOST}:${SGLANG_PREFILL_HTTP_PORT}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
     "Decode:      GPU ${SGLANG_DECODE_GPU}, HTTP http://${SGLANG_HOST}:${SGLANG_DECODE_HTTP_PORT}, gRPC ${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" \
-    "Bootstrap:   ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT}"
+    "Bootstrap:   ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_PREFILL_HTTP_PORT}"
 
 python3 -m dynamo.frontend &
 
+# The Rust server serves prefill's bootstrap on its HTTP port.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
 "$SGLANG_PYTHON" -m sglang.launch_server \
@@ -95,7 +102,6 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     --grpc-port "$SGLANG_PREFILL_GRPC_PORT" \
     --incremental-streaming-output \
     --disaggregation-mode prefill \
-    --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \
@@ -111,7 +117,6 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --grpc-port "$SGLANG_DECODE_GRPC_PORT" \
     --incremental-streaming-output \
     --disaggregation-mode decode \
-    --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \

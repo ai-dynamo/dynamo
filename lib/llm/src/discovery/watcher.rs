@@ -595,8 +595,8 @@ impl ModelWatcher {
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline =
-                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
+            let needs_generate_pipeline = needs_systemone_preprocessor
+                || supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2331,12 +2331,12 @@ mod tests {
 
         assert!(supports_enabled_engine_generate(
             &card,
-            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY],
         ));
         assert!(!supports_enabled_engine_generate(&card, &[]));
         assert!(!supports_enabled_engine_generate(
             &card,
-            &[OTHER_GENERATE_CAPABILITY]
+            &[OTHER_GENERATE_CAPABILITY],
         ));
     }
 
@@ -2368,7 +2368,7 @@ mod tests {
             return;
         }
         use dynamo_kv_router::plugins::request_classifier::{
-            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
+            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier, WorkerView,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2383,12 +2383,12 @@ mod tests {
                 &mut self,
                 _request: ClassifyRequest,
                 _workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
                     .unwrap();
-                Box::pin(async { Err(Box::new(std::io::Error::other("catalog rejection")) as _) })
+                Err(Box::new(std::io::Error::other("catalog rejection")) as _)
             }
 
             async fn on_event(&mut self, event: ClassifyEvent) {
@@ -3020,6 +3020,24 @@ request_classifier:
         ));
         assert_eq!(source, RouterLoadSource::Encode);
         assert!(!source.monitors_sequence_load());
+
+        watcher.set_systemone_enabled(true);
+        watcher.generate_engine_capabilities.clear();
+        watcher.chat_engine_factory = Some(Arc::new(|_, _, _| {
+            Box::pin(async {
+                Ok(Arc::new(UncalledEngine)
+                    as crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine)
+            })
+        }));
+        assert!(!spec.representative.card.is_systemone_serial_eligible());
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+        let prepared = watcher
+            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+            .await
+            .unwrap();
+        let workers = prepared.worker_set.as_ref().unwrap();
+        assert!(workers.has_chat_engine());
+        assert!(!workers.has_generate_engine());
         runtime.shutdown();
     }
 

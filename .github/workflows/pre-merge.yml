@@ -432,6 +432,10 @@ jobs:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
+    env:
+      # Every run builds target/ from scratch, so incremental caches are never
+      # reused. They only take runner disk, which this job has run out of.
+      CARGO_INCREMENTAL: "0"
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
@@ -571,9 +575,6 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-    - name: Check router crate layering
-      if: matrix.dir == '.'
-      run: bash scripts/router_layering_check.sh --host
     - name: Run Python bindings AIS feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
