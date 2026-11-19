@@ -218,12 +218,17 @@ class CapacityModel(abc.ABC):
             ),
         )
 
+    @staticmethod
+    def decode_steps(osl: float) -> float:
+        """Decode steps of one request: prefill produces its first token."""
+        return max(0.0, osl - 1.0)
+
     def residence_s(
         self, concurrency: float, isl: float, osl: float, kv_hit: float
     ) -> float:
         t_p = self.prefill_ms(isl * (1.0 - kv_hit)) / 1000.0
         t_d = self.decode_step_ms(concurrency, isl, osl) / 1000.0
-        return t_p + max(0.0, osl) * t_d
+        return t_p + self.decode_steps(osl) * t_d
 
     def concurrency(
         self, load_per_worker: float, isl: float, osl: float, kv_hit: float
@@ -255,7 +260,7 @@ class CapacityModel(abc.ABC):
         concurrency at the cap, where decode batching is best. Prefill GPU time
         is serial per request; each decode step is shared by ``c`` requests::
 
-            mu = 1 / ( T_p + osl * T_d(c_sat) / c_sat )
+            mu = 1 / ( T_p + (osl - 1) * T_d(c_sat) / c_sat )
 
         Evaluating at the current load's concurrency instead would charge a
         lightly loaded worker almost a full decode step per token and report a
@@ -270,7 +275,11 @@ class CapacityModel(abc.ABC):
         c = self.saturated_concurrency(isl, osl)
         t_p = self.prefill_ms(isl * (1.0 - kv_hit)) / 1000.0
         t_d = self.decode_step_ms(c, isl, osl) / 1000.0
-        return self.decode_parallelism * self._bias / max(1e-3, t_p + osl * t_d / c)
+        return (
+            self.decode_parallelism
+            * self._bias
+            / max(1e-3, t_p + self.decode_steps(osl) * t_d / c)
+        )
 
     def itl_ms(
         self,
@@ -420,7 +429,9 @@ class AISCapacityModel(CapacityModel):
                         batch_size=c, isl=key[1], osl=key[2]
                     )
                 )
-                self._decode_cache[key] = total / key[2]
+                # AIS sums the ``osl - 1`` steps after the first token; the
+                # bucket floor of 16 keeps the divisor positive.
+                self._decode_cache[key] = total / (key[2] - 1)
             except (RuntimeError, ValueError) as exc:
                 self.fallbacks += 1
                 logger.warning(
@@ -1188,7 +1199,11 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         isl, osl = max(1.0, self._isl_now), max(1.0, self._osl_ema)
         c = self._capacity.saturated_concurrency(isl, osl)
         t_d = self._capacity.decode_step_ms(c, isl, osl) / 1000.0
-        return self._capacity.decode_parallelism * c / max(1e-3, osl * t_d)
+        return (
+            self._capacity.decode_parallelism
+            * c
+            / max(1e-3, self._capacity.decode_steps(osl) * t_d)
+        )
 
     def _decode_itl_ms(self, load_per_worker: float) -> float:
         """Decode step time at the pool's Little's-law concurrency (no prefill on the worker)."""
@@ -1198,7 +1213,10 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         c = 1.0
         for _ in range(30):
             t_d = self._capacity.decode_step_ms(c, isl, osl) / 1000.0
-            c_new = min(cap, max(1.0, load_per_rank * osl * t_d))
+            c_new = min(
+                cap,
+                max(1.0, load_per_rank * self._capacity.decode_steps(osl) * t_d),
+            )
             if abs(c_new - c) < 0.05:
                 c = c_new
                 break

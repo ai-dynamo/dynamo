@@ -51,7 +51,7 @@ def test_ais_queries_use_deployed_pool_identity(monkeypatch, disagg):
 
         def decode(**kwargs):
             queried.append(("decode", config["worker_type"], config["tp"]))
-            return 16.0
+            return 15.0  # AIS totals the osl - 1 = 15 steps after the first token
 
         return SimpleNamespace(predict_prefill=prefill, predict_decode=decode)
 
@@ -69,6 +69,25 @@ def test_ais_queries_use_deployed_pool_identity(monkeypatch, disagg):
         ("prefill", prefill_config["worker_type"], prefill_config["tp"]),
         ("decode", decode_config["worker_type"], decode_config["tp"]),
     ]
+
+
+def test_ais_step_time_and_capacity_count_the_steps_after_the_first_token(
+    monkeypatch,
+):
+    """A 16-token output is 15 decode steps: 780 ms of generation is 52 ms a step."""
+
+    def create_session(config):
+        return SimpleNamespace(
+            predict_prefill=lambda **kwargs: 100.0,
+            predict_decode=lambda **kwargs: 780.0,
+        )
+
+    monkeypatch.setattr("dynamo._internal.ais.create_session", create_session)
+    model = AISCapacityModel({"worker_type": "aggregated"}, max_num_seqs=1)
+    assert model.decode_step_ms(1, 256, 16) == pytest.approx(52.0)
+    # One request at a time: 100 ms prefill plus the 780 ms the 15 steps take.
+    assert model.residence_s(1, 256, 16, 0.0) == pytest.approx(0.88)
+    assert model.service_rate(1.0, 256, 16) == pytest.approx(1 / 0.88)
 
 
 class _LinearCapacityModel(CapacityModel):
@@ -616,10 +635,10 @@ def test_disagg_pool_capacities_follow_their_binding_resources():
     assert mpc._mu_prefill() == pytest.approx(
         1000 / (135 + mpc._kv_transfer_ms()), rel=1e-6
     )
-    # decode: c_sat / (osl * T_d(c_sat)) -- KV-bound, far below prefill capacity here
+    # decode: c_sat / ((osl - 1) * T_d(c_sat)) -- KV-bound, far below prefill capacity here
     c = mpc._capacity.saturated_concurrency(4500, 1680)
     assert mpc._mu_decode() == pytest.approx(
-        c / (1680 * (5 + 0.1 * c) / 1000), rel=1e-6
+        c / (1679 * (5 + 0.1 * c) / 1000), rel=1e-6
     )
     assert mpc._mu_decode() < mpc._mu_prefill()
 

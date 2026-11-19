@@ -28,8 +28,10 @@ concurrency limit. For aggregate workers, the sustainable request rate is:
 
 ```text
 c_sat = min(0.9 * worker_kv_tokens / attention_dp / (isl + osl), rank_max_num_seqs)
-worker_mu = attention_dp / (prefill_seconds + osl * decode_step_seconds(c_sat) / c_sat)
+worker_mu = attention_dp / (prefill_seconds + (osl - 1) * decode_step_seconds(c_sat) / c_sat)
 ```
+
+Prefill produces a request's first token, so it takes `osl - 1` decode steps.
 
 Capacity is evaluated at saturation. Offered load also enters the latency
 estimate, while a bounded correction learns scheduler effects from observed
