@@ -495,18 +495,32 @@ async def test_known_container_without_codec_stays_missing_decoder(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", _UNNAMED_CONTAINERS)
-async def test_known_container_failed_open_with_backend_is_not_415(
-    monkeypatch, content
+@pytest.mark.parametrize(
+    ("content", "codec"),
+    [
+        pytest.param(_MP4V_CONTAINER, None, id="mp4"),
+        pytest.param(_FLV_CONTAINER, None, id="flv"),
+        pytest.param(_ASF_CONTAINER, None, id="asf"),
+        pytest.param(b"vp9-bytes", "vp9", id="probed-vp9"),
+    ],
+)
+async def test_failed_open_with_backend_is_415_for_any_input(
+    monkeypatch, content, codec
 ):
-    """A real container OpenCV cannot open is not reported as non-video."""
+    """With a video backend, a failed open is 415 even for a container or codec.
+
+    Only a build without a backend reports these as a missing decoder.
+    """
     loader = VideoLoader()
-    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: codec)
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: False)
 
-    with pytest.raises(ValueError, match="Could not open video stream"):
+    with pytest.raises(HttpStatusError) as exc_info:
         await loader._decode_video_bytes(content, _FailedOpenMediaIO())
+
+    assert exc_info.value.status == 415
+    assert exc_info.value.message == "Unsupported video media"
 
 
 @pytest.mark.asyncio
@@ -531,7 +545,7 @@ async def test_unsupported_video_reaches_batch_as_415(monkeypatch, caplog):
     assert exc_info.value.status == 415
     assert "URL rejected loading video" not in caplog.text
     assert "Unsupported video loading: 'https://example.com/clip.mp4'" in caplog.text
-    assert "Rejecting non-video input supplied as video" in caplog.text
+    assert "Rejecting undecodable video input" in caplog.text
     assert "Could not open video stream" in caplog.text
 
 
