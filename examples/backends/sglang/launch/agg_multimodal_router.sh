@@ -87,9 +87,8 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
-# set -e ignores background jobs, so without this check a worker that dies during
-# startup (for example a CUDA-graph OOM) leaves the readiness loops polling a dead
-# endpoint until the caller's timeout, and the harness never sees the failure.
+# set -e ignores background jobs; without this check a worker that dies during
+# startup leaves the readiness loops polling a dead endpoint until timeout.
 LAUNCHED_PIDS=()
 LAUNCHED_NAMES=()
 exit_if_any_exited() {
