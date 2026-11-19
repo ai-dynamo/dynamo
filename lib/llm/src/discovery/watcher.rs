@@ -436,6 +436,8 @@ impl ModelWatcher {
         let mcid = &spec.representative.mcid;
         let mut prepared_card = spec.representative.card.clone();
         let card = &mut prepared_card;
+        spec.generation_capabilities
+            .retain_on(&mut card.runtime_config);
 
         card.download_config(self.local_model_path.as_deref())
             .await?;
@@ -2525,6 +2527,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                generation_capabilities: Default::default(),
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -2681,6 +2684,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            generation_capabilities: Default::default(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2776,6 +2780,7 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                generation_capabilities: Default::default(),
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -3001,6 +3006,7 @@ request_classifier:
             generation: 1,
             representative: desired,
             video_contract: None,
+            generation_capabilities: Default::default(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -3678,6 +3684,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                generation_capabilities: Default::default(),
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

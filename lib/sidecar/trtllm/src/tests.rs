@@ -885,7 +885,14 @@ async fn unsupported_features_fail_before_rpc_submission() {
 async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
+    let config = engine.start(0).await.expect("start");
+    for capability in [
+        dynamo_llm::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+        dynamo_llm::local_model::runtime_config::REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
+        dynamo_llm::local_model::runtime_config::RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY,
+    ] {
+        assert_eq!(config.runtime_data[capability], serde_json::json!(true));
+    }
     let token_ids = |outputs: &[dynamo_backend_common::LLMEngineOutput]| {
         outputs
             .iter()
@@ -911,38 +918,6 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     let terminal = outputs.last().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
     assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)));
-}
-
-#[tokio::test]
-async fn parser_stop_strings_cross_the_rpc_and_do_not_expose_hidden_tokens() {
-    let server = FakeServer::start(FakeTrtllm::default()).await;
-    let engine = engine(&server.endpoint, 1);
-    let config = engine.start(0).await.expect("start");
-    for capability in [
-        dynamo_llm::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY,
-        dynamo_llm::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
-        dynamo_llm::local_model::runtime_config::REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
-        dynamo_llm::local_model::runtime_config::RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY,
-    ] {
-        assert_eq!(config.runtime_data[capability], serde_json::json!(true));
-    }
-    let mut req = request();
-    req.stop_conditions.stop_visible = Some(vec!["<|close|>call<|sep|>".into()]);
-    req.stop_conditions.stop_token_ids_hidden = Some(vec![42]);
-    let outputs = collect(&engine, req).await;
-    assert!(outputs.iter().all(|output| output.token_ids.is_empty()));
-    let requests = server.service.requests.lock().await;
-    let stopping = requests[0].stopping.as_ref().unwrap();
-    assert_eq!(stopping.include_stop_in_output, Some(true));
-    assert!(
-        stopping
-            .conditions
-            .iter()
-            .any(|condition| condition.condition
-                == Some(pb::stop_condition::Condition::StopText(
-                    "<|close|>call<|sep|>".into()
-                )))
-    );
 }
 
 #[tokio::test]

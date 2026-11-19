@@ -350,10 +350,11 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         JSON and tool constraints still apply in the answer phase. Plain chat
         without constraints or a thinking budget does not request this gate.
 
-        With the GLM profile (`glm47` tool parsing or `glm45` reasoning parsing),
-        Dynamo renders Chat Completions `developer` messages as `system` messages,
-        preserving their content and position. Responses developer input is also
-        converted to system messages.
+        With model-provided GLM templates (`glm47` tool parsing or `glm45`
+        reasoning parsing), Dynamo renders Chat Completions `developer` messages
+        as `system` messages, preserving their content and position. Templates
+        supplied with `--custom-jinja-template` receive the original Chat Completions
+        roles. Dynamo converts Responses developer input to system messages.
 
         For this GLM profile on the TensorRT-LLM OpenEngine sidecar, a new assistant
         generation with thinking disabled requires a rendered prompt ending in

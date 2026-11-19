@@ -91,9 +91,10 @@ async fn context_overflow_events_require_the_selected_deployment_capability() {
                     let engine = if phase == "generate" {
                         scripted_chat_engine::ScriptedChatEngine::with_generate_error(
                             DynamoError::builder()
-                                .error_type(DynamoErrorType::InvalidArgument)
+                                .error_type(DynamoErrorType::Backend(
+                                    dynamo_runtime::error::BackendError::InvalidArgument,
+                                ))
                                 .message(DIAGNOSTIC)
-                                .public_message(DIAGNOSTIC)
                                 .build(),
                         )
                     } else {
@@ -133,9 +134,9 @@ async fn context_overflow_events_require_the_selected_deployment_capability() {
                             reqwest::StatusCode::OK,
                             "{enabled}/{phase}"
                         );
-                        let events = parse_responses_sse(&response.text().await.unwrap())
-                            .await
-                            .unwrap();
+                        let body = response.text().await.unwrap();
+                        assert!(!body.contains(DIAGNOSTIC), "{enabled}/{phase}");
+                        let events = parse_responses_sse(&body).await.unwrap();
                         let failed = &events[event_position(&events, "response.failed")];
                         assert_eq!(
                             failed.data["response"]["error"]["code"],
