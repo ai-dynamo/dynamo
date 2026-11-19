@@ -286,6 +286,21 @@ spec:
                       minimum: 1
                       type: integer
                   type: object
+                rerun:
+                  description: |-
+                    Rerun intentionally creates a new Request generation when the search inputs otherwise
+                    remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry
+                    the same immutable Run.
+                  properties:
+                    reason:
+                      description: |-
+                        Reason records why the user requested another Run. Changing this value creates a new
+                        Request generation and the value is frozen into that generation's immutable Run.
+                      minLength: 1
+                      type: string
+                  required:
+                    - reason
+                  type: object
                 workload:
                   description: |-
                     Workload defines the traffic model used for every candidate evaluation: synthetic static

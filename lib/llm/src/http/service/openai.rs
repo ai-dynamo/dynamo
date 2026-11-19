@@ -64,8 +64,9 @@ use crate::preprocessor::{
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
-    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
-    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
+    agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
+    session_affinity_from_headers, upstream_elapsed_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
@@ -1244,6 +1245,18 @@ where
     Ok(request)
 }
 
+/// Record how long a gateway held the request before forwarding it, from its routing header.
+/// Like the other routing headers it is honored only while NvExt is enabled.
+pub(super) fn attach_upstream_elapsed<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) {
+    if nvext_enabled && let Some(upstream_elapsed) = upstream_elapsed_from_headers(headers) {
+        request.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, upstream_elapsed);
+    }
+}
+
 /// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
 ///
 /// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
@@ -1282,6 +1295,9 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
             SESSION_AFFINITY_CONTEXT_KEY,
             session_affinity.as_ref().clone(),
         );
+    }
+    if let Ok(upstream_elapsed) = source.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY) {
+        target.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, *upstream_elapsed);
     }
 }
 
@@ -1345,10 +1361,11 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request =
+    let mut request =
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_completion_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     let context = request.context();
 
     // create the connection handles
@@ -2720,6 +2737,7 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4116,6 +4134,7 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
+#[allow(deprecated)]
 fn apply_chat_completions_request_template(
     request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
     template: Option<&RequestTemplate>,
@@ -4127,7 +4146,14 @@ fn apply_chat_completions_request_template(
         if request.temperature.is_none() {
             request.temperature = Some(template.temperature);
         }
-        if request.max_completion_tokens.unwrap_or(0) == 0 {
+        // `max_completion_tokens` wins over the deprecated `max_tokens` downstream, so
+        // filling it here would discard a limit the client sent as `max_tokens`.
+        if request
+            .max_completion_tokens
+            .or(request.max_tokens)
+            .unwrap_or(0)
+            == 0
+        {
             request.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -4248,14 +4274,33 @@ async fn chat_completions(
     // The lookup sits inside validation, so this range nests in
     // frontend.http.chat.validate, whose duration includes it.
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    // Text-input WorkerSets never run the preprocessor gate, so admit custom
+    // content only where a WorkerSet advertises it.
+    let (engine, parsing_options) = if crate::preprocessor::has_custom_content(request.content()) {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_for_capability(
+                &model,
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
+    } else {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing(&model)
+            .map(Some)
+    }
+    .map_err(|e| ErrorMessage::from_model_error(&e))
+    .and_then(|selected| {
+        selected.ok_or_else(|| {
+            ErrorMessage::from_anyhow(
+                invalid_argument(crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED).into(),
+                crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED,
+            )
+        })
+    })
+    .inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
     drop(nvtx_lookup);
 
     // Beam route, before generic validation (which rejects what this normalizes): a
@@ -4844,6 +4889,7 @@ async fn handler_responses(
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_response_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -6995,6 +7041,31 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    fn test_chat_completions_template_preserves_client_max_tokens() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            max_tokens: Some(16),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        // `max_completion_tokens` wins over `max_tokens` downstream, so filling it
+        // from the template would discard the limit the client asked for.
+        assert_eq!(request.max_tokens, Some(16));
+        assert_eq!(request.max_completion_tokens, None);
+
+        request.max_tokens = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.max_completion_tokens, Some(128));
+    }
+
+    #[test]
     fn test_is_json_content_type() {
         assert!(is_json_content_type("application/json"));
         assert!(is_json_content_type("application/json; charset=utf-8"));
@@ -7598,6 +7669,35 @@ mod tests {
                 .input_trigger,
             Some(InputTrigger::Other)
         );
+    }
+
+    #[test]
+    fn test_upstream_elapsed_follows_the_nvext_switch_and_survives_a_context_copy() {
+        use std::time::Duration;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-elapsed-since-arrival-ms", "1500".parse().unwrap());
+
+        let mut disabled = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut disabled, &headers, false);
+        assert!(
+            disabled
+                .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                .is_err()
+        );
+
+        let mut source = context_from_headers((), "request-2".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut source, &headers, true);
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        for context in [&source, &target] {
+            assert_eq!(
+                *context
+                    .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                    .unwrap(),
+                Duration::from_millis(1500)
+            );
+        }
     }
 
     #[test]

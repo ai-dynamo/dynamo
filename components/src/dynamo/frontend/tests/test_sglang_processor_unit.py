@@ -111,6 +111,14 @@ MODEL = "Qwen/Qwen3-0.6B"
 BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
+class FakeContext:
+    def __init__(self, request_id="ctx-request"):
+        self._request_id = request_id
+
+    def id(self):
+        return self._request_id
+
+
 @pytest.fixture(scope="module")
 def tokenizer():
     return get_tokenizer(MODEL)
@@ -1305,7 +1313,13 @@ def _qwen_guided_request_without_separation(tool_choice):
 
 @pytest.mark.parametrize(
     "failure,from_stream",
-    [("unavailable", False), ("internal", False), (403, False), (404, True)],
+    [
+        ("unavailable", False),
+        ("capacity", False),
+        ("internal", False),
+        (403, False),
+        (404, True),
+    ],
 )
 def test_routed_engine_rejection_keeps_its_semantic_error(
     tokenizer, failure, from_stream
@@ -1313,6 +1327,9 @@ def test_routed_engine_rejection_keeps_its_semantic_error(
     if failure == "unavailable":
         routed_error = WorkerUnavailable("prefill routing is still activating")
         expected = WorkerUnavailable
+    elif failure == "capacity":
+        routed_error = RoutedEngineError("worker pool at capacity")
+        expected = RoutedEngineError
     elif failure == "internal":
         routed_error = RuntimeError("worker crashed")
         expected = Unknown
@@ -6244,6 +6261,44 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         chunk = items[0]["data"]
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
+
+    @pytest.mark.parametrize("context_id", ["ctx-123", None])
+    def test_stream_keeps_caller_request_id(self, tokenizer, context_id):
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {"token_ids": [101], "finish_reason": None},
+                        {"token_ids": [], "finish_reason": "stop"},
+                    ]
+                ),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "local-req",
+                    {"model": "test-model"},
+                    {},
+                    [],
+                    post,
+                    context=FakeContext(context_id),
+                )
+            ]
+
+        items = asyncio.run(collect())
+
+        data_frames = [
+            item for item in items if item.get("_dynamo_annotated") and "data" in item
+        ]
+        assert data_frames
+        assert all(item["data"]["id"] == "chatcmpl-local-req" for item in data_frames)
 
     def _run_stream(self, tokenizer, items, engine=None):
         processor = SglangProcessor(

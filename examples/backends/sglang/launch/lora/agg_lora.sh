@@ -49,6 +49,8 @@ echo "=========================================="
 python3 -m dynamo.frontend &
 
 # Worker
+# The LoRA target modules and rank match the example adapter. "all" would also
+# reserve embed_tokens and lm_head LoRA buffers, about 0.6 GiB more VRAM at startup.
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
@@ -59,7 +61,7 @@ python3 -m dynamo.sglang \
   --skip-tokenizer-init \
   --enable-lora \
   --max-lora-rank 64 \
-  --lora-target-modules all \
+  --lora-target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
   $GPU_MEM_ARGS &
 
 wait_any_exit
