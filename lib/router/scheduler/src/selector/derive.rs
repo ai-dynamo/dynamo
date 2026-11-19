@@ -20,6 +20,7 @@ pub trait WorkerCapacityExt {
 impl WorkerCapacityExt for WorkerCapacity {
     fn of<C: WorkerConfigLike>(config: &C) -> Self {
         Self::new(config.max_num_batched_tokens(), config.total_kv_blocks())
+            .with_max_num_seqs(config.max_num_seqs())
     }
 }
 

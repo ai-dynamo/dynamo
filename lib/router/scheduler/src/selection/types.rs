@@ -49,6 +49,7 @@ pub struct SelectionWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub max_num_seqs: Option<u64>,
     pub stable_routing_id: Option<String>,
     pub is_eagle: Option<bool>,
     #[serde(default)]
@@ -90,6 +91,10 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn max_num_seqs(&self) -> Option<u64> {
+        self.max_num_seqs
     }
 
     fn taints(&self) -> &HashSet<String> {
@@ -160,6 +165,7 @@ pub struct WorkerCatalogRecord {
     pub data_parallel_size: Option<u32>,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub max_num_seqs: Option<u64>,
     pub stable_routing_id: Option<String>,
     pub is_eagle: Option<bool>,
     #[serde(default)]
@@ -199,6 +205,7 @@ impl WorkerCatalogRecord {
             data_parallel_size: req.data_parallel_size,
             max_num_batched_tokens: req.max_num_batched_tokens,
             total_kv_blocks: req.total_kv_blocks,
+            max_num_seqs: req.max_num_seqs,
             stable_routing_id: req.stable_routing_id,
             is_eagle: req.is_eagle,
             taints: req.taints,
@@ -239,6 +246,7 @@ impl WorkerCatalogRecord {
             data_parallel_size: self.dp_size(),
             max_num_batched_tokens: self.max_num_batched_tokens,
             total_kv_blocks: self.total_kv_blocks,
+            max_num_seqs: self.max_num_seqs,
             stable_routing_id: self.stable_routing_id.clone(),
             is_eagle: self.is_eagle,
             taints: self.taints.clone(),
@@ -301,6 +309,7 @@ impl Default for WorkerRequest {
             data_parallel_size: None,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
+            max_num_seqs: None,
             stable_routing_id: None,
             is_eagle: None,
             taints: HashSet::new(),
@@ -333,6 +342,7 @@ pub struct WorkerRequest {
     pub data_parallel_size: Option<u32>,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub max_num_seqs: Option<u64>,
     pub stable_routing_id: Option<String>,
     #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
@@ -369,6 +379,7 @@ pub struct WorkerPatchRequest {
     pub data_parallel_size: Option<u32>,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub max_num_seqs: Option<u64>,
     pub stable_routing_id: Option<String>,
     #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
@@ -418,6 +429,9 @@ impl WorkerCatalogRecord {
         }
         if patch.total_kv_blocks.is_some() {
             self.total_kv_blocks = patch.total_kv_blocks;
+        }
+        if patch.max_num_seqs.is_some() {
+            self.max_num_seqs = patch.max_num_seqs;
         }
         if patch.stable_routing_id.is_some() {
             self.stable_routing_id = patch.stable_routing_id;

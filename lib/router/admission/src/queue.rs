@@ -124,9 +124,10 @@ pub struct QueueMetadata {
     /// and it always expires.
     pub due_at: Option<Instant>,
     /// Router ingress plus the class's `slo_ttft_ms`, from
-    /// [`PolicyClassConfig::slo_ttft_due_at`]. Only an EDF class orders by it, and only for a
-    /// request without `due_at`; it expires only in a class that enables controlled delay, in
-    /// a queue built by [`PolicyQueue::with_class_budget_expiry`].
+    /// [`PolicyClassConfig::slo_ttft_due_at`], used only for a request without `due_at`. An EDF
+    /// class orders by it. A WSPT class orders by it once it has passed and
+    /// [`PolicyQueue::promote_overdue`] has run. It expires only in a class that enables
+    /// controlled delay, in a queue built by [`PolicyQueue::with_class_budget_expiry`].
     pub class_due_at: Option<Instant>,
     /// Seconds from the queue's arrival origin to router ingress. FCFS and LCFS order by it.
     pub arrival_offset_secs: f64,
@@ -174,20 +175,32 @@ struct QueuePriority {
     strict_priority: u32,
     /// `DueKey::low` of the ordering due time. Bit 31 (`EXPIRES`) marks an explicit deadline in
     /// its class's `due_entries`; a class with head expiry indexes none, because its lane roots
-    /// carry every due time that expires. The flag never orders. The key's words are stored flat
-    /// so the priority stays 24 bytes and an entry stays within one cache line.
+    /// carry every due time that expires. Bit 30 (`AGES`) marks a class due time in its class's
+    /// `aging_entries` that does not order until it has passed. The flags never order. The
+    /// key's words are stored flat so the priority stays 24 bytes and an entry stays within
+    /// one cache line.
     due_low: u32,
-    /// `DueKey::high` of the ordering due time.
+    /// `DueKey::high` of the ordering due time. Bit 62 (`PROMOTED`) is set on a class due time
+    /// once it is promoted.
     due_high: u64,
     policy_score: OrderedFloat<f64>,
 }
 
 impl QueuePriority {
+    /// The due time the entry orders by: none while it waits for its class due time to pass.
     #[inline]
     fn due(self) -> DueKey {
+        if self.due_low & AGES != 0 {
+            return DueKey::NONE;
+        }
+        self.stored_due()
+    }
+
+    #[inline]
+    fn stored_due(self) -> DueKey {
         DueKey {
             high: self.due_high,
-            low: self.due_low & !EXPIRES,
+            low: self.due_low & !(EXPIRES | AGES),
         }
     }
 
@@ -195,10 +208,29 @@ impl QueuePriority {
     fn expires(self) -> bool {
         self.due_low & EXPIRES != 0
     }
+
+    /// The class due time the entry starts ordering by once it has passed.
+    #[inline]
+    fn ages_at(self) -> Option<DueKey> {
+        (self.due_low & AGES != 0).then_some(self.stored_due())
+    }
 }
 
 /// Marks an explicit deadline in `QueuePriority::due_low`.
 const EXPIRES: u32 = 1 << 31;
+
+/// Marks a class due time in `QueuePriority::due_low` that has not passed. Nanoseconds stay
+/// below bit 30, so both flags are free.
+const AGES: u32 = 1 << 30;
+
+/// Set in `QueuePriority::due_high` when a class due time is promoted. Whole seconds stay far
+/// below it, so promoted entries order by due time among themselves, after every explicit
+/// deadline and ahead of every entry without a due time.
+const PROMOTED: u64 = 1 << 62;
+
+/// Promotion rebuilds each lane that holds an overdue entry, which is linear in the lane's
+/// length, so it runs at most this often however many requests run out of budget.
+const PROMOTION_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A due time's offset from the queue's fixed origin: `high` holds the whole seconds and `low`
 /// the nanoseconds after them, so `(high, low)` orders exactly as the due times do. A due time
@@ -213,7 +245,7 @@ impl DueKey {
     /// An absent due time, after every finite one.
     const NONE: Self = Self {
         high: u64::MAX,
-        low: !EXPIRES,
+        low: !(EXPIRES | AGES),
     };
 
     fn new(origin: Instant, due_at: Instant) -> Self {
@@ -239,7 +271,9 @@ impl DueKey {
 // applies: a request that must finish by a wall-clock time cannot trade its
 // slot for cache affinity, so EDF deliberately preempts the cost-aware score
 // (DEP #13891). Entries without a deadline tie at `DueKey::NONE` and fall through
-// to the policy score unchanged. An EDF class zeroes strict priority and the
+// to the policy score unchanged. A WSPT entry whose class due time has passed
+// orders by it from its promotion on, behind every explicit deadline, which bounds
+// how long the score can hold a costly request back. An EDF class zeroes strict priority and the
 // policy score and also keys a request without a deadline by its class due
 // time, so it orders by due time alone, absent last, then enqueue sequence.
 #[inline]
@@ -314,6 +348,11 @@ impl<T> PolicyQueueEntry<T> {
     /// The explicit deadline's key while the entry is indexed for expiry.
     fn expiry_key(&self) -> Option<DueKey> {
         self.priority.expires().then_some(self.priority.due())
+    }
+
+    /// The class due time's key while the entry is indexed for promotion.
+    fn aging_key(&self) -> Option<DueKey> {
+        self.priority.ages_at()
     }
 
     pub fn payload(&self) -> &T {
@@ -425,6 +464,8 @@ struct PolicyClassQueue<T> {
     /// lane root: in a non-EDF order, or behind an EDF root whose earlier class due time only
     /// orders the class.
     due_entries: BTreeSet<(DueKey, u64)>,
+    /// Class due times of a WSPT class's entries that have not been promoted, earliest first.
+    aging_entries: BTreeSet<(DueKey, u64)>,
     /// With head expiry, the root of every lane, blocked or not, whose due time is finite.
     expiring_roots: BTreeSet<LaneRoot>,
 }
@@ -813,6 +854,36 @@ impl<T> PolicyClassQueue<T> {
         self.needs_blocked_worker_recheck = true;
     }
 
+    /// Lets every entry whose class due time is at or before `now` order by it, and returns
+    /// whether there was one. Each lane holding one is rebuilt; a blocked lane whose root
+    /// changed is unblocked, because nothing has checked its new root.
+    fn promote_overdue(&mut self, now: DueKey) -> bool {
+        let mut overdue = FxHashSet::default();
+        while let Some(&(due, enqueue_seq)) = self.aging_entries.first()
+            && due <= now
+        {
+            self.aging_entries.pop_first();
+            overdue.insert(enqueue_seq);
+        }
+        if overdue.is_empty() {
+            return false;
+        }
+        promote_in_lane(&mut self.pending, &overdue);
+        let mut worker_lane_changed = false;
+        for (worker, ready) in &mut self.ready_by_worker {
+            if let Some(root_changed) = promote_in_lane(ready, &overdue) {
+                worker_lane_changed = true;
+                if root_changed {
+                    self.blocked_workers.remove(worker);
+                }
+            }
+        }
+        if worker_lane_changed {
+            self.rebuild_worker_heads();
+        }
+        true
+    }
+
     fn rebuild_worker_heads(&mut self) {
         self.candidate_worker_heads.clear();
         self.blocked_workers
@@ -857,6 +928,8 @@ pub struct PolicyQueue<T> {
     /// Origin of every due-time key, fixed at construction: an EDF class due time can stay
     /// queued past its due time, so keys taken at different times must share one origin.
     deadline_origin: Instant,
+    /// The earliest time the next promotion may run, once one has promoted an entry.
+    next_promotion_at: Option<Instant>,
     candidates: Vec<Option<DispatchCandidate>>,
 }
 
@@ -896,6 +969,7 @@ impl<T> PolicyQueue<T> {
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
                     due_entries: BTreeSet::new(),
+                    aging_entries: BTreeSet::new(),
                     expiring_roots: BTreeSet::new(),
                 })
                 .collect(),
@@ -904,6 +978,7 @@ impl<T> PolicyQueue<T> {
             next_enqueue_seq: 0,
             pending_count: 0,
             deadline_origin: Instant::now(),
+            next_promotion_at: None,
             candidates: vec![None; class_count],
         }
     }
@@ -943,6 +1018,25 @@ impl<T> PolicyQueue<T> {
                         .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
                 })
         })
+    }
+
+    /// Moves each WSPT entry whose class due time is at or before `now` ahead of its class's
+    /// entries without a due time, earliest due time first. Call it before extracting: the
+    /// order only matters then, so the queue needs no timer for it. A call within
+    /// [`PROMOTION_INTERVAL`] of one that promoted an entry does nothing, so an entry can be
+    /// promoted that much late. Offline replay does not call it and keeps the unpromoted order.
+    pub fn promote_overdue(&mut self, now: Instant) {
+        if self.next_promotion_at.is_some_and(|at| now < at) {
+            return;
+        }
+        let due = DueKey::new(self.deadline_origin, now);
+        let mut promoted = false;
+        for class in &mut self.classes {
+            promoted |= class.promote_overdue(due);
+        }
+        if promoted {
+            self.next_promotion_at = Some(now + PROMOTION_INTERVAL);
+        }
     }
 
     /// The earliest due time at which an entry of the class expires.
@@ -1094,8 +1188,13 @@ impl<T> PolicyQueue<T> {
             RouterQueuePolicy::Edf => due_at.or(class_due_at),
             RouterQueuePolicy::Fcfs | RouterQueuePolicy::Lcfs | RouterQueuePolicy::Wspt => due_at,
         };
-        let due =
-            ordering_due_at.map_or(DueKey::NONE, |due_at| DueKey::new(deadline_origin, due_at));
+        // WSPT orders by cost alone until the class due time passes, so that the score cannot
+        // hold a costly request back for longer than the class budget.
+        let aging_due_at = class_due_at
+            .filter(|_| queue_policy == RouterQueuePolicy::Wspt && ordering_due_at.is_none());
+        let due = ordering_due_at
+            .or(aging_due_at)
+            .map_or(DueKey::NONE, |due_at| DueKey::new(deadline_origin, due_at));
         // A class with head expiry finds every expiring due time at its lane roots.
         let expires = due_at.is_some() && !class.head_expiry;
         let entry = make_entry(
@@ -1106,12 +1205,16 @@ impl<T> PolicyQueue<T> {
             strict_priority,
             due,
             expires,
+            aging_due_at.is_some(),
             queue_policy,
             self.next_enqueue_seq,
             payload,
         );
         if let Some(due) = entry.expiry_key() {
             class.due_entries.insert((due, self.next_enqueue_seq));
+        }
+        if let Some(due) = entry.aging_key() {
+            class.aging_entries.insert((due, self.next_enqueue_seq));
         }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
@@ -1232,6 +1335,7 @@ impl<T> PolicyQueue<T> {
             subtract_stats(&mut class.stats, entry.snapshot());
             self.pending_count -= 1;
             remove_due_time(&mut class.due_entries, entry);
+            remove_aging_time(&mut class.aging_entries, entry);
         }
         if class.ready_is_empty() {
             class.deficit = 0;
@@ -1411,6 +1515,7 @@ impl<T> PolicyQueue<T> {
         subtract_stats(&mut class.stats, entry.snapshot());
         self.pending_count -= 1;
         remove_due_time(&mut class.due_entries, &entry);
+        remove_aging_time(&mut class.aging_entries, &entry);
         if class.ready_is_empty() {
             class.deficit = 0;
         }
@@ -1429,6 +1534,37 @@ fn remove_due_time<T>(due_entries: &mut BTreeSet<(DueKey, u64)>, entry: &PolicyQ
     }
 }
 
+fn remove_aging_time<T>(aging_entries: &mut BTreeSet<(DueKey, u64)>, entry: &PolicyQueueEntry<T>) {
+    if let Some(due) = entry.aging_key() {
+        let removed = aging_entries.remove(&(due, entry.enqueue_seq));
+        debug_assert!(removed);
+    }
+}
+
+/// Clears the aging flag of the lane's entries in `overdue` and restores the heap order.
+/// Returns whether the lane's root changed, or `None` when the lane holds none of them.
+fn promote_in_lane<T>(
+    lane: &mut BinaryHeap<PolicyQueueEntry<T>>,
+    overdue: &FxHashSet<u64>,
+) -> Option<bool> {
+    if !lane
+        .iter()
+        .any(|entry| overdue.contains(&entry.enqueue_seq))
+    {
+        return None;
+    }
+    let root_before = lane.peek().map(|entry| entry.enqueue_seq);
+    let mut entries = std::mem::take(lane).into_vec();
+    for entry in &mut entries {
+        if overdue.contains(&entry.enqueue_seq) {
+            entry.priority.due_low &= !AGES;
+            entry.priority.due_high |= PROMOTED;
+        }
+    }
+    *lane = BinaryHeap::from(entries);
+    Some(lane.peek().map(|entry| entry.enqueue_seq) != root_before)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_entry<T>(
     class_index: usize,
@@ -1438,6 +1574,7 @@ fn make_entry<T>(
     strict_priority: u32,
     due: DueKey,
     expires: bool,
+    ages: bool,
     queue_policy: RouterQueuePolicy,
     enqueue_seq: u64,
     payload: T,
@@ -1454,7 +1591,7 @@ fn make_entry<T>(
         class_index,
         priority: QueuePriority {
             strict_priority,
-            due_low: due.low | if expires { EXPIRES } else { 0 },
+            due_low: due.low | if expires { EXPIRES } else { 0 } | if ages { AGES } else { 0 },
             due_high: due.high,
             policy_score: OrderedFloat(policy_score),
         },
@@ -1583,6 +1720,11 @@ impl<T> PolicyQueue<T> {
                 .collect::<BTreeSet<_>>();
             assert_eq!(indexed, class.due_entries);
             assert!(!class.head_expiry || class.due_entries.is_empty());
+            let aging = entries
+                .iter()
+                .filter_map(|entry| entry.aging_key().map(|key| (key, entry.enqueue_seq)))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(aging, class.aging_entries);
             let roots = std::iter::once(None)
                 .chain(class.ready_by_worker.keys().copied().map(Some))
                 .filter_map(|lane| class.expiring_root(lane))
@@ -1629,7 +1771,11 @@ mod tests {
         assert!(keys.is_sorted_by(|lower, upper| lower < upper), "{keys:?}");
         for (key, instant) in keys.into_iter().zip(instants) {
             assert_eq!(key.due_at(origin), Some(instant));
-            assert_eq!(key.low & EXPIRES, 0, "the flag bit never carries ordering");
+            assert_eq!(
+                key.low & (EXPIRES | AGES),
+                0,
+                "the flag bits never carry ordering"
+            );
             assert!(
                 key < DueKey::NONE,
                 "an absent due time follows every finite one"
@@ -1709,5 +1855,161 @@ mod tests {
             assert_eq!(queue.pending_count(), 0);
             assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
         }
+    }
+
+    fn wspt_queue() -> PolicyQueue<&'static str> {
+        PolicyQueue::new(&PolicyProfile::synthetic(None, RouterQueuePolicy::Wspt))
+    }
+
+    /// Enqueues `payload` with a cost and a class due time `budget_secs` after the origin.
+    fn enqueue_wspt(
+        queue: &mut PolicyQueue<&'static str>,
+        lane: QueueLane,
+        payload: &'static str,
+        cost_tokens: usize,
+        budget_secs: Option<u64>,
+    ) {
+        let origin = queue.deadline_origin();
+        queue
+            .enqueue_in_lane(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(cost_tokens, 0),
+                    due_at: None,
+                    class_due_at: budget_secs.map(|secs| origin + Duration::from_secs(secs)),
+                    arrival_offset_secs: 0.0,
+                },
+                1,
+                0.0,
+                0,
+                lane,
+                payload,
+            )
+            .unwrap();
+    }
+
+    fn pop(queue: &mut PolicyQueue<&'static str>) -> &'static str {
+        queue.pop_next(|_, _, _| true).unwrap().into_payload()
+    }
+
+    #[test]
+    fn wspt_orders_by_cost_until_a_class_due_time_passes() {
+        let at = |queue: &PolicyQueue<&'static str>, secs| {
+            queue.deadline_origin() + Duration::from_secs(secs)
+        };
+        let filled = || {
+            let mut queue = wspt_queue();
+            enqueue_wspt(
+                &mut queue,
+                QueueLane::Shared,
+                "costly-due-10",
+                900,
+                Some(10),
+            );
+            enqueue_wspt(&mut queue, QueueLane::Shared, "costly-due-5", 800, Some(5));
+            enqueue_wspt(&mut queue, QueueLane::Shared, "cheap-due-60", 10, Some(60));
+            enqueue_wspt(&mut queue, QueueLane::Shared, "no-budget", 500, None);
+            queue.assert_indexes_match_entries();
+            queue
+        };
+
+        // Before any class due time, and whenever nothing promotes, cost alone orders.
+        let mut queue = filled();
+        queue.promote_overdue(at(&queue, 4));
+        let by_cost = ["cheap-due-60", "no-budget", "costly-due-5", "costly-due-10"];
+        assert_eq!(by_cost.map(|_| pop(&mut queue)), by_cost);
+
+        // Past both costly entries' due times they go first, earliest due time first, and the
+        // rest keep the cost order.
+        let mut queue = filled();
+        queue.promote_overdue(at(&queue, 10));
+        queue.assert_indexes_match_entries();
+        let promoted = ["costly-due-5", "costly-due-10", "cheap-due-60", "no-budget"];
+        assert_eq!(promoted.map(|_| pop(&mut queue)), promoted);
+        queue.assert_indexes_match_entries();
+
+        // An entry enqueued later with an earlier due time joins the promoted ones in due
+        // order.
+        let mut queue = filled();
+        queue.promote_overdue(at(&queue, 5));
+        enqueue_wspt(&mut queue, QueueLane::Shared, "late-due-1", 5_000, Some(1));
+        queue.promote_overdue(at(&queue, 5) + PROMOTION_INTERVAL);
+        assert_eq!(pop(&mut queue), "late-due-1");
+        assert_eq!(pop(&mut queue), "costly-due-5");
+        assert_eq!(pop(&mut queue), "cheap-due-60");
+
+        // A call within the interval of the last promotion leaves an overdue entry for the
+        // next one.
+        let mut queue = filled();
+        queue.promote_overdue(at(&queue, 5));
+        enqueue_wspt(&mut queue, QueueLane::Shared, "late-due-1", 5_000, Some(1));
+        queue.promote_overdue(at(&queue, 5) + PROMOTION_INTERVAL - Duration::from_millis(1));
+        assert_eq!(pop(&mut queue), "costly-due-5");
+        assert_eq!(pop(&mut queue), "cheap-due-60");
+        queue.promote_overdue(at(&queue, 5) + PROMOTION_INTERVAL);
+        assert_eq!(pop(&mut queue), "late-due-1");
+    }
+
+    #[test]
+    fn promotion_tracks_removed_entries_and_explicit_deadlines() {
+        let mut queue = wspt_queue();
+        let origin = queue.deadline_origin();
+        enqueue_wspt(&mut queue, QueueLane::Shared, "cancelled", 900, Some(5));
+        enqueue_wspt(&mut queue, QueueLane::Shared, "dispatched", 1, Some(5));
+        enqueue_wspt(&mut queue, QueueLane::Shared, "overdue", 800, Some(5));
+        // An explicit deadline orders from the start and never waits for a class due time.
+        queue
+            .enqueue_in_lane(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(700, 0),
+                    due_at: Some(origin + Duration::from_secs(30)),
+                    class_due_at: Some(origin + Duration::from_secs(5)),
+                    arrival_offset_secs: 0.0,
+                },
+                1,
+                0.0,
+                0,
+                QueueLane::Shared,
+                "explicit",
+            )
+            .unwrap();
+        queue.assert_indexes_match_entries();
+
+        // Entries that left before their due time are gone from the promotion index.
+        queue.retain(|payload| *payload != "cancelled" && *payload != "dispatched");
+        queue.assert_indexes_match_entries();
+        queue.promote_overdue(origin + Duration::from_secs(5));
+        queue.assert_indexes_match_entries();
+        // The explicit deadline is later than the promoted entry's class due time and still
+        // goes first.
+        assert_eq!(pop(&mut queue), "explicit");
+        assert_eq!(pop(&mut queue), "overdue");
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn promotion_in_a_worker_lane_rechecks_a_blocked_lane_with_a_new_root() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let lane = QueueLane::Exact(worker);
+        let mut queue = wspt_queue();
+        enqueue_wspt(&mut queue, lane, "cheap", 10, Some(60));
+        enqueue_wspt(&mut queue, lane, "costly", 900, Some(5));
+        // The lane's root cannot dispatch, so the lane is parked.
+        assert!(
+            queue
+                .pop_next_with_readiness(|_, _, _| QueueReadiness::Blocked)
+                .is_none()
+        );
+        assert!(queue.class_blocks_worker(0, worker));
+
+        // Promotion puts the costly entry at the root; nothing has checked it, so the lane
+        // is no longer parked and the next pass dispatches it.
+        queue.promote_overdue(queue.deadline_origin() + Duration::from_secs(5));
+        assert!(!queue.class_blocks_worker(0, worker));
+        queue.assert_indexes_match_entries();
+        assert_eq!(pop(&mut queue), "costly");
+        assert_eq!(pop(&mut queue), "cheap");
+        assert_eq!(queue.class_lane_counts(0), [0, 0, 0, 0]);
     }
 }
