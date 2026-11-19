@@ -82,9 +82,28 @@ fn copy_session_affinity(
     }
 }
 
+/// Give the routed request its parent request's image-cache scope, unless it carries its own.
+///
+/// Workers read the scope only from this request field, and a chat processor replaces the
+/// preprocessor that would have filled it from the session affinity id.
+fn inherit_image_cache_scope(
+    parent_context: &crate::context::Context,
+    request: &mut PreprocessedRequest,
+) {
+    if request.image_cache_scope.is_none() {
+        request.image_cache_scope = parent_context
+            .session_affinity()
+            .map(|session_affinity| session_affinity.as_str().to_owned());
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
+    ///
+    /// With `context`, the routed request inherits the parent request's session affinity. Unless
+    /// `preprocessed` carries an `image_cache_scope` of its own, that session id is also its
+    /// image-cache scope.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -99,6 +118,7 @@ impl RoutedEngine {
             request.tracker = Some(Arc::new(RequestTracker::new()));
         }
         let request_context = if let Some(parent_context) = context.as_ref() {
+            inherit_image_cache_scope(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
             let mut child_context = SingleIn::with_id_and_metadata(
@@ -234,6 +254,38 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity restored after Python boundary");
         assert_eq!(session_affinity.as_str(), "session-123");
+    }
+
+    /// The Python binding context of a request that arrived with `x-dynamo-session-id`.
+    fn python_context_with_session(session_id: &str) -> crate::context::Context {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-dynamo-session-id", session_id.parse().unwrap());
+        let session_affinity =
+            session_affinity_from_headers(&headers).expect("session affinity header");
+        let mut source = SingleIn::new(());
+        source.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+        crate::context::Context::new(source.context(), None, None, Default::default())
+            .with_session_affinity_from(&source)
+            .expect("pipeline context converts to Python binding context")
+    }
+
+    #[test]
+    fn request_inherits_image_cache_scope_across_python_boundary() {
+        let python_context = python_context_with_session("session-123");
+        let mut request = preprocessed_request();
+        inherit_image_cache_scope(&python_context, &mut request);
+
+        assert_eq!(request.image_cache_scope.as_deref(), Some("session-123"));
+    }
+
+    #[test]
+    fn processor_image_cache_scope_is_not_overwritten() {
+        let python_context = python_context_with_session("from-headers");
+        let mut request = preprocessed_request();
+        request.image_cache_scope = Some("from-processor".to_owned());
+        inherit_image_cache_scope(&python_context, &mut request);
+
+        assert_eq!(request.image_cache_scope.as_deref(), Some("from-processor"));
     }
 
     fn make_trace_context(
