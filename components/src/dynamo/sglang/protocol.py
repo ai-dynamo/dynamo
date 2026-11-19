@@ -94,46 +94,6 @@ class DisaggPreprocessedRequest(BaseModel):
 # ============================================================================
 
 
-class TextContent(BaseModel):
-    type: Literal["text"]
-    text: str
-
-
-class ImageURLDetail(BaseModel):
-    url: str
-
-
-class ImageContent(BaseModel):
-    type: Literal["image_url"]
-    image_url: ImageURLDetail
-
-
-class VideoURLDetail(BaseModel):
-    url: str
-
-
-class VideoContent(BaseModel):
-    type: Literal["video_url"]
-    video_url: VideoURLDetail
-
-
-MessageContent = Union[TextContent, ImageContent, VideoContent]
-
-
-class ChatMessage(BaseModel):
-    role: Literal["user", "system", "assistant"]
-    content: List[MessageContent]
-
-
-class MultiModalRequest(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    model: str
-    messages: List[ChatMessage]
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    stream: Optional[bool] = False
-
-
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None

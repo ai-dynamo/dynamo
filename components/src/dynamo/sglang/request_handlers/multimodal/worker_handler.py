@@ -304,17 +304,6 @@ class StreamProcessor:
             }
             yield json.dumps(error_output)
 
-    @staticmethod
-    def create_bootstrap_info(
-        bootstrap_host: str, bootstrap_port: int, bootstrap_room: int
-    ) -> dict:
-        """Create bootstrap info dictionary"""
-        return {
-            "bootstrap_host": bootstrap_host,
-            "bootstrap_port": bootstrap_port,
-            "bootstrap_room": bootstrap_room,
-        }
-
 
 class ErrorResponseBuilder:
     """Standardized error response builder"""
