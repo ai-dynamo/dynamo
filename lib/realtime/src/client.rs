@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt, stream::BoxStream};
 use serde_json::Value;
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::OnceCell};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
-    tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
+    Connector, MaybeTlsStream, WebSocketStream,
+    tungstenite::{self, Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use url::Url;
@@ -25,6 +25,7 @@ pub struct Client {
 pub(crate) struct Inner {
     base: Url,
     authorization: Option<reqwest::header::HeaderValue>,
+    connector: OnceCell<Connector>,
     pub(crate) http: reqwest::Client,
     pub(crate) model: String,
     pub(crate) limits: Limits,
@@ -73,6 +74,7 @@ impl Client {
             inner: Arc::new(Inner {
                 base,
                 authorization,
+                connector: OnceCell::new(),
                 http,
                 model,
                 limits,
@@ -221,10 +223,32 @@ impl Client {
         let config = WebSocketConfig::default()
             .max_message_size(Some(self.inner.limits.max_buffered_output_bytes.get()))
             .max_frame_size(Some(self.inner.limits.max_buffered_output_bytes.get()));
-        let (socket, _) = tokio::time::timeout(
-            self.inner.limits.connect_timeout,
-            tokio_tungstenite::connect_async_with_config(request, Some(config), false),
-        )
+        let (socket, _) = tokio::time::timeout(self.inner.limits.connect_timeout, async {
+            let connector = self
+                .inner
+                .connector
+                .get_or_try_init(|| async {
+                    if self.inner.base.scheme() != "https" {
+                        return Ok(Connector::Plain);
+                    }
+                    // Only WSS needs native roots; readiness normally warms this
+                    // cache without blocking the executor or HTTP-only clients.
+                    tokio::task::spawn_blocking(websocket_connector)
+                        .await
+                        .map_err(|error| {
+                            Error::Protocol(format!("WebSocket TLS setup failed: {error}"))
+                        })?
+                })
+                .await?;
+            tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                Some(config),
+                false,
+                Some(connector.clone()),
+            )
+            .await
+            .map_err(Error::from)
+        })
         .await
         .map_err(|_| Error::Timeout)??;
         Ok(socket)
@@ -233,6 +257,33 @@ impl Client {
     pub(crate) async fn close(&self, socket: &mut Socket) {
         let _ = tokio::time::timeout(self.inner.limits.close_timeout, socket.close(None)).await;
     }
+}
+
+fn websocket_connector() -> Result<Connector, Error> {
+    let rustls_native_certs::CertificateResult { certs, errors, .. } =
+        rustls_native_certs::load_native_certs();
+    if !errors.is_empty() {
+        tracing::warn!(?errors, "native root CA certificate loading errors");
+    }
+    if certs.is_empty() {
+        return Err(tungstenite::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no native root CA certificates found (errors: {errors:?})"),
+        ))
+        .into());
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(certs);
+    // Match reqwest's fallback without changing the process-wide provider.
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| tungstenite::Error::Tls(error.into()))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
 }
 
 pub(crate) async fn send(socket: &mut Socket, event: Value) -> Result<(), Error> {

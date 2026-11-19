@@ -699,6 +699,11 @@ fn validate_session(session: &Value, protocol: Protocol, model: &str) -> Result<
         {
             return Err(invalid("input must be mono PCM16 at 24000 Hz"));
         }
+        let format = &session["audio"]["output"]["format"];
+        if !format.is_null() && (format["type"] != "audio/pcm" || format["rate"] != OPENAI_PCM_RATE)
+        {
+            return Err(invalid("output must be mono PCM16 at 24000 Hz"));
+        }
         if let Some(modalities) = session
             .get("output_modalities")
             .filter(|value| !value.is_null())

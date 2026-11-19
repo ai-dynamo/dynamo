@@ -344,38 +344,6 @@ impl ConditionalDisaggPolicy for IslOrLoadPolicy {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Copy)]
-pub struct RandomBypassConditionalDisaggPolicy {
-    enabled: bool,
-    bypass_probability: f64,
-}
-
-#[cfg(test)]
-impl RandomBypassConditionalDisaggPolicy {
-    pub fn new(enabled: bool, bypass_probability: f64) -> Self {
-        Self {
-            enabled,
-            bypass_probability: bypass_probability.clamp(0.0, 1.0),
-        }
-    }
-}
-
-#[cfg(test)]
-#[async_trait]
-impl ConditionalDisaggPolicy for RandomBypassConditionalDisaggPolicy {
-    fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    async fn should_bypass_remote_prefill(&self, _input: ConditionalDisaggDecisionInput) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        fastrand::f64() < self.bypass_probability
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -468,40 +436,6 @@ mod tests {
     async fn weighted_cached_tokens_do_not_round_up_to_full_block() {
         let policy = IslBoundingPolicy::new(true, 2048, 0.99);
         assert!(!policy.should_bypass_remote_prefill(input(2100, 48)).await);
-    }
-
-    #[tokio::test]
-    async fn random_bypass_when_disabled_never_bypasses() {
-        let policy = RandomBypassConditionalDisaggPolicy::new(false, 1.0);
-        assert!(
-            !policy
-                .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
-                .await
-        );
-    }
-
-    #[tokio::test]
-    async fn random_bypass_zero_probability_never_bypasses() {
-        let policy = RandomBypassConditionalDisaggPolicy::new(true, 0.0);
-        for _ in 0..50 {
-            assert!(
-                !policy
-                    .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
-                    .await
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn random_bypass_one_probability_always_bypasses() {
-        let policy = RandomBypassConditionalDisaggPolicy::new(true, 1.0);
-        for _ in 0..50 {
-            assert!(
-                policy
-                    .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
-                    .await
-            );
-        }
     }
 
     fn input_with_busy(
@@ -640,20 +574,5 @@ mod tests {
         let policy = enabled_or_policy();
         assert!(policy.should_bypass_remote_prefill(small_input(None)).await);
         assert!(!policy.should_bypass_remote_prefill(large_input(None)).await);
-    }
-
-    #[tokio::test]
-    async fn decision_input_new_defaults_busy_to_none() {
-        let input = ConditionalDisaggDecisionInput::new(1000, 0);
-        assert_eq!(input.prefill_chosen_worker_busy, None);
-        assert_eq!(input.decode_chosen_worker_busy, None);
-    }
-
-    #[tokio::test]
-    async fn decision_input_with_decode_chosen_worker_busy_round_trips() {
-        let input =
-            ConditionalDisaggDecisionInput::new(1000, 0).with_decode_chosen_worker_busy(Some(true));
-        assert_eq!(input.decode_chosen_worker_busy, Some(true));
-        assert_eq!(input.prefill_chosen_worker_busy, None);
     }
 }

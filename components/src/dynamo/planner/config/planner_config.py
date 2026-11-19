@@ -174,8 +174,8 @@ class AISPerfModelSpec(BaseModel):
         # estimator runtime. Require AIS only when validating an AIS config.
         # The package root loads native APIs lazily and types them as object;
         # import the typed native module directly.
-        from aisimulate_core._native import RustForwardPassPerfModel
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        from aisim_core._native import RustForwardPassPerfModel
+        from aisim_core.sdk import ForwardPassPerfModelConfig
 
         result = {}
         for role, config in roles.items():
@@ -2613,7 +2613,7 @@ class PlannerConfig(BaseModel):
         if "prefill_load_model" not in spec:
             return
         # Imported on use: the adapter schema imports this module.
-        from aisimulate.config.common import Choices
+        from aisim.config.common import Choices
 
         from dynamo.planner.retune.domains import parse_retune_section
 

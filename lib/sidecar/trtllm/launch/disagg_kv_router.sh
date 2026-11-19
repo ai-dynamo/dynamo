@@ -4,7 +4,7 @@
 #
 # Disaggregated KV-aware serving (2 prefill, 2 decode GPUs).
 
-# Use `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`.
+# Use `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`.
 
 set -e
 

@@ -19,6 +19,8 @@ futures = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }
 rubato = "0.16.2"
+rustls = { workspace = true }
+rustls-native-certs = "0.8"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -30,4 +32,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 dynamo-protocols = { workspace = true }
+rcgen = { workspace = true }
+tempfile = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }

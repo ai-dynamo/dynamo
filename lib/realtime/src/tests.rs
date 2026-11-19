@@ -424,6 +424,7 @@ async fn check_omni_partial_session_update(include_model: bool) {
         assert_eq!(update["session"]["output_modalities"], json!(["text"]));
         assert_eq!(update["session"]["instructions"], "Keep replies short.");
         assert_eq!(update["session"]["max_output_tokens"], 123);
+        assert!(update["session"].get("audio").is_none());
         send(
             &mut socket,
             json!({"type": "session.updated", "session": update["session"]}),
@@ -494,6 +495,14 @@ async fn check_omni_partial_session_update(include_model: bool) {
             "instructions": "Do not keep this model patch."}),
         json!({"type": "realtime", "model": MODEL, "output_modalities": ["invalid"],
             "instructions": "Do not keep this invalid config."}),
+        json!({"type": "realtime", "audio": {
+            "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+            "output": {"format": {"type": "audio/pcmu"}, "speed": 1.0, "voice": "alloy"}
+        }, "instructions": "Do not keep this unsupported output codec."}),
+        json!({"type": "realtime", "audio": {
+            "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+            "output": {"format": {"type": "audio/pcm", "rate": 16000}, "speed": 1.0, "voice": "alloy"}
+        }, "instructions": "Do not keep this unsupported output sample rate."}),
     ] {
         input
             .send(typed_client_event(
@@ -710,4 +719,109 @@ fn audio_resampling_is_chunk_invariant_and_filters_above_nyquist() {
     };
     assert!(rms(&single) > 0.3);
     assert!(rms(&high) < 0.01, "downsampling must attenuate aliases");
+}
+
+#[tokio::test]
+async fn wss_connections_reuse_native_trust_without_requiring_it_for_http() {
+    const CHILD_URL: &str = "DYNAMO_REALTIME_TEST_WSS_URL";
+    if let Ok(url) = std::env::var(CHILD_URL) {
+        let client = Client::new(
+            url.parse().unwrap(),
+            MODEL.into(),
+            Limits::for_protocol(Protocol::Omni),
+            None,
+        )
+        .unwrap();
+        for turn in 0..2 {
+            let mut socket = client.clone().connect().await.unwrap();
+            if turn == 0 {
+                std::fs::remove_file(std::env::var_os("SSL_CERT_FILE").unwrap()).unwrap();
+            }
+            assert_eq!(
+                crate::client::receive(&mut socket).await.unwrap()["type"],
+                "session.created"
+            );
+            client.close(&mut socket).await;
+        }
+        client.shutdown().await;
+        // Speech uses HTTP only and must not require a native WSS trust store.
+        Client::new(
+            url.parse().unwrap(),
+            MODEL.into(),
+            Limits::for_protocol(Protocol::Omni),
+            None,
+        )
+        .unwrap()
+        .shutdown()
+        .await;
+        return;
+    }
+
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let cert_path = directory.path().join("ca.pem");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    let empty_cert_dir = directory.path().join("empty");
+    std::fs::create_dir(&empty_cert_dir).unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![cert.der().clone()],
+        rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into(),
+    )
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "https://localhost:{}",
+        listener.local_addr().unwrap().port()
+    );
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tls).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type": "session.created"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
+        }
+    });
+
+    // Isolate trust-store environment changes from other concurrently running tests.
+    let output = tokio::time::timeout(
+        DEADLINE,
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::wss_connections_reuse_native_trust_without_requiring_it_for_http",
+                "--nocapture",
+            ])
+            .env(CHILD_URL, url)
+            .env("SSL_CERT_FILE", cert_path)
+            .env("SSL_CERT_DIR", empty_cert_dir)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    tokio::time::timeout(DEADLINE, server)
+        .await
+        .unwrap()
+        .unwrap();
 }
