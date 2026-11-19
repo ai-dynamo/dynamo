@@ -321,13 +321,20 @@ per-worker `CACHE` rows. Cached tokens also set each request's default
 scheduling cost and queue accounting, and prefix overlap still guides worker
 selection.
 
-Each class owns a shared heap plus one heap for each exact-worker lane, all
-ordered by the class's queue policy, along with its busy thresholds, queue
-limits, quantum, deficit, and counters. Arbitration compares the shared head with the currently dispatchable
-exact-worker lane heads. Absolute and fractional busy thresholds use OR
+Each class owns a shared heap plus one heap per lane, all ordered by the
+class's queue policy, along with its busy thresholds, queue limits, quantum,
+deficit, and counters. A request classifier may give a request a lane key, and
+requests that share a key wait in one lane: ThunderAgent keys by session, so a
+session bound to a busy rank, whether by hard session affinity or by the gate's
+hold, delays only its own later turns. Without a key, a pinned request, such as
+one with an explicit worker target, waits in a lane of its own worker and holds
+only the requests pinned to the same worker while it is full; every other
+request waits in the shared heap, as it does with no classifier installed.
+Arbitration compares the shared head with the currently dispatchable lane
+heads. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
-A class queues only when at least one threshold is configured and every eligible worker is busy for that class, but a new arrival cannot bypass an existing backlog in the same class.
+A class queues only when at least one threshold is configured and every eligible worker is busy for that class, or when an installed dispatch gate holds the request, but a new arrival cannot bypass an existing backlog in the same class.
 
 `decode_busy_threshold_frac` is a class's decode wait limit. A decode worker is busy for the class while the KV blocks its active requests hold exceed that fraction of its `total_kv_blocks`, so a pool filled by long-running decodes stops taking new work for the class even after their prefill completes. Where the limit is judged depends on the topology:
 
@@ -506,7 +513,7 @@ The first successfully dispatched request binds the session ID to its selected w
 
 | Mode | Behavior |
 |---|---|
-| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
+| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once. When the class queues and the target is full, the request waits in its target's lane until the target frees, holding only the requests bound to that target; a classifier that keys lanes by session narrows that to the session's own later turns |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
 **Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.
