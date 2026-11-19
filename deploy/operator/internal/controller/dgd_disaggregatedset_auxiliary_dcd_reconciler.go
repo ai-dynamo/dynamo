@@ -20,10 +20,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

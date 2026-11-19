@@ -6,11 +6,11 @@ package leaderworkerset
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"maps"
 	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
