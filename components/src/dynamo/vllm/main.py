@@ -77,7 +77,10 @@ from .capacity import (
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
-from .decision_execution import publish_vllm_decision_capability
+from .decision_execution import (
+    publish_vllm_decision_capability,
+    qualify_vllm_decision_runtime,
+)
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -820,6 +823,8 @@ def setup_vllm_engine(
     if stat_logger:
         factory.append(stat_logger)
 
+    qualify_vllm_decision_runtime(vllm_config, config)
+
     # Time engine initialization
     start_time = time.time()
     embedding_process_group = None
@@ -988,7 +993,6 @@ async def register_vllm_model(
         runtime_config,
         model_input,
         worker_type,
-        vllm_config,
         config,
         native_generate_supported=native_generate_supported,
         needs=needs,

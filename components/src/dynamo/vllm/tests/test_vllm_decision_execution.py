@@ -74,6 +74,9 @@ def test_disabled_worker_preserves_metadata_and_skips_qualification(
     monkeypatch.setattr(decisions, "_released_runtime", qualification)
     original = dict(profile["runtime_config"].runtime_data)
 
+    decisions.qualify_vllm_decision_runtime(
+        profile.pop("vllm_config"), profile["config"]
+    )
     assert not decisions.publish_vllm_decision_capability(**profile)
     assert profile["runtime_config"].runtime_data == original
 
@@ -157,6 +160,9 @@ def test_invalid_explicit_opt_in_fails_before_engine_start(
 
 
 def test_qualified_worker_publishes_capability_and_logs_success(profile, caplog):
+    decisions.qualify_vllm_decision_runtime(
+        profile.pop("vllm_config"), profile["config"]
+    )
     with caplog.at_level(logging.INFO, logger=decisions.__name__):
         assert decisions.publish_vllm_decision_capability(**profile)
     assert (
@@ -168,11 +174,42 @@ def test_qualified_worker_publishes_capability_and_logs_success(profile, caplog)
     assert "Published vLLM causal decision capability" in caplog.text
 
 
+def test_capability_publication_does_not_repeat_runtime_qualification(
+    profile, monkeypatch
+):
+    profile.pop("vllm_config")
+    qualification = Mock(side_effect=AssertionError("runtime is already qualified"))
+    monkeypatch.setattr(decisions, "_released_runtime", qualification)
+    monkeypatch.setattr(decisions, "verify_cache_sources", qualification)
+    assert decisions.publish_vllm_decision_capability(**profile)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("model_input", ModelInput.Text),
+        ("worker_type", WorkerType.Decode),
+        ("native_generate_supported", False),
+        ("needs", [[WorkerType.Prefill]]),
+    ],
+)
+def test_capability_publication_rejects_unqualified_registration(
+    profile, setting, value
+):
+    profile.pop("vllm_config")
+    profile[setting] = value
+    with pytest.raises(ValueError, match="aggregated token-input worker"):
+        decisions.publish_vllm_decision_capability(**profile)
+    assert not profile["runtime_config"].runtime_data
+
+
 @pytest.mark.parametrize("release", ["0.32.0", "0.33.0rc1", "0.33.0.dev1"])
 def test_explicit_opt_in_rejects_unqualified_runtime(profile, monkeypatch, release):
     monkeypatch.setattr(decisions, "version", lambda _: release)
     with pytest.raises(ValueError, match="vLLM 0.33.0"):
-        decisions.publish_vllm_decision_capability(**profile)
+        decisions.qualify_vllm_decision_runtime(
+            profile["vllm_config"], profile["config"]
+        )
 
 
 @pytest.mark.parametrize(
@@ -185,7 +222,9 @@ def test_explicit_opt_in_names_unsupported_architecture(profile, architecture):
     with pytest.raises(
         ValueError, match=f"unsupported model architecture '{architecture}'"
     ):
-        decisions.publish_vllm_decision_capability(**profile)
+        decisions.qualify_vllm_decision_runtime(
+            profile["vllm_config"], profile["config"]
+        )
     assert profile["runtime_config"].runtime_data == original
 
 
@@ -220,20 +259,26 @@ def test_explicit_opt_in_names_unqualified_runtime_setting(
     setattr(getattr(runtime, section) if section else runtime, name, value)
     original = dict(profile["runtime_config"].runtime_data)
     with pytest.raises(ValueError, match=name):
-        decisions.publish_vllm_decision_capability(**profile)
+        decisions.qualify_vllm_decision_runtime(
+            profile["vllm_config"], profile["config"]
+        )
     assert profile["runtime_config"].runtime_data == original
 
 
 def test_explicit_opt_in_rejects_missing_runtime_metadata(profile):
     del profile["vllm_config"].model_config.runner_type
     with pytest.raises(ValueError, match="missing runtime metadata"):
-        decisions.publish_vllm_decision_capability(**profile)
+        decisions.qualify_vllm_decision_runtime(
+            profile["vllm_config"], profile["config"]
+        )
 
 
 def test_explicit_opt_in_rejects_modified_cache_source(profile, monkeypatch):
     monkeypatch.setattr(decisions, "verify_cache_sources", lambda: False)
     with pytest.raises(ValueError, match="cache source"):
-        decisions.publish_vllm_decision_capability(**profile)
+        decisions.qualify_vllm_decision_runtime(
+            profile["vllm_config"], profile["config"]
+        )
 
 
 def test_installed_cache_sources_match_qualified_release():
@@ -283,11 +328,11 @@ def test_installed_configuration_qualifies_without_model_load(
     config.engine_args = AsyncEngineArgs.from_cli_args(engine_args)
     config.validate()
     assert type(runtime.scheduler_config.async_scheduling) is bool
+    decisions.qualify_vllm_decision_runtime(runtime, config)
     assert decisions.publish_vllm_decision_capability(
         ModelRuntimeConfig(),
         ModelInput.Tokens,
         WorkerType.Aggregated,
-        runtime,
         config,
         native_generate_supported=True,
     )

@@ -83,35 +83,14 @@ def _unqualified_runtime_condition(runtime: "VllmConfig") -> str | None:
     return next((name for name, qualified in checks if not qualified), None)
 
 
-def publish_vllm_decision_capability(
-    runtime_config: ModelRuntimeConfig,
-    model_input: ModelInput,
-    worker_type: WorkerType,
-    vllm_config: "VllmConfig",
-    config: "Config",
-    *,
-    native_generate_supported: bool,
-    needs: list[list[WorkerType]] | None = None,
-) -> bool:
-    """Publish only the single-rank, serialized, raw candidate-read contract.
+def qualify_vllm_decision_runtime(vllm_config: "VllmConfig", config: "Config") -> None:
+    """Reject an unqualified resolved configuration before the engine starts.
 
-    The frontend owns question rendering and answer projection. Execution uses
-    one generated token per question; this flag does not establish model quality.
     Cache fields alone do not establish measurement provenance, so their installed
-    source owners must match the qualified release before advertising support.
+    source owners must match the qualified release before loading the model.
     """
     if config.systemone_serial is not True:
-        return False
-    if (
-        native_generate_supported is not True
-        or model_input != ModelInput.Tokens
-        or worker_type != WorkerType.Aggregated
-        or any(needs or ())
-    ):
-        raise ValueError(
-            "--systemone-serial requires an aggregated token-input worker with "
-            "native generate support and no downstream workers"
-        )
+        return
     if not _released_runtime():
         raise ValueError("--systemone-serial requires qualified vLLM 0.33.0")
     try:
@@ -126,6 +105,34 @@ def publish_vllm_decision_capability(
         )
     if not verify_cache_sources():
         raise ValueError("--systemone-serial requires qualified vLLM cache sources")
+
+
+def publish_vllm_decision_capability(
+    runtime_config: ModelRuntimeConfig,
+    model_input: ModelInput,
+    worker_type: WorkerType,
+    config: "Config",
+    *,
+    native_generate_supported: bool,
+    needs: list[list[WorkerType]] | None = None,
+) -> bool:
+    """Publish a prequalified runtime's serialized raw candidate-read contract.
+
+    The frontend owns question rendering and answer projection. Execution uses
+    one generated token per question; this flag does not establish model quality.
+    """
+    if config.systemone_serial is not True:
+        return False
+    if (
+        native_generate_supported is not True
+        or model_input != ModelInput.Tokens
+        or worker_type != WorkerType.Aggregated
+        or any(needs or ())
+    ):
+        raise ValueError(
+            "--systemone-serial requires an aggregated token-input worker with "
+            "native generate support and no downstream workers"
+        )
     runtime_config.set_engine_specific(VLLM_CAUSAL_DECISION_CAPABILITY, "true")
     logger.info("Published vLLM causal decision capability (serialized raw scoring)")
     return True
