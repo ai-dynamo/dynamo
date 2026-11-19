@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import runpy
 import shlex
@@ -19,6 +20,7 @@ from typing import Any
 
 import pytest
 from autoscaling_arena import match_runner
+from autoscaling_arena.checkpoints import RunJournal
 from autoscaling_arena.html_report import _replay_command
 from autoscaling_arena.match_config import (
     EngineConfig,
@@ -607,6 +609,61 @@ def test_warmup_digest_is_portable_but_resume_pins_contents(tmp_path: Path, sour
         '{"timestamp":0,"input_length":16,"output_length":4}\n'
     )
     assert match_runner.execution_signature(left) != before
+
+
+def _fake_installed(monkeypatch: pytest.MonkeyPatch, installed: dict[str, str]):
+    def version(package: str) -> str:
+        if package not in installed:
+            raise importlib.metadata.PackageNotFoundError(package)
+        return installed[package]
+
+    monkeypatch.setattr(match_runner.importlib.metadata, "version", version)
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        ({"aisim": "0.14.0"}, {"aisim": "0.14.0"}),
+        (
+            {"aisimulate": "0.13.0.dev202610290000000087"},
+            {"aisimulate": "0.13.0.dev202610290000000087"},
+        ),
+        ({}, {"aisim": None}),
+    ],
+    ids=["aisim", "legacy-aisimulate", "neither"],
+)
+def test_execution_signature_records_installed_ais_distribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed, expected
+):
+    _fake_installed(monkeypatch, {"ai-dynamo": "1.7.0", **installed})
+    versions = match_runner.execution_signature(_sim_config(tmp_path))["versions"]
+    assert {k: v for k, v in versions.items() if k.startswith("aisim")} == expected
+    assert versions["ai-dynamo"] == "1.7.0"
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"aisim": "0.15.0"}, {"aisimulate": "0.13.0"}, {}],
+    ids=["aisim-upgrade", "legacy-aisimulate", "neither"],
+)
+def test_ais_change_refuses_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed
+):
+    config = _sim_config(tmp_path)
+    session = tmp_path / "session"
+    session.mkdir()
+    _fake_installed(monkeypatch, {"aisim": "0.14.0"})
+    with RunJournal(session, match_runner.execution_signature(config)) as journal:
+        journal.record("run-1", {"run_id": "run-1", "status": "ok"})
+    _fake_installed(monkeypatch, changed)
+    with pytest.raises(ValueError, match="signature does not match"):
+        with RunJournal(session, match_runner.execution_signature(config), resume=True):
+            pass
+    _fake_installed(monkeypatch, {"aisim": "0.14.0"})
+    with RunJournal(
+        session, match_runner.execution_signature(config), resume=True
+    ) as journal:
+        assert journal.load_success("run-1")["status"] == "ok"
 
 
 def test_planner_warmup_outside_config_directory_is_redacted(

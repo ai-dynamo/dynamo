@@ -31,24 +31,24 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.7.0
           env:
           - name: DYN_ROUTER_MODE
             value: kv
   - name: TRTLLMWorker
     type: worker
     replicas: 2
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009@sha256:b210fb5baf50a5513f5ab9aebeae8c0794aeccf900862fd447dc2593c6f26147
           # Probe Control.Health without importing TensorRT-LLM; field 1 is state, READY = 2.
           startupProbe:
             exec:
@@ -116,7 +116,7 @@ spec:
         initContainers:
         # Start the Dynamo sidecar before the engine.
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.7.0
           restartPolicy: Always
           command:
           - dynamo-trtllm-sidecar

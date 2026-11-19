@@ -41,8 +41,13 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
 
-# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
-RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+# Remove the upstream runtime's Git LFS package and the nasm assembler without
+# pruning shared dependencies. Nothing installed depends on nasm; fail if its
+# purge would remove anything else.
+RUN purged=$(apt-get -s purge nasm | awk '/^(Remv|Purg) /{print $2}') && \
+    { [ "$purged" = nasm ] || { echo "ERROR: purging nasm would remove: ${purged:-nothing}" >&2; exit 1; }; } && \
+    apt-get purge -y git-lfs nasm && rm -rf /var/lib/apt/lists/* && \
+    ! command -v nasm && ! dpkg -s nasm >/dev/null 2>&1
 
 # Create the LD_PRELOAD target before the ENV below names it. ENV applies to
 # every RUN after it, so a preload path that does not exist yet costs one
@@ -255,6 +260,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         ca-certificates \
         dirmngr \
         gnupg \
@@ -266,9 +273,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
 
@@ -510,6 +529,18 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
+# Raise transformers in system site past the exact pin that tensorrt-llm
+# declares (transformers==5.5.4), for the inventory reason given for aiohttp
+# above. 5.10.4 declares the same requirements as 5.5.4, so the solve moves no
+# other distribution. Fail if it does: that distribution's package paths must be
+# added to the pre_runtime whiteout first. The version bounds of the checks below
+# must hold this pin (tests/dependencies/test_system_site_pins.py).
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/transformers-upgrade.json "transformers==5.10.4" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/transformers-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"transformers"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/transformers-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
+
 # Pin the upstream developer stack in system site, where the image inventory
 # reads it. The rc29 baseline on both architectures satisfies all transitive
 # requirements of these versions. Fail if the solve changes another distribution:
@@ -527,6 +558,46 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
 # so an older venv distribution cannot shadow the refreshed system packages.
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
 {% endif %}
+
+# Raise the base image's datasets, fsspec, filelock and pyasn1 in system site, for
+# the inventory reason given for aiohttp above. requirements.trtllm.txt reaches
+# only the venv, and none of the four are in it. datasets 4.7.0 caps fsspec at
+# 2026.2.0, so datasets moves to 5.1.0, whose cap admits fsspec 2026.7.0.
+# tensorrt-llm declares datasets without a version. torchtitan in the base caps
+# datasets below 4.8.0, and tensorrt_llm does not import torchtitan. The filelock
+# floor matches the one upstream TensorRT-LLM sets for Python 3.11 and newer, and
+# the pyasn1 cap stays inside the range that pyasn1-modules declares.
+# soupsieve, onnx, multidict and werkzeug move to their current releases in the
+# same step. soupsieve 4 needs Python 3.11.5 or newer and no other package;
+# beautifulsoup4 needs soupsieve 1.6.1 or newer and tensorrt-llm 2.8.4 or newer.
+# requirements.trtllm.txt also refreshes soupsieve, but only the venv copy. onnx
+# 1.22.0 needs typing_extensions 4.15.0 and ml_dtypes 0.5.4 or newer, which the
+# base already ships, and aiohttp caps multidict below 7.
+# Fail if the solve changes another distribution: its package paths must be added
+# to the pre_runtime whiteout first. Mirrored by that whiteout, and checked again
+# after the overlay.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/system-site-refresh.json \
+        "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" \
+        "soupsieve==4.1.1" "onnx==1.22.0" "multidict==6.9.1" "werkzeug==3.1.9" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/system-site-refresh.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"datasets", "fsspec", "filelock", "pyasn1", "soupsieve", "onnx", "multidict", "werkzeug"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/system-site-refresh.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7"), "soupsieve": ("4.1.1", "4.1.2"), "onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1, soupsieve, onnx, multidict, werkzeug'
+
+# Raise the base image's Mooncake transfer engine in system site, for the
+# inventory reason given for aiohttp above. A floor in requirements.trtllm.txt
+# would reach only the venv and leave the base copy on disk. The specifier matches
+# requirements.vllm.txt and requirements.sglang.txt
+# (tests/dependencies/test_mooncake_floor_consistency.py). tensorrt-llm declares
+# mooncake-transfer-engine-cuda13==0.3.13, so pip check reports that pin. Fail if
+# the solve changes another distribution. Mirrored by the pre_runtime whiteout,
+# and checked again after the overlay.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/mooncake-upgrade.json \
+        "mooncake-transfer-engine-cuda13>=0.3.14,<0.4" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/mooncake-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"mooncake-transfer-engine-cuda13"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/mooncake-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"mooncake-transfer-engine-cuda13": ("0.3.14", "0.4")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import mooncake'
 
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
@@ -557,8 +628,13 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # The filesystem overlay does not carry runtime_full's image environment.
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
-# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
-RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+# Remove the upstream runtime's Git LFS package and the nasm assembler without
+# pruning shared dependencies. Nothing installed depends on nasm; fail if its
+# purge would remove anything else.
+RUN purged=$(apt-get -s purge nasm | awk '/^(Remv|Purg) /{print $2}') && \
+    { [ "$purged" = nasm ] || { echo "ERROR: purging nasm would remove: ${purged:-nothing}" >&2; exit 1; }; } && \
+    apt-get purge -y git-lfs nasm && rm -rf /var/lib/apt/lists/* && \
+    ! command -v nasm && ! dpkg -s nasm >/dev/null 2>&1
 
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, standalone
@@ -570,6 +646,9 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # (libavcodec-847b0373.so.62 -> libavcodec-7e11e4e3.so.62), and an overlay COPY
 # only replaces paths that match. Dropping the tree first means the image ships
 # exactly runtime_full's copy, even if a later stage changes the DALI version.
+#
+# transformers is here for the same reason as aiohttp below: runtime_full raises it
+# in system site, and the upgrade renames its version-stamped dist-info directory.
 #
 # aiohttp is here for the DALI reason, not the opencv one: runtime_full upgrades
 # it in system site, and the version-stamped metadata directory is renamed by the
@@ -589,6 +668,16 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# soupsieve, onnx and werkzeug are here for the datasets reason below. multidict,
+# which the same step raises, is already listed with aiohttp's dependencies above.
+# datasets, fsspec, filelock and pyasn1 are here for the aiohttp reason: runtime_full
+# raises them in system site, and each upgrade renames a version-stamped dist-info
+# directory. The pyasn1 pattern names the dist-info suffix so it cannot match
+# pyasn1_modules.
+# The Mooncake transfer engine is here for the same reason, and also for the DALI
+# one: the libraries vendored in mooncake_transfer_engine_cuda13.libs are
+# hash-named, and the hashes change with the version. Its console scripts keep
+# their names, so the overlay replaces them.
 # Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
     /etc/ssl/certs \
@@ -637,9 +726,28 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attrs-* \
     /usr/local/lib/python3.12/dist-packages/certifi \
     /usr/local/lib/python3.12/dist-packages/certifi-* \
+    /usr/local/lib/python3.12/dist-packages/transformers \
+    /usr/local/lib/python3.12/dist-packages/transformers-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/PIL \
     /usr/local/lib/python3.12/dist-packages/pillow-* \
-    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs \
+    /usr/local/lib/python3.12/dist-packages/soupsieve \
+    /usr/local/lib/python3.12/dist-packages/soupsieve-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/onnx \
+    /usr/local/lib/python3.12/dist-packages/onnx-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/werkzeug \
+    /usr/local/lib/python3.12/dist-packages/werkzeug-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/datasets \
+    /usr/local/lib/python3.12/dist-packages/datasets-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/fsspec \
+    /usr/local/lib/python3.12/dist-packages/fsspec-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/filelock \
+    /usr/local/lib/python3.12/dist-packages/filelock-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/pyasn1 \
+    /usr/local/lib/python3.12/dist-packages/pyasn1-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/mooncake \
+    /usr/local/lib/python3.12/dist-packages/mooncake_transfer_engine_cuda13-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/mooncake_transfer_engine_cuda13.libs && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -648,10 +756,21 @@ COPY --from=runtime_full / /
 # Validate after the overlay so stale base metadata cannot survive the refresh.
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("transformers after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"soupsieve": ("4.1.1", "4.1.2"), "onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
+# A missed Mooncake whiteout keeps the old hash-named libraries beside a correct
+# dist-info, so also fail on any file in its two package trees that the installed
+# RECORD does not list.
+RUN /usr/bin/python3 -c 'import glob, os, importlib.metadata as m; from packaging.version import Version; site = "/usr/local/lib/python3.12/dist-packages/"; dist = m.distribution("mooncake-transfer-engine-cuda13"); d = glob.glob(site + "mooncake_transfer_engine_cuda13-*.dist-info"); recorded = {os.path.normpath(os.path.join(site, str(f))) for f in dist.files}; unrecorded = sorted(p for t in ("mooncake", "mooncake_transfer_engine_cuda13.libs") for p in glob.glob(site + t + "/**", recursive=True) if os.path.isfile(p) and "__pycache__" not in p and p not in recorded); print("mooncake after overlay:", dist.version, d, "unrecorded files:", unrecorded); assert len(d) == 1 and Version("0.3.14") <= Version(dist.version) < Version("0.4") and not unrecorded'
 
 {% if target not in ("dev", "local-dev") %}
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import transformers; print("runtime import path:", transformers.__file__); assert transformers.__file__ == "/usr/local/lib/python3.12/dist-packages/transformers/__init__.py"'
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import onnx, multidict, werkzeug; paths = [onnx.__file__, multidict.__file__, werkzeug.__file__]; print("runtime import paths:", paths); assert all(p.startswith("/usr/local/lib/python3.12/dist-packages/") for p in paths)'
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1; print("runtime import paths:", datasets.__file__, fsspec.__file__, filelock.__file__, pyasn1.__file__)'
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; v = m.version("mooncake-transfer-engine-cuda13"); print("runtime interpreter version:", v); assert Version("0.3.14") <= Version(v) < Version("0.4"); import mooncake; print("runtime import path:", mooncake.__file__); assert mooncake.__file__ == "/usr/local/lib/python3.12/dist-packages/mooncake/__init__.py"'
 {% endif %}
 
 # Check the merged filesystem: both base stages must purge package-owned paths.
@@ -660,7 +779,13 @@ RUN test ! -e /usr/bin/git-lfs && \
     ! command -v git-lfs && \
     status=$(dpkg-query -W -f='${db:Status-Status}' git-lfs 2>/dev/null || true) && \
     test "$status" != installed && \
-    set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1"
+    set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1" && \
+    test ! -e /usr/bin/nasm && \
+    test ! -e /usr/bin/ndisasm && \
+    ! command -v nasm && \
+    status=$(dpkg-query -W -f='${db:Status-Status}' nasm 2>/dev/null || true) && \
+    test "$status" != installed && \
+    set -- /var/lib/dpkg/info/nasm.* && test ! -e "$1"
 
 # Post-overlay guard for the Open MPI settings edit in runtime_full. This stage
 # starts from the base image again, where the selected Open MPI's
@@ -746,6 +871,25 @@ RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metr
         echo "ERROR: an efa_metrics plugin directory survived removal; the glob no" >&2; \
         echo "       longer matches the base image's Nsight layout." >&2; \
         find /usr/local -type d -name efa_metrics >&2; \
+        exit 1; \
+    fi
+
+# The same Nsight Systems CLI carries its own Python. On x86_64 that Python has
+# pip installed in its site-packages, and nothing in the image runs it. The
+# PyTorch source tree in the base keeps an onnx.egg-info from its own build, and
+# nothing imports from it: no .pth file or sys.path entry points into
+# /opt/pytorch/pytorch/third_party/onnx. Remove both after the overlay, for the
+# efa_metrics reason above, and fail if either survives a base layout change.
+RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/lib/python3.12/site-packages/pip \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/lib/python3.12/site-packages/pip-*.dist-info \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/bin/pip3* \
+        /opt/pytorch/pytorch/third_party/onnx/onnx.egg-info; \
+    left=$(find /usr/local -path '*/NsightSystems-cli-*/site-packages/pip*' 2>/dev/null; \
+        find /opt/pytorch -name onnx.egg-info 2>/dev/null); \
+    if [ -n "$left" ]; then \
+        echo "ERROR: the Nsight Systems pip or the PyTorch tree's onnx.egg-info" >&2; \
+        echo "       survived removal; the globs no longer match the base layout:" >&2; \
+        echo "$left" >&2; \
         exit 1; \
     fi
 

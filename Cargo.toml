@@ -64,7 +64,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.7.0" }
-# Published separately by https://github.com/ai-dynamo/aisimulate.
+# Published separately by https://github.com/ai-dynamo/aisim.
 aisimulate-core = { package = "aisim-core", version = "=0.14.0" }
 
 # Local crates
@@ -130,8 +130,8 @@ fs4 = { version = "0.13.1" }
 hf-hub = { version = "0.4.2", default-features = false }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.7.0" }
-modelexpress-common = { version = "0.7.0" }
+modelexpress-client = { version = "0.8.0" }
+modelexpress-common = { version = "0.8.0" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }
@@ -162,7 +162,7 @@ tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
 zmq = { version = "0.10" }
-tokio = { version = "=1.54.0", features = ["full"] }
+tokio = { version = "=1.54.1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
@@ -238,12 +238,12 @@ inherits = "release"
 debug = true
 strip = false
 
-# Release-only AISim 0.14.0 RC1 source pin for Dynamo 1.7.0.
+# Release-only AISim 0.14.0 RC4 source pin for Dynamo 1.7.0.
 [patch.crates-io]
-aisim-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "a420a6d8b26c767b250a145136f8732d75925069" }
+aisim-core = { git = "https://github.com/ai-dynamo/aisim.git", rev = "77d82652b2f83fd67afefc3141d69a5f06e630be" }
 
 # Publication uses the indexed RC matching the normal Git source pin above.
 [workspace.metadata.artifactory.dependencies.aisim-core]
-version = "=0.14.0-rc.1"
+version = "=0.14.0-rc.4"
 registry = "aisim"
-git-rev = "a420a6d8b26c767b250a145136f8732d75925069"
+git-rev = "77d82652b2f83fd67afefc3141d69a5f06e630be"
