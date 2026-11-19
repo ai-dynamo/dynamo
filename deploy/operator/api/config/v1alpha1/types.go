@@ -100,9 +100,10 @@ const DefaultDGDROutputCopierImage = "docker.io/bitnami/kubectl@sha256:8f59408f9
 // DGDRConfiguration holds operator-wide profiling Job settings.
 type DGDRConfiguration struct {
 	// OutputCopierImage is a complete image reference for the output-copier sidecar.
-	// Empty uses DefaultDGDROutputCopierImage. The image must provide /bin/sh,
-	// kubectl and the shell utilities used by the copier. Per-request profiling
-	// Job container image overrides take precedence. Existing Jobs keep their image.
+	// Empty uses the bundled digest-pinned kubectl image. The image must provide
+	// /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.
+	// Per-request profiling Job container image overrides take precedence.
+	// Existing Jobs keep their image.
 	OutputCopierImage string `json:"outputCopierImage,omitempty"`
 }
 
