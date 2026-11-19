@@ -23,8 +23,8 @@ site, in line with the project's authoring guides.
 
 Two authoring guides govern this work; read whichever applies before writing:
 
-- [`docs/fern/pages/community/contributing/documentation/documentation-style-guide.md`](../../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md) — the standard for **every** page: frontmatter, headings, prose, terminology, links, callouts. The must-fix subset is distilled in [Style Guide Is the Standard](#style-guide-is-the-standard) and [Content Rules](#content-rules) below.
-- [`docs/fern/pages/recipes/_catalog/README.md`](../../../docs/fern/pages/recipes/_catalog/README.md) — the standard for **recipe and feature-benchmark pages** (the catalog contract, the `.mdx` page blueprint, and the pure-CSS target picker). See [Add a Recipe or Feature Benchmark Page](#add-a-recipe-or-feature-benchmark-page).
+- [`docs/fern/pages/community/contributing/documentation/documentation-style-guide.md`](../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md) — the standard for **every** page: frontmatter, headings, prose, terminology, links, callouts. The must-fix subset is distilled in [Style Guide Is the Standard](#style-guide-is-the-standard) and [Content Rules](#content-rules) below.
+- [`docs/fern/pages/recipes/_catalog/README.md`](../../docs/fern/pages/recipes/_catalog/README.md) — the standard for **recipe and feature-benchmark pages** (the catalog contract, the `.mdx` page blueprint, and the pure-CSS target picker). See [Add a Recipe or Feature Benchmark Page](#add-a-recipe-or-feature-benchmark-page).
 
 ## Branch Rule
 
@@ -34,7 +34,7 @@ The `docs-website` branch is CI-managed and must **never** be edited by hand.
 ## Style Guide Is the Standard
 
 Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) follows the
-[Documentation Style Guide](../../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md)
+[Documentation Style Guide](../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md)
 (`docs/fern/pages/community/contributing/documentation/documentation-style-guide.md`). Read it before
 writing content. The `Docs Lint` job (`docs/fern/scripts/docs_lint.py`) enforces a **must-fix** subset on every
 PR — get these right or the checks fail:
@@ -185,7 +185,7 @@ them the incoming links and redirects you found in steps 1 and 2.
 
 Recipe and feature-benchmark pages are **catalog-driven** and use `.mdx` (they embed a pure-CSS
 target picker). Authoritative guide:
-[`docs/fern/pages/recipes/_catalog/README.md`](../../../docs/fern/pages/recipes/_catalog/README.md).
+[`docs/fern/pages/recipes/_catalog/README.md`](../../docs/fern/pages/recipes/_catalog/README.md).
 Each page is a triple — page + catalog entry + nav:
 
 1. **Write the `.mdx`** at `docs/fern/pages/recipes/model-recipes/<slug>.mdx` (or `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`). Frontmatter
@@ -384,7 +384,7 @@ the contract itself, independent of how it's launched, it belongs in `reference/
 
 Within the chosen tab, match the nearest existing page (see [Add a Page](#add-a-page)) rather than
 reasoning from section names. Fuller placement guidance lives in
-[`docs/fern/pages/AGENTS.md`](../../../docs/fern/pages/AGENTS.md).
+[`docs/fern/pages/AGENTS.md`](../../docs/fern/pages/AGENTS.md).
 
 ## Translations and Versioned Navs
 
