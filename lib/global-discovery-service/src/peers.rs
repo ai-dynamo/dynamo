@@ -120,7 +120,7 @@ impl Sharing {
 }
 
 impl RegistrationSharing for Sharing {
-    /// Also reports every instance that asked within [`asker_kept`] while
+    /// Also reports every instance that asked within `asker_kept` while
     /// holding registrations, whether or not this one hears from it: a
     /// reader drops those it hears from itself.
     fn reply(&self) -> SharedRegistrations {
@@ -249,9 +249,12 @@ impl PeerSync {
                 _ = ticks.tick() => {}
             }
             let listed = match self.instances.list().await {
-                Ok(listed) => listed,
+                Ok(listed) => {
+                    instances.listed();
+                    listed
+                }
                 Err(error) => {
-                    tracing::warn!(?error, "cannot list the discovery service instances");
+                    instances.list_failed(&error, lease, Instant::now());
                     self.sharing
                         .registrations
                         .end_round(ExchangeRound::default());
@@ -364,6 +367,8 @@ struct Instances {
     own: HashSet<RouterReplicaId>,
     /// Since when this instance has not found itself in the list.
     unfound: Option<Problem>,
+    /// Since when the list of instances has failed, while it does.
+    unlisted: Option<Problem>,
     /// The instances whose answers counted, by the names their replies
     /// carry, and when each was last asked for one.
     heard: HashMap<Uuid, Instant>,
@@ -413,6 +418,31 @@ impl Problem {
 impl Instances {
     fn is_own(&self, id: &RouterReplicaId) -> bool {
         self.own.contains(id)
+    }
+
+    /// The list of instances failed: logged when it starts to fail, and as an
+    /// error once it has failed for a lease, not every round.
+    fn list_failed(&mut self, error: &DiscoveryError, lease: Lease, now: Instant) {
+        let Some(problem) = &mut self.unlisted else {
+            self.unlisted = Some(Problem::new(now));
+            tracing::warn!(?error, "cannot list the discovery service instances");
+            return;
+        };
+        if problem.lasted(lease.duration(), now) {
+            tracing::error!(
+                ?error,
+                "the discovery service instances have not been listed for a lease, so pool lists \
+                 stay incomplete, and an instance that has never listed them is not ready; check \
+                 that this service can list EndpointSlices in the namespace of --peer-service"
+            );
+        }
+    }
+
+    /// The list of instances answered: logged if it had failed.
+    fn listed(&mut self) {
+        if self.unlisted.take().is_some() {
+            tracing::info!("the discovery service instances are listed again");
+        }
     }
 
     /// The listed instance `id` is this one: it asks only the others from
@@ -1514,6 +1544,118 @@ mod tests {
                 "{leaves}"
             );
         }
+    }
+
+    /// The level and message of every event logged on a thread while this is
+    /// its default subscriber.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    impl Logs {
+        /// How many events at `level` have a message that contains `text`.
+        fn count(&self, level: tracing::Level, text: &str) -> usize {
+            let events = self.0.lock().unwrap();
+            events
+                .iter()
+                .filter(|(at, message)| *at == level && message.contains(text))
+                .count()
+        }
+    }
+
+    impl tracing::Subscriber for Logs {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            let level = *event.metadata().level();
+            self.0.lock().unwrap().push((level, message.0));
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A list of instances that fails while `failing` is set, and lists none
+    /// otherwise.
+    #[derive(Default)]
+    struct Unlistable {
+        failing: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Directory<RouterReplica, RouterReplicaId> for Unlistable {
+        async fn list(&self) -> Result<Snapshot<RouterReplica>, DiscoveryError> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(DiscoveryError::Unavailable(anyhow::anyhow!(
+                    "endpointslices is forbidden"
+                )));
+            }
+            Ok(Snapshot {
+                items: Vec::new(),
+                completeness: Completeness::Exact,
+            })
+        }
+
+        async fn list_and_watch(
+            &self,
+            _cancel_token: Option<CancellationToken>,
+        ) -> Result<WatchStream<RouterReplica, RouterReplicaId>, DiscoveryError> {
+            unreachable!("PeerSync only lists the instances")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_list_of_instances_is_logged_once_and_again_after_a_lease() {
+        let logs = Logs::default();
+        let _logging = tracing::subscriber::set_default(logs.clone());
+        let list = Arc::new(Unlistable::default());
+        list.failing.store(true, Ordering::SeqCst);
+        let store = Arc::new(MemoryPoolStore::new(lease()));
+        let (sync, sharing) =
+            PeerSync::new(list.clone(), Arc::new(Network::default()), store, lease()).unwrap();
+        let stop = CancellationToken::new();
+        tokio::spawn(sync.run(stop.clone()));
+
+        // Twelve rounds over two leases: one warning, and one error after a
+        // lease. The instance has asked no one, so it is not ready.
+        tokio::time::sleep(lease().duration() * 2).await;
+        let failing = "cannot list the discovery service instances";
+        assert_eq!(logs.count(tracing::Level::WARN, failing), 1);
+        let lasting = "have not been listed for a lease";
+        assert_eq!(logs.count(tracing::Level::ERROR, lasting), 1);
+        assert!(!sharing.synced());
+
+        // Listed again: said once, and ready after that round. A new failure
+        // is warned about again.
+        list.failing.store(false, Ordering::SeqCst);
+        tokio::time::sleep(lease().heartbeat_interval()).await;
+        let again = "the discovery service instances are listed again";
+        assert_eq!(logs.count(tracing::Level::INFO, again), 1);
+        assert!(sharing.synced());
+        list.failing.store(true, Ordering::SeqCst);
+        tokio::time::sleep(lease().heartbeat_interval()).await;
+        assert_eq!(logs.count(tracing::Level::WARN, failing), 2);
+        stop.cancel();
     }
 
     /// Serves an instance over HTTP that reads the others over HTTP. Returns
