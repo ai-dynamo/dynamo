@@ -514,6 +514,7 @@ pub(crate) fn worker_request_from_runtime_config(
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
         ),
         total_kv_blocks: config.total_kv_blocks,
+        cache_owner_capacity_blocks: config.cache_owner_capacity_blocks,
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),
         taints: config.taints().clone(),
@@ -587,6 +588,7 @@ mod tests {
             data_parallel_size: 2,
             max_num_batched_tokens: Some(8192),
             total_kv_blocks: Some(4096),
+            cache_owner_capacity_blocks: Some(1024),
             stable_routing_id: Some("worker-0".to_string()),
             ..ModelRuntimeConfig::default()
         };
@@ -613,6 +615,7 @@ mod tests {
         assert_eq!(request.data_parallel_size, Some(2));
         assert_eq!(request.max_num_batched_tokens, Some(8192));
         assert_eq!(request.total_kv_blocks, Some(4096));
+        assert_eq!(request.cache_owner_capacity_blocks, Some(1024));
         assert_eq!(request.stable_routing_id.as_deref(), Some("worker-0"));
         assert!(request.taints.contains("gpu=h100"));
         assert_eq!(request.router_hint_worker_type.as_deref(), Some("decode"));

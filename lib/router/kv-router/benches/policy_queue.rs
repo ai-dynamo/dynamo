@@ -41,6 +41,22 @@ fn resolve_profile(yaml: &str, queue_policy: RouterQueuePolicy) -> PolicyProfile
     profile
 }
 
+/// Metadata for an entry with no explicit or class due time: how the kernel enqueues a
+/// request outside EDF.
+fn no_due_metadata(
+    class_index: usize,
+    snapshot: QueueSnapshot,
+    arrival_offset_secs: f64,
+) -> QueueMetadata {
+    QueueMetadata {
+        class_index,
+        snapshot,
+        due_at: None,
+        class_due_at: None,
+        arrival_offset_secs,
+    }
+}
+
 fn profile() -> PolicyProfile {
     static PROFILE: OnceLock<PolicyProfile> = OnceLock::new();
     PROFILE
@@ -142,11 +158,9 @@ fn exact_queue(
     for request_index in 0..requests {
         let lane = request_index % lanes;
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), request_index as f64),
                 lanes,
-                QueueSnapshot::new(1, 0),
-                request_index as f64,
                 0.0,
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
@@ -163,11 +177,9 @@ fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
     let mut queue = PolicyQueue::new(&profile());
     for request_index in 0..requests {
         queue
-            .enqueue(
-                0,
+            .enqueue_with_due_at(
+                no_due_metadata(0, QueueSnapshot::new(1, 0), request_index as f64),
                 1,
-                QueueSnapshot::new(1, 0),
-                request_index as f64,
                 0.0,
                 0,
                 WorkerPlacement::Any,

@@ -33,6 +33,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    routed_dp_rank_kwargs,
     supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -948,7 +949,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,
@@ -1051,7 +1052,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,

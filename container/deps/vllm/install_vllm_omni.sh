@@ -96,5 +96,6 @@ path.write_text("# Modified by NVIDIA Dynamo: experimental Physis pipelines remo
 py_compile.compile(str(path), doraise=True)
 PY
   # The image purges PyAV in a later step; check Omni's pipeline registry loads without it.
-  python3 -c "import sys; sys.modules['av'] = None; import vllm_omni.config.pipeline_registry"
+  # Keep humming from creating a root-owned ~/.humming on import.
+  HUMMING_DISABLE_PARALLEL_BUILD=1 python3 -c "import sys; sys.modules['av'] = None; import vllm_omni.config.pipeline_registry"
 fi

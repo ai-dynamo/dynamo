@@ -198,6 +198,8 @@ pub struct SchedulingResponse {
 pub struct AdmittedSchedulingResponse {
     pub response: SchedulingResponse,
     pub attempt: AdmissionAttempt,
+    /// Set by the request classifier for the engine's own admission order.
+    pub backend_priority: Option<i32>,
 }
 
 /// Whether an admitted scheduling response owns tracked request state.

@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::PrefillError;
+use crate::http::service::metrics::request_deadline_exceeded;
 use crate::kv_router::UnknownPolicyClassRefusal;
 use crate::protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
@@ -263,13 +264,18 @@ impl PrefillTask {
     }
 }
 
-/// Cancel prefill when decode dispatch fails with an admission refusal, or because the decode
-/// router refused the request's unknown policy class at class entry. Neither has a receiver
-/// waiting for staged KV.
+/// Cancel prefill when decode dispatch fails with an admission refusal, because the decode
+/// router refused the request's unknown policy class at class entry, or because the request's
+/// deadline expired in the decode router's queue. None has a receiver waiting for staged KV.
+/// Other deadline errors, such as response timeouts, may follow dispatch and keep prefill.
 fn cancel_prefill_on_decode_error(error: &anyhow::Error, prefill_context: &dyn AsyncEngineContext) {
     if error.downcast_ref::<UnknownPolicyClassRefusal>().is_some() {
         tracing::debug!(request_id = %prefill_context.id(), %error,
             "Cancelling remote prefill after decode refused an unknown policy class");
+        prefill_context.stop_generating();
+    } else if request_deadline_exceeded(error.as_ref()) {
+        tracing::debug!(request_id = %prefill_context.id(), %error,
+            "Cancelling remote prefill after the decode router's queue deadline expired before dispatch");
         prefill_context.stop_generating();
     } else {
         let rejection = error
@@ -292,12 +298,12 @@ fn cancel_prefill_on_decode_rejection(
         .or_else(|| {
             std::iter::successors(Some(error), |cause| cause.source())
                 .filter_map(|cause| cause.downcast_ref::<DynamoError>())
-                .find(|error| error.class() == ErrorClass::CapacityExhausted)
+                .find(|cause| cause.class() == ErrorClass::CapacityExhausted)
         });
-    let Some(error) = rejection else {
+    let Some(decode_rejection) = rejection else {
         return false;
     };
-    tracing::debug!(request_id = %prefill_context.id(), %error,
+    tracing::debug!(request_id = %prefill_context.id(), error = %decode_rejection,
         "Cancelling remote prefill after explicit decode rejection");
     prefill_context.stop_generating();
     true
@@ -717,8 +723,17 @@ mod tests {
         }
     }
 
-    async fn assert_dispatch_rejection_cancels_prefill(output: PrefillNeed, error: DynamoError) {
-        let case = format!("output={output:?}, error={error:?}");
+    fn decode_admission_rejection(error_type: ErrorType) -> anyhow::Error {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(error_type)
+            .message("decode admission rejected")
+            .build();
+        anyhow::Error::new(error).context("decode admission rejected")
+    }
+
+    async fn assert_dispatch_rejection_cancels_prefill(output: PrefillNeed, error: anyhow::Error) {
+        let case = format!("output={output:?}, error={error:#}");
+        let message = error.to_string();
         let prefill_context = Arc::new(Controller::default());
         let task_context = prefill_context.clone();
         let (cleaned_tx, cleaned_rx) = oneshot::channel();
@@ -730,7 +745,6 @@ mod tests {
             },
             prefill_context.clone(),
         );
-        let error = anyhow::Error::new(error).context("decode rejected");
         let request_context = Arc::new(Controller::default());
         let result = task
             .forward_decode(
@@ -740,7 +754,10 @@ mod tests {
                 prefill_context.clone(),
             )
             .await;
-        assert!(result.unwrap_err().to_string().contains("decode rejected"));
+        let Err(error) = result else {
+            panic!("decode dispatch error was swallowed: {case}");
+        };
+        assert_eq!(error.to_string(), message);
         assert!(
             prefill_context.is_stopped(),
             "rejected decode left independent prefill running: {case}"
@@ -829,8 +846,11 @@ mod tests {
                 ErrorType::CapacityExhausted,
                 ErrorType::Backend(BackendError::WorkerOverloaded),
             ] {
-                let error = DynamoError::builder().error_type(error_type).build();
-                assert_dispatch_rejection_cancels_prefill(output, error).await;
+                assert_dispatch_rejection_cancels_prefill(
+                    output,
+                    decode_admission_rejection(error_type),
+                )
+                .await;
             }
         }
     }
@@ -862,7 +882,7 @@ mod tests {
             PrefillNeed::BeforeFirst,
         ] {
             let error = DynamoError::reject_before_kv_receiver("invalid sampling options".into());
-            assert_dispatch_rejection_cancels_prefill(output, error.clone()).await;
+            assert_dispatch_rejection_cancels_prefill(output, error.clone().into()).await;
             assert_stream_rejection_cancels_prefill(output, error).await;
         }
     }
@@ -927,6 +947,54 @@ mod tests {
                 ]
             {
                 assert_decode_error_preserves_prefill(output, error).await;
+            }
+        }
+    }
+
+    /// The decode router refuses a request whose deadline expired in its queue before any
+    /// decode worker was booked, so no receiver will pull the staged KV.
+    #[tokio::test]
+    async fn decode_queue_deadline_cancels_prefill() {
+        use dynamo_scheduler::host::KvSchedulerError;
+
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            assert_dispatch_rejection_cancels_prefill(
+                output,
+                crate::kv_router::map_scheduler_error(KvSchedulerError::DeadlineExceeded),
+            )
+            .await;
+        }
+    }
+
+    /// Other deadline errors may follow dispatch while a decode worker pulls staged KV.
+    #[tokio::test]
+    async fn other_deadline_decode_errors_preserve_prefill_transfer() {
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            let plain_deadline = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::DeadlineExceeded)
+                .message("decode deadline exceeded")
+                .build();
+            let request_deadline = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::DeadlineExceeded)
+                .message("request deadline exceeded during migration")
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("request.deadline_exceeded").unwrap(),
+                )
+                .build();
+            let response_timeout = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::ResponseTimeout)
+                .message("decode worker stopped responding")
+                .build();
+            for error in [plain_deadline, request_deadline, response_timeout] {
+                assert_decode_error_preserves_prefill(output, error.into()).await;
             }
         }
     }

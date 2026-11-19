@@ -20,7 +20,7 @@ async def _generate(request, context):
     assert dict(context.metadata.items()) == request.get("expected_metadata", {})
     if request["kind"] == "error":
         raise ValueError("direct adapter test error")
-    if request["kind"] == "decode-rejection":
+    if request["kind"] == "decode-failure":
         error_type = (
             DecodeRejectedBeforeKvReceiver if request["explicit"] else InvalidArgument
         )
@@ -87,7 +87,7 @@ async def test_decode_rejection_preserves_invalid_argument(
     assert not isinstance(InvalidArgument("ordinary"), DecodeRejectedBeforeKvReceiver)
 
     stream = await request_plane_client.generate(
-        {"kind": "decode-rejection", "explicit": explicit}
+        {"kind": "decode-failure", "explicit": explicit}
     )
     with pytest.raises(InvalidArgument, match="^invalid sampling options$") as error:
         async for _ in stream:

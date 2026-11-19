@@ -43,7 +43,7 @@ use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePo
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
-use dynamo_kv_indexer::ResidentBlockCounts;
+use dynamo_kv_indexer::{CacheOwnerBlockCounts, ResidentBlockCounts};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
@@ -132,6 +132,8 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         /// The partition's live resident block counts, lent by the host for a policy that
         /// declared [`WorkerInputs::RESIDENT_BLOCKS`]; `None` otherwise.
         resident_blocks: Option<&'a ResidentBlockCounts>,
+        /// Live lookup for this selection; never retained in prepared rows.
+        decode_progress: Option<&'a dynamo_worker_selection::host::DecodeProgressSource<'a>>,
     },
 }
 
@@ -155,27 +157,40 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            decode_progress: None,
         }
     }
 
     /// Lend the partition's live resident block counts to this selection. The host passes them
     /// only for a policy that declared [`WorkerInputs::RESIDENT_BLOCKS`]; every component's
     /// snapshot borrows them for this selection alone.
-    pub fn with_resident_blocks(self, resident_blocks: Option<&'a ResidentBlockCounts>) -> Self {
+    pub fn with_resident_blocks(mut self, counts: Option<&'a ResidentBlockCounts>) -> Self {
         let Self::Configured {
-            workers,
-            request,
-            eligibility,
-            block_size,
-            ..
+            resident_blocks, ..
+        } = &mut self;
+        *resident_blocks = counts;
+        self
+    }
+
+    /// Lend the owning scheduler's on-demand progress lookup to this selection.
+    pub fn with_decode_progress(
+        mut self,
+        source: Option<&'a dynamo_worker_selection::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        let Self::Configured {
+            decode_progress, ..
+        } = &mut self;
+        *decode_progress = source;
+        self
+    }
+
+    pub fn decode_progress(
+        &self,
+    ) -> Option<&'a dynamo_worker_selection::host::DecodeProgressSource<'a>> {
+        let Self::Configured {
+            decode_progress, ..
         } = self;
-        Self::Configured {
-            workers,
-            request,
-            eligibility,
-            block_size,
-            resident_blocks,
-        }
+        *decode_progress
     }
 
     /// The resident block counts lent to this selection, if any.
@@ -270,6 +285,10 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     pub(super) block_size: u32,
     /// The partition's live resident block counts, when the host lent them for this selection.
     resident_blocks: Option<&'a ResidentBlockCounts>,
+    decode_progress: Option<&'a dynamo_worker_selection::host::DecodeProgressSource<'a>>,
+    /// The cache-owner block counts, pinned from `resident_blocks` on the first read: a
+    /// selection that reads none pins nothing.
+    cache_owner_counts: OnceCell<Option<CacheOwnerBlockCounts>>,
     /// Only tracked requests report cache reuse, so only their rows carry raw cached tokens.
     tracked: bool,
     pub(super) kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
@@ -291,6 +310,8 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            decode_progress: None,
+            cache_owner_counts: OnceCell::new(),
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
             #[cfg(any(test, feature = "testing", feature = "bench"))]
@@ -301,6 +322,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     /// The source for a host's selection input, once its pinned worker is validated.
     fn from_input(input: WorkerSelectionInput<'a, C>) -> Result<Self, KvSchedulerError> {
         let resident_blocks = input.resident_blocks();
+        let decode_progress = input.decode_progress();
         let (workers, request, eligibility, block_size) = input.into_configured();
         eligibility.validate_pinned_worker_allowed()?;
         if let Some(worker) = eligibility.pinned_worker() {
@@ -316,6 +338,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         }
         let mut source = Self::new(request, workers, eligibility, block_size);
         source.resident_blocks = resident_blocks;
+        source.decode_progress = decode_progress;
         Ok(source)
     }
 
@@ -324,6 +347,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     pub(super) fn context(&self) -> WorkerSelectionContext<'_> {
         selection_context(self.request, self.block_size)
             .with_pinned_worker(self.eligibility.pinned_worker())
+            .with_decode_progress(self.decode_progress)
             .with_resident_blocks(
                 self.resident_blocks
                     .is_some()
@@ -544,6 +568,13 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
     #[inline(always)]
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
         self.resident_blocks.and_then(|counts| counts.get(worker))
+    }
+
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        self.cache_owner_counts
+            .get_or_init(|| self.resident_blocks?.cache_owner_block_counts())
+            .as_ref()?
+            .get(worker)
     }
 }
 
