@@ -1834,32 +1834,36 @@ def prefill_probe_handler():
     return handler
 
 
-_JSON_AFTER_REASONING_TAG = {
-    "type": "structural_tag",
-    "format": {
-        "type": "sequence",
-        "elements": [
-            {
-                "type": "tag",
-                "begin": "",
-                "end": {"type": "token", "token": 3},
-                "content": {"type": "any_tokens", "exclude_tokens": [3]},
+@pytest.fixture
+def json_after_reasoning_guidance():
+    return {
+        "structural_tag": {
+            "type": "structural_tag",
+            "format": {
+                "type": "sequence",
+                "elements": [
+                    {
+                        "type": "tag",
+                        "begin": "",
+                        "end": {"type": "token", "token": 3},
+                        "content": {"type": "any_tokens", "exclude_tokens": [3]},
+                    },
+                    {"type": "json_schema", "json_schema": {"type": "object"}},
+                ],
             },
-            {"type": "json_schema", "json_schema": {"type": "object"}},
-        ],
-    },
-}
+        }
+    }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend", "guidance", "rejected"),
     [
-        ("guidance", {"structural_tag": _JSON_AFTER_REASONING_TAG}, True),
-        ("outlines", {"structural_tag": _JSON_AFTER_REASONING_TAG}, True),
-        ("lm-format-enforcer", {"structural_tag": _JSON_AFTER_REASONING_TAG}, True),
-        ("auto", {"structural_tag": _JSON_AFTER_REASONING_TAG}, False),
-        ("xgrammar", {"structural_tag": _JSON_AFTER_REASONING_TAG}, False),
+        ("guidance", None, True),
+        ("outlines", None, True),
+        ("lm-format-enforcer", None, True),
+        ("auto", None, False),
+        ("xgrammar", None, False),
         ("guidance", {"json": {"type": "object"}}, False),
         (
             "guidance",
@@ -1880,12 +1884,14 @@ _JSON_AFTER_REASONING_TAG = {
     ],
 )
 async def test_prefill_checks_structural_tags_against_local_backend(
-    prefill_probe_handler, backend, guidance, rejected
+    prefill_probe_handler, json_after_reasoning_guidance, backend, guidance, rejected
 ):
     handler = prefill_probe_handler
     handler.engine_client.vllm_config = SimpleNamespace(
         structured_outputs_config=SimpleNamespace(backend=backend)
     )
+    if guidance is None:
+        guidance = json_after_reasoning_guidance
     request = VllmPrefillHealthCheckPayload().to_dict()
     request.setdefault("sampling_options", {})["guided_decoding"] = guidance
     stream = handler.generate(request, MagicMock())
