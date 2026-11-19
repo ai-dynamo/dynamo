@@ -170,7 +170,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(
 		&dcd.Spec, oldSpec, field.NewPath("spec"),
-		dcdUsesOrderedEnvironment(dcd), oldDCD != nil && dcdUsesOrderedEnvironment(oldDCD),
+		dynamo.DCDUsesOrderedEnvironment(dcd), oldDCD != nil && dynamo.DCDUsesOrderedEnvironment(oldDCD),
 	)...)
 }
 

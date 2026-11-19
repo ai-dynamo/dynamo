@@ -2279,7 +2279,7 @@ func TestLPXGroveDefaultedRollingUpdatePreservesPodCliqueSet(t *testing.T) {
 	r, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
 	pcs := findLPXTestPodCliqueSet(t, objects)
-	hash, err := commoncontroller.GetSpecHash(pcs, commoncontroller.WithPreservedListOrder())
+	hash, err := commoncontroller.GetSpecHash(pcs, commoncontroller.WithPreservedListOrder(true))
 	require.NoError(t, err)
 	metav1.SetMetaDataAnnotation(&pcs.ObjectMeta, commoncontroller.NvidiaAnnotationHashKey, hash)
 	metav1.SetMetaDataAnnotation(&pcs.ObjectMeta, commoncontroller.NvidiaAnnotationGenerationKey, "1")
@@ -3441,7 +3441,7 @@ func materializeLPXTestPCS(t *testing.T, deployment *v1alpha1.LPXGraphDeployment
 	}
 
 	// Include the operator bookkeeping on a materialized, acknowledged PCS.
-	hash, err := commoncontroller.GetSpecHash(pcs, commoncontroller.WithPreservedListOrder())
+	hash, err := commoncontroller.GetSpecHash(pcs, commoncontroller.WithPreservedListOrder(true))
 	require.NoError(t, err)
 	if pcs.Annotations == nil {
 		pcs.Annotations = make(map[string]string)

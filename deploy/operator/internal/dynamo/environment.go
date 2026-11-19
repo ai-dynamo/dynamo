@@ -26,6 +26,20 @@ type podEnvironment struct {
 	policyBindings []corev1.EnvVar
 }
 
+// DCDUsesOrderedEnvironment follows the origin selected by the workload renderer.
+// dcd must not be nil. Any semantic role consumes the shared root env list.
+func DCDUsesOrderedEnvironment(dcd *v1beta1.DynamoComponentDeployment) bool {
+	if dcd.GetParentGraphDeploymentName() == "" {
+		return compatibility.OrderedEnvironmentVariables.Enabled(dcd.Annotations)
+	}
+	for _, template := range ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		if compatibility.OrderedEnvironmentVariables.Enabled(template.Annotations) {
+			return true
+		}
+	}
+	return false
+}
+
 func newPodEnvironment(annotations map[string]string, general []corev1.EnvVar) *podEnvironment {
 	if !compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
 		return nil
