@@ -659,6 +659,8 @@ requirements.txt                                                                
 /.ai/metrics-review.md                                                                                  @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.devcontainer/sglang/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /.devcontainer/trtllm/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/lib/sidecar/AGENTS.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/CLAUDE.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/docker-compose.yml                                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /docs/fern/**/*sidecar*                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-sidecar-codeowners

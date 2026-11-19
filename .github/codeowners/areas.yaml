@@ -1265,6 +1265,14 @@ shared:
   owners:
   - performance
   - sidecar
+- glob: lib/sidecar/AGENTS.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/CLAUDE.md
+  owners:
+  - runtime
+  - sidecar
 - glob: lib/sidecar/Dockerfile
   owners:
   - ops
