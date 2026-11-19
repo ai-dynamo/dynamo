@@ -54,6 +54,10 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 	// Validate the final merge independently of typed rules; overrides remain authoritative.
 	input, err := aisimulate.Lower(spec)
 	if err != nil {
+		// Override syntax errors were already reported by the always-run AISimSpec validation.
+		if _, overrideErr := aisimulate.InputOverrides(spec); overrideErr != nil {
+			return allErrs
+		}
 		return append(allErrs, field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error()))
 	}
 	if err := aisimulate.ValidateInput(input); err != nil {
@@ -136,8 +140,10 @@ func validateAISimSpec(
 ) field.ErrorList {
 	// Use the lowering package's decoder as the single interpretation of RawExtension.
 	overrides, err := aisimulate.InputOverrides(&nvidiacomv1beta2.NativeSearchInput{AISim: input})
-	if err != nil || overrides == nil {
-		// The lowering validation reports malformed override documents once.
+	if err != nil {
+		return field.ErrorList{field.Invalid(fldPath.Child("inputOverrides"), "<redacted>", err.Error())}
+	}
+	if overrides == nil {
 		return nil
 	}
 

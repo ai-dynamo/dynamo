@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strings"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
@@ -68,7 +70,8 @@ func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[strin
 }
 
 // InputOverrides returns spec.aisim.inputOverrides as a JSON object, expanding exact
-// {"$null":true} objects to native nulls. An absent or null document returns nil.
+// {"$null":true} object-field values outside arrays to native nulls. Other uses of $null
+// return an error. An absent or native-null document returns nil.
 func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	if spec.AISim == nil || spec.AISim.InputOverrides == nil {
 		return nil, nil
@@ -92,36 +95,58 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("spec.aisim.inputOverrides: trailing JSON value")
 	}
-	switch typed := expandNullSentinels(value).(type) {
+	switch typed := value.(type) {
 	case nil:
 		return nil, nil
 	case map[string]any:
+		if _, err := expandNullSentinels(typed, "", false); err != nil {
+			return nil, err
+		}
 		return typed, nil
 	default:
 		return nil, fmt.Errorf("spec.aisim.inputOverrides: must be a JSON object, got %T", value)
 	}
 }
 
-// expandNullSentinels replaces exact {"$null":true} objects in decoded JSON; nil is JSON null.
+// expandNullSentinels validates and expands object-field deletion markers in decoded JSON.
+// path is empty at the document root; inArray stays true below any array. Native null is nil.
 // It mutates the decoded maps and slices, never the spec.
-func expandNullSentinels(value any) any {
+func expandNullSentinels(value any, path string, inArray bool) (any, error) {
 	switch typed := value.(type) {
 	case map[string]any:
-		if len(typed) == 1 && typed["$null"] == true {
-			return nil
+		// A reserved directive must be an exact marker outside the root and arrays.
+		if marker, found := typed["$null"]; found {
+			if path == "" {
+				return nil, fmt.Errorf("spec.aisim.inputOverrides: $null is not allowed at the document root")
+			}
+			if inArray {
+				return nil, fmt.Errorf("spec.aisim.inputOverrides%s: $null is not allowed inside arrays", path)
+			}
+			if len(typed) != 1 || marker != true {
+				return nil, fmt.Errorf("spec.aisim.inputOverrides%s: $null must be the boolean true and the only object field", path)
+			}
+			return nil, nil
 		}
 
-		// Keep non-marker objects and recursively decode their values.
-		for key, member := range typed {
-			typed[key] = expandNullSentinels(member)
+		// Visit keys in a stable order so multiple invalid directives report deterministically.
+		for _, key := range slices.Sorted(maps.Keys(typed)) {
+			expanded, err := expandNullSentinels(typed[key], fmt.Sprintf("%s[%q]", path, key), inArray)
+			if err != nil {
+				return nil, err
+			}
+			typed[key] = expanded
 		}
 	case []any:
-		// Arrays keep their length when a marker becomes a null element.
+		// Reject directives anywhere below an array while preserving native array values.
 		for i, member := range typed {
-			typed[i] = expandNullSentinels(member)
+			expanded, err := expandNullSentinels(member, fmt.Sprintf("%s[%d]", path, i), true)
+			if err != nil {
+				return nil, err
+			}
+			typed[i] = expanded
 		}
 	}
-	return value
+	return value, nil
 }
 
 // Underlay translates the typed spec into the public CoreRecommendationConfig input consumed by

@@ -87,14 +87,27 @@ derived defaults have been lowered to AISimulate input. Object fields merge
 recursively, arrays and scalars replace their previous values, and `null` deletes
 the named field or parent object. The operator does not restore deleted defaults.
 
-Dynamo 1.8 adds the exact object `{$null: true}` as an alternative spelling of `null`. The operator
-expands it recursively before merging and validating the AISimulate input. The
-stored Request and its immutable Run snapshot retain the original spelling.
-Only this exact object is reserved: `{$null: false}`, `{$null: "true"}`, and objects
-with additional keys remain ordinary data, subject to the AISimulate schema.
-Inside arrays, the alias produces a null array value; it does not remove an array
-element. A whole `inputOverrides` document set to `null` or `{$null: true}` supplies
-no overrides.
+Dynamo 1.8 adds the exact object `{$null: true}` as a deletion alias, allowed only
+as the value of an object field outside arrays. The operator expands valid aliases
+before merging and validating the AISimulate input. The stored Request and its
+immutable Run snapshot retain the original spelling.
+
+`$null` is reserved. Its value must be the boolean `true`, and its object must
+contain no other keys. Other values, additional keys, a marker directly on
+`inputOverrides`, and any marker anywhere inside an array are rejected with a
+path-specific error, including on updates that leave the spec unchanged. This
+includes markers nested in objects inside an array.
+To delete an entire array-valued field, put the marker on that object field.
+Native null array values keep their normal JSON meaning. A whole document set
+to native `null` continues to supply no overrides.
+
+| Form | Result |
+| --- | --- |
+| `prefill: {$null: true}` | Deletes the `prefill` object field |
+| `prefill: {$null: false}` or `prefill: {$null: "true"}` | Rejected: the value must be boolean `true` |
+| `prefill: {$null: true, other: 1}` | Rejected: the object has an additional key |
+| `inputOverrides: {$null: true}` | Rejected: marker at the document root |
+| `values: [{$null: true}]` or `values: [{nested: {$null: true}}]` | Rejected: marker inside an array |
 
 <Warning>
   Client-side `kubectl apply` removes native null values, as observed with kubectl

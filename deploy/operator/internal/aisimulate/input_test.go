@@ -474,6 +474,7 @@ func TestLowerNullSentinelsMatchNativeNulls(t *testing.T) {
 		{name: "typed field", overrides: `{"traffic":{"source":{"input_tokens":null}}}`},
 		{name: "derived default", overrides: `{"traffic":{"stop":{"requests":null,"requests_per_load_unit":10}}}`},
 		{name: "complete section", overrides: `{"optimizer":null}`},
+		{name: "complete array field", overrides: `{"engine":{"backend":{"choices":null}}}`},
 		{name: "absent field", overrides: `{"optimizer":{"missing":null,"seed":9007199254740993}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -498,15 +499,13 @@ func TestInputOverridesNullSentinelValues(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "whole document", raw: `{"$null":true}`, want: `null`},
-		{name: "array values", raw: `{"values":[{"$null":true},{"nested":{"$null":true}},null]}`, want: `{"values":[null,{"nested":null},null]}`},
-		{name: "false is ordinary data", raw: `{"value":{"$null":false}}`, want: `{"value":{"$null":false}}`},
-		{name: "number is ordinary data", raw: `{"value":{"$null":1}}`, want: `{"value":{"$null":1}}`},
-		{name: "string is ordinary data", raw: `{"value":{"$null":"true"}}`, want: `{"value":{"$null":"true"}}`},
-		{name: "extra keys are ordinary data", raw: `{"value":{"$null":true,"other":1}}`, want: `{"value":{"$null":true,"other":1}}`},
+		{name: "native null document", raw: `null`, want: `null`},
+		{name: "native array values", raw: `{"values":[null,{"nested":null},[1]]}`, want: `{"values":[null,{"nested":null},[1]]}`},
+		{name: "whole array field", raw: `{"values":{"$null":true}}`, want: `{"values":null}`},
+		{name: "ordinary object", raw: `{"value":{"other":true}}`, want: `{"value":{"other":true}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Interpret only the exact sentinel and retain array replacement values")
+			t.Log("Expand object-field markers and retain native nulls and ordinary data")
 			spec := withInputOverrides(defaultedSpec(), tc.raw)
 			got, err := InputOverrides(&spec.NativeSearchInput)
 			if err != nil {
@@ -514,6 +513,40 @@ func TestInputOverridesNullSentinelValues(t *testing.T) {
 			}
 			if encoded := encode(t, got); encoded != tc.want {
 				t.Fatalf("input overrides = %s, want %s", encoded, tc.want)
+			}
+		})
+	}
+}
+
+func TestInputOverridesRejectsInvalidNullSentinels(t *testing.T) {
+	const malformed = "$null must be the boolean true and the only object field"
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		path    string
+		message string
+	}{
+		{name: "false", raw: `{"value":{"$null":false}}`, path: `["value"]`, message: malformed},
+		{name: "number", raw: `{"value":{"$null":1}}`, path: `["value"]`, message: malformed},
+		{name: "string", raw: `{"value":{"$null":"true"}}`, path: `["value"]`, message: malformed},
+		{name: "null", raw: `{"value":{"$null":null}}`, path: `["value"]`, message: malformed},
+		{name: "object", raw: `{"value":{"$null":{}}}`, path: `["value"]`, message: malformed},
+		{name: "list", raw: `{"value":{"$null":[]}}`, path: `["value"]`, message: malformed},
+		{name: "extra keys", raw: `{"value":{"$null":true,"other":1}}`, path: `["value"]`, message: malformed},
+		{name: "root", raw: `{"$null":true}`, message: "$null is not allowed at the document root"},
+		{name: "array element", raw: `{"values":[{"$null":true}]}`, path: `["values"][0]`, message: "$null is not allowed inside arrays"},
+		{name: "object inside array", raw: `{"values":[{"nested":{"$null":true}}]}`, path: `["values"][0]["nested"]`, message: "$null is not allowed inside arrays"},
+		{name: "nested array", raw: `{"values":[[{"$null":true}]]}`, path: `["values"][0][0]`, message: "$null is not allowed inside arrays"},
+		{name: "path preserves map keys", raw: `{"a.b":{"c/d":{"$null":false}}}`, path: `["a.b"]["c/d"]`, message: malformed},
+		{name: "first error is deterministic", raw: `{"z":{"$null":false},"a":{"$null":"true"}}`, path: `["a"]`, message: malformed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Reject a reserved directive before merging, even in otherwise opaque input")
+			spec := withInputOverrides(defaultedSpec(), tc.raw)
+			_, err := Lower(&spec.NativeSearchInput)
+			want := "spec.aisim.inputOverrides" + tc.path + ": " + tc.message
+			if err == nil || err.Error() != want {
+				t.Fatalf("Lower error = %v, want %s", err, want)
 			}
 		})
 	}
