@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 from difflib import unified_diff
 from pathlib import Path
@@ -10,7 +11,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
+
+def repository_root() -> Path:
+    if workspace := os.environ.get("GITHUB_WORKSPACE"):
+        return Path(workspace).resolve()
+
+    cwd = Path.cwd().resolve()
+    if (cwd / "components/src/dynamo/aisimulate").is_dir():
+        return cwd
+
+    return Path(__file__).resolve().parents[6]
 
 
 def assert_yaml_golden(golden: Path, actual: str) -> None:
@@ -23,14 +33,9 @@ def assert_yaml_golden(golden: Path, actual: str) -> None:
     proposal = golden.with_name(f"{golden.stem}.new{golden.suffix}")
     proposal.parent.mkdir(parents=True, exist_ok=True)
     proposal.write_text(actual)
+    root = repository_root()
     golden_arg, proposal_arg = (
-        shlex.quote(
-            str(
-                path.relative_to(_REPOSITORY_ROOT)
-                if path.is_relative_to(_REPOSITORY_ROOT)
-                else path
-            )
-        )
+        shlex.quote(str(path.relative_to(root) if path.is_relative_to(root) else path))
         for path in (golden, proposal)
     )
     review_source = golden_arg if expected is not None else "/dev/null"
