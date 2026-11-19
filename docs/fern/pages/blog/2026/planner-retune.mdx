@@ -330,9 +330,11 @@ divides by it.
 **What a sweep costs.** The replays are simulations and need no GPU. In these two experiments each sweep ran as four
 CPU-only pods next to the deployment and scored 108 candidates in about five minutes and 36 in about three.
 
-**If a switch does not pay off.** Retune does not check a decision against live metrics, and it has no automatic
-rollback. The next window is replayed with the new settings as the baseline, so they are replaced then if another
-candidate is more than 3% better. To go back sooner, set `advisory: true`: the Planner then returns the routers to
+**If a switch does not pay off.** Retune decides on simulation alone, and there is no guarantee that the simulation
+matches real performance. Retune also has no way to monitor whether the new settings really do better than the old
+ones once they are live: the next window repeats the search in simulation, and there is no automatic rollback. If that
+is a concern, start in `advisory` mode and check the recommended settings in a small-scale test or an A/B test before
+you let retune apply them. To undo a switch by hand, set `advisory: true`: the Planner then returns the routers to
 their startup settings, and a restarted Planner runs its configured values again. See
 [Disable](../../kubernetes/auto-deployment/planner-live-retune.md#disable).
 
