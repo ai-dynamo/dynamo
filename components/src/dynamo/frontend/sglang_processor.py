@@ -64,6 +64,7 @@ from .utils import (
     nvext_extra_field_requested,
     random_uuid,
     read_jinja_chat_template,
+    request_cache_salt,
     resolve_chat_template,
     worker_warmup,
 )
@@ -188,16 +189,6 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
         routing["expected_output_tokens"] = expected_output_tokens
 
     return routing or None
-
-
-def _request_cache_salt(request: dict[str, Any]) -> str | None:
-    """Match the public precedence of Rust's ``request_cache_salt``."""
-    nvext = request.get("nvext")
-    salt = nvext.get("cache_salt") if isinstance(nvext, dict) else None
-    if isinstance(salt, str) and salt:
-        return salt
-    salt = request.get("cache_salt")
-    return salt if isinstance(salt, str) and salt else None
 
 
 def _request_stop_strings(request: dict[str, Any]) -> set[str]:
@@ -602,7 +593,7 @@ def _build_dynamo_preproc(
             routing = {**nvext_routing, **routing}
     else:
         routing = nvext_routing
-    cache_salt = _request_cache_salt(request)
+    cache_salt = request_cache_salt(request)
     if cache_salt is not None:
         # The router and worker must use the same public namespace. Build a new
         # dict so the caller's routing hints are not mutated.
