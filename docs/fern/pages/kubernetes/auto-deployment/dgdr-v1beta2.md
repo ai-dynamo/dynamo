@@ -15,10 +15,10 @@ Each Candidate represents one evaluated point. Its spec contains the unpruned
 evaluation `metrics`, and a `Valid` condition. Choose a valid result and copy its spec into an
 independent DGD.
 
-> [!WARNING]
-> **Experimental.** DGDR v1beta2 is not feature complete and may change incompatibly in future
-> releases. This guide covers static and recorded-trace workloads, scalar and Pareto optimization,
-> DGD overrides, and manual Candidate-to-DGD creation.
+> [!NOTE]
+> DGDR v1beta2 is available without a feature gate but is not feature complete. This guide covers
+> static and recorded-trace workloads, scalar and Pareto optimization, DGD overrides, and manual
+> Candidate-to-DGD creation.
 
 ## Prerequisites
 
@@ -27,8 +27,7 @@ Install the operator and matching DGDR v1beta2 CRDs as described in the
 feature gate. Installations with `dynamo-operator.upgradeCRD=false` require an administrator to
 install the matching CRDs before upgrading the operator.
 
-Planner live retune has its own disabled-by-default
-`dynamo-operator.dgdrV1Beta2.plannerLiveRetune` Helm opt-in and requires Planner configuration.
+Planner live retune remains a separate, disabled-by-default feature with its existing opt-ins.
 It is not required for a manually submitted search. See [Planner Live Retune](planner-live-retune.md).
 
 The operator selects the planner image configured by its Helm release. Requests and Runs cannot

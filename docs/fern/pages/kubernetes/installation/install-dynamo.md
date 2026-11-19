@@ -151,19 +151,19 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!TIP]
 > All `helm install` commands can be customized with your own values file: `helm install ... -f your-values.yaml`
 
-> [!WARNING]
-> **Experimental.** Starting with platform chart v1.7.0, the operator installs and serves
-> the DGDR v1beta2 Request, Run, and Candidate APIs and reconciles Requests into Runs without
-> a feature gate. These APIs are not feature complete and may change incompatibly in future
-> releases. Older chart versions, including the `1.2.1` example above,
-> do not provide this default availability.
+> [!NOTE]
+> Starting with platform chart v1.8.0, the operator installs and serves the DGDR v1beta2 Request,
+> Run, and Candidate APIs and reconciles Requests into Runs without a feature gate. These APIs
+> are available but not feature complete. Older chart versions, including the `1.2.1` example
+> above, do not provide this default availability.
 >
-> Remove the obsolete `dynamo-operator.dgdrV1Beta2.enabled` Helm value from custom values files.
 > Custom operator and CRD-installer commands must remove `--dgdr-v1beta2-enabled`.
-> Kubernetes persists Run and Candidate objects in etcd, so review API migration notes before
-> upgrading. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
-> installations, require an administrator to install the matching CRDs before upgrading the operator. Planner live retune remains disabled unless explicitly enabled
-> with `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` and configured on the Planner.
+> The legacy `dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability;
+> it remains solely for the existing Planner live-retune RBAC condition. Retune remains disabled
+> by default with its existing opt-ins.
+>
+> Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
+> installations, require an administrator to install the matching CRDs before upgrading the operator.
 
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:

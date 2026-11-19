@@ -79,7 +79,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	// The platform chart installs Run admission by default alongside the Experimental API.
+	// The platform chart installs Run admission by default alongside the v1beta2 API.
 	dgdrRunHandler := webhookvalidation.NewDynamoGraphDeploymentRunHandler()
 	if err := dgdrRunHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRun webhook: %w", err)

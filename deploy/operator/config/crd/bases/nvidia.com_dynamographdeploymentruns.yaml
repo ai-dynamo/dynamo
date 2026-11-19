@@ -41,8 +41,7 @@ spec:
         openAPIV3Schema:
           description: |-
             DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
-            Experimental and not feature complete. Available without a feature gate; this API
-            may change incompatibly in future releases.
+            Available without a feature gate. This API is not feature complete.
           properties:
             apiVersion:
               description: |-

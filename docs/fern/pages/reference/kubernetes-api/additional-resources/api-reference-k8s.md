@@ -3417,8 +3417,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
-Experimental and not feature complete. Available without a feature gate; this API
-may change incompatibly in future releases.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3456,8 +3455,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
-Experimental and not feature complete. Available without a feature gate; this API
-may change incompatibly in future releases.
+Available without a feature gate. This API is not feature complete.
 
 
 
@@ -3566,8 +3564,7 @@ _Appears in:_
 
 
 DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
-Experimental and not feature complete. Available without a feature gate; this API
-may change incompatibly in future releases.
+Available without a feature gate. This API is not feature complete.
 
 
 

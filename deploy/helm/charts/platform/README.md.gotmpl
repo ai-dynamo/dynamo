@@ -108,23 +108,23 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### API Availability
 
-##### Experimental DGDR v1beta2 Without an API Gate
+##### DGDR v1beta2 Available by Default
 
-**Change:** The operator installs and serves the Experimental DGDR v1beta2 Request, Run, and
-Candidate APIs and starts their controllers without a feature gate. The API is Experimental
-and not feature complete; it may change incompatibly in future releases. Existing v1beta1 Requests
-retain their API and behavior; the Request storage version and conversion contract are unchanged.
+**Change:** The operator installs and serves the DGDR v1beta2 Request, Run, and Candidate APIs
+and starts their controllers without a feature gate. The API is available but not feature complete.
+Existing v1beta1 Requests retain their API and behavior; the Request storage version and conversion
+contract are unchanged.
 
 **Affected:** All operator installations, including those that previously left
-`dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Existing v1beta2 resources continue
-to reconcile. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
-operators, require the matching CRDs to be installed before upgrading the operator.
+`dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Installations with
+`dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, require the matching
+CRDs to be installed before upgrading the operator.
 
-**Action:** Remove `dynamo-operator.dgdrV1Beta2.enabled` from custom values files and
-`--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands. Ordinary Helm upgrades
-remove the flag automatically. Review Experimental API migration notes before future upgrades.
-Planner live retune remains disabled by default behind
-`dynamo-operator.dgdrV1Beta2.plannerLiveRetune` and still requires explicit Planner configuration.
+**Action:** Remove `--dgdr-v1beta2-enabled` from custom operator and CRD-installer commands.
+Ordinary Helm upgrades remove the flag automatically. The legacy
+`dynamo-operator.dgdrV1Beta2.enabled` value no longer controls API availability; it remains solely
+for the existing Planner live-retune RBAC condition. Retune behavior and its disabled defaults are
+unchanged. Review API migration notes before future upgrades.
 
 #### Operator behavior breaking changes
 
