@@ -82,3 +82,4 @@ maintainer: Andy Henroid
 gaps:
 - The 1.7.0 enterprise images publish on NGC with the Dynamo 1.7.0 release.
 - No performance results for image and video requests; NIM Factory accuracy testing covered them.
+- Video on the disaggregated target needs a longer request timeout and NIXL KV lease; see the recipe README.

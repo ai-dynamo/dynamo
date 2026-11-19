@@ -125,6 +125,32 @@ every worker, and to the frontend if it decodes video (`--frontend-decoding`):
   value: "256"
 ```
 
+To serve video on the disaggregated target, make two more changes. A large inline video can take
+longer than the default 5 s request timeout to reach a prefill worker, and the decode worker
+reloads each video before it pulls KV from prefill, which can take minutes under load. Prefill
+releases unread KV blocks after 30 s by default, and decode then generates from stale KV.
+
+- Add this variable to the frontend and every worker:
+
+  ```yaml
+  - name: DYN_TCP_REQUEST_TIMEOUT
+    value: "120"
+  ```
+
+- Add `"kv_lease_duration":2400` to the `NixlConnector` settings in `KV_TRANSFER_CONFIG` on the
+  prefill and decode workers. On prefill, it goes in the `NixlConnector` entry inside the
+  `MultiConnector`. On decode, the value becomes:
+
+  ```yaml
+  - name: KV_TRANSFER_CONFIG
+    value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"kv_lease_duration":2400}}'
+  ```
+
+The 2400 s lease covers the longest KV pull wait seen in Video-MME testing, about 1,180 s; raise
+it if your decode queue runs longer. Prefill holds the KV blocks of abandoned requests for the
+whole lease. See [#16155](https://github.com/ai-dynamo/dynamo/issues/16155) and
+[vllm-project/vllm#61229](https://github.com/vllm-project/vllm/issues/61229).
+
 NIM Factory image and video accuracy testing used these settings.
 
 ## Benchmark

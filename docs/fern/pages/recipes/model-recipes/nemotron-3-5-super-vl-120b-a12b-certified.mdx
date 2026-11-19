@@ -148,6 +148,7 @@ The runs used a synthetic MTP acceptance length of 4.06 with five draft tokens. 
 
 - The 1.7.0 enterprise images publish on NGC with the Dynamo 1.7.0 release.
 - To serve image or video requests, add `--mm-ipc-gpu-memory-gb 10` to every worker and raise the request size limits; see the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md#multimodal-workloads). NIM Factory image and video accuracy testing used these settings.
+- To serve video on the disaggregated target, also raise `DYN_TCP_REQUEST_TIMEOUT` to 120 s and the NIXL KV lease (`kv_lease_duration`) to 2400 s; the same README section shows how. With the defaults, large videos time out on the way to prefill, and decode can read KV after prefill has released it.
 - The disaggregated decode workers use `NixlConnector` alone, matching the open-source recipe.
 
 ## Source
