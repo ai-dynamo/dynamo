@@ -180,7 +180,8 @@ pub(super) struct PrefillLoadTracker {
     pub(super) anchored_prefill: Option<(RequestId, Instant)>,
     /// Load state of the anchored request, cached so snapshots need no lookup.
     anchored_load: Option<PrefillLoadState>,
-    /// Modeled token progress that exceeded available work before a later arrival.
+    /// Modeled token progress not charged to the active prefills: it exceeded available
+    /// work before a later arrival, or a removed prefill had absorbed it.
     discarded_completed_tokens: usize,
 }
 
@@ -258,11 +259,10 @@ impl PrefillLoadTracker {
             .anchored_prefill
             .as_ref()
             .is_some_and(|(anchored_id, _)| anchored_id == request_id);
-        if !removed_front && prefill.expected_prefill_duration.is_some() {
-            // The removal takes its own tokens' worth of progress with it. Progress left
-            // behind would be charged to the remaining prefills, including later arrivals.
-            let shift = self.anchor_time_for_tokens(prefill.initial_effective_prefill_tokens);
-            self.shift_anchor_forward(shift, decay_now);
+        if !removed_front && let Some(expected_prefill_duration) = prefill.expected_prefill_duration
+        {
+            let removed_tokens = prefill.initial_effective_prefill_tokens;
+            self.shift_anchor_forward(removed_tokens, expected_prefill_duration, decay_now);
         }
         if removed_front {
             self.set_anchor_to_front(decay_now);
@@ -270,43 +270,41 @@ impl PrefillLoadTracker {
         Some(prefill)
     }
 
-    /// Time the anchor's rate needs to complete `tokens`, rounded up so that a shift
-    /// by it takes back at least `tokens` of progress.
-    fn anchor_time_for_tokens(&self, tokens: usize) -> Duration {
-        let Some(PrefillLoadState {
-            initial_effective_prefill_tokens: anchor_tokens,
-            expected_prefill_duration: Some(anchor_duration),
-        }) = self.anchored_load
+    fn shift_anchor_forward(
+        &mut self,
+        removed_tokens: usize,
+        duration: Duration,
+        max_anchor_time: Instant,
+    ) {
+        let (Some((_, anchored_since)), Some(load)) =
+            (self.anchored_prefill.as_mut(), self.anchored_load)
         else {
-            return Duration::ZERO;
-        };
-        if anchor_tokens == 0 {
-            return Duration::ZERO;
-        }
-        let nanos = (tokens as u128)
-            .saturating_mul(anchor_duration.as_nanos())
-            .div_ceil(anchor_tokens as u128);
-        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
-    }
-
-    fn shift_anchor_forward(&mut self, duration: Duration, max_anchor_time: Instant) {
-        let Some((_, anchored_since)) = self.anchored_prefill.as_mut() else {
             return;
         };
+        let progress_since = |anchored_since: Instant| {
+            completed_prefill_tokens(
+                load.initial_effective_prefill_tokens,
+                load.expected_prefill_duration,
+                max_anchor_time.saturating_duration_since(anchored_since),
+            )
+        };
+        let before = progress_since(*anchored_since);
         let shifted = anchored_since
             .checked_add(duration)
             .unwrap_or(max_anchor_time);
         *anchored_since = shifted.min(max_anchor_time);
-        let elapsed = max_anchor_time.saturating_duration_since(*anchored_since);
-        if let Some(load) = self.anchored_load {
-            self.discarded_completed_tokens =
-                self.discarded_completed_tokens
-                    .min(completed_prefill_tokens(
-                        load.initial_effective_prefill_tokens,
-                        load.expected_prefill_duration,
-                        elapsed,
-                    ));
-        }
+        let after = progress_since(*anchored_since);
+        // Progress beyond the anchor's own tokens was absorbed by the other prefills.
+        // Discard the removed prefill's share of it that the shift did not return, or
+        // it is charged to the prefills that remain.
+        let absorbed = before
+            .saturating_sub(self.discarded_completed_tokens)
+            .saturating_sub(load.initial_effective_prefill_tokens)
+            .min(removed_tokens);
+        self.discarded_completed_tokens = self
+            .discarded_completed_tokens
+            .saturating_add(absorbed.saturating_sub(before.saturating_sub(after)))
+            .min(after);
     }
 
     pub(super) fn set_anchor_to_front(&mut self, now: Instant) {
@@ -781,9 +779,9 @@ mod tests {
     fn arrival_progress_survives_nonfront_completion_and_resets_with_new_front() {
         // Removing C shifts the anchor and bounds discarded progress. The capped
         // case leaves no elapsed progress; the partial shift leaves 20 tokens.
-        for (case, c_tokens, remaining_tokens) in [
-            ("partial anchor shift", 100, 180),
-            ("anchor shift capped at completion", 1000, 200),
+        for (case, duration, remaining_tokens) in [
+            ("partial anchor shift", 10, 180),
+            ("anchor shift capped at completion", 100, 200),
         ] {
             let epoch = Instant::now();
             let mut tracker = PrefillLoadTracker::default();
@@ -795,7 +793,7 @@ mod tests {
             );
             let next = epoch + Duration::from_millis(31);
             assert_eq!(tracker.snapshot().active_tokens_at(next), 90, "{case}");
-            tracker.insert(&"C".into(), prefill_state_ms(c_tokens, 10), next);
+            tracker.insert(&"C".into(), prefill_state_ms(100, duration), next);
             let completion = epoch + Duration::from_millis(32);
             tracker.remove(&"C".into(), completion);
             tracker.assert_consistent();
@@ -862,43 +860,49 @@ mod tests {
     #[test]
     fn nonfront_removal_keeps_later_arrival_booked() {
         // A is 100 tokens / 10 ms and stays live past its estimate. Z books at 1 ms,
-        // B books 100 tokens at `b_arrival_ms`, and Z completes 1 ms after B books.
-        for (case, z, b_arrival_ms, expected) in [
-            ("Z at the anchor's rate", prefill_state_ms(100, 10), 50, 90),
-            // Fewer than Z's 1000 tokens have decayed, so Z takes all of the progress.
-            (
-                "Z at 10x the anchor's rate",
-                prefill_state_ms(1000, 10),
-                50,
-                200,
-            ),
-            (
-                "Z at 10x, B arrives after the backlog drained",
-                prefill_state_ms(1000, 10),
-                200,
-                90,
-            ),
-            (
-                "Z at a tenth of the anchor's rate",
-                prefill_state_ms(100, 100),
-                50,
-                90,
-            ),
+        // B books 100 tokens at `b_ms`, and Z completes 1 ms after B books.
+        for (case, z_tokens, b_ms, expected) in [
+            ("Z at the anchor's rate", 100, 50, 90),
+            ("Z at 10x the anchor's rate", 1000, 50, 100),
+            ("Z at 10x, B books after the backlog drained", 1000, 200, 90),
         ] {
             let epoch = Instant::now();
             let ms = |n: u64| epoch + Duration::from_millis(n);
             let mut tracker = PrefillLoadTracker::default();
             tracker.insert(&"A".into(), prefill_state_ms(100, 10), ms(0));
-            tracker.insert(&"Z".into(), z, ms(1));
-            tracker.insert(&"B".into(), prefill_state_ms(100, 10), ms(b_arrival_ms));
-            let later = ms(b_arrival_ms + 1);
+            tracker.insert(&"Z".into(), prefill_state_ms(z_tokens, 10), ms(1));
+            tracker.insert(&"B".into(), prefill_state_ms(100, 10), ms(b_ms));
+            let later = ms(b_ms + 1);
             tracker.remove(&"Z".into(), later);
             tracker.assert_consistent();
-            assert_eq!(
-                tracker.snapshot().active_tokens_at(later),
-                expected,
-                "{case}"
-            );
+            let active = tracker.snapshot().active_tokens_at(later);
+            assert_eq!(active, expected, "{case}");
         }
+    }
+
+    #[test]
+    fn nonfront_removal_inside_anchor_estimate_returns_own_duration() {
+        // 80 of A's 100 tokens have decayed, so X absorbed none: only its own 5 ms return.
+        let epoch = Instant::now();
+        let now = epoch + Duration::from_millis(8);
+        let mut tracker = PrefillLoadTracker::default();
+        tracker.insert(&"A".into(), prefill_state_ms(100, 10), epoch);
+        tracker.insert(&"X".into(), prefill_state_ms(100, 5), now);
+        tracker.remove(&"X".into(), now);
+        assert_eq!(tracker.snapshot().active_tokens_at(now), 70);
+    }
+
+    #[test]
+    fn nonfront_removal_with_unmodeled_prefill_returns_own_duration() {
+        // Only A decays while an unmodeled prefill is booked, and A stays past its
+        // estimate after Z's own 10 ms return.
+        let epoch = Instant::now();
+        let ms = |n: u64| epoch + Duration::from_millis(n);
+        let mut tracker = PrefillLoadTracker::default();
+        tracker.insert(&"A".into(), prefill_state_ms(100, 10), ms(0));
+        tracker.insert(&"unknown".into(), unmodeled_prefill_state(1), ms(0));
+        tracker.insert(&"Z".into(), prefill_state_ms(1000, 10), ms(1));
+        tracker.remove(&"Z".into(), ms(51));
+        assert_eq!(tracker.snapshot().active_tokens_at(ms(51)), 1);
     }
 }
