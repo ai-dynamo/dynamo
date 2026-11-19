@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" width="760" height="480" role="img" aria-labelledby="title desc">
   <title id="title">sglang-multinode-dp</title>
-  <desc id="desc">SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC. The node 1 follower sidecar has no request-plane edge and no gRPC request edge; it only relays its SGLang KV events (ZMQ) to the frontend. SGLang on both nodes dispatches requests between nodes and runs collectives with each other.</desc>
+  <desc id="desc">SGLang attention data parallelism across two nodes, with one Dynamo Sidecar per node. The Dynamo Frontend router picks a worker, and with KV routing a DP rank, and sends requests over the request plane to either node's sidecar. The node 0 sidecar registers DP ranks 0-1 and the node 1 sidecar DP ranks 2-3; each calls the SGLang Rust listener of the request's rank on its own node over native gRPC, and relays its node's KV events (ZMQ) to the frontend. SGLang on both nodes runs collectives with each other; neither node dispatches requests to the other.</desc>
 
   <defs>
     <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -234,27 +234,27 @@
 
   <rect x="40" y="208" width="136" height="64" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="108.0" y="232.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Frontend</text>
-  <text x="108.0" y="249.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Router picks a DP rank</text>
+  <text x="108.0" y="249.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Router picks a worker</text>
   <rect x="262" y="80" width="152" height="96" rx="10" fill="var(--accent)" opacity="0.7"/>
   <rect x="264" y="80" width="152" height="96" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5" filter="url(#shadow)"/>
   <text x="340.0" y="114.0" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Sidecar</text>
-  <text x="340.0" y="131.0" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Leader</text>
-  <text x="340.0" y="143.5" fill="var(--text-muted)" font-size="11px" text-anchor="middle" dominant-baseline="central">Registers DP ranks 0-3</text>
+  <text x="340.0" y="131.0" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Node 0 worker</text>
+  <text x="340.0" y="143.5" fill="var(--text-muted)" font-size="11px" text-anchor="middle" dominant-baseline="central">Registers DP ranks 0-1</text>
   <rect x="568" y="80" width="136" height="96" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="636.0" y="120.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">SGLang</text>
-  <text x="636.0" y="137.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">DP ranks 0-1</text>
+  <text x="636.0" y="137.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Listeners for ranks 0-1</text>
   <rect x="262" y="328" width="152" height="96" rx="10" fill="var(--accent)" opacity="0.7"/>
   <rect x="264" y="328" width="152" height="96" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5" filter="url(#shadow)"/>
   <text x="340.0" y="362.0" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">Dynamo Sidecar</text>
-  <text x="340.0" y="379.0" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Follower</text>
-  <text x="340.0" y="391.5" fill="var(--text-muted)" font-size="11px" text-anchor="middle" dominant-baseline="central">KV events only</text>
+  <text x="340.0" y="379.0" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Node 1 worker</text>
+  <text x="340.0" y="391.5" fill="var(--text-muted)" font-size="11px" text-anchor="middle" dominant-baseline="central">Registers DP ranks 2-3</text>
   <rect x="568" y="328" width="136" height="96" rx="10" fill="var(--surface)" stroke="var(--border)" stroke-width="1.0" filter="url(#shadow)"/>
   <text x="636.0" y="368.5" class="box-label-center" dominant-baseline="central" style="font-size:14px; fill: var(--text-secondary);">SGLang</text>
-  <text x="636.0" y="385.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">DP ranks 2-3</text>
+  <text x="636.0" y="385.5" class="box-sub-center" dominant-baseline="central" style="font-size:10px; fill: var(--text-muted);">Listeners for ranks 2-3</text>
 
   <path d="M636,176 L636,326" fill="none" stroke="var(--connector)" stroke-width="1" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
-  <rect x="498.5947999999999" y="242.0" width="121.40520000000002" height="20.0" rx="10" class="pill-info"/>
-  <text x="559.2973999999999" y="252.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Dispatch and collectives</text>
+  <rect x="562.0" y="242.0" width="58.0" height="20.0" rx="10" class="pill-info"/>
+  <text x="591.0" y="252.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Collectives</text>
 
   <path d="M568,160 L418,160" fill="none" stroke="var(--connector)" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow-var--connector)"/>
   <rect x="446.6076" y="124.0" width="90.7848" height="20.0" rx="10" class="pill-info"/>
@@ -268,7 +268,9 @@
   <path d="M72,208 L72,96 L262,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <rect x="129.1152" y="60.0" width="77.76960000000003" height="20.0" rx="10" class="pill-info"/>
   <text x="168.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Request plane</text>
+  <path d="M72,272 L72,392 L262,392" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <path d="M416,96 L566,96" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
+  <path d="M416,376 L566,376" fill="none" stroke="var(--connector)" stroke-width="1.5" marker-start="url(#arrow-green-rev-var--connector)" marker-end="url(#arrow-var--connector)"/>
   <rect x="456.5271" y="60.0" width="70.94579999999999" height="20.0" rx="10" class="pill-info"/>
   <text x="492.0" y="70.0" class="conn-label label-info" dominant-baseline="central" style="font-size:10px;">Native gRPC</text>
 

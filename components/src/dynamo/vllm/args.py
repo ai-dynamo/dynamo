@@ -9,7 +9,6 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
-from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import (
     AsyncEngineArgs,
@@ -321,6 +320,15 @@ def update_dynamo_config_with_engine(
         dynamo_config.endpoint = parsed_ep
 
     if dynamo_config.custom_jinja_template is not None:
+        if dynamo_config.use_vllm_tokenizer:
+            raise ValueError(
+                "Cannot use --custom-jinja-template with --use-vllm-tokenizer: "
+                "the worker renders with the model's own chat template. Remove "
+                "--use-vllm-tokenizer. Then keep --custom-jinja-template to apply "
+                "the template in Dynamo's preprocessor, or start the frontend with "
+                "--dyn-chat-processor vllm --chat-template <file> to render it in "
+                "vLLM."
+            )
         expanded_template_path = os.path.expanduser(
             os.path.expandvars(dynamo_config.custom_jinja_template)
         )
@@ -660,9 +668,6 @@ def create_kv_events_config(
 def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
     """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
     Dynamo's KV indexers hash only each block's own tokens."""
-    # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
-    if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
-        return
     spec = engine_config.speculative_config
     if (
         spec is None

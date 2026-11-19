@@ -207,8 +207,10 @@ def test_process_group_reports_unexpected_child_exit():
 
 
 def _assert_names_verified_versions(message):
-    for version in processes._VERIFIED_VLLM_VERSIONS:
-        assert version in message
+    # Match the whole phrase. The message also starts with the installed
+    # vLLM version, and that alone passes a check of each version.
+    verified = " and ".join(processes._VERIFIED_VLLM_VERSIONS)
+    assert f"verified against vLLM {verified};" in message
 
 
 def test_unpack_core_engine_launch_names_a_renamed_field():
