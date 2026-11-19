@@ -1917,6 +1917,162 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn decode_progress_collection_follows_picker_declaration() {
+    use dynamo_kv_router::plugins::prelude::{
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+    };
+    use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+        DECODE_PROGRESS, DecodeProgressByRow,
+    };
+    use dynamo_worker_selection::host::WorkerSelectionPolicyError;
+
+    struct Probe {
+        declare: bool,
+        seen: Arc<Mutex<Option<(usize, usize)>>>,
+    }
+    impl WorkerPicker for Probe {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            if self.declare {
+                DECODE_PROGRESS
+            } else {
+                WorkerInputs::NONE
+            }
+        }
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {
+                (
+                    progress.observed_requests(),
+                    progress.remaining_token_budget(),
+                )
+            });
+            Ok(0)
+        }
+    }
+
+    for declare in [false, true] {
+        let seen = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&seen);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: true,
+            router_track_output_blocks: false,
+            ..Default::default()
+        };
+        let (router, runtime) = router_with_config_classifier_and_policy(
+            None,
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+            config,
+            None::<RecordingClassifier>,
+            SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    role.as_str(),
+                    Vec::new(),
+                    Box::new(Probe {
+                        declare,
+                        seen: Arc::clone(&capture),
+                    }),
+                )
+            })),
+        )
+        .await;
+        let mut input = request();
+        input.token_ids = vec![1; 15].into();
+        input.stop_conditions.max_tokens = Some(128);
+        input.stop_conditions.ignore_eos = Some(false);
+        input.stop_conditions.stop = Some(vec!["stop".to_string()]);
+        let input = Context::new(input);
+        let (mut selection, _) = router
+            .select_with_affinity(
+                &input,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let mut guard = track_selection(
+            &router,
+            &input,
+            &mut selection,
+            RequestPhase::Aggregated,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+        let initial_loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let initial_blocks = initial_loads[0].potential_decode_blocks;
+        for (output, expected) in [
+            (
+                LLMEngineOutput {
+                    token_ids: vec![10; 8],
+                    ..Default::default()
+                },
+                declare.then_some((1, 120)),
+            ),
+            (
+                LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Stop),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            guard.on_item(&Annotated::from_data(output)).await;
+            router
+                .kv_router()
+                .find_best_match_details_with_policy_class(
+                    None,
+                    &[1],
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(*seen.lock().unwrap(), expected);
+            let loads = router
+                .kv_router()
+                .get_potential_loads(&[], None, None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(loads[0].active_requests, 1);
+            assert_eq!(loads[0].potential_decode_blocks, initial_blocks);
+        }
+        guard.complete().await;
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(loads[0].active_requests, 0);
+        drop(router);
+        runtime.shutdown();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn output_block_accounting_tracks_grouped_chunks() {
     for (track_output_blocks, expected_output_tokens, expected_output_blocks) in
         [(true, None, 3), (true, Some(66), 3), (false, None, 0)]
@@ -2111,6 +2267,23 @@ async fn router_with_config_and_classifier(
     config: KvRouterConfig,
     classifier: Option<impl RequestClassifier>,
 ) -> (RoutingHost, Runtime) {
+    router_with_config_classifier_and_policy(
+        session_affinity_ttl,
+        workers,
+        config,
+        classifier,
+        SelectionPolicySource::Registry,
+    )
+    .await
+}
+
+async fn router_with_config_classifier_and_policy(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    config: KvRouterConfig,
+    classifier: Option<impl RequestClassifier>,
+    policy: SelectionPolicySource,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -2131,7 +2304,7 @@ async fn router_with_config_and_classifier(
         workers,
         None,
         16,
-        SelectionPolicySource::Registry,
+        policy,
         Some(config),
         None,
         "decode",
@@ -2314,6 +2487,7 @@ async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking()
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
     elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
+    priorities: Mutex<Vec<Option<i32>>>,
 }
 
 #[async_trait]
@@ -2335,6 +2509,12 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(instance.expect("selected worker instance").id());
+        self.priorities.lock().unwrap().push(
+            content
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.priority),
+        );
         let output = Annotated::from_data(LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
@@ -2455,14 +2635,18 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
-    router_with_recorded_dispatch_affinity_and_classifier(namespace, session_affinity_ttl, None)
-        .await
+    router_with_recorded_dispatch_affinity_and_classifier(
+        namespace,
+        session_affinity_ttl,
+        None::<RecordingClassifier>,
+    )
+    .await
 }
 
 async fn router_with_recorded_dispatch_affinity_and_classifier(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
-    classifier: Option<RecordingClassifier>,
+    classifier: Option<impl RequestClassifier>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -2648,6 +2832,58 @@ impl RequestClassifier for RecordingClassifier {
             self.observations.send(observation).unwrap();
         }
     }
+}
+
+struct BackendPriorityClassifier(i32);
+
+impl RequestClassifier for BackendPriorityClassifier {
+    fn classify(
+        &mut self,
+        mut request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> ClassifyFuture {
+        request.set_backend_priority(self.0);
+        Box::pin(async move { Ok(request) })
+    }
+}
+
+async fn dispatched_priority(
+    namespace: &str,
+    classifier: Option<BackendPriorityClassifier>,
+) -> Option<i32> {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch_affinity_and_classifier(namespace, None, classifier).await;
+    let mut input = request();
+    input.routing_mut().priority = Some(7);
+    let mut stream = router.generate(Context::new(input)).await.unwrap();
+    while stream.next().await.is_some() {}
+    let priorities = dispatch.priorities.lock().unwrap().clone();
+    drop(router);
+    runtime.shutdown();
+    assert_eq!(priorities.len(), 1);
+    priorities[0]
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn dispatch_forwards_the_classifiers_backend_priority() {
+    assert_eq!(
+        dispatched_priority(
+            "kv-classifier-backend-priority",
+            Some(BackendPriorityClassifier(-250))
+        )
+        .await,
+        Some(-250)
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn dispatch_keeps_the_request_priority_without_a_classifier_override() {
+    assert_eq!(
+        dispatched_priority("kv-request-backend-priority", None).await,
+        Some(7)
+    );
 }
 
 #[derive(Debug, thiserror::Error)]

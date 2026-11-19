@@ -13,6 +13,8 @@ export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 source "$DYNAMO_HOME/examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/launch_utils.sh"
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/common.sh"
 
 # The sidecar needs SGLang's Rust server (sglang.api.v1).
 export SGLANG_RUST_SERVER=1
@@ -50,17 +52,17 @@ while [[ $# -gt 0 ]]; do
             echo "  SGLANG_DECODE1_GPU                 First decode GPU assignment (default: 2)"
             echo "  SGLANG_DECODE2_GPU                 Second decode GPU assignment (default: 3)"
             echo "  SGLANG_PREFILL1_HTTP_PORT          First prefill HTTP port (default: 30000)"
-            echo "  SGLANG_PREFILL1_GRPC_PORT          First prefill gRPC port (default: 30001)"
+            echo "  SGLANG_PREFILL1_GRPC_PORT          First prefill gRPC port (default: 30010)"
             echo "  SGLANG_PREFILL1_KV_EVENT_PORT      First prefill KV-event port (default: 5557)"
-            echo "  SGLANG_PREFILL2_HTTP_PORT          Second prefill HTTP port (default: 30010)"
-            echo "  SGLANG_PREFILL2_GRPC_PORT          Second prefill gRPC port (default: 30011)"
-            echo "  SGLANG_PREFILL2_KV_EVENT_PORT      Second prefill KV-event port (default: 5558)"
-            echo "  SGLANG_DECODE1_HTTP_PORT           First decode HTTP port (default: 30020)"
-            echo "  SGLANG_DECODE1_GRPC_PORT           First decode gRPC port (default: 30021)"
-            echo "  SGLANG_DECODE1_KV_EVENT_PORT       First decode KV-event port (default: 5559)"
-            echo "  SGLANG_DECODE2_HTTP_PORT           Second decode HTTP port (default: 30030)"
-            echo "  SGLANG_DECODE2_GRPC_PORT           Second decode gRPC port (default: 30031)"
-            echo "  SGLANG_DECODE2_KV_EVENT_PORT       Second decode KV-event port (default: 5560)"
+            echo "  SGLANG_PREFILL2_HTTP_PORT          Second prefill HTTP port (default: 30020)"
+            echo "  SGLANG_PREFILL2_GRPC_PORT          Second prefill gRPC port (default: 30030)"
+            echo "  SGLANG_PREFILL2_KV_EVENT_PORT      Second prefill KV-event port (default: 5567)"
+            echo "  SGLANG_DECODE1_HTTP_PORT           First decode HTTP port (default: 30040)"
+            echo "  SGLANG_DECODE1_GRPC_PORT           First decode gRPC port (default: 30050)"
+            echo "  SGLANG_DECODE1_KV_EVENT_PORT       First decode KV-event port (default: 5577)"
+            echo "  SGLANG_DECODE2_HTTP_PORT           Second decode HTTP port (default: 30060)"
+            echo "  SGLANG_DECODE2_GRPC_PORT           Second decode gRPC port (default: 30070)"
+            echo "  SGLANG_DECODE2_KV_EVENT_PORT       Second decode KV-event port (default: 5587)"
             echo "  SGLANG_BOOTSTRAP_HOST              Advertised prefill bootstrap host (default: 127.0.0.1)"
             echo "  SGLANG_PAGE_SIZE                   KV-event block size (default: 64)"
             echo "  MAX_MODEL_LEN                      Maximum model length (default: 4096)"
@@ -86,10 +88,15 @@ SGLANG_PREFILL2_GPU="${SGLANG_PREFILL2_GPU:-1}"
 SGLANG_DECODE1_GPU="${SGLANG_DECODE1_GPU:-2}"
 SGLANG_DECODE2_GPU="${SGLANG_DECODE2_GPU:-3}"
 # Managed ports are indexed like DYN_SYSTEM_PORT{N}: workers 1-2 are prefill, 3-4 are decode.
-dyn_worker_ports SGLANG_PREFILL1 1 HTTP=30000 GRPC=30001 KV_EVENT=5557
-dyn_worker_ports SGLANG_PREFILL2 2 HTTP=30010 GRPC=30011 KV_EVENT=5558
-dyn_worker_ports SGLANG_DECODE1 3 HTTP=30020 GRPC=30021 KV_EVENT=5559
-dyn_worker_ports SGLANG_DECODE2 4 HTTP=30030 GRPC=30031 KV_EVENT=5560
+dyn_worker_ports SGLANG_PREFILL1 1 HTTP=30000 GRPC=30010 KV_EVENT=5557
+dyn_worker_ports SGLANG_PREFILL2 2 HTTP=30020 GRPC=30030 KV_EVENT=5567
+dyn_worker_ports SGLANG_DECODE1 3 HTTP=30040 GRPC=30050 KV_EVENT=5577
+dyn_worker_ports SGLANG_DECODE2 4 HTTP=30060 GRPC=30070 KV_EVENT=5587
+SGLANG_LISTENERS=$(sglang_listener_count "${EXTRA_ARGS[@]}")
+sglang_check_listener_ports "$SGLANG_PREFILL1_HTTP_PORT" "$SGLANG_PREFILL1_GRPC_PORT" "$SGLANG_LISTENERS"
+sglang_check_listener_ports "$SGLANG_PREFILL2_HTTP_PORT" "$SGLANG_PREFILL2_GRPC_PORT" "$SGLANG_LISTENERS"
+sglang_check_listener_ports "$SGLANG_DECODE1_HTTP_PORT" "$SGLANG_DECODE1_GRPC_PORT" "$SGLANG_LISTENERS"
+sglang_check_listener_ports "$SGLANG_DECODE2_HTTP_PORT" "$SGLANG_DECODE2_GRPC_PORT" "$SGLANG_LISTENERS"
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
