@@ -27,7 +27,7 @@ def bench_without_aisimulate(monkeypatch):
     attempts = []
 
     def without_aisimulate(name, *args, **kwargs):
-        if name.split(".")[0] in {"aisimulate", "aisimulate_core"}:
+        if name.split(".")[0] in {"aisim", "aisim_core"}:
             attempts.append(name)
             raise ModuleNotFoundError("AISimulate is unavailable", name=name)
         return original_import(name, *args, **kwargs)
@@ -71,5 +71,5 @@ def test_aic_comparison_requires_aisimulate_at_call_time(bench_without_aisimulat
         bench.compare_aic_and_replay_disagg(spec)
 
     assert exc.value.name is not None
-    assert exc.value.name.split(".")[0] == "aisimulate"
+    assert exc.value.name.split(".")[0] == "aisim"
     assert attempts == [exc.value.name]

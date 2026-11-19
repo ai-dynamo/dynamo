@@ -16,9 +16,9 @@ readme = "README.md"
 [features]
 default = []
 # The reference picker, for parity tests and benchmarks of the composed policy.
-bench = ["dynamo-router-protocol/bench", "dep:parking_lot"]
+bench = ["dynamo-router-protocol/bench", "dep:parking_lot", "dep:fastrand"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = ["dynamo-router-protocol/testing", "dep:parking_lot"]
+testing = ["dynamo-router-protocol/testing", "dep:parking_lot", "dep:fastrand"]
 
 [dependencies]
 dynamo-router-protocol = { workspace = true }
@@ -26,7 +26,7 @@ dynamo-session-affinity = { workspace = true }
 dynamo-slot-tracker = { workspace = true }
 async-trait = { workspace = true }
 crossbeam-queue = "0.3"
-fastrand = "2"
+fastrand = { version = "2", optional = true }
 parking_lot = { workspace = true, optional = true }
 rustc-hash = "2.1.1"
 serde = { workspace = true }
@@ -36,5 +36,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
+fastrand = "2"
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
