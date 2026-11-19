@@ -214,42 +214,23 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
             #[serde(borrow)]
             source: Option<&'a RawValue>,
         }
-        fn present_raw_value<'de, D: Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Option<&'de RawValue>, D::Error> {
-            <&RawValue>::deserialize(deserializer).map(Some)
-        }
         fn valid_image_source(source: &RawValue) -> bool {
-            // Match AnthropicImageSource without allocating the image data.
+            // Validate the same shape as AnthropicImageSource and borrow unescaped strings.
             #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Source<'a> {
-                #[serde(rename = "type", borrow)]
-                kind: std::borrow::Cow<'a, str>,
-                #[serde(default, borrow, deserialize_with = "present_raw_value")]
-                media_type: Option<&'a RawValue>,
-                #[serde(default, borrow, deserialize_with = "present_raw_value")]
-                data: Option<&'a RawValue>,
-                #[serde(default, borrow, deserialize_with = "present_raw_value")]
-                url: Option<&'a RawValue>,
+            #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+            enum Source<'a> {
+                Base64 {
+                    #[serde(rename = "media_type", borrow)]
+                    _media_type: std::borrow::Cow<'a, str>,
+                    #[serde(rename = "data", borrow)]
+                    _data: std::borrow::Cow<'a, str>,
+                },
+                Url {
+                    #[serde(rename = "url", borrow)]
+                    _url: std::borrow::Cow<'a, str>,
+                },
             }
-            let Ok(source) = serde_json::from_str::<Source<'_>>(source.get()) else {
-                return false;
-            };
-            let is_string = |value: &RawValue| value.get().starts_with('"');
-            match source.kind.as_ref() {
-                "base64" => {
-                    source.media_type.is_some_and(is_string)
-                        && source.data.is_some_and(is_string)
-                        && source.url.is_none()
-                }
-                "url" => {
-                    source.url.is_some_and(is_string)
-                        && source.media_type.is_none()
-                        && source.data.is_none()
-                }
-                _ => false,
-            }
+            serde_json::from_str::<Source<'_>>(source.get()).is_ok()
         }
         fn image_blocks<'a>(content: &'a RawValue, nested: bool, images: &mut Vec<&'a RawValue>) {
             let Ok(blocks) = serde_json::from_str::<Vec<&RawValue>>(content.get()) else {

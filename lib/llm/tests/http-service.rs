@@ -4683,6 +4683,17 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
     );
     assert!(engine.messages.lock().unwrap().is_none());
 
+    let invalid_source = r#"{"model":"text-only","max_tokens":1,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"\uD800"}}]}]}"#;
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(invalid_source)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(engine.messages.lock().unwrap().is_none());
+
     for image in [
         serde_json::json!({"type":"image"}),
         serde_json::json!({"type":"image", "source":{"type":"base64","media_type":"image/png"}}),
