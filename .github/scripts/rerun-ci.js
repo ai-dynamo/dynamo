@@ -127,7 +127,15 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
   const { data: reply } = await github.rest.issues.createComment({
     ...issueArgs, body: render(),
   });
-  const update = () => github.rest.issues.updateComment({ ...repo, comment_id: reply.id, body: render() });
+  const update = async () => {
+    try {
+      await github.rest.issues.updateComment({ ...repo, comment_id: reply.id, body: render() });
+      return true;
+    } catch (error) {
+      core.warning(`Could not update the PR reply (HTTP ${error.status ?? 'unknown'}).`);
+      return false;
+    }
+  };
 
   for (const [index, { run, link, messageIndex }] of candidates.entries()) {
     if (!(await currentApproval(run.event === 'push'))) {
@@ -151,7 +159,12 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
       continue;
     }
     reservations.push(attemptMarker(run));
-    await update();
+    if (!(await update())) {
+      reservations.pop();
+      messages[messageIndex] = `${link}: could not record the retry reservation. No retry was requested. Post a new command to try again.`;
+      failedRequests++;
+      continue;
+    }
     try {
       await github.rest.actions.reRunWorkflowFailedJobs({ ...repo, run_id: run.id });
       messages[messageIndex] = `${link}: requested failed jobs and their dependent jobs.`;
