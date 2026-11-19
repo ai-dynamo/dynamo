@@ -375,7 +375,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     ./agg_lora.sh
     ```
 
-    The script starts `dynamo.sglang` with `--enable-lora`, `--max-lora-rank 64`, and `--lora-target-modules all`. It also sets `DYN_LORA_ENABLED`, `DYN_LORA_PATH`, and the worker system port.
+    The script starts `dynamo.sglang` with `--enable-lora`, `--max-lora-rank 64`, and the example adapter's target modules (`--lora-target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj`). It also sets `DYN_LORA_ENABLED`, `DYN_LORA_PATH`, and the worker system port.
   </Step>
 
   <Step title="Load and query the adapter">

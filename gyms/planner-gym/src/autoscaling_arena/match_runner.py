@@ -72,6 +72,8 @@ _SENSITIVE_ARGS = {
     "--token",
 }
 _HEADER_ARGS = {"--header", "-h"}
+# `aisim` is the AIS distribution name from 0.14.0 on; `aisimulate` is the legacy name.
+_AIS_DISTRIBUTIONS = ("aisim", "aisimulate")
 _SENSITIVE_CONFIG_KEYS = {
     "access_token",
     "aeg_sas_key",
@@ -420,16 +422,22 @@ def execution_signature(config: MatchConfig) -> dict[str, Any]:
             raise ValueError(_redact_exception_message(config, str(exc))) from exc
         inputs.append({"sha256": digest.hexdigest()})
     versions = {}
-    for package in (
-        "autoscaling-arena",
-        "ai-dynamo",
-        "ai-dynamo-runtime",
-        "aisimulate",
-    ):
+    for package in ("autoscaling-arena", "ai-dynamo", "ai-dynamo-runtime"):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
+    # Record the AIS distribution under its real name. A missing runtime stays
+    # null, so resume needs the same AIS name and version, or none.
+    ais_name, ais_version = _AIS_DISTRIBUTIONS[0], None
+    for package in _AIS_DISTRIBUTIONS:
+        try:
+            ais_version = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        ais_name = package
+        break
+    versions[ais_name] = ais_version
     return {
         "config_sha256": hashlib.sha256(
             json.dumps(payload, sort_keys=True, allow_nan=False).encode()

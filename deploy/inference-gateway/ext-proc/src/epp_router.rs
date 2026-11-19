@@ -26,13 +26,13 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::scheduling::KvSchedulerError;
-use dynamo_kv_router::services::selection::{RouterPluginRegistry, SelectionError};
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
+use dynamo_scheduler::host::{KvSchedulerError, SelectionError};
 use serde::Deserialize;
 
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};

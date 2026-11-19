@@ -390,7 +390,12 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
