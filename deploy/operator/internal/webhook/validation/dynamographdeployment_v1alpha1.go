@@ -19,33 +19,72 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil.
-// oldDGD is nil on create, otherwise it is the previous source-version object.
+// validateDynamoGraphDeploymentV1alpha1 validates newDGD; oldDGD is nil on create.
+// newDGD must be non-nil. Prepared inputs contain only successfully lowered DCDs.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
+	newDGD, oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
+	newRendering, oldRendering dynamoGraphDeploymentComponents,
 ) field.ErrorList {
-	if !hasV1Alpha1CompatibilityFields(dgd) &&
+	if !hasV1Alpha1CompatibilityFields(newDGD) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
 	var oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec
-	if oldDGD != nil {
+	if oldDGD != nil && v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		oldSpec = &oldDGD.Spec
 	}
-	return v.validateDynamoGraphDeploymentSpecV1alpha1(
-		&dgd.Spec,
+	allErrs := v.validateDynamoGraphDeploymentSpecV1alpha1(
+		&newDGD.Spec,
 		field.NewPath("spec"),
-		dgd.Name,
-		dgd.Namespace,
+		newDGD.Name,
+		newDGD.Namespace,
 		oldSpec,
-		compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations),
+		compatibility.OrderedEnvironmentVariables.Enabled(newDGD.Annotations),
 	)
+
+	// Grove and failed preparation supply no DCD inputs for source-only Ingress backends.
+	if newRendering.deployments == nil {
+		return allErrs
+	}
+
+	// Validate only backends emitted by the component pathway.
+	ds := newRendering.provider == consts.WorkloadProviderDisaggregatedSet
+	oldDS := oldRendering.provider == consts.WorkloadProviderDisaggregatedSet
+	servicesPath := field.NewPath("spec", "services")
+	for _, name := range sortedV1Alpha1ServiceNames(newDGD.Spec.Services) {
+		dcd := newRendering.deployments[name]
+		ingress := newDGD.Spec.Services[name].Ingress
+		if ingress == nil || !componentdeployment.IngressEnabled(ingress.Enabled, ingress.IngressControllerClassName) ||
+			dcd.Spec.ManagedByExternalController() || (ds && disaggregatedset.Owns(&dcd.Spec.DynamoComponentDeploymentSharedSpec)) {
+			continue
+		}
+		rendered := dynamo.GenerateComponentIngress(v.ctx, dcd.Name, dcd.Namespace, dynamo.IngressSpec{IngressControllerClassName: ingress.IngressControllerClassName})
+		var oldBackend *networkingv1.IngressBackend
+		if oldDCD := oldRendering.deployments[name]; oldDGD != nil && oldDCD != nil && !(oldDS && disaggregatedset.Owns(&oldDCD.Spec.DynamoComponentDeploymentSharedSpec)) {
+			if oldService := oldDGD.Spec.Services[name]; oldService != nil && oldService.Ingress != nil && componentdeployment.IngressEnabled(oldService.Ingress.Enabled, oldService.Ingress.IngressControllerClassName) {
+				oldIngress := dynamo.GenerateComponentIngress(v.ctx, oldDCD.Name, oldDCD.Namespace, dynamo.IngressSpec{IngressControllerClassName: oldService.Ingress.IngressControllerClassName})
+				oldBackend = &oldIngress.Spec.Rules[0].HTTP.Paths[0].Backend
+			}
+		}
+		errors := v.validateIngressBackend(&rendered.Spec.Rules[0].HTTP.Paths[0].Backend, oldBackend, servicesPath.Key(name).Child("ingress"))
+		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+			for _, err := range errors {
+				err.Detail += "; worker hash is shown as zeros"
+			}
+		}
+		allErrs = append(allErrs, errors...)
+	}
+	return allErrs
 }
 
 // validateDynamoGraphDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.

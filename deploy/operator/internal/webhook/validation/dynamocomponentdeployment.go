@@ -22,21 +22,31 @@ import (
 	"fmt"
 	"strings"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // DynamoComponentDeploymentValidator validates v1beta1 DynamoComponentDeployment resources.
-type DynamoComponentDeploymentValidator struct{}
+type DynamoComponentDeploymentValidator struct {
+	discoveryBackend configv1alpha1.DiscoveryBackend
+}
 
 // NewDynamoComponentDeploymentValidator creates a validator for v1beta1 DynamoComponentDeployment.
-func NewDynamoComponentDeploymentValidator() *DynamoComponentDeploymentValidator {
-	return &DynamoComponentDeploymentValidator{}
+// discoveryBackend is the operator's default discovery backend.
+func NewDynamoComponentDeploymentValidator(discoveryBackend configv1alpha1.DiscoveryBackend) *DynamoComponentDeploymentValidator {
+	return &DynamoComponentDeploymentValidator{discoveryBackend: discoveryBackend}
 }
 
 // dynamoComponentDeploymentValidation carries DCD-specific request state.
@@ -62,6 +72,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	validation := &dynamoComponentDeploymentValidation{
 		ctx:                                ctx,
 		runtimeVersionSource:               runtimeVersionSource,
+		discoveryBackend:                   v.discoveryBackend,
 		allowMissingRuntimeVersionOverride: true,
 	}
 
@@ -88,6 +99,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	validation := &dynamoComponentDeploymentValidation{
 		ctx:                                ctx,
 		runtimeVersionSource:               runtimeVersionSource,
+		discoveryBackend:                   v.discoveryBackend,
 		ratchetRuntimeVersion:              true,
 		allowMissingRuntimeVersionOverride: true,
 	}
@@ -98,16 +110,14 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	var oldAlpha *nvidiacomv1alpha1.DynamoComponentDeployment
-	var oldEnv []corev1.EnvVar
-	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		oldAlpha, err = alphaDynamoComponentDeploymentForValidation(oldDCD)
-		if err != nil {
-			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
+	oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
+	if err != nil {
+		if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+			return nil, fmt.Errorf("cannot validate old v1alpha1 DynamoComponentDeployment fields: %w", err)
 		}
-		oldEnv = oldAlpha.Spec.Envs
+		oldAlpha = nil
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldEnv, dynamo.DCDUsesOrderedEnvironment(newDCD))...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldAlpha, dynamo.DCDUsesOrderedEnvironment(newDCD))...)
 
 	// Run the source-version old/new ratchet after the stateless traversal.
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -157,7 +167,7 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 	)}
 }
 
-// validateDynamoComponentDeployment validates dcd. dcd must not be nil.
+// validateDynamoComponentDeployment validates dcd. dcd must not be nil; oldDCD is nil on create.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -169,6 +179,18 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
+
+	// Conversion preserves the component label identity, including omitted alpha serviceName defaults.
+	if oldDCD == nil || dcd.Spec.ComponentName != oldDCD.Spec.ComponentName {
+		namePath := field.NewPath("spec", "name")
+		if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+			namePath = field.NewPath("spec", "serviceName")
+		}
+		if messages := k8svalidation.IsValidLabelValue(dcd.Spec.ComponentName); len(messages) > 0 {
+			allErrs = append(allErrs, field.Invalid(namePath, dcd.Spec.ComponentName, "generated "+consts.KubeLabelDynamoComponent+" label value is invalid: "+strings.Join(messages, "; ")))
+		}
+	}
+	allErrs = append(allErrs, v.validateDynamoComponentDeploymentRendered(dcd, oldDCD, field.NewPath("metadata", "name"))...)
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(
 		&dcd.Spec, oldSpec, field.NewPath("spec"),
 		dynamo.DCDUsesOrderedEnvironment(dcd), oldDCD != nil && dynamo.DCDUsesOrderedEnvironment(oldDCD),
@@ -256,5 +278,45 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		canModifyReplicas,
 		nvidiacomv1beta1.DynamoComponentDeploymentGVK.GroupKind(),
 	)...)
+	return allErrs
+}
+
+// validateDynamoComponentDeploymentRendered validates identities produced by component rendering.
+// newDCD and fldPath must be non-nil; oldDCD is nil on create.
+func (v *sharedValidation) validateDynamoComponentDeploymentRendered(newDCD, oldDCD *nvidiacomv1beta1.DynamoComponentDeployment, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	if oldDCD == nil || newDCD.Name != oldDCD.Name {
+		if messages := k8svalidation.IsDNS1123Subdomain(newDCD.Name); len(messages) > 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath, newDCD.Name, "generated DynamoComponentDeployment name is invalid: "+strings.Join(messages, "; ")))
+		}
+	}
+
+	// Render each version's actual workload shape, including LWS selector omission.
+	lwsEnabled := features.MustGateFrom(v.ctx).Enabled(features.LWS)
+	if lwsEnabled && newDCD.IsMultinode() {
+		var oldService *corev1.Service
+		if oldDCD != nil && oldDCD.IsMultinode() {
+			oldService = &corev1.Service{Name: leaderworkerset.Name(oldDCD.Name)}
+		}
+		allErrs = append(allErrs, v.validateService(&corev1.Service{Name: leaderworkerset.Name(newDCD.Name)}, oldService, fldPath)...)
+	} else {
+		workload := componentdeployment.Render(newDCD, metav1.ObjectMeta{}, &corev1.PodTemplateSpec{}, appsv1.DeploymentStrategy{})
+		var oldMetadata *metav1.ObjectMeta
+		if oldDCD != nil && !(lwsEnabled && oldDCD.IsMultinode()) {
+			oldWorkload := componentdeployment.Render(oldDCD, metav1.ObjectMeta{}, &corev1.PodTemplateSpec{}, appsv1.DeploymentStrategy{})
+			oldMetadata = &oldWorkload.Spec.Template.ObjectMeta
+		}
+		allErrs = append(allErrs, v.validateComponentPodMetadata(&workload.Spec.Template.ObjectMeta, oldMetadata, fldPath)...)
+	}
+
+	// Render optional discovery Services with the same annotations and operator default.
+	service, _ := componentdeployment.RenderService(componentdeployment.ServiceParams{ServiceName: newDCD.Name, ComponentType: string(newDCD.Spec.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, dynamo.GetDCDKubeAnnotations(newDCD))})
+	if service != nil {
+		var oldService *corev1.Service
+		if oldDCD != nil {
+			oldService, _ = componentdeployment.RenderService(componentdeployment.ServiceParams{ServiceName: oldDCD.Name, ComponentType: string(oldDCD.Spec.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, dynamo.GetDCDKubeAnnotations(oldDCD))})
+		}
+		allErrs = append(allErrs, v.validateService(service, oldService, fldPath)...)
+	}
 	return allErrs
 }

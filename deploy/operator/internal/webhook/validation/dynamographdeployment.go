@@ -23,15 +23,21 @@ import (
 	"sort"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -47,13 +53,14 @@ import (
 
 // DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
 type DynamoGraphDeploymentValidator struct {
-	mgr ctrl.Manager
+	mgr              ctrl.Manager
+	discoveryBackend configv1alpha1.DiscoveryBackend
 }
 
 // NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
-// mgr must not be nil.
-func NewDynamoGraphDeploymentValidator(mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{mgr: mgr}
+// mgr must be non-nil; discoveryBackend is the operator default used by Service rendering.
+func NewDynamoGraphDeploymentValidator(mgr ctrl.Manager, discoveryBackend configv1alpha1.DiscoveryBackend) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{mgr: mgr, discoveryBackend: discoveryBackend}
 }
 
 // dynamoGraphDeploymentValidation carries DGD-specific request state.
@@ -88,14 +95,18 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 		ctx:                  ctx,
 		mgr:                  v.mgr,
 		runtimeVersionSource: runtimeVersionSource,
+		discoveryBackend:     v.discoveryBackend,
 	}
 
-	allErrs := validation.validateDynamoGraphDeployment(deployment, nil)
+	// Prepare actual component inputs once for storage and compatibility validation.
+	newRendering, renderErr := prepareDynamoGraphDeploymentComponents(deployment, features.MustGateFrom(ctx).Enabled(features.Grove))
+	var oldRendering dynamoGraphDeploymentComponents
+	allErrs := validation.validateDynamoGraphDeployment(deployment, nil, newRendering, oldRendering, renderErr)
 	alpha, err := alphaDynamoGraphDeploymentForValidation(deployment)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, nil)...)
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, nil, newRendering, oldRendering)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
@@ -115,26 +126,38 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 		ctx:                   ctx,
 		mgr:                   v.mgr,
 		runtimeVersionSource:  runtimeVersionSource,
+		discoveryBackend:      v.discoveryBackend,
 		ratchetRuntimeVersion: true,
 		userInfo:              userInfo,
 		operatorPrincipal:     operatorPrincipal,
 	}
 
-	allErrs := validation.validateDynamoGraphDeployment(newDGD, oldDGD)
+	// Compare names produced by each version's selected lowering.
+	groveEnabled := features.MustGateFrom(ctx).Enabled(features.Grove)
+	newRendering, renderErr := prepareDynamoGraphDeploymentComponents(newDGD, groveEnabled)
+	var oldRendering dynamoGraphDeploymentComponents
+	if newRendering.provider != consts.WorkloadProviderGrove {
+		var oldRenderErr error
+		oldRendering, oldRenderErr = prepareDynamoGraphDeploymentComponents(oldDGD, groveEnabled)
+
+		// Only a newly introduced lowering failure blocks an update.
+		if oldRenderErr != nil {
+			renderErr = nil
+		}
+	}
+	allErrs := validation.validateDynamoGraphDeployment(newDGD, oldDGD, newRendering, oldRendering, renderErr)
 	newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-
-	// Alpha source lists retain their complete ordered old values for ratcheting.
-	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
-	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDGD)
-		if err != nil {
+	oldAlpha, err := alphaDynamoGraphDeploymentForValidation(oldDGD)
+	if err != nil {
+		if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 		}
+		oldAlpha = nil
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(newAlpha, oldAlpha)...)
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(newAlpha, oldAlpha, newRendering, oldRendering)...)
 
 	// Stateful rules share the same receiver and compatibility projections.
 	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)...)
@@ -186,18 +209,16 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 
-// validateDynamoGraphDeployment validates dgd. dgd must not be nil.
+// validateDynamoGraphDeployment validates dgd with its prepared component inputs.
+// dgd must be non-nil; oldDGD is nil on create. renderErr reports a lowering failure that was absent from the old state.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	newRendering, oldRendering dynamoGraphDeploymentComponents,
+	renderErr error,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, v.validateObjectMeta(
-		&dgd.ObjectMeta,
-		field.NewPath("metadata"),
-		hasIntraPodFailover(&dgd.Spec),
-		dgd.HasLPXComponent(),
-	)...)
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentMetadata(dgd, oldDGD, field.NewPath("metadata"))...)
 
 	// Validate desired strategy intent; admission has no observed PCS rollout state.
 	updateStrategy, err := dynamo.ResolveGroveUpdateStrategy(dgd, nil)
@@ -243,6 +264,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		)
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentComponents(dgd, oldDGD, field.NewPath("spec", "components"), newRendering, oldRendering, renderErr)...)
 
 	// LPX children require the Grove route for materialization.
 	if dgd.HasLPXComponent() && !grovePathway {
@@ -381,6 +403,19 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
+
+		// Conversion preserves the logical identity, including alpha map keys.
+		if opts.oldComponents[component.ComponentName] == nil {
+			namePath := componentPath.Child("name")
+			if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+				namePath = field.NewPath("spec", "services").Key(component.ComponentName)
+			}
+			if component.ComponentName == "" {
+				allErrs = append(allErrs, field.Required(namePath, "component name must not be empty"))
+			} else if messages := k8svalidation.IsValidLabelValue(component.ComponentName); len(messages) > 0 {
+				allErrs = append(allErrs, field.Invalid(namePath, component.ComponentName, "generated "+consts.KubeLabelDynamoComponent+" label value is invalid: "+strings.Join(messages, "; ")))
+			}
+		}
 
 		// Draft fanout expands models; the target owns the shared endpoint and availability.
 		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {
@@ -1099,6 +1134,178 @@ func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
 				consts.KubeAnnotationGPUPowerLimit,
 			),
 		))
+	}
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentMetadata adds graph-specific rules to ObjectMeta validation.
+// newDGD and fldPath must be non-nil; oldDGD is nil on create.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentMetadata(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment, fldPath *field.Path) field.ErrorList {
+	allErrs := v.validateObjectMeta(&newDGD.ObjectMeta, fldPath, hasIntraPodFailover(&newDGD.Spec), newDGD.HasLPXComponent())
+	if oldDGD == nil || newDGD.Name != oldDGD.Name {
+		if messages := k8svalidation.IsValidLabelValue(newDGD.Name); len(messages) > 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), newDGD.Name, "invalid as the "+consts.KubeLabelDynamoGraphDeploymentName+" label value: "+strings.Join(messages, "; ")+"; choose a shorter graph name"))
+		}
+	}
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentComponents checks prepared resources at their source component fields.
+// newDGD and fldPath must be non-nil; oldDGD is nil on create. renderErr reports a lowering failure that was absent from the old state.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponents(
+	newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	fldPath *field.Path,
+	newRendering, oldRendering dynamoGraphDeploymentComponents,
+	renderErr error,
+) field.ErrorList {
+	// Grove compares only identities from a previous Grove lowering.
+	if newRendering.provider == consts.WorkloadProviderGrove {
+		if oldDGD != nil {
+			oldGrove, _ := grovePathwayForDynamoGraphDeployment(features.MustGateFrom(v.ctx).Enabled(features.Grove), oldDGD)
+			if !oldGrove {
+				oldDGD = nil
+			}
+		}
+		return v.validateDynamoGraphDeploymentComponentsGrove(newDGD, oldDGD, fldPath)
+	}
+
+	// The provider's headless Service name does not depend on prepared children.
+	disaggregatedSet := newRendering.provider == consts.WorkloadProviderDisaggregatedSet
+	oldDisaggregatedSet := oldRendering.provider == consts.WorkloadProviderDisaggregatedSet
+	var allErrs field.ErrorList
+	if disaggregatedSet {
+		name := disaggregatedset.Name(newDGD)
+		var oldService *corev1.Service
+		if oldDisaggregatedSet {
+			oldService = &corev1.Service{Name: disaggregatedset.Name(oldDGD)}
+		}
+		allErrs = append(allErrs, v.validateService(&corev1.Service{Name: name}, oldService, field.NewPath("metadata", "name"))...)
+	}
+
+	// Collection-level failures must refer to fields present in the submitted version.
+	if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+		fldPath = field.NewPath("spec", "services")
+	}
+	if renderErr != nil {
+		return append(allErrs, field.Forbidden(fldPath, "cannot render component resources: "+renderErr.Error()))
+	}
+
+	// A previously failing lowering supplies no new child identities to inspect.
+	if newRendering.deployments == nil {
+		return allErrs
+	}
+
+	// Old DS children remain available for discovery Services, but not Deployment or LWS identities.
+	deployments, oldDeployments := newRendering.deployments, oldRendering.deployments
+	for i := range newDGD.Spec.Components {
+		component := &newDGD.Spec.Components[i]
+		if component.ManagedByExternalController() {
+			continue
+		}
+		namePath := fldPath.Index(i).Child("name")
+		if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+			namePath = field.NewPath("spec", "services").Key(component.ComponentName)
+		}
+		dcd := deployments[component.ComponentName]
+		oldDCD := oldDeployments[component.ComponentName]
+		dsOwnsComponent := disaggregatedSet && disaggregatedset.Owns(component)
+		if !dsOwnsComponent && oldDCD != nil && oldDisaggregatedSet && disaggregatedset.Owns(&oldDCD.Spec.DynamoComponentDeploymentSharedSpec) {
+			oldDCD = nil
+		}
+
+		// Alpha keys also become the generated beta child's spec.name, which excludes dots and underscores.
+		if !dsOwnsComponent && (oldDCD == nil || dcd.Spec.ComponentName != oldDCD.Spec.ComponentName) {
+			messages := k8svalidation.IsDNS1123Label(strings.ToLower(dcd.Spec.ComponentName))
+			messages = append(messages, k8svalidation.IsValidLabelValue(dcd.Spec.ComponentName)...)
+			if len(messages) > 0 {
+				allErrs = append(allErrs, field.Invalid(namePath, dcd.Spec.ComponentName, "generated DynamoComponentDeployment spec.name is invalid: "+strings.Join(messages, "; ")))
+			}
+		}
+		firstError := len(allErrs)
+		if dsOwnsComponent {
+			// DS owns these Pods directly; the shared component renderer still owns discovery Services.
+			params := componentdeployment.ServiceParams{ServiceName: dcd.Name, ComponentType: string(component.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, dynamo.GetDGDComponentResourceAnnotations(newDGD, component.ComponentName, &dcd.Spec.DynamoComponentDeploymentSharedSpec))}
+			service, _ := componentdeployment.RenderService(params)
+			if service != nil {
+				var oldService *corev1.Service
+				if oldDCD != nil {
+					oldService, _ = componentdeployment.RenderService(componentdeployment.ServiceParams{ServiceName: oldDCD.Name, ComponentType: string(oldDCD.Spec.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, dynamo.GetDGDComponentResourceAnnotations(oldDGD, component.ComponentName, &oldDCD.Spec.DynamoComponentDeploymentSharedSpec))})
+				}
+				allErrs = append(allErrs, v.validateService(service, oldService, namePath)...)
+			}
+		} else {
+			allErrs = append(allErrs, v.validateDynamoComponentDeploymentRendered(dcd, oldDCD, namePath)...)
+		}
+		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			for _, err := range allErrs[firstError:] {
+				err.Detail += "; worker hash is shown as zeros"
+			}
+		}
+
+	}
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentComponentsGrove checks actual Grove Pod metadata and optional Services.
+// newDGD and fldPath must be non-nil; oldDGD is nil on create.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentComponentsGrove(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	hasOrdinaryWorkload := false
+	for i := range newDGD.Spec.Components {
+		component := &newDGD.Spec.Components[i]
+		hasOrdinaryWorkload = hasOrdinaryWorkload || !component.ManagedByExternalController()
+		namePath := fldPath.Index(i).Child("name")
+		if v.runtimeVersionSource == runtimeVersionSourceV1Alpha1 {
+			namePath = field.NewPath("spec", "services").Key(component.ComponentName)
+		}
+		metadata := grove.RenderPodMetadata(newDGD.Name, dynamo.GetDCDResourceName(newDGD, component.ComponentName, ""), metav1.ObjectMeta{})
+		var oldMetadata *metav1.ObjectMeta
+		var oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		if oldDGD != nil {
+			oldComponent = oldDGD.GetComponentByName(component.ComponentName)
+			if oldComponent != nil {
+				oldMeta := grove.RenderPodMetadata(oldDGD.Name, dynamo.GetDCDResourceName(oldDGD, component.ComponentName, ""), metav1.ObjectMeta{})
+				oldMetadata = &oldMeta
+			}
+		}
+		allErrs = append(allErrs, v.validateComponentPodMetadata(&metadata, oldMetadata, namePath)...)
+		if component.ManagedByExternalController() {
+			continue
+		}
+		params := componentdeployment.ServiceParams{ServiceName: dynamo.GetDCDResourceName(newDGD, component.ComponentName, ""), ComponentType: string(component.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, newDGD.Annotations)}
+		service, _ := componentdeployment.RenderService(params)
+		var oldService *corev1.Service
+		if oldComponent != nil && !oldComponent.ManagedByExternalController() {
+			oldService, _ = componentdeployment.RenderService(componentdeployment.ServiceParams{ServiceName: dynamo.GetDCDResourceName(oldDGD, component.ComponentName, ""), ComponentType: string(oldComponent.ComponentType), IsK8sDiscovery: commoncontroller.IsK8sDiscoveryEnabled(v.discoveryBackend, oldDGD.Annotations)})
+		}
+		if service != nil {
+			allErrs = append(allErrs, v.validateService(service, oldService, namePath)...)
+		}
+
+		// The shared renderer decides whether a single-pod Ray leader gets its additional Service.
+		main := dynamo.GetMainContainer(component)
+		service = grove.RenderElasticEPLeaderService(component, params, main != nil && dynamo.IsElasticEPRayLaunch(main))
+		if service != nil {
+			oldService = nil
+			if oldComponent != nil {
+				oldMain := dynamo.GetMainContainer(oldComponent)
+				oldService = grove.RenderElasticEPLeaderService(oldComponent, componentdeployment.ServiceParams{ServiceName: dynamo.GetDCDResourceName(oldDGD, component.ComponentName, "")}, oldMain != nil && dynamo.IsElasticEPRayLaunch(oldMain))
+			}
+			allErrs = append(allErrs, v.validateService(service, oldService, namePath)...)
+		}
+	}
+	if hasOrdinaryWorkload {
+		service := &corev1.Service{Name: grovecommon.GenerateHeadlessServiceName(grovecommon.ResourceNameReplica{Name: dynamo.PCSNameForDGD(newDGD, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)})}
+		var oldService *corev1.Service
+		if oldDGD != nil {
+			for i := range oldDGD.Spec.Components {
+				if !oldDGD.Spec.Components[i].ManagedByExternalController() {
+					oldService = &corev1.Service{Name: grovecommon.GenerateHeadlessServiceName(grovecommon.ResourceNameReplica{Name: dynamo.PCSNameForDGD(oldDGD, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)})}
+					break
+				}
+			}
+		}
+		allErrs = append(allErrs, v.validateService(service, oldService, field.NewPath("metadata", "name"))...)
 	}
 	return allErrs
 }

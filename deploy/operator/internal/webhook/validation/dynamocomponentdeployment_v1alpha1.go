@@ -19,28 +19,48 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateDynamoComponentDeploymentV1alpha1 validates dcd. dcd must not be nil.
-// oldEnv is nil on create, otherwise it is the previous source-version envs list.
+// validateDynamoComponentDeploymentV1alpha1 validates newDCD; oldDCD is nil on create.
+// newDCD must be non-nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
-	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
-	oldEnv []corev1.EnvVar,
+	newDCD, oldDCD *nvidiacomv1alpha1.DynamoComponentDeployment,
 	orderedEnvironment bool,
 ) field.ErrorList {
-	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
+	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(newDCD) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
-	return v.validateDynamoComponentDeploymentSpecV1alpha1(
-		&dcd.Spec,
+	var oldEnv []corev1.EnvVar
+	if oldDCD != nil && v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		oldEnv = oldDCD.Spec.Envs
+	}
+	allErrs := v.validateDynamoComponentDeploymentSpecV1alpha1(
+		&newDCD.Spec,
 		field.NewPath("spec"),
-		dcd.GetDynamoNamespace(),
+		newDCD.GetDynamoNamespace(),
 		oldEnv,
 		orderedEnvironment,
 	)
+
+	// The source-only Ingress backend combines metadata and compatibility spec fields.
+	ingress := newDCD.Spec.Ingress
+	if ingress == nil || !componentdeployment.IngressEnabled(ingress.Enabled, ingress.IngressControllerClassName) {
+		return allErrs
+	}
+	rendered := dynamo.GenerateComponentIngress(v.ctx, newDCD.Name, newDCD.Namespace, dynamo.IngressSpec{IngressControllerClassName: ingress.IngressControllerClassName})
+	backend := &rendered.Spec.Rules[0].HTTP.Paths[0].Backend
+	var oldBackend *networkingv1.IngressBackend
+	if oldDCD != nil && oldDCD.Spec.Ingress != nil && componentdeployment.IngressEnabled(oldDCD.Spec.Ingress.Enabled, oldDCD.Spec.Ingress.IngressControllerClassName) {
+		oldIngress := dynamo.GenerateComponentIngress(v.ctx, oldDCD.Name, oldDCD.Namespace, dynamo.IngressSpec{IngressControllerClassName: oldDCD.Spec.Ingress.IngressControllerClassName})
+		oldBackend = &oldIngress.Spec.Rules[0].HTTP.Paths[0].Backend
+	}
+	return append(allErrs, v.validateIngressBackend(backend, oldBackend, field.NewPath("spec", "ingress"))...)
 }
 
 // validateDynamoComponentDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.

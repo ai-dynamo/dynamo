@@ -40,11 +40,12 @@ import (
 )
 
 const (
-	admissionOperatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
-	customRuntimeImage         = "registry.example/runtime:custom"
-	frontendImage150           = "registry.example/dynamo-frontend:1.5.0"
-	legacyEPPImage140          = "registry.example/epp-image:1.4.0"
-	legacySeedUsername         = "operatorenv-legacy-seeder"
+	admissionOperatorPrincipal  = "system:serviceaccount:dynamo-system:dynamo-operator"
+	customRuntimeImage          = "registry.example/runtime:custom"
+	frontendImage150            = "registry.example/dynamo-frontend:1.5.0"
+	legacyEPPImage140           = "registry.example/epp-image:1.4.0"
+	legacySeedUsername          = "operatorenv-legacy-seeder"
+	legacyUnmutatedSeedUsername = "operatorenv-unmutated-legacy-seeder"
 )
 
 func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {
@@ -74,9 +75,10 @@ var (
 	admissionGate = &mutableFeatureGate{}
 	admissionEnv  = operatorenv.New(operatorenv.Options{
 		Admission: operatorenv.AdmissionWebhooks{
-			Mutating:    true,
-			Validating:  true,
-			BypassUsers: []string{legacySeedUsername},
+			Mutating:            true,
+			Validating:          true,
+			BypassUsers:         []string{legacySeedUsername, legacyUnmutatedSeedUsername},
+			MutatingBypassUsers: []string{legacyUnmutatedSeedUsername},
 		},
 		SetupWebhooks:     setupAdmissionWebhooks,
 		OperatorVersion:   "1.6.0",
@@ -147,16 +149,17 @@ func (g *mutableFeatureGate) set(gates features.Gate) {
 }
 
 type admissionTestCase struct {
-	object             runtime.Object
-	oldObject          runtime.Object
-	oldBeforeUpdate    runtime.Object
-	mutateObject       func(*testing.T, map[string]any)
-	gates              features.Gate
-	seedGates          *features.Gates
-	seedWithoutWebhook bool
-	statusOnly         bool
-	terminating        bool
-	username           string
+	object              runtime.Object
+	oldObject           runtime.Object
+	oldBeforeUpdate     runtime.Object
+	mutateObject        func(*testing.T, map[string]any)
+	gates               features.Gate
+	seedGates           *features.Gates
+	seedWithoutWebhook  bool
+	seedWithoutMutation bool
+	statusOnly          bool
+	terminating         bool
+	username            string
 
 	// beforeUpdate runs after the old state is seeded and before the update is submitted. Use
 	// it to change what the webhooks see between the two writes, such as hardware discovery.
@@ -197,7 +200,9 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		}
 		admissionGate.set(seedGates)
 		seedClient := resourceClient
-		if test.seedWithoutWebhook {
+		if test.seedWithoutMutation {
+			seedClient = newAdmissionResourceClient(t, env, test.oldObject, legacyUnmutatedSeedUsername, warnings)
+		} else if test.seedWithoutWebhook {
 			seedClient = newAdmissionResourceClient(t, env, test.oldObject, legacySeedUsername, warnings)
 		}
 		old := seedAdmissionObject(t, seedClient, test, env.Namespace())

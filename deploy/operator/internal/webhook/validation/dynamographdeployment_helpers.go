@@ -29,6 +29,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -436,4 +437,36 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+// disaggregatedSetPathwayForDynamoGraphDeployment identifies the DS path after Grove is excluded.
+// dgd must be non-nil.
+func disaggregatedSetPathwayForDynamoGraphDeployment(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	provider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
+	return provider == consts.WorkloadProviderDisaggregatedSet ||
+		(provider == "" && strings.EqualFold(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet], consts.KubeLabelValueTrue))
+}
+
+// dynamoGraphDeploymentComponents contains the selected provider and its prepared DCD inputs.
+// deployments is nil for Grove or failed preparation; the zero value means no preparation.
+type dynamoGraphDeploymentComponents struct {
+	provider    string
+	deployments map[string]*nvidiacomv1beta1.DynamoComponentDeployment
+}
+
+// prepareDynamoGraphDeploymentComponents resolves the provider and lowers DCD inputs once.
+// dgd must be non-nil. The provider remains available when normalization fails.
+func prepareDynamoGraphDeploymentComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment, groveEnabled bool) (dynamoGraphDeploymentComponents, error) {
+	grovePathway, _ := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
+	if grovePathway {
+		return dynamoGraphDeploymentComponents{provider: consts.WorkloadProviderGrove}, nil
+	}
+	provider := consts.WorkloadProviderComponent
+	if disaggregatedSetPathwayForDynamoGraphDeployment(dgd) {
+		provider = consts.WorkloadProviderDisaggregatedSet
+	}
+
+	// Use the production lowering, including template inheritance and worker hashes.
+	deployments, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: "00000000"})
+	return dynamoGraphDeploymentComponents{provider: provider, deployments: deployments}, err
 }
