@@ -197,13 +197,13 @@ def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None
     prefill = getattr(resolved, "dsa_prefill_backend", None)
     decode = getattr(resolved, "dsa_decode_backend", None)
     if any(
-        kernel is not None and kernel not in {"trtllm", "flashmla_kv"}
+        kernel is not None and kernel not in {"trtllm", "flashmla_kv", "prims_ts"}
         for kernel in (prefill, decode)
     ):
         return False
     if prefill is not None and decode is not None and prefill != decode:
         return False
-    # K3.1's sharded DCP path adds FlashMLA and Rubin TRT-LLM support.
+    # K3.1's sharded DCP path adds FlashMLA, Prims-TS and Rubin TRT-LLM support.
     model_config = get_sglang_model_config(server_args)
     hf_config = getattr(model_config, "hf_config", None)
     kimi_k31 = "KimiK31ForConditionalGeneration" in (
@@ -211,10 +211,17 @@ def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None
     )
     sharded = kimi_k31 and _sglang_has_dsa_dcp_module(_SGLANG_DSA_SHARDED_DCP_MODULE)
     if not sharded:
-        if "flashmla_kv" in (prefill, decode):
+        if {"flashmla_kv", "prims_ts"} & {prefill, decode}:
             return False
         if sglang_get_platform().device_sm not in (100, 103):
             return False
+    elif "prims_ts" in (prefill, decode) and sglang_get_platform().device_sm not in (
+        100,
+        103,
+        107,
+    ):
+        # SGLang checks the Prims-TS GPU only at backend init.
+        return False
     # K3.1's native validator owns its model-specific platform constraints.
     if prefill is None or decode is None:
         return None
