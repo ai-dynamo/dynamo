@@ -2552,7 +2552,8 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
     shared_namespace: str,
     request_plane: str = "tcp",
 ):
-    """Validate required topology constraints derived from pinned prefill workers."""
+    """Validate required topology constraints derived from pinned prefill workers, and
+    that unpinned requests avoid a prefill worker whose zone has no decode worker."""
     with KVRouterProcess(
         request,
         block_size,
@@ -2658,12 +2659,29 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 },
             }
             async with aiohttp.ClientSession() as session:
+                # Pinned to zone b, which has no decode worker: rejected with 503
+                # before prefill runs.
                 await post_expect_status(
                     session,
                     zone_b_payload,
-                    500,
+                    503,
                     "Expected required KV-transfer topology mismatch to fail",
                 )
+
+                # Unpinned requests avoid the zone-b prefill worker, whose zone has no
+                # decode worker.
+                for attempt in range(20):
+                    # A fresh prompt each time, so blocks cached on zone a don't decide.
+                    unpinned_payload = {
+                        **test_payload,
+                        "messages": [{"role": "user", "content": uuid.uuid4().hex}],
+                    }
+                    await post_expect_status(
+                        session,
+                        unpinned_payload,
+                        200,
+                        f"Expected unpinned request {attempt} to avoid zone b",
+                    )
 
         asyncio.run(run_requests())
 

@@ -24,7 +24,7 @@ pub mod kv_state_agent;
 
 mod model_manager;
 pub(crate) mod router_policy;
-pub(crate) use model_manager::CommittedModelView;
+pub(crate) use model_manager::{CommittedModelView, has_kv_transfer_peer};
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod controller;

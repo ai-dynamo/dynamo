@@ -2634,6 +2634,19 @@ impl ModelManager {
         self.lora_domain(endpoint_id).state_tracker.clone()
     }
 
+    /// Install a runtime-config watch for `endpoint_id`, as discovery would. Keep the
+    /// returned sender to change the endpoint's workers; dropping it closes the watch.
+    #[cfg(test)]
+    pub(crate) fn set_runtime_configs_for_test(
+        &self,
+        endpoint_id: &EndpointId,
+        configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> tokio::sync::watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>> {
+        let (tx, rx) = tokio::sync::watch::channel(configs);
+        self.runtime_configs.insert(endpoint_id.clone(), rx);
+        tx
+    }
+
     pub fn lora_load_estimator_for(&self, endpoint_id: &EndpointId) -> Arc<LoadEstimator> {
         self.lora_domain(endpoint_id).load_estimator.clone()
     }
@@ -2979,6 +2992,65 @@ impl ModelManager {
 
         Ok(Some(constraints))
     }
+
+    /// The runtime-config watch of `endpoint_id`, if discovery has created one.
+    pub(crate) fn runtime_config_watch(
+        &self,
+        endpoint_id: &EndpointId,
+    ) -> Option<RuntimeConfigWatch> {
+        self.runtime_configs.get(endpoint_id).map(|rx| rx.clone())
+    }
+
+    /// The workers of `endpoint_id` that have a KV-transfer peer: those without a required
+    /// transfer policy, and those whose required taints some available worker in
+    /// `peer_configs` carries. Returns `None` when no worker would be excluded, or when the
+    /// endpoint is unknown or has no required policy.
+    pub(crate) fn kv_transfer_reachable_workers(
+        &self,
+        endpoint_id: &EndpointId,
+        peer_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+        peer_available: Option<&HashSet<WorkerId>>,
+    ) -> Option<HashSet<WorkerId>> {
+        // Collect first: get_kv_transfer_routing_constraints re-borrows this same watch.
+        let worker_ids: Vec<WorkerId> = {
+            let rx = self.runtime_configs.get(endpoint_id)?;
+            let configs = rx.borrow();
+            if !has_required_kv_transfer_policy(&configs) {
+                return None;
+            }
+            configs.keys().copied().collect()
+        };
+        let mut reachable = HashSet::with_capacity(worker_ids.len());
+        let mut excluded_any = false;
+        for worker_id in worker_ids {
+            match self.get_kv_transfer_routing_constraints(endpoint_id, worker_id) {
+                Ok(Some(constraints))
+                    if constraints.has_hard_constraints()
+                        && !has_kv_transfer_peer(peer_configs, peer_available, &constraints) =>
+                {
+                    excluded_any = true;
+                }
+                // Misconfigured workers stay eligible; the dispatch preflight reports them.
+                _ => {
+                    reachable.insert(worker_id);
+                }
+            }
+        }
+        excluded_any.then_some(reachable)
+    }
+}
+
+/// Whether a worker in `peers` that is in `available` (when known) carries every required
+/// taint in `constraints`.
+pub(crate) fn has_kv_transfer_peer(
+    peers: &HashMap<WorkerId, ModelRuntimeConfig>,
+    available: Option<&HashSet<WorkerId>>,
+    constraints: &RoutingConstraints,
+) -> bool {
+    peers.iter().any(|(worker_id, config)| {
+        available.is_none_or(|ids| ids.contains(worker_id))
+            && constraints.is_compatible_with_worker_taints(&config.taints)
+    })
 }
 
 fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfig>) -> bool {
@@ -3245,8 +3317,7 @@ mod tests {
         endpoint_id: &EndpointId,
         configs: HashMap<WorkerId, ModelRuntimeConfig>,
     ) {
-        let (_tx, rx) = tokio::sync::watch::channel(configs);
-        mm.runtime_configs.insert(endpoint_id.clone(), rx);
+        mm.set_runtime_configs_for_test(endpoint_id, configs);
     }
 
     #[tokio::test]
@@ -3486,6 +3557,91 @@ mod tests {
 
         assert_eq!(estimator_a.get_current_load().get(&adapter.name), Some(&1));
         assert!(!estimator_b.get_current_load().contains_key(&adapter.name));
+    }
+
+    /// A worker in topology zone `zone` that may hand its KV only to a peer in that zone.
+    fn required_in_zone(zone: &str) -> ModelRuntimeConfig {
+        let mut config = topology_runtime_config(KvTransferEnforcement::Required, None);
+        config
+            .topology_domains
+            .insert("zone".to_string(), zone.to_string());
+        config.add_topology_taints();
+        config
+    }
+
+    #[test]
+    fn kv_transfer_reachable_workers_drops_workers_without_an_available_peer() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let in_zone = required_in_zone;
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(1, in_zone("a")), (2, in_zone("b"))]),
+        );
+
+        let peers = HashMap::from([(10, in_zone("a")), (11, in_zone("b"))]);
+        assert_eq!(
+            mm.kv_transfer_reachable_workers(&endpoint_id, &peers, None),
+            None,
+            "nothing to exclude"
+        );
+        // Zone b's peer is registered but not available, as after a reported failure.
+        assert_eq!(
+            mm.kv_transfer_reachable_workers(&endpoint_id, &peers, Some(&HashSet::from([10]))),
+            Some(HashSet::from([1]))
+        );
+
+        let preferred_only = EndpointId::from("test.prefill_preferred.generate");
+        insert_runtime_configs(
+            &mm,
+            &preferred_only,
+            HashMap::from([(
+                3,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.5)),
+            )]),
+        );
+        assert_eq!(
+            mm.kv_transfer_reachable_workers(&preferred_only, &HashMap::new(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn kv_transfer_reachable_workers_keeps_workers_it_cannot_judge() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        assert_eq!(
+            mm.kv_transfer_reachable_workers(&endpoint_id, &HashMap::new(), None),
+            None,
+            "unknown endpoint"
+        );
+
+        let in_zone = required_in_zone;
+        // Required policy, but the domain's value is missing: constraints can't be derived.
+        let mut misconfigured = topology_runtime_config(KvTransferEnforcement::Required, None);
+        misconfigured.topology_domains.clear();
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([
+                (1, in_zone("a")),
+                (2, in_zone("b")),
+                (3, misconfigured),
+                // No transfer domain: any decode can take its KV.
+                (4, ModelRuntimeConfig::default()),
+            ]),
+        );
+
+        // Only worker 2 is provably stranded; the dispatch preflight reports worker 3.
+        assert_eq!(
+            mm.kv_transfer_reachable_workers(
+                &endpoint_id,
+                &HashMap::from([(10, in_zone("a"))]),
+                None
+            ),
+            Some(HashSet::from([1, 3, 4]))
+        );
     }
 
     #[test]
