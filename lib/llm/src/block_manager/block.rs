@@ -392,17 +392,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
     pub(crate) fn metadata_on_returned(&mut self, tick: u64) {
         self.metadata.on_returned(tick);
     }
-}
 
-pub(crate) trait PrivateBlockExt {
-    fn register(
-        &mut self,
-        registry: &mut registry::BlockRegistry,
-    ) -> Result<Option<PublishHandle>, registry::BlockRegistrationError>;
-}
-
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PrivateBlockExt for Block<S, L, M> {
-    fn register(
+    pub(crate) fn register(
         &mut self,
         registry: &mut registry::BlockRegistry,
     ) -> Result<Option<PublishHandle>, registry::BlockRegistrationError> {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::block_manager::{
-    block::{BlockState, PrivateBlockExt, registry::BlockRegistrationError},
+    block::{BlockState, registry::BlockRegistrationError},
     events::Publisher,
 };
 
