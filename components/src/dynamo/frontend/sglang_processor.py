@@ -38,20 +38,27 @@ from dynamo.llm.exceptions import (
 )
 
 from .responses_history import responses_tools_request
+from .sglang_deepseek import create_recipe_output_parser
 from .sglang_prepost import (
+    JsonArrayParser,
     ReasoningParser,
     SglangStreamingPostProcessor,
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
     _guided_output_requires_reasoning,
+    _with_thinking_template_kwargs,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
-from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
+from .sglang_prompt_renderer import (
+    DeepSeekPromptRenderer,
+    PromptRenderer,
+    build_prompt_renderer,
+)
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .usage import response_usage, update_usage_metadata
@@ -765,6 +772,11 @@ class SglangProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.prompt_renderer = prompt_renderer
+        self.deepseek_spec = (
+            prompt_renderer.recipe_spec
+            if isinstance(prompt_renderer, DeepSeekPromptRenderer)
+            else None
+        )
         self.token_budget = token_budget
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
@@ -831,6 +843,25 @@ class SglangProcessor:
         """Parsers are passed in because the pool path must recreate them in the
         main process; they are not picklable.
         """
+        recipe_parser = None
+        if self.deepseek_spec is not None and not isinstance(
+            tool_call_parser, JsonArrayParser
+        ):
+            recipe_request = _with_thinking_template_kwargs(
+                request, self.default_thinking_mode
+            )
+            recipe_request["separate_reasoning"] = _client_wants_separate_reasoning(
+                request
+            )
+            recipe_parser = create_recipe_output_parser(
+                recipe_request,
+                tokenizer=self.tokenizer,
+                spec=self.deepseek_spec,
+                reasoning_parser_name=self.reasoning_parser_name,
+                tool_call_parser_name=self.tool_call_parser_name,
+                parse_tool_calls=tool_call_parser is not None,
+                json_content=_guided_json_is_content(dynamo_preproc),
+            )
         return SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
             tool_call_parser=tool_call_parser,
@@ -847,6 +878,7 @@ class SglangProcessor:
             stop_strings=_request_stop_strings(request),
             skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
+            recipe_parser=recipe_parser,
         )
 
     async def _generator_inner(
@@ -1052,6 +1084,7 @@ class SglangProcessor:
                 stop_reason: Any | None,
                 stop_terminated: bool,
                 engine_data: Any | None,
+                aborted: bool = False,
             ) -> dict[str, Any]:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
@@ -1068,6 +1101,7 @@ class SglangProcessor:
                     "finish_reason": finish_reason,
                     "stop_reason": stop_reason,
                     "stop_terminated": stop_terminated,
+                    "aborted": aborted,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -1227,6 +1261,10 @@ class SglangProcessor:
                     )
                     break
                 finish_reason = _map_finish_reason(raw_finish_reason)
+                aborted = isinstance(raw_finish_reason, str) and (
+                    raw_finish_reason == "cancelled"
+                    or raw_finish_reason.startswith("abort")
+                )
                 backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
                 if usage := engine_response.get("completion_usage"):
@@ -1251,7 +1289,7 @@ class SglangProcessor:
                         entries[:logprobs_count] for entries in top_logprobs
                     ]
 
-                if new_ids and pending_token_ids:
+                if new_ids and pending_token_ids and not aborted:
                     pending_logprob_shape = (
                         pending_log_probs is not None,
                         pending_top_logprobs is not None,
@@ -1306,6 +1344,7 @@ class SglangProcessor:
                         stop_reason=stop_reason,
                         stop_terminated=stop_terminated,
                         engine_data=engine_data,
+                        aborted=aborted,
                     )
                     if (
                         post.locally_finished
@@ -1316,7 +1355,7 @@ class SglangProcessor:
                         pending_terminal = envelope
                         continue
                     yield envelope
-                    if post.locally_finished:
+                    if post.locally_finished or aborted:
                         break
             else:
                 if pending_terminal is not None:

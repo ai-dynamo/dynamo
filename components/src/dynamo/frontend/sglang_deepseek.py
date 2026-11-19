@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compatibility with SGLang's recipe-based DeepSeek prompt encoder."""
+"""Compatibility with SGLang's recipe-based DeepSeek encoding and parsing."""
 
 import json
 from functools import lru_cache
@@ -14,6 +14,13 @@ except ModuleNotFoundError as exc:
     if exc.name != "sglang.srt.parser.deepseek_recipe_renderer":
         raise
     recipe_renderer = None
+
+try:
+    from sglang.srt.parser.deepseek_recipe_output import DeepSeekRecipeOutputParser
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.parser.deepseek_recipe_output":
+        raise
+    DeepSeekRecipeOutputParser = None
 
 
 def resolve_deepseek_spec(model_path: str) -> str | None:
@@ -38,6 +45,83 @@ class RecipeRequestError(ValueError):
 @lru_cache(maxsize=8)
 def _encoder(tokenizer: Any, spec: str):
     return recipe_renderer.DeepSeekRecipe.from_hf_tokenizer(spec, tokenizer)
+
+
+def supports_recipe_output(
+    *,
+    spec: str | None,
+    reasoning_parser_name: str | None,
+    tool_call_parser_name: str | None,
+) -> bool:
+    """Use native token parsing only for the checkpoint's configured family."""
+    if DeepSeekRecipeOutputParser is None or spec is None:
+        return False
+    reasoning_name, tool_name = {
+        "dsv4": ("deepseek-v4", "deepseekv4"),
+        "dsv41": ("deepseek-v41", "deepseekv41"),
+    }[spec]
+    if not (
+        reasoning_parser_name == reasoning_name or tool_call_parser_name == tool_name
+    ):
+        return False
+    if reasoning_parser_name not in (
+        None,
+        reasoning_name,
+    ) or tool_call_parser_name not in (
+        None,
+        tool_name,
+    ):
+        return False
+    return True
+
+
+def create_recipe_output_parser(
+    request: dict[str, Any],
+    *,
+    tokenizer: Any,
+    spec: str | None,
+    reasoning_parser_name: str | None,
+    tool_call_parser_name: str | None,
+    parse_tool_calls: bool,
+    json_content: bool = False,
+):
+    if not supports_recipe_output(
+        spec=spec,
+        reasoning_parser_name=reasoning_parser_name,
+        tool_call_parser_name=tool_call_parser_name,
+    ):
+        return None
+    kwargs = (
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
+    encoder = _encoder(tokenizer, spec)
+    messages = request.get("messages") or []
+    continued = (
+        {**messages[-1], "content": messages[-1].get("content") or ""}
+        if request.get("continue_final_message")
+        and messages
+        and messages[-1]["role"] == "assistant"
+        else None
+    )
+    stop = request.get("stop") or []
+    return DeepSeekRecipeOutputParser(
+        encoder,
+        thinking_stage=None
+        if json_content
+        else encoder.parse_start(
+            thinking=bool(kwargs.get("thinking")), continued=continued
+        ),
+        parse_tool_calls=parse_tool_calls and not json_content,
+        parse_json_output=json_content
+        or (request.get("response_format") or {}).get("type")
+        in ("json_object", "json_schema"),
+        separate_reasoning=reasoning_parser_name is not None
+        and request.get("separate_reasoning", True),
+        stream_reasoning=request.get("stream_reasoning", True),
+        stop=[stop]
+        if isinstance(stop, str)
+        else [item for item in stop if isinstance(item, str)],
+    )
 
 
 def render_recipe_prompt(

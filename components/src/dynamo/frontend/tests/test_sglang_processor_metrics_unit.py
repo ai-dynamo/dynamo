@@ -170,6 +170,13 @@ def _load_processor_module(
         remove_module(name)
     _install_sglang_stubs(install_module, tokenizer_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
+    _install_module(
+        install_module,
+        "dynamo.frontend.sglang_prompt_renderer",
+        DeepSeekPromptRenderer=type("DeepSeekPromptRenderer", (), {}),
+        PromptRenderer=object,
+        build_prompt_renderer=lambda *_args, **_kwargs: None,
+    )
     # Importing common.utils initializes native bindings absent from this fixture.
     _install_module(
         install_module,
@@ -185,12 +192,16 @@ def _load_processor_module(
     _install_module(
         install_module,
         "dynamo.frontend.sglang_prepost",
+        JsonArrayParser=sys.modules[
+            "sglang.srt.function_call.json_array_parser"
+        ].JsonArrayParser,
         ReasoningParser=object,
         SglangStreamingPostProcessor=object,
         ToolCallParserType=object,
         _client_wants_separate_reasoning=lambda *_args, **_kwargs: False,
         _get_history_tool_calls_count=lambda *_args, **_kwargs: 0,
         _guided_output_requires_reasoning=lambda *_args, **_kwargs: False,
+        _with_thinking_template_kwargs=lambda request, _default: dict(request),
         convert_tools=lambda *_args, **_kwargs: None,
         create_parsers=lambda *_args, **_kwargs: (None, None),
         detect_force_reasoning_from_template=lambda *_args, **_kwargs: False,
