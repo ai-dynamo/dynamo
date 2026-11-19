@@ -105,7 +105,27 @@ every worker, after `--gpu-memory-utilization`:
 - "10"
 ```
 
-NIM Factory image and video accuracy testing used this setting.
+Raise the request size limits for large images and videos. Add these variables to the frontend
+and every worker; `DYN_HTTP_BODY_LIMIT_MB` applies only to the frontend:
+
+```yaml
+- name: DYN_TCP_MAX_MESSAGE_SIZE
+  value: "2147483648"
+- name: DYN_MM_MAX_DATA_URL_MB
+  value: "1024"
+- name: DYN_HTTP_BODY_LIMIT_MB
+  value: "1024"
+```
+
+To sample up to 256 frames from each video, in place of the default 32, add this variable to
+every worker, and to the frontend if it decodes video (`--frontend-decoding`):
+
+```yaml
+- name: DYN_MM_VIDEO_NUM_FRAMES
+  value: "256"
+```
+
+NIM Factory image and video accuracy testing used these settings.
 
 ## Benchmark
 

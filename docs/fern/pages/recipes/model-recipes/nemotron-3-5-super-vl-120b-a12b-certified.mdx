@@ -147,7 +147,7 @@ The runs used a synthetic MTP acceptance length of 4.06 with five draft tokens. 
 ## Notes
 
 - The 1.7.0 enterprise images publish on NGC with the Dynamo 1.7.0 release.
-- To serve image or video requests, add `--mm-ipc-gpu-memory-gb 10` to every worker; see the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md#multimodal-workloads). NIM Factory image and video accuracy testing used this setting.
+- To serve image or video requests, add `--mm-ipc-gpu-memory-gb 10` to every worker and raise the request size limits; see the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md#multimodal-workloads). NIM Factory image and video accuracy testing used these settings.
 - The disaggregated decode workers use `NixlConnector` alone, matching the open-source recipe.
 
 ## Source

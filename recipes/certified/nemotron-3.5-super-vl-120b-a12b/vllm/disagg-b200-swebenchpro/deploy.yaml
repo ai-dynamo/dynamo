@@ -55,18 +55,12 @@ spec:
                 - fastokens
                 - --no-tokenizer-fallback
               env:
-                - name: DYN_TCP_MAX_MESSAGE_SIZE
-                  value: "2147483648"
-                - name: DYN_MM_MAX_DATA_URL_MB
-                  value: "1024"
                 - name: FASTOKENS_BPE_THREADS
                   value: "16"
                 - name: DYN_ROUTER_MODE
                   value: kv
                 - name: DYN_ROUTER_SESSION_AFFINITY_TTL_SECS
                   value: '7200'
-                - name: DYN_HTTP_BODY_LIMIT_MB
-                  value: "1024"
                 - name: HF_TOKEN
                   valueFrom:
                     secretKeyRef:
@@ -172,14 +166,8 @@ spec:
                 - --disaggregation-mode
                 - prefill
               env:
-                - name: DYN_MM_VIDEO_NUM_FRAMES
-                  value: "256"
                 - name: NUMPY_MADVISE_HUGEPAGE
                   value: "0"
-                - name: DYN_TCP_MAX_MESSAGE_SIZE
-                  value: "2147483648"
-                - name: DYN_MM_MAX_DATA_URL_MB
-                  value: "1024"
                 - name: KV_TRANSFER_CONFIG
                   value: '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"lazy_offload":false,"cpu_bytes_to_use":214748364800}}]}}'
                 - name: MODEL_NAME
@@ -329,14 +317,8 @@ spec:
                 - --disaggregation-mode
                 - decode
               env:
-                - name: DYN_MM_VIDEO_NUM_FRAMES
-                  value: "256"
                 - name: NUMPY_MADVISE_HUGEPAGE
                   value: "0"
-                - name: DYN_TCP_MAX_MESSAGE_SIZE
-                  value: "2147483648"
-                - name: DYN_MM_MAX_DATA_URL_MB
-                  value: "1024"
                 - name: KV_TRANSFER_CONFIG
                   value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}'
                 - name: MODEL_NAME

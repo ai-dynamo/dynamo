@@ -52,12 +52,6 @@ spec:
           - fastokens
           - --no-tokenizer-fallback
           env:
-          - name: DYN_TCP_MAX_MESSAGE_SIZE
-            value: "2147483648"
-          - name: DYN_MM_MAX_DATA_URL_MB
-            value: "1024"
-          - name: DYN_HTTP_BODY_LIMIT_MB
-            value: "1024"
           - name: FASTOKENS_BPE_THREADS
             value: "16"
           - name: DYN_ROUTER_MODE
@@ -171,12 +165,6 @@ spec:
           - --dyn-tool-call-parser
           - qwen3_coder
           env:
-          - name: DYN_MM_VIDEO_NUM_FRAMES
-            value: "256"
-          - name: DYN_TCP_MAX_MESSAGE_SIZE
-            value: "2147483648"
-          - name: DYN_MM_MAX_DATA_URL_MB
-            value: "1024"
           - name: NUMPY_MADVISE_HUGEPAGE
             value: "0"
           - name: MODEL_NAME
