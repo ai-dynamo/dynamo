@@ -7,3 +7,6 @@ POLICY_CONTRACTS = {
     "mpc": "paired-slo-feedback-v2",
     "knowline": "joint-fleet-measured-efficiency-v2",
 }
+
+#: Replay telemetry cadence (simulated seconds) both feedback planners require.
+FEEDBACK_TELEMETRY_INTERVAL_S = 5.0

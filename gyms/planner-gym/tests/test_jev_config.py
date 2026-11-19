@@ -7,13 +7,21 @@ from pathlib import Path
 import pytest
 import yaml
 from autoscaling_arena.match_config import MatchConfigError, load_match_config
+from autoscaling_arena.match_runner import (
+    MatchPublishError,
+    preflight_publish_destinations,
+)
+
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
-def load_example(tmp_path, changes=None):
+def load_example(tmp_path, changes=None, edit=None):
     root = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((root / "configs/match.jev.example.yaml").read_text())
     config["backend"]["planner_config"] = str(root / "configs/planner.sim.example.yaml")
     config["backend"]["autoscalers"][0]["config"].update(changes or {})
+    if edit is not None:
+        edit(config)
     path = tmp_path / "match.yaml"
     path.write_text(yaml.safe_dump(config))
     return load_match_config(path)
@@ -108,3 +116,67 @@ def test_recovery_log_must_exist(tmp_path):
                 "replay_decisions_sha256": "0" * 64,
             },
         )
+
+
+SELF_HOSTED = {
+    "provider": "self_hosted",
+    "base_url": "http://localhost:8123",
+    "model": "PelaAI/KnowLine-31B-Gen1",
+}
+
+
+@pytest.mark.parametrize("interval", [None, 10])
+def test_self_hosted_requires_five_second_telemetry(tmp_path, interval):
+    def change_cadence(config):
+        config["backend"]["replay"]["telemetry_sample_interval_s"] = interval
+
+    with pytest.raises(MatchConfigError, match="5-second replay telemetry"):
+        load_example(tmp_path, SELF_HOSTED, edit=change_cadence)
+    # Hosted Jev does not read replay telemetry, so its cadence stays optional.
+    load_example(tmp_path, edit=change_cadence)
+
+
+def test_self_hosted_token_requires_https_beyond_loopback(tmp_path):
+    remote = {**SELF_HOSTED, "api_key_env": "MODEL_TOKEN"}
+    with pytest.raises(MatchConfigError, match="https"):
+        load_example(tmp_path, {**remote, "base_url": "http://decision.internal:8123"})
+    load_example(tmp_path, {**remote, "base_url": "https://decision.internal:8123"})
+    load_example(tmp_path, remote)
+
+
+def _recovery(source):
+    source.write_text("")
+    return {
+        "replay_decisions": source.name,
+        "replay_decisions_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
+
+
+def test_recovery_log_cannot_be_a_publish_destination(tmp_path):
+    source = tmp_path / "previous.jsonl"
+
+    def publish_over_the_log(config):
+        config["publish"]["destinations"] = [
+            {"type": "json", "path": str(source), "overwrite": True}
+        ]
+
+    with pytest.raises(MatchConfigError, match="must not overwrite an input"):
+        load_example(tmp_path, _recovery(source), edit=publish_over_the_log)
+
+
+def test_publication_preflight_protects_the_recovery_log(tmp_path):
+    source = tmp_path / "previous.jsonl"
+    results = tmp_path / "results.json"
+
+    def publish_beside_the_log(config):
+        config["publish"] = {
+            "artifact_root": str(tmp_path / "artifacts"),
+            "destinations": [{"type": "json", "path": str(results), "overwrite": True}],
+        }
+
+    config = load_example(tmp_path, _recovery(source), edit=publish_beside_the_log)
+    preflight_publish_destinations(config)
+    # The destination now resolves to the log a recovery verifies by checksum.
+    results.symlink_to(source)
+    with pytest.raises(MatchPublishError, match="refusing to overwrite input"):
+        preflight_publish_destinations(config)

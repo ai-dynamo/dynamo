@@ -27,9 +27,12 @@ from autoscaling_arena.match_config import (
     load_match_config,
 )
 
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+
 ARENA_ROOT = Path(__file__).resolve().parents[1]
 PLANNER_CONFIG = ARENA_ROOT / "configs" / "planner.sim.example.yaml"
 MPC_EXAMPLE = ARENA_ROOT / "configs" / "match.mpc.example.yaml"
+COGNITIVE_AGENT_EXAMPLE = ARENA_ROOT / "configs" / "match.cognitive-agent.example.yaml"
 
 # ``substrate: gpt_oss`` resolves a separate AIS identity for each deployed role.
 EXPECTED_AIS_SPEC = {
@@ -55,9 +58,16 @@ EXPECTED_AIS_SPEC["decode_config"] = {
 
 
 def _write_sim_config(
-    tmp_path: Path, *, autoscalers: str, topology: str = "disagg", gpu_budget: int = 32
+    tmp_path: Path,
+    *,
+    autoscalers: str,
+    topology: str = "disagg",
+    gpu_budget: int = 32,
+    backend_extra: str = "",
+    substrate: bool = True,
 ) -> Path:
     entries = textwrap.indent(textwrap.dedent(autoscalers).strip(), "    ")
+    extra = textwrap.indent(textwrap.dedent(backend_extra).strip(), "  ")
     body = textwrap.dedent(
         f"""
         schema_version: 1
@@ -68,6 +78,7 @@ def _write_sim_config(
           topology: {topology}
           gpu_budget: {gpu_budget}
           planner_config: {PLANNER_CONFIG}
+        @@BACKEND_EXTRA@@
           autoscalers:
         @@AUTOSCALERS@@
         evaluations:
@@ -93,7 +104,12 @@ def _write_sim_config(
         """
     ).lstrip()
     path = tmp_path / "match.yaml"
-    path.write_text(body.replace("@@AUTOSCALERS@@", entries))
+    if not substrate:
+        # Explicit model and engines (in ``backend_extra``) replace the preset.
+        body = body.replace("  substrate: gpt_oss\n", "")
+    path.write_text(
+        body.replace("@@BACKEND_EXTRA@@", extra).replace("@@AUTOSCALERS@@", entries)
+    )
     return path
 
 
@@ -205,6 +221,44 @@ def test_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
             """,
             ("slo_ttft_ms and slo_itl_ms must equal SLO profile", "interactive"),
         ),
+        (
+            # Scoring and replay must charge a worker the same GPUs.
+            """
+            - name: bad
+              type: mpc
+              start: {prefill: 1, decode: 1}
+              config: {gpus_per_worker: 4}
+            """,
+            ("gpus_per_worker", "deployed engine's 1 GPUs per worker"),
+        ),
+        (
+            """
+            - name: bad
+              type: mpc
+              start: {prefill: 1, decode: 1}
+              config: {prefill_gpus_per_worker: 2}
+            """,
+            ("prefill_gpus_per_worker", "deployed engine's 1 GPUs per worker"),
+        ),
+        (
+            # A prediction made between samples never matches a telemetry interval.
+            """
+            - name: bad
+              type: mpc
+              start: {prefill: 1, decode: 1}
+              config: {poll_interval_s: 2}
+            """,
+            ("poll_interval_s", "multiple of the 5-second telemetry interval"),
+        ),
+        (
+            """
+            - name: bad
+              type: mpc
+              start: {prefill: 1, decode: 1}
+              config: {poll_interval_s: 7.5}
+            """,
+            ("poll_interval_s", "multiple of the 5-second telemetry interval"),
+        ),
     ],
 )
 def test_mpc_config_errors(tmp_path: Path, autoscaler: str, message_parts):
@@ -212,6 +266,70 @@ def test_mpc_config_errors(tmp_path: Path, autoscaler: str, message_parts):
         load_match_config(_write_sim_config(tmp_path, autoscalers=autoscaler))
     for part in message_parts:
         assert part in str(excinfo.value)
+
+
+MPC_ENTRY = """
+- name: mpc
+  type: mpc
+  start: {prefill: 1, decode: 1}
+"""
+
+
+def test_mpc_accepts_matching_costs_and_aligned_cadence(tmp_path: Path):
+    (mpc,) = _sim_autoscalers(
+        _write_sim_config(
+            tmp_path,
+            autoscalers="""
+            - name: mpc
+              type: mpc
+              start: {prefill: 1, decode: 1}
+              config:
+                gpus_per_worker: 1
+                prefill_gpus_per_worker: 1
+                poll_interval_s: 10
+            """,
+        )
+    )
+    assert mpc.config["poll_interval_s"] == 10
+
+
+@pytest.mark.parametrize("interval", ["null", "10"])
+def test_mpc_requires_five_second_telemetry(tmp_path: Path, interval: str):
+    with pytest.raises(MatchConfigError, match="5-second replay telemetry"):
+        load_match_config(
+            _write_sim_config(
+                tmp_path,
+                autoscalers=MPC_ENTRY,
+                backend_extra=f"replay: {{telemetry_sample_interval_s: {interval}}}",
+            )
+        )
+
+
+def test_mpc_requires_one_cold_start_delay_for_both_pools(tmp_path: Path):
+    example = yaml.safe_load(COGNITIVE_AGENT_EXAMPLE.read_text())["backend"]
+
+    def explicit_engines(prefill: float, decode: float) -> str:
+        engines = {
+            "common": example["engines"]["common"],
+            "prefill": {"runtime": {"cold_start_delay_s": prefill}},
+            "decode": {"runtime": {"cold_start_delay_s": decode}},
+        }
+        return yaml.safe_dump({"model": example["model"], "engines": engines})
+
+    def load(prefill: float, decode: float):
+        return _sim_autoscalers(
+            _write_sim_config(
+                tmp_path,
+                autoscalers=MPC_ENTRY,
+                substrate=False,
+                backend_extra=explicit_engines(prefill, decode),
+            )
+        )
+
+    with pytest.raises(MatchConfigError, match="single cold-start delay"):
+        load(60, 10)
+    (mpc,) = load(45, 45)
+    assert mpc.config["cold_start_s"] == 45
 
 
 def test_unknown_autoscaler_type_lists_supported_choices(tmp_path: Path):

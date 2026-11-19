@@ -60,7 +60,8 @@ Setting a threshold explicitly makes low-confidence answers hold their pool's
 current expected target. Default `failure_mode: raise` fails on a timeout, API
 error, malformed answer, or pinned-model mismatch. `failure_mode: hold` is a
 separate reliability experiment; it holds both targets and logs the error.
-Exhausting `max_calls` always stops the run.
+Exhausting `max_calls` stops the run at the next decision that needs a model
+call.
 
 ## Evidence and interpretation
 

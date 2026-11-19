@@ -633,6 +633,13 @@ def preflight_publish_destinations(
     if isinstance(config.backend, RealBackendConfig):
         if config.backend.endpoint_catalog is not None:
             protected.add(config.backend.endpoint_catalog.resolve(strict=False))
+    else:
+        # A recovery verifies its decision log by checksum; never replace it.
+        protected.update(
+            Path(autoscaler.config["replay_decisions"]).resolve(strict=False)
+            for autoscaler in config.backend.autoscalers
+            if "replay_decisions" in autoscaler.config
+        )
     artifact_root = config.publish.artifact_root
     if artifact_root.exists() and not artifact_root.is_dir():
         raise MatchPublishError(
@@ -1566,10 +1573,14 @@ def _build_sim_factory(
 
         def factory(config, capabilities):
             del config
-            decode_caps = getattr(capabilities, "decode", None)
+            decode_caps = capabilities.decode if capabilities is not None else None
             caps_kwargs = {
-                "max_kv_tokens": getattr(decode_caps, "max_kv_tokens", None),
-                "max_num_seqs": getattr(decode_caps, "max_num_seqs", None),
+                "max_kv_tokens": (
+                    decode_caps.max_kv_tokens if decode_caps is not None else None
+                ),
+                "max_num_seqs": (
+                    decode_caps.max_num_seqs if decode_caps is not None else None
+                ),
             }
             if capacity_type == "ais":
                 capacity_model = mpc_module.AISCapacityModel(

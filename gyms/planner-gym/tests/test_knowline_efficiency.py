@@ -5,10 +5,11 @@ import asyncio
 import hashlib
 import json
 
-import httpx
 import pytest
 from feedback_fixtures import knowline_context, sample
 
+# The HTTP client ships with the optional `jev` extra.
+httpx = pytest.importorskip("httpx")
 types = pytest.importorskip("dynamo.planner.core.types")
 from autoscaling_arena.adapters.jev import JevAutoscaler  # noqa: E402
 from autoscaling_arena.adapters.knowline_policy import KnowLinePolicy  # noqa: E402

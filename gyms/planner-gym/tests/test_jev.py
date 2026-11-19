@@ -22,10 +22,9 @@ validate_answer = importlib.import_module(
 )._validate_answer
 engine_protocol = importlib.import_module("dynamo.planner.core.engine_protocol")
 
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
-@pytest.mark.unit
-@pytest.mark.gpu_0
-@pytest.mark.pre_merge
+
 def test_jev_keeps_the_common_tick_contract_without_runtime_reconfiguration(tmp_path):
     engine = make_engine(tmp_path, lambda request: httpx.Response(200, json={}))
     try:
@@ -466,3 +465,166 @@ def test_recovery_refuses_changed_log_or_observations(tmp_path, fault):
 
         asyncio.run(recover())
     assert len(requests) == 1
+
+
+FIXED_FLEET = dict(
+    provider="self_hosted",
+    base_url="http://127.0.0.1",
+    model="PelaAI/KnowLine-31B-Gen1",
+    min_prefill=1,
+    max_prefill=1,
+    min_decode=1,
+    max_decode=1,
+)
+FIXED_TICK = TickInput(
+    now_s=0,
+    worker_counts=WorkerCounts(
+        ready_num_prefill=1,
+        expected_num_prefill=1,
+        ready_num_decode=1,
+        expected_num_decode=1,
+    ),
+)
+
+
+def _fixed_fleet_engine(directory, **kwargs):
+    def handler(request):
+        pytest.fail("A fixed allocation must not call the model endpoint")
+
+    engine = make_engine(
+        directory, handler, context=knowline_context(), **FIXED_FLEET, **kwargs
+    )
+    engine.on_telemetry(sample())
+    return engine
+
+
+def _tick_once(engine, tick=FIXED_TICK, at=0):
+    async def run():
+        try:
+            return await engine.tick(engine.initial_tick(at), tick)
+        finally:
+            await engine.shutdown()
+
+    return asyncio.run(run())
+
+
+def test_recovery_budget_counts_api_calls_not_forced_rows(tmp_path):
+    original = tmp_path / "original"
+    original.mkdir()
+    _tick_once(_fixed_fleet_engine(original))
+    source = original / "decisions.jsonl"
+    assert json.loads(source.read_text())["api_calls_used"] == 0
+
+    recovery = tmp_path / "recovery"
+    recovery.mkdir()
+    engine = _fixed_fleet_engine(
+        recovery,
+        prior_calls=0,
+        replay_decisions=str(source),
+        replay_decisions_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    result = _tick_once(engine)
+    assert result.scale_to.num_prefill == result.scale_to.num_decode == 1
+    row = json.loads((recovery / "decisions.jsonl").read_text())
+    assert (row["response_source"], row["api_calls_used"]) == ("replay", 0)
+
+
+def test_recovery_still_requires_the_recorded_api_calls(tmp_path):
+    def handler(request):
+        return httpx.Response(200, json=response_for(json.loads(request.content)))
+
+    _tick_once(make_engine(tmp_path, handler), snapshot(), at=15)
+    source = tmp_path / "decisions.jsonl"
+    with pytest.raises(ValueError, match="recorded API calls"):
+        JevAutoscaler(
+            prior_calls=0,
+            replay_decisions=str(source),
+            replay_decisions_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        )
+
+
+def test_forced_fleet_proceeds_after_the_call_budget_is_spent(tmp_path):
+    engine = _fixed_fleet_engine(tmp_path, max_calls=1, prior_calls=1)
+    result = _tick_once(engine)
+    assert result.scale_to.num_prefill == result.scale_to.num_decode == 1
+    row = json.loads((tmp_path / "decisions.jsonl").read_text())
+    assert (row["response_source"], row["api_calls_used"]) == ("forced_bounds", 1)
+
+
+def test_non_finite_token_usage_is_a_recorded_failure(tmp_path):
+    def handler(request):
+        body = json.dumps(response_for(json.loads(request.content)))
+        assert '"input_tokens": 300' in body
+        return httpx.Response(
+            200, content=body.replace('"input_tokens": 300', '"input_tokens": 1e400')
+        )
+
+    engine = make_engine(tmp_path, handler, failure_mode="hold")
+    result = _tick_once(engine, snapshot(), at=15)
+    assert result.scale_to.num_decode == 4  # the held fleet
+    row = json.loads((tmp_path / "decisions.jsonl").read_text())
+    assert (row["status"], row["error_stage"]) == ("error", "strict_json")
+    assert "usage" not in row
+
+
+def test_cancelled_inference_is_not_a_replayable_decision(tmp_path):
+    async def handler(request):
+        await asyncio.sleep(30)
+        raise AssertionError("cancellation should stop the call")
+
+    engine = make_engine(tmp_path, handler, timeout_s=20)
+
+    async def run():
+        try:
+            task = asyncio.ensure_future(
+                engine.tick(engine.initial_tick(15), snapshot())
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            await engine.shutdown()
+
+    asyncio.run(run())
+    source = tmp_path / "decisions.jsonl"
+    row = json.loads(source.read_text())
+    assert (row["status"], row["error_type"]) == ("interrupted", "CancelledError")
+    assert row["api_calls_used"] == 1
+    assert "answers" not in row
+    assert summarize_decisions(source)["errors"] == 1
+
+    recovery = tmp_path / "recovery"
+    recovery.mkdir()
+    resumed = make_engine(
+        recovery,
+        handler,
+        prior_calls=1,
+        replay_decisions=str(source),
+        replay_decisions_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    try:
+        assert not resumed._replay  # the interrupted attempt is not reused
+    finally:
+        asyncio.run(resumed.shutdown())
+
+
+def test_rounded_probabilities_must_admit_a_distribution_summing_to_one():
+    def answer(probabilities):
+        return {
+            "type": "choice",
+            "choice": "1",
+            "confidence": 0.9,
+            "probabilities": probabilities,
+        }
+
+    five = {str(n): {} for n in range(1, 6)}
+    # The unrounded values total at least 0.995 + 0.005 + 0.005 > 1.
+    with pytest.raises(ValueError, match="rounding tolerance"):
+        validate_answer(
+            answer({"1": 1.0, "2": 0.01, "3": 0.01, "4": 0.0, "5": 0.0}), five
+        )
+    # Three thirds, each rounded down, still describe one distribution.
+    validate_answer(
+        answer({"1": 0.33, "2": 0.33, "3": 0.33}), {"1": {}, "2": {}, "3": {}}
+    )

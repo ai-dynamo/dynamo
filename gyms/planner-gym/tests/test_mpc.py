@@ -24,7 +24,14 @@ from autoscaling_arena.adapters.mpc import (  # noqa: E402
     RooflineCapacityModel,
     _ArrivalForecaster,
 )
+from autoscaling_arena.match_config import (  # noqa: E402
+    ReplicaCounts,
+    SimAutoscalerConfig,
+)
+from autoscaling_arena.match_runner import _build_sim_factory  # noqa: E402
 from autoscaling_arena.worker_limits import WorkerLimits  # noqa: E402
+
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 # Per-worker KV capacity of the published agg substrate: 29920 blocks x 16.
 MAX_KV_TOKENS = 29920 * 16
@@ -219,9 +226,6 @@ def test_mpc_uses_measured_goodput_per_resident_gpu_second(mode, p, d):
 
 
 def test_match_factory_passes_the_scorers_short_output_policy():
-    from autoscaling_arena.match_config import ReplicaCounts, SimAutoscalerConfig
-    from autoscaling_arena.match_runner import _build_sim_factory
-
     entry = SimAutoscalerConfig(
         name="mpc",
         type="mpc",

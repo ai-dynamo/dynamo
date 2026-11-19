@@ -48,8 +48,10 @@ python scripts/run_match_config.py configs/match.cognitive-agent.example.yaml
 
 `base_url` must be an HTTP(S) origin without credentials or a path. If the
 endpoint needs a bearer token, name its environment variable with
-`api_key_env`; `TYPESAFE_API_KEY` is reserved for the hosted provider. The
-adapter bypasses ambient HTTP proxies for a self-hosted endpoint.
+`api_key_env`; `TYPESAFE_API_KEY` is reserved for the hosted provider. A token
+is sent only over HTTPS or to a loopback address, so a remote endpoint with
+`api_key_env` needs an `https` origin. The adapter bypasses ambient HTTP
+proxies for a self-hosted endpoint.
 
 ## Joint fleet actions
 
@@ -74,7 +76,9 @@ native Planner's recommendation are excluded.
 
 The policy identifier is `joint-fleet-measured-efficiency-v2`. Five-second
 native telemetry supplies `completion_feedback.schema_version == 1`; missing,
-stale or inconsistent feedback fails the run. Model decisions occur every
+stale or inconsistent feedback fails the run. The replay runtime must emit
+that block; see the runtime requirement in [mpc.md](mpc.md#runtime-requirement).
+Model decisions occur every
 `poll_interval_s` simulated seconds (15 in the example); keep it at or above
 the five-second telemetry cadence so each decision sees its previous action.
 
@@ -86,6 +90,7 @@ ships the server. The reported results used revision
 `8f052a8130e599b53e5324c34f0f5ff90696e1c6` on two 80 GiB GPUs:
 
 ```bash
+export MODEL_DIR="$HOME/models/knowline-31b-gen1"  # any local directory
 python - <<'PY'
 import os
 from huggingface_hub import snapshot_download
@@ -111,7 +116,9 @@ Each run records exact requests, validated answers, targets, inference latency
 and errors in `jev-decisions.jsonl`, with a `runtime.jev` summary. A resumed
 run can replay a saved decision prefix (`replay_decisions` with its SHA-256 and
 `prior_calls`); it rejects changed observations, and replayed decisions do not
-call the model.
+call the model. `prior_calls` is the number of model calls the prefix used; a
+decision forced by a single feasible fleet uses none. A cancelled or otherwise
+interrupted attempt is logged with status `interrupted` and is never replayed.
 
 API wall time does not advance replay time. Results measure decision quality
 under ideal actuation timing; physical model GPU use and call latency are

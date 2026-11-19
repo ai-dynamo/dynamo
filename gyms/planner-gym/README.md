@@ -152,7 +152,7 @@ requests meeting the SLOs; it is not the ranking metric.
 cloudAI-MPC ranks first in disaggregated serving and second in aggregated.
 Cognitive Agent ranks first in aggregated serving and third in disaggregated.
 In aggregated serving the top three are close, and the fixed Static fleet
-takes the most outright wins.
+earns the most win credit.
 
 Each cell is one CPU-simulated full-trace run, not a GPU-serving measurement.
 Simulated GPU-hours exclude the physical GPUs that serve Cognitive Agent's

@@ -19,6 +19,7 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 
 import yaml
 from autoscaling_arena.decision_endpoint import decision_base_url
+from autoscaling_arena.policy_contracts import FEEDBACK_TELEMETRY_INTERVAL_S
 from autoscaling_arena.substrates import DEFAULT_COLD_START_DELAY_S, SUBSTRATES
 from autoscaling_arena.trace_preparation import TracePreparationConfig
 from autoscaling_arena.worker_limits import WorkerLimits
@@ -648,8 +649,38 @@ def parse_match_config(data: Any, *, source_path: str | Path) -> MatchConfig:
                             f"backend.planner_config.{key} conflicts with SLO profile {profile.name!r}; omit the duplicate target to use each profile"
                         )
         for autoscaler in backend.autoscalers:
+            # MPC and Cognitive Agent read measured outcomes from replay
+            # telemetry at one fixed cadence; catch a mismatch before the run.
+            if autoscaler.type not in _MPC_TYPES and not (
+                autoscaler.type == "jev"
+                and autoscaler.config.get("provider") == "self_hosted"
+            ):
+                continue
+            if (
+                backend.replay.telemetry_sample_interval_s
+                != FEEDBACK_TELEMETRY_INTERVAL_S
+            ):
+                raise MatchConfigError(
+                    "backend.replay.telemetry_sample_interval_s: autoscaler "
+                    f"{autoscaler.name!r} requires {FEEDBACK_TELEMETRY_INTERVAL_S:g}-second "
+                    "replay telemetry"
+                )
             if autoscaler.type not in _MPC_TYPES:
                 continue
+            # A latency prediction is checked against the telemetry interval
+            # that follows it, so decisions must fall on sample boundaries.
+            ticks_per_sample = (
+                float(autoscaler.config["poll_interval_s"])
+                / FEEDBACK_TELEMETRY_INTERVAL_S
+            )
+            if ticks_per_sample < 1 or not math.isclose(
+                ticks_per_sample, round(ticks_per_sample), rel_tol=0, abs_tol=1e-9
+            ):
+                raise MatchConfigError(
+                    f"backend.autoscalers.{autoscaler.name}.config.poll_interval_s: "
+                    f"must be a multiple of the {FEEDBACK_TELEMETRY_INTERVAL_S:g}-second "
+                    "telemetry interval"
+                )
             targets = (
                 autoscaler.config["slo_ttft_ms"],
                 autoscaler.config["slo_itl_ms"],
@@ -686,8 +717,15 @@ def parse_match_config(data: Any, *, source_path: str | Path) -> MatchConfig:
     if isinstance(backend, RealBackendConfig):
         if backend.endpoint_catalog is not None:
             protected_inputs.add(backend.endpoint_catalog)
-    elif backend.planner_config_path is not None:
-        protected_inputs.add(backend.planner_config_path)
+    else:
+        if backend.planner_config_path is not None:
+            protected_inputs.add(backend.planner_config_path)
+        # A recovery verifies this log by checksum; publication must not replace it.
+        protected_inputs.update(
+            Path(autoscaler.config["replay_decisions"])
+            for autoscaler in backend.autoscalers
+            if "replay_decisions" in autoscaler.config
+        )
     if publish.artifact_root in protected_inputs:
         raise MatchConfigError(
             "publish.artifact_root: must not be an input configuration file"
@@ -1509,6 +1547,27 @@ def _resolve_mpc_config(
     else:
         assert engines.aggregate is not None
         ttft_engine = cost_engine = engines.aggregate
+    # Replay charges each worker its engine's GPUs. A different cost in the
+    # controller would score fleets against GPU-seconds the run never spends.
+    worker_costs = [("gpus_per_worker", cost_engine)]
+    if topology == "disagg":
+        worker_costs.append(("prefill_gpus_per_worker", ttft_engine))
+    for key, engine in worker_costs:
+        if key in config and int(config[key]) != engine.num_gpus:
+            raise MatchConfigError(
+                f"{path}.{key}: must equal the deployed engine's {engine.num_gpus} "
+                "GPUs per worker; omit it to use the engine's value"
+            )
+    # The controller plans with one cold-start delay for both pools.
+    if (
+        topology == "disagg"
+        and ttft_engine.runtime.cold_start_delay_s
+        != cost_engine.runtime.cold_start_delay_s
+    ):
+        raise MatchConfigError(
+            f"{path}: MPC plans with a single cold-start delay; the prefill and "
+            "decode engines must share runtime.cold_start_delay_s"
+        )
     config.setdefault("gpus_per_worker", cost_engine.num_gpus)
     if cost_engine.runtime.cold_start_delay_s is not None:
         config.setdefault("cold_start_s", cost_engine.runtime.cold_start_delay_s)

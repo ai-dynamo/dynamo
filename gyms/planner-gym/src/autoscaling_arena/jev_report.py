@@ -15,7 +15,7 @@ def summarize_decisions(path: Path) -> dict:
     with path.open(encoding="utf-8") as stream:
         for line in stream:
             row = json.loads(line)
-            errors += row["status"] == "error"
+            errors += row["status"] != "ok"  # failed or interrupted attempts
             gated += bool(row["gated_pools"])
             if row.get("model"):
                 models.add(row["model"])

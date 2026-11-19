@@ -5,10 +5,26 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from typing import Any
 from urllib.parse import urlsplit
+
+try:
+    import httpx
+except ImportError:  # the optional `jev` extra; config validation works without it
+    httpx = None
+
+
+def _is_loopback(hostname: str) -> bool:
+    host = hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def decision_base_url(
@@ -60,13 +76,20 @@ def decision_base_url(
         or api_key_env == "TYPESAFE_API_KEY"
     ):
         raise ValueError("api_key_env must name a separate environment variable")
+    # The bearer token must not cross a network in clear text.
+    if (
+        api_key_env is not None
+        and url.scheme != "https"
+        and not _is_loopback(url.hostname)
+    ):
+        raise ValueError(
+            "api_key_env requires an https base_url unless the endpoint is on loopback"
+        )
     return base_url.rstrip("/")
 
 
 def decision_http_client(*, timeout_s: float, **endpoint: Any) -> Any:
     """Keep httpx optional for config-only installations."""
-    import httpx
-
     origin = decision_base_url(**endpoint)
     provider = endpoint.get("provider", "typesafe")
     key_env = (
@@ -78,6 +101,10 @@ def decision_http_client(*, timeout_s: float, **endpoint: Any) -> Any:
         if not key:
             raise ValueError(f"decision endpoint requires {key_env} in the environment")
         headers["Authorization"] = f"Bearer {key}"
+    if httpx is None:
+        raise ImportError(
+            "the decision endpoint client needs httpx; install the Gym's `jev` extra"
+        )
     return httpx.AsyncClient(
         base_url=origin,
         headers=headers,

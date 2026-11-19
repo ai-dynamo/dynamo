@@ -30,7 +30,10 @@ from autoscaling_arena.adapters.aggregation import (
 )
 from autoscaling_arena.adapters.knowline_policy import KnowLinePolicy
 from autoscaling_arena.decision_endpoint import decision_base_url, decision_http_client
-from autoscaling_arena.policy_contracts import POLICY_CONTRACTS
+from autoscaling_arena.policy_contracts import (
+    FEEDBACK_TELEMETRY_INTERVAL_S,
+    POLICY_CONTRACTS,
+)
 
 from dynamo.planner.core.types import (
     PlannerEffects,
@@ -70,10 +73,17 @@ def _validate_answer(answer: Any, options: dict[str, Any]) -> None:
         math.isclose(p, round(p, 2), rel_tol=0, abs_tol=1e-12)
         for p in probabilities.values()
     )
-    tolerance = len(probabilities) * 0.005 + 1e-12 if rounded else 1e-3
-    if not math.isclose(
-        math.fsum(probabilities.values()), 1, rel_tol=0, abs_tol=tolerance
-    ):
+    if rounded:
+        # Each value stands for an unrounded probability within half a
+        # hundredth of it and inside [0, 1]; some such set must sum to one.
+        lowest = math.fsum(max(0.0, p - 0.005) for p in probabilities.values())
+        highest = math.fsum(min(1.0, p + 0.005) for p in probabilities.values())
+        consistent = lowest - 1e-12 <= 1 <= highest + 1e-12
+    else:
+        consistent = math.isclose(
+            math.fsum(probabilities.values()), 1, rel_tol=0, abs_tol=1e-3
+        )
+    if not consistent:
         raise ValueError("Choice probability mass exceeds rounding tolerance")
     if probabilities[answer["choice"]] < max(probabilities.values()):
         raise ValueError("Choice selection is not a highest-probability option")
@@ -150,8 +160,20 @@ class JevAutoscaler(_NoopRegressionBootstrap):
                 if row["status"] != "ok":
                     break
                 self._replay.append(row)
-            if len(self._replay) > prior_calls:
-                raise ValueError("prior_calls must include the recorded decisions")
+            # Budget accounting counts API attempts, not rows: a tick whose
+            # only feasible fleet is forced by its bounds spends no call. A
+            # row without the cumulative count is charged as one attempt.
+            recorded_calls = max(
+                (
+                    row.get("api_calls_used", index)
+                    for index, row in enumerate(self._replay, 1)
+                ),
+                default=0,
+            )
+            if type(recorded_calls) is not int or recorded_calls < 0:
+                raise ValueError("Jev replay decision log has an invalid call count")
+            if recorded_calls > prior_calls:
+                raise ValueError("prior_calls must include the recorded API calls")
         elif replay_decisions_sha256 is not None:
             raise ValueError("replay_decisions_sha256 requires replay_decisions")
         endpoint = dict(
@@ -179,7 +201,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
         self._failure_mode = failure_mode
         self._context = context or {}
         self.consumes_replay_telemetry = provider == "self_hosted"
-        self.telemetry_interval_s = 5.0
+        self.telemetry_interval_s = FEEDBACK_TELEMETRY_INTERVAL_S
         self._knowline = (
             KnowLinePolicy(mode, self._context, self._bounds, step)
             if self.consumes_replay_telemetry
@@ -241,10 +263,6 @@ class JevAutoscaler(_NoopRegressionBootstrap):
     async def tick(
         self, scheduled_tick: ScheduledTick, tick_input: TickInput
     ) -> PlannerEffects:
-        if self._calls >= self._max_calls and not self._replay:
-            raise RuntimeError(
-                "Jev max_calls exhausted; increase the explicit run budget"
-            )
         snapshot = self._snapshot(tick_input)
         current = {
             role: current_replica_target(
@@ -338,6 +356,12 @@ class JevAutoscaler(_NoopRegressionBootstrap):
             record["forced_pools"] = sorted(forced_answers)
             if cached is None and not inference_questions:
                 record["response_source"] = "forced_bounds"
+        # Only a live model call spends budget; replayed and forced decisions
+        # proceed after the last allowed call.
+        if cached is None and inference_questions and self._calls >= self._max_calls:
+            raise RuntimeError(
+                "Jev max_calls exhausted; increase the explicit run budget"
+            )
         failure = None
         stage = "http_or_json"
         try:
@@ -386,13 +410,15 @@ class JevAutoscaler(_NoopRegressionBootstrap):
                 stage = f"choice_{role}"
                 _validate_answer(answers[role], questions[role]["criteria"])
             stage = "usage"
-            if result.get("usage") is not None and not isinstance(
-                result["usage"], dict
-            ):
+            usage = result.get("usage")
+            if usage is not None and not isinstance(usage, dict):
                 raise TypeError("invalid token usage")
-            record.update(
-                model=result["model"], answers=answers, usage=result.get("usage")
-            )
+            # Python decodes an out-of-range number as infinity, but the
+            # decision log is strict JSON. Reject such a value here, where the
+            # failure handler records it, not while the row is written.
+            stage = "strict_json"
+            json.dumps([answers, usage], allow_nan=False)
+            record.update(model=result["model"], answers=answers, usage=usage)
             if self._knowline is not None:
                 answer = answers["fleet"]
                 if answer["confidence"] >= self._confidence:
@@ -421,6 +447,14 @@ class JevAutoscaler(_NoopRegressionBootstrap):
                 ):
                     record["probability_sum"] = math.fsum(probabilities.values())
             target = dict(current)
+        except BaseException as exc:
+            # Cancellation or an unexpected error interrupted the decision.
+            # Never leave a replayable "ok" row without a validated answer.
+            record.update(
+                status="interrupted", error_type=type(exc).__name__, error_stage=stage
+            )
+            target = dict(current)
+            raise
         finally:
             record.update(
                 wall_latency_s=time.perf_counter() - started,

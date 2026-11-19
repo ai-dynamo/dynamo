@@ -4,6 +4,8 @@
 import pytest
 from autoscaling_arena.worker_limits import WorkerLimits, resident_workers
 
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+
 
 def test_all_asymmetric_disagg_splits_are_allowed_with_unequal_gpu_costs():
     targets = WorkerLimits(2, 16).targets(

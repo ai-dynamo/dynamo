@@ -42,7 +42,10 @@ from autoscaling_arena.adapters.outcome_feedback import (
     LatencyCalibration,
     OutcomeFeedback,
 )
-from autoscaling_arena.policy_contracts import POLICY_CONTRACTS
+from autoscaling_arena.policy_contracts import (
+    FEEDBACK_TELEMETRY_INTERVAL_S,
+    POLICY_CONTRACTS,
+)
 
 from dynamo.planner.core.types import (
     PlannerEffects,
@@ -534,7 +537,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
     """MPC over a capacity model with pending replicas and guarded scale-down."""
 
     consumes_replay_telemetry = True
-    telemetry_interval_s = 5.0
+    telemetry_interval_s = FEEDBACK_TELEMETRY_INTERVAL_S
     policy_contract = POLICY_CONTRACTS["mpc"]
 
     def __init__(
