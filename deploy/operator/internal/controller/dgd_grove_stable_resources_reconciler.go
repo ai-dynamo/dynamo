@@ -20,12 +20,13 @@ package controller
 import (
 	"context"
 	"fmt"
-	groverender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
+
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	componentrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -83,7 +84,7 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	managedComponents := req.ManagedComponents()
 	for i := range managedComponents {
 		component := &managedComponents[i]
-		if componentrender.ServiceEnabled(string(component.ComponentType), isK8sDiscoveryEnabled) {
+		if componentdeployment.ServiceEnabled(string(component.ComponentType), isK8sDiscoveryEnabled) {
 			serviceResource, err := r.reconcileComponentService(
 				ctx,
 				req.DGD,
@@ -138,7 +139,7 @@ func groveComponentServiceParams(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
-) componentrender.ServiceParams {
+) componentdeployment.ServiceParams {
 	componentName := component.ComponentName
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
@@ -156,7 +157,7 @@ func groveComponentServiceParams(
 			labels[commonconsts.KubeLabelDynamoWorkerHash] = value
 		}
 	}
-	return componentrender.ServiceParams{
+	return componentdeployment.ServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
 		ComponentType:   componentType,
@@ -178,7 +179,7 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	params.IsK8sDiscovery = isK8sDiscoveryEnabled
-	service, err := componentrender.RenderService(params)
+	service, err := componentdeployment.RenderService(params)
 	if err != nil {
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
@@ -258,7 +259,7 @@ func (r *groveStableResourcesReconciler) syncServiceAnnotations(
 
 // reconcileElasticEPLeaderService creates the headless Service a single-pod elastic-EP
 // leader is reachable at, or deletes it when toDelete says the component no longer
-// qualifies. See groverender.RenderElasticEPLeaderService.
+// qualifies. See grove.RenderElasticEPLeaderService.
 func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -270,12 +271,12 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	container := dynamo.GetMainContainer(component)
 	elasticRayLaunch := container != nil && dynamo.IsElasticEPRayLaunch(container)
-	service := groverender.RenderElasticEPLeaderService(component, params, elasticRayLaunch)
+	service := grove.RenderElasticEPLeaderService(component, params, elasticRayLaunch)
 
 	// Handle removal here rather than through SyncResource, which resolves the live object
 	// by name alone and would delete a Service this DGD never created.
 	if service == nil {
-		return nil, r.deleteOwnedService(ctx, dgd, groverender.ElasticEPLeaderServiceName(params.ServiceName))
+		return nil, r.deleteOwnedService(ctx, dgd, grove.ElasticEPLeaderServiceName(params.ServiceName))
 	}
 
 	_, syncedService, err := commoncontroller.SyncResource(

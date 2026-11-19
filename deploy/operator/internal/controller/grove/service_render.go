@@ -11,7 +11,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	componentrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -52,7 +52,7 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 //
 // It returns nil unless the component is a single-pod elastic-EP Ray leader.
 // component must be non-nil. Inputs are not modified; elasticRayLaunch is the resolved launch mode.
-func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSharedSpec, params componentrender.ServiceParams, elasticRayLaunch bool) *corev1.Service {
+func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSharedSpec, params componentdeployment.ServiceParams, elasticRayLaunch bool) *corev1.Service {
 	if !elasticRayLaunch || component.GetNumberOfNodes() > 1 || (component.Replicas != nil && *component.Replicas != 1) {
 		return nil
 	}

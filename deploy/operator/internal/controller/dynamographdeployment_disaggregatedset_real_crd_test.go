@@ -6,11 +6,12 @@
 package controller
 
 import (
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -47,7 +48,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	dgd.Namespace = testEnv.Namespace()
 	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{})
 	require.NoError(t, err)
-	selection, reason := dsrender.Select(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	require.Empty(t, reason)
 
 	runtimeConfig := &commoncontroller.RuntimeConfig{

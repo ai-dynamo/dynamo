@@ -23,7 +23,7 @@ import (
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,7 +50,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) ([]Resource, bool, error) {
 	resources := []Resource{}
 	modified := false
@@ -79,7 +79,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) Reconcile(
 func (r *disaggregatedSetAuxiliaryDCDReconciler) DeleteSelected(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) error {
 	dcds, err := r.listOwnedSelectedDCDs(ctx, dgd, selection)
 	if err != nil {
@@ -101,7 +101,7 @@ func (r *disaggregatedSetAuxiliaryDCDReconciler) DeleteSelected(
 func (r *disaggregatedSetAuxiliaryDCDReconciler) listOwnedSelectedDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) ([]nvidiacomv1beta1.DynamoComponentDeployment, error) {
 	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
 	if err := r.client.List(ctx, dcdList, client.InNamespace(dgd.Namespace)); err != nil {

@@ -8,10 +8,10 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	componentrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
-	groverender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
-	lwsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
+	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,15 +31,15 @@ func TestResourceRenderersOwnGeneratedMetadata(t *testing.T) {
 	originalMetadata, originalTemplate := metadata.DeepCopy(), template.DeepCopy()
 
 	t.Log("Render Deployment and Grove identities without modifying authored metadata")
-	deployment := componentrender.Render(dcd, metadata, template, appsv1.DeploymentStrategy{})
-	groveMetadata := groverender.RenderPodMetadata(dgd.Name, dcd.Name, metadata)
+	deployment := componentdeployment.Render(dcd, metadata, template, appsv1.DeploymentStrategy{})
+	groveMetadata := grove.RenderPodMetadata(dgd.Name, dcd.Name, metadata)
 	require.Equal(t, dcd.Name, deployment.Spec.Template.Labels[consts.KubeLabelDynamoSelector])
 	require.Equal(t, dcd.Name, groveMetadata.Labels[consts.KubeLabelDynamoSelector])
 	require.Equal(t, originalMetadata, &metadata)
 	require.Equal(t, originalTemplate, template)
 
 	t.Log("Render multinode templates without the Deployment-only selector")
-	lws := lwsrender.Render(dcd, lwsrender.Name(dcd.Name), metadata, template, template)
+	lws := leaderworkerset.Render(dcd, leaderworkerset.Name(dcd.Name), metadata, template, template)
 	require.NotContains(t, lws.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels, consts.KubeLabelDynamoSelector)
 	require.NotContains(t, lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels, consts.KubeLabelDynamoSelector)
 	require.Equal(t, originalTemplate, template)
@@ -54,7 +54,7 @@ func TestResourceRenderersOwnGeneratedMetadata(t *testing.T) {
 	t.Log("Keep native DisaggregatedSet role maps independent from the rendered object")
 	roles := []any{map[string]any{"name": "prefill", "spec": map[string]any{"replicas": int64(1)}}}
 	originalRoles := runtime.DeepCopyJSONValue(roles)
-	ds := dsrender.Render(dgd, roles)
+	ds := disaggregatedset.Render(dgd, roles)
 	ds.Object["spec"].(map[string]any)["roles"].([]any)[0].(map[string]any)["name"] = "changed"
 	require.Equal(t, originalRoles, roles)
 }

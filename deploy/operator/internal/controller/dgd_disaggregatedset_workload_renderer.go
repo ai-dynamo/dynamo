@@ -23,7 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -43,7 +43,7 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (*unstructured.Unstructured, error) {
@@ -83,7 +83,7 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 	if len(roles) < 2 {
 		return nil, fmt.Errorf("DisaggregatedSet requires at least two roles, got %d", len(roles))
 	}
-	ds := dsrender.Render(dgd, roles)
+	ds := disaggregatedset.Render(dgd, roles)
 	if ownerRef := dgdControllerOwnerReference(dgd); ownerRef != nil {
 		ds.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
 	}

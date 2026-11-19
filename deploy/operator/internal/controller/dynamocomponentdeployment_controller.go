@@ -60,8 +60,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	componentrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
-	lwsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -430,7 +430,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 // resources without deleting serving legacy groups before reporting workload status.
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	// Reuse an existing supported or serving LWS so an operator upgrade does not restart it.
-	selectedName := lwsrender.Name(dynamoComponentDeployment.Name)
+	selectedName := leaderworkerset.Name(dynamoComponentDeployment.Name)
 	legacy := &leaderworkersetv1.LeaderWorkerSet{}
 	legacyKey := types.NamespacedName{Name: legacyLeaderWorkerSetName(dynamoComponentDeployment.Name), Namespace: dynamoComponentDeployment.Namespace}
 	if legacyKey.Name != selectedName {
@@ -651,7 +651,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to render multinode pod templates")
 	}
 
-	return lwsrender.Render(opt.dynamoComponentDeployment, selectedName, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)}, leaderPodTemplateSpec, workerPodTemplateSpec), false, nil
+	return leaderworkerset.Render(opt.dynamoComponentDeployment, selectedName, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)}, leaderPodTemplateSpec, workerPodTemplateSpec), false, nil
 }
 
 // Pod label controller-revision-hash=<statefulset>-<10-char hash> must fit 63 chars, and LWS
@@ -680,7 +680,7 @@ func preserveLegacyLeaderWorkerSet(legacy *leaderworkersetv1.LeaderWorkerSet) bo
 // resource syncs. It preserves serving legacy groups; dcd must be non-nil.
 func (r *DynamoComponentDeploymentReconciler) deleteUnselectedLeaderWorkerSet(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment, selectedName string) error {
 	legacyName := legacyLeaderWorkerSetName(dcd.Name)
-	boundedName := lwsrender.Name(dcd.Name)
+	boundedName := leaderworkerset.Name(dcd.Name)
 	if legacyName == boundedName {
 		return nil
 	}
@@ -933,7 +933,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
-	kubeDeployment = componentrender.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy)
+	kubeDeployment = componentdeployment.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy)
 
 	return
 }

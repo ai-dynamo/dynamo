@@ -20,10 +20,11 @@ package controller
 import (
 	"context"
 	"fmt"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"maps"
 	"slices"
 	"sort"
+
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -81,7 +82,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
-	selection, reason := dsrender.Select(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
 	}
@@ -214,7 +215,7 @@ func buildDisaggregatedSetResourceStatus(
 func lowerNonSelectedComponents(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	normalizedComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 ) (map[string]*nvidiacomv1beta1.DynamoComponentDeployment, error) {
 	nonSelectedComponents := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec)
@@ -334,7 +335,7 @@ func (r *disaggregatedSetWorkloadsReconciler) getNextSequentialRestartComponent(
 	if !currentFound || nextComponent == "" {
 		return nextComponent, currentFound
 	}
-	selection, reason := dsrender.Select(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		return nextComponent, currentFound
 	}
@@ -353,7 +354,7 @@ func (r *disaggregatedSetWorkloadsReconciler) getNextSequentialRestartComponent(
 func (r *disaggregatedSetWorkloadsReconciler) applyDisaggregatedSetCheckpointStartupPolicies(
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) (bool, error) {
 	for _, componentName := range sortedComponentNames(components) {
 		if err := applyCheckpointStartupPolicy(components[componentName], checkpointInfos[componentName]); err != nil {
@@ -397,7 +398,7 @@ func sortedComponentNames(components map[string]*nvidiacomv1beta1.DynamoComponen
 func disaggregatedSetPathwayObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	ds *unstructured.Unstructured,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	targetHash string,
 ) (bool, error) {

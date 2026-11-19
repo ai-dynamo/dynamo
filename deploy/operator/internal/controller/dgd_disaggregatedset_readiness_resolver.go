@@ -20,9 +20,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"sort"
 	"strings"
+
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,7 +52,7 @@ func newDisaggregatedSetReadinessResolver(reader client.Reader) *disaggregatedSe
 func (r *disaggregatedSetReadinessResolver) Resolve(
 	ctx context.Context,
 	ds *unstructured.Unstructured,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) (disaggregatedSetReadiness, error) {
 	children := &leaderworkersetv1.LeaderWorkerSetList{}
 	if err := r.reader.List(ctx, children, client.InNamespace(ds.GetNamespace())); err != nil {
@@ -111,7 +112,7 @@ func (r *disaggregatedSetReadinessResolver) Resolve(
 
 func checkDisaggregatedSetReadiness(
 	ds *unstructured.Unstructured,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 	sliceCount := disaggregatedSetSliceCount(ds)
 	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.ComponentToRole))
@@ -176,7 +177,7 @@ func disaggregatedSetSliceCount(ds *unstructured.Unstructured) int32 {
 }
 
 func checkDisaggregatedSetChildLWSReadiness(
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 	sliceCount int,
 	targetByIdentity map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet,
 	childrenByRole map[string][]*leaderworkersetv1.LeaderWorkerSet,

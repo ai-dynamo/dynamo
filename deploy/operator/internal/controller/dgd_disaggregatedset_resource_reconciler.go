@@ -24,7 +24,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -112,10 +112,10 @@ func disaggregatedSetDesiredStateEqual(a, b *unstructured.Unstructured) bool {
 func (r *disaggregatedSetResourceReconciler) RestartAnnotations(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) (map[string]string, error) {
 	ds := newDisaggregatedSetObject()
-	key := types.NamespacedName{Name: dsrender.Name(dgd), Namespace: dgd.Namespace}
+	key := types.NamespacedName{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}
 	if err := r.client.Get(ctx, key, ds); err != nil {
 		if apierrors.IsNotFound(err) {
 			return map[string]string{}, nil
@@ -127,7 +127,7 @@ func (r *disaggregatedSetResourceReconciler) RestartAnnotations(
 
 func restartAnnotationsFromDisaggregatedSet(
 	ds *unstructured.Unstructured,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 ) (map[string]string, error) {
 	restartAnnotations := make(map[string]string)
 	if ds == nil {

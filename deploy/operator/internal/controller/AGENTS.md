@@ -26,6 +26,8 @@ SPDX-License-Identifier: Apache-2.0
   maintain a separate admission model of a lowering.
 - Keep lowering-specific decisions with their lowering. Do not collect them in
   generic `dynamo`, `names`, or utility packages, or add forwarding wrappers.
+- Use import names that describe the lowering, such as `disaggregatedset` or
+  `grove`; avoid aliases tied to one role, such as `dsrender`.
 - Extract only the rendering needed by the change. Moving a complete lowering's
   reconciliation and lifecycle into its subpackage is a separate refactor.
 

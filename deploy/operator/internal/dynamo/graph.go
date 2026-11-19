@@ -37,7 +37,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	groverender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -1034,7 +1034,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 // This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
 // avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
 func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
-	// Normalize the service name the same way componentrender.RenderService does
+	// Normalize the service name the same way componentdeployment.RenderService does
 	// so the DestinationRule host matches the actual Service DNS name.
 	normalizedName := NormalizeKubeResourceName(serviceName)
 
@@ -3118,7 +3118,7 @@ func generatePodMetadata(
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
-	return groverender.RenderPodMetadata(dynamoDeployment.Name, GetDCDResourceName(dynamoDeployment, componentName, ""), metav1.ObjectMeta{Labels: labels, Annotations: annotations})
+	return grove.RenderPodMetadata(dynamoDeployment.Name, GetDCDResourceName(dynamoDeployment, componentName, ""), metav1.ObjectMeta{Labels: labels, Annotations: annotations})
 }
 
 func getDGDComponentAlphaLabels(dgd *v1beta1.DynamoGraphDeployment, componentName string) map[string]string {

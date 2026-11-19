@@ -19,7 +19,8 @@ package controller
 
 import (
 	"fmt"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -61,7 +62,7 @@ func disaggregatedSetEligibilityReason(
 	if dgd == nil {
 		return "DynamoGraphDeployment is nil"
 	}
-	selection, reason := dsrender.Select(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		return reason
 	}
@@ -104,7 +105,7 @@ func coalesceDisaggregatedSetRestartState(
 	if restartState == nil || dynamo.IsParallelRestart(dgd) {
 		return restartState
 	}
-	selection, reason := dsrender.Select(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	if reason != "" {
 		return restartState
 	}

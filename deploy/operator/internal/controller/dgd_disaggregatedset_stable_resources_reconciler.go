@@ -25,7 +25,7 @@ import (
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -65,7 +65,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	normalizedComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	selection dsrender.Selection,
+	selection disaggregatedset.Selection,
 	targetRevision string,
 	targetReady bool,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
@@ -102,7 +102,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 				service,
 				existing,
 				existingErr == nil,
-				dsrender.Name(dgd),
+				disaggregatedset.Name(dgd),
 				roleName,
 				targetRevision,
 				component.IsMultinode(),
