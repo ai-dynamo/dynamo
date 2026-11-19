@@ -55,6 +55,19 @@ def test_url_chunk_normalized_to_bare_type(tokenizer, kind):
     assert [c["type"] for c in out[0]["content"]] == [kind]
 
 
+def test_input_audio_gets_audio_slot_in_order(tokenizer):
+    input_audio = {
+        "type": "input_audio",
+        "input_audio": {"data": "AA==", "format": "wav"},
+    }
+    content = [_url_chunk("audio"), input_audio, _url_chunk("audio")]
+    messages = [{"role": "user", "content": content}]
+    out = _normalize_messages_for_template(messages, tokenizer)
+    assert [c["type"] for c in out[0]["content"]] == ["audio", "audio", "audio"]
+    # The caller's messages are shared with extract_mm_urls().
+    assert messages[0]["content"][1] is input_audio
+
+
 def test_text_only_passes_through(tokenizer):
     messages = [{"role": "user", "content": "hello"}]
     assert _normalize_messages_for_template(messages, tokenizer) == messages

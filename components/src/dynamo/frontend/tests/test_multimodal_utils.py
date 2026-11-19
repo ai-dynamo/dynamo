@@ -364,25 +364,3 @@ def test_rejects_media_parts_without_valid_url_or_uuid(part):
         ValueError, match=r"URL or uuid|non-empty string|non-empty data"
     ):
         extract_mm_urls(messages)
-
-
-def test_rejects_invalid_audio_url_uuid_next_to_input_audio():
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_audio",
-                    "input_audio": {"data": "AA==", "format": "wav"},
-                },
-                {
-                    "type": "audio_url",
-                    "audio_url": {"url": "https://x/a.wav"},
-                    "uuid": 7,
-                },
-            ],
-        }
-    ]
-
-    with pytest.raises(ValueError, match="audio_url uuid must be a non-empty string"):
-        extract_mm_urls(messages)

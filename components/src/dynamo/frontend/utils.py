@@ -242,6 +242,28 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 _INPUT_AUDIO_MIME_SUBTYPES = {"wav": "wav", "mp3": "mpeg"}
 
 
+def input_audio_data_url(part: dict[str, Any]) -> str | None:
+    """Return the ``audio_url`` data URL for an ``input_audio`` content part.
+
+    ``wav`` becomes ``data:audio/wav;base64,<data>`` and ``mp3`` becomes
+    ``data:audio/mpeg;base64,<data>``, as in the Rust preprocessor. Returns
+    ``None`` when ``data`` is empty or ``format`` is neither.
+    """
+    input_audio = part.get("input_audio")
+    if not isinstance(input_audio, dict):
+        return None
+    data = input_audio.get("data")
+    audio_format = input_audio.get("format")
+    subtype = (
+        _INPUT_AUDIO_MIME_SUBTYPES.get(audio_format)
+        if isinstance(audio_format, str)
+        else None
+    )
+    if not isinstance(data, str) or not data or subtype is None:
+        return None
+    return f"data:audio/{subtype};base64,{data}"
+
+
 def extract_mm_urls(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
@@ -276,24 +298,13 @@ def extract_mm_urls(
                 continue
             part_type = part.get("type")
             if part_type == "input_audio" and msg.get("role") == "user":
-                input_audio = part.get("input_audio")
-                if not isinstance(input_audio, dict):
-                    input_audio = {}
-                data = input_audio.get("data")
-                audio_format = input_audio.get("format")
-                subtype = (
-                    _INPUT_AUDIO_MIME_SUBTYPES.get(audio_format)
-                    if isinstance(audio_format, str)
-                    else None
-                )
-                if not isinstance(data, str) or not data or subtype is None:
+                audio_url = input_audio_data_url(part)
+                if audio_url is None:
                     raise ValueError(
                         "input_audio part must contain non-empty data and "
                         "format 'wav' or 'mp3'"
                     )
-                mm_data.setdefault("audio_url", []).append(
-                    {"Url": f"data:audio/{subtype};base64,{data}"}
-                )
+                mm_data.setdefault("audio_url", []).append({"Url": audio_url})
                 # Rust has no UUID for input_audio; any `uuid` key is ignored.
                 mm_uuids.setdefault("audio_url", []).append(None)
                 continue
