@@ -317,8 +317,11 @@ impl Directory {
             .map_err(anyhow::Error::from)?;
         let mut errs = Vec::new();
         for p in self.owned_files.lock().drain() {
-            if let Err(err) = fs::remove_file(&p) {
-                errs.push(format!("{}: {err}", p.display()));
+            match fs::remove_file(&p) {
+                Err(err) if err.kind() != ErrorKind::NotFound => {
+                    errs.push(format!("{}: {err}", p.display()));
+                }
+                _ => {}
             }
         }
         if !errs.is_empty() {
@@ -781,9 +784,12 @@ mod tests {
 
         bucket.delete(&key).await.unwrap();
 
+        // An owned file that is already gone is still dropped from `owned_files`,
+        // so `keep_alive` stops touching it.
         bucket.insert(&key, "value".into(), 0).await.unwrap();
+        std::fs::remove_file(bucket.p.join(key.url_safe().as_ref())).unwrap();
         bucket.delete(&key).await.unwrap();
-        bucket.delete(&key).await.unwrap();
+        assert!(bucket.owned_files.lock().is_empty());
 
         cancel_token.cancel();
     }
