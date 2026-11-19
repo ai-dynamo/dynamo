@@ -19,12 +19,23 @@ from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
 
+try:
+    import fastokens
+except ImportError:  # Optional: only `--tokenizer fastokens` needs it.
+    fastokens = None
+
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    InvalidArgument,
+    RoutedEngineError,
+    Unknown,
+    WorkerUnavailable,
+)
 
 from .responses_history import responses_tools_request
 from .sglang_prepost import (
@@ -52,8 +63,8 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
     read_jinja_chat_template,
+    request_id_from_context,
     resolve_chat_template,
     worker_warmup,
 )
@@ -243,13 +254,70 @@ def _model_eos_token_ids(tokenizer: Any, source_path: str) -> list[int]:
     return token_ids
 
 
-def _load_tokenizer(source_path: str, trust_remote_code: bool):
+def _sglang_tokenizer_backend(frontend_backend: str) -> str:
+    """Map the frontend `--tokenizer` value to SGLang's `tokenizer_backend`."""
+    if frontend_backend == "fastokens":
+        return "fastokens"
+    if frontend_backend != "default":
+        logger.warning(
+            "--tokenizer %s has no SGLang chat processor equivalent; using HuggingFace",
+            frontend_backend,
+        )
+    return "huggingface"
+
+
+def _load_tokenizer(
+    source_path: str, trust_remote_code: bool, tokenizer_backend: str = "huggingface"
+):
     """Load the SGLang tokenizer, falling back to an on-disk chat template
     (e.g. chat_template.json) when the tokenizer defines none."""
-    tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
+    if tokenizer_backend == "huggingface":
+        tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
+    else:
+        if tokenizer_backend == "fastokens" and fastokens is not None:
+            # Idempotent. SGLang patches only once per process, so re-patch here
+            # in case an earlier model's fallback unpatched transformers.
+            fastokens.patch_transformers()
+        tokenizer = get_tokenizer(
+            source_path,
+            trust_remote_code=trust_remote_code,
+            tokenizer_backend=tokenizer_backend,
+        )
     if getattr(tokenizer, "chat_template", None) is None:
         tokenizer.chat_template = resolve_chat_template(source_path, backend="sglang")
     return tokenizer
+
+
+def _load_tokenizer_with_fallback(
+    source_path: str,
+    trust_remote_code: bool,
+    tokenizer_backend: str,
+    tokenizer_fallback: bool,
+) -> tuple[Any, str]:
+    """Load the tokenizer; return it with the backend actually in use.
+
+    Follows the Rust frontend's `--tokenizer-fallback` contract: when fastokens
+    is missing or cannot load the model's tokenizer, log a warning and use
+    HuggingFace, or raise when fallback is disabled.
+    """
+    try:
+        return (
+            _load_tokenizer(source_path, trust_remote_code, tokenizer_backend),
+            tokenizer_backend,
+        )
+    except (ImportError, RuntimeError) as exc:
+        if tokenizer_backend == "huggingface" or not tokenizer_fallback:
+            raise
+        logger.warning(
+            "Failed to load the %s tokenizer backend, falling back to HuggingFace: %s",
+            tokenizer_backend,
+            exc,
+        )
+    if fastokens is not None:
+        # The failed load left transformers patched process-wide, which would
+        # also break the HuggingFace load.
+        fastokens.unpatch_transformers()
+    return _load_tokenizer(source_path, trust_remote_code), "huggingface"
 
 
 def _runtime_config_parser_name(
@@ -261,6 +329,59 @@ def _runtime_config_parser_name(
         return None
     value = runtime_config.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _runtime_token_budget(mdc: ModelDeploymentCard) -> TokenBudget | None:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+    value = runtime_data.get(TOKEN_BUDGET_RUNTIME_KEY)
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        combined_limit = value.get("combined_limit")
+        reject_prompt = value.get("reject_prompt_overflow", False)
+        reject_total = value.get("reject_total_overflow", False)
+        if (
+            type(combined_limit) is int
+            and 0 <= combined_limit <= _U32_MAX
+            and isinstance(reject_prompt, bool)
+            and isinstance(reject_total, bool)
+        ):
+            return TokenBudget(combined_limit, reject_prompt, reject_total)
+
+    logger.warning("Ignoring invalid %s runtime metadata", TOKEN_BUDGET_RUNTIME_KEY)
+    return None
+
+
+def _validate_requested_token_budget(
+    prompt_len: int, max_tokens: int | None, token_budget: TokenBudget
+) -> None:
+    limit = token_budget.combined_limit
+    if prompt_len >= limit:
+        if token_budget.reject_prompt_overflow:
+            raise InvalidArgument(
+                f"The prompt has {prompt_len} input tokens, leaving no room for "
+                f"generation within the {limit}-token context window. "
+                "Please reduce the input length."
+            )
+        # Backend truncation can change the prompt length.
+        return
+
+    if (
+        token_budget.reject_total_overflow
+        and max_tokens is not None
+        and prompt_len + max_tokens > limit
+    ):
+        raise InvalidArgument(
+            f"This model accepts at most {limit} combined input and output tokens. "
+            f"The request has {prompt_len} input tokens and asks for {max_tokens} "
+            "output tokens. Please reduce the input length or requested output length."
+        )
 
 
 def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
@@ -386,13 +507,18 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    isolate_tool_call_markers: bool = False,
+    tokenizer_backend: str = "huggingface",
+    tokenizer_fallback: bool = True,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
     global _w_structural_tag_scope, _w_structural_tag_schema, _w_prompt_renderer
-    _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
+    _w_tokenizer, _ = _load_tokenizer_with_fallback(
+        model_path, trust_remote_code, tokenizer_backend, tokenizer_fallback
+    )
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
     _w_tool_call_parser_name = tool_call_parser_name
@@ -409,6 +535,7 @@ def _init_worker(
         chat_template=chat_template,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
+        isolate_tool_call_markers=isolate_tool_call_markers,
     )
 
 
@@ -609,6 +736,7 @@ class SglangProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         prompt_renderer: PromptRenderer | None = None,
+        token_budget: TokenBudget | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -637,6 +765,7 @@ class SglangProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.prompt_renderer = prompt_renderer
+        self.token_budget = token_budget
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -724,7 +853,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Single-process path: preprocess, dispatch, stream post-process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         try:
             if self.debug_perf:
@@ -801,7 +930,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Pool path: preprocess in worker, stream in main process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         # --- Phase 1: Preprocess (semaphore held) ---
         assert self._worker_semaphore is not None
@@ -872,6 +1001,13 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
+        # Media expansion is backend-owned on this path, so only text-only
+        # requests have an exact frontend-visible prompt length.
+        if self.token_budget is not None and not dynamo_preproc.get("multi_modal_data"):
+            stop_conditions = dynamo_preproc.get("stop_conditions") or {}
+            _validate_requested_token_budget(
+                len(tokens), stop_conditions.get("max_tokens"), self.token_budget
+            )
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
@@ -965,7 +1101,7 @@ class SglangProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choice:
                     dynamo_out: dict[str, Any] = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": [choice],
                         "created": created_ts,
                         "model": request["model"],
@@ -1208,7 +1344,7 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield finalize_terminal(pending_terminal)
-        except (InvalidArgument, Unknown, WorkerUnavailable):
+        except (InvalidArgument, RoutedEngineError, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
@@ -1243,6 +1379,8 @@ class SglangEngineFactory:
         self.chat_template = chat_template
 
         self.trust_remote_code = config.trust_remote_code
+        self.tokenizer_backend = _sglang_tokenizer_backend(config.tokenizer_backend)
+        self.tokenizer_fallback = config.tokenizer_fallback
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_SGLANG_STREAM_INTERVAL")
         if raw_stream_interval:
@@ -1277,7 +1415,13 @@ class SglangEngineFactory:
             )
 
         logger.info("Loading SGLang tokenizer from %s", local_dir)
-        tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
+        tokenizer, tokenizer_backend = _load_tokenizer_with_fallback(
+            local_dir,
+            self.trust_remote_code,
+            self.tokenizer_backend,
+            self.tokenizer_fallback,
+        )
+        logger.info("SGLang tokenizer backend: %s", tokenizer_backend)
         chat_template = _load_chat_template(self.chat_template)
         if chat_template is not None:
             logger.info("Using custom chat template override")
@@ -1320,6 +1464,7 @@ class SglangEngineFactory:
             chat_template=chat_template,
             tool_call_parser_name=tool_call_parser_name,
             reasoning_parser_name=reasoning_parser_name,
+            isolate_tool_call_markers=self.config.isolate_tool_call_markers,
         )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -1345,6 +1490,10 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    self.config.isolate_tool_call_markers,
+                    # The main process's result, so workers skip a failed backend.
+                    tokenizer_backend,
+                    self.tokenizer_fallback,
                 ),
             )
             futures = [
@@ -1385,6 +1534,7 @@ class SglangEngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             prompt_renderer=prompt_renderer,
+            token_budget=_runtime_token_budget(mdc),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

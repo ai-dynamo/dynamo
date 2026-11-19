@@ -69,6 +69,11 @@ impl KvStateIngressProtocol {
     pub fn has_process_local_inventory(self) -> bool {
         matches!(self, Self::SglangHiCacheV1)
     }
+
+    /// See `idempotent_stores` on `KvEventSourceConfig::Zmq`.
+    pub fn has_idempotent_stores(self) -> bool {
+        matches!(self, Self::SglangHiCacheV1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

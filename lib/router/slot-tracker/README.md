@@ -5,8 +5,4 @@ SPDX-License-Identifier: Apache-2.0
 
 # dynamo-slot-tracker
 
-Bookings per rank in, load and fullness per request out. The router's slot tracker stage: the active-sequence trackers (`ActiveSequences`, `ActiveSequencesMultiWorker`), the prompt registry with its membership trie and load projection (`WorkerLoadProjection`, `WorkerLoadReader`), the block and prefill trackers, the request index that holds the one `AttemptIdMinter`, worker topology, the replication effects, the replication wire (`wire`, including the scheduler-load report `SchedulerLoad` and `SchedulerGroup`), per-rank fullness (`busy::BusyThresholds`, `busy::FullRankCounts`, the `RankLoad` reading trait; admission and worker selection depend on this crate for that rule), and the booking the scheduler hands in (`booking::SchedulerBookingDescriptor`). `lib/router/kv-router` re-exports every item at its old path and keeps the adapters: the replica mesh, the slot-tracker registry, and the HTTP server.
-
-Dependencies: `dynamo-router-protocol` and nothing router-side beyond it; no axum, reqwest, zmq, Prometheus, or `dynamo-runtime` under any feature. Tokio stays for channels and timers; the stage rule forbids sockets and HTTP, not async.
-
-Part of the router split (see `lib/router/README.md`).
+`dynamo-slot-tracker` keeps track of the requests currently running on each worker rank, with their KV blocks and remaining prefill, so the router can estimate load and decide when a worker is full. It also defines the replication wire that keeps the views of several router replicas in sync. The replica mesh and HTTP server that use it live in `dynamo-kv-router`.
