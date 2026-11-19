@@ -216,6 +216,36 @@ async def test_prefill_forwards_first_token_logprob_options(wrapped, options, ex
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_prefill_rejects_incompatible_structural_tag_before_generation(wrapped):
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace(async_generate=AsyncMock())
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(grammar_backend="llguidance"),
+        dynamo_args=SimpleNamespace(enable_rl=False),
+    )
+    handler._default_sampling_params = {}
+    tag = {
+        "type": "structural_tag",
+        "format": {"type": "json_schema", "json_schema": {"type": "object"}},
+    }
+    request = {"token_ids": [1]}
+    if wrapped:
+        request = {
+            "request": request,
+            "sampling_params": {"structural_tag": json.dumps(tag)},
+        }
+    else:
+        request["sampling_options"] = {"guided_decoding": {"structural_tag": tag}}
+
+    context = SimpleNamespace(id=lambda: "request-id")
+    async with aclosing(handler.generate(request, context)) as stream:
+        with pytest.raises(InvalidArgument, match="'llguidance'.*structural tag"):
+            await anext(stream)
+    handler.engine.async_generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enable_rl", "nvext", "expected_top_k"),
     [(False, {}, 20), (True, {"token_data": [1, 2]}, None)],
@@ -1669,6 +1699,47 @@ def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, ex
 
     for key, value in expected.items():
         assert sampling_params[key] == value
+
+
+@pytest.mark.parametrize(
+    ("backend", "tag_format", "rejected"),
+    [
+        ("xgrammar", "modern", False),
+        ("xgrammar", "legacy", False),
+        ("llguidance", "modern", True),
+        ("llguidance", "legacy", False),
+        ("outlines", "modern", True),
+        ("outlines", "legacy", True),
+        ("none", "modern", True),
+        ("custom-backend", "modern", False),
+        ("llguidance", "json", False),
+    ],
+)
+def test_build_sampling_params_checks_structural_tag_backend(
+    backend, tag_format, rejected
+):
+    handler = _new_decode_handler(grammar_backend=backend)
+    schema = {"type": "object"}
+    tag = {
+        "modern": {
+            "type": "structural_tag",
+            "format": {"type": "json_schema", "json_schema": schema},
+        },
+        "legacy": {
+            "triggers": ["<tool>"],
+            "structures": [{"begin": "<tool>", "end": "</tool>", "schema": schema}],
+        },
+    }.get(tag_format)
+    guidance = {"json": schema} if tag is None else {"structural_tag": tag}
+    request = {"sampling_options": {"guided_decoding": guidance}}
+
+    if rejected:
+        with pytest.raises(InvalidArgument, match=rf"{backend!r}.*structural tag"):
+            handler._build_sampling_params(request)
+    else:
+        sampling = handler._build_sampling_params(request)
+        key = "json_schema" if tag is None else "structural_tag"
+        assert json.loads(sampling[key]) == (schema if tag is None else tag)
 
 
 def test_build_sampling_params_degenerate_choice_does_not_hide_later_constraint():

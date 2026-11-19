@@ -22,7 +22,10 @@ from dynamo.common.model_taints import MODEL_TAINT_ROUTE, register_model_taint_r
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.common.utils.structural_tag import (
+    serialize_structural_tag,
+    validate_structural_tag_backend,
+)
 from dynamo.llm import (
     HttpError,
     KvEventPublisher,
@@ -1203,6 +1206,23 @@ class BaseWorkerHandler(
             return {"structural_tag": serialize_structural_tag(structural_tag)}
 
         return {}
+
+    def _validate_structural_tag_backend(self, sampling_params: Dict[str, Any]) -> None:
+        structural_tag = sampling_params.get("structural_tag")
+        if structural_tag is None:
+            return
+
+        backend = self.config.server_args.grammar_backend
+        # SGLang can register custom grammar backends. Leave their capabilities
+        # to the engine and reject only known incompatibilities here.
+        if backend in ("llguidance", "outlines", "none"):
+            validate_structural_tag_backend(
+                structural_tag,
+                backend,
+                backend_label="SGLang grammar backend",
+                supported_backends=("xgrammar",),
+                legacy_backend="llguidance",
+            )
 
     @staticmethod
     def _generate_bootstrap_room() -> int:

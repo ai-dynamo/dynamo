@@ -148,6 +148,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         native_payload = native_generate_payload(inner_request)
         has_thinking_budget = False
         if native_payload is None:
+            self._validate_structural_tag_backend(sampling_params)
             has_thinking_budget = thinking_budget_requested(inner_request)
             sampling_params = apply_thinking_budget(
                 inner_request,
