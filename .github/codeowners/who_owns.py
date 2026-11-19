@@ -27,7 +27,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import parse_codeowners, resolve_owners  # noqa: E402
+from codeowners_match import (  # noqa: E402
+    DELEGATED_POLICY_PATHS,
+    parse_codeowners,
+    resolve_owners,
+)
 
 
 def changed_files(repo: str, base: str) -> list[str]:
@@ -106,6 +110,10 @@ def main() -> int:
             if owners
             else "(no owner -- falls through; CI coverage gate should block this)"
         )
+        if not owners and f in DELEGATED_POLICY_PATHS and ("/" + f, []) in rules:
+            owners_str = (
+                "(delegated -- ownership-approvals requires the affected owners)"
+            )
         print(f"{f}\n    review: {owners_str}")
 
     if args.changed:

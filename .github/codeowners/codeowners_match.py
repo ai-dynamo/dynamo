@@ -51,6 +51,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
+# These two files are reviewed through the required ownership-change check.
+DELEGATED_POLICY_PATHS = frozenset({"CODEOWNERS", ".github/codeowners/areas.yaml"})
+
 # ----------------------------------------------------------------------
 # Typed shapes (S6)
 # ----------------------------------------------------------------------
@@ -144,7 +147,19 @@ class ResolvedModel:
     def unmatched_paths(self, tree: Iterable[str]) -> list[str]:
         """Paths in ``tree`` that fall through to the catch-all only."""
         patterns = self.owned_patterns()
-        return [p for p in tree if not any(match(g, p) for g in patterns)]
+        return [
+            p
+            for p in tree
+            if p not in self.delegated_paths()
+            and not any(match(g, p) for g in patterns)
+        ]
+
+    def delegated_paths(self) -> frozenset[str]:
+        return (
+            DELEGATED_POLICY_PATHS
+            if self.meta.get("delegated_policy_reviews", False)
+            else frozenset()
+        )
 
 
 # ----------------------------------------------------------------------
@@ -247,8 +262,7 @@ def parse_codeowners(text: str) -> list[tuple[str, list[str]]]:
         if not stripped:
             continue
         pattern, *owners = stripped.split()
-        if owners:
-            rules.append((pattern, owners))
+        rules.append((pattern, owners))
     return rules
 
 
@@ -465,6 +479,8 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         _ = tree
 
     catch_all = spec.get("meta", {}).get("catch_all", "")
+    if type(spec.get("meta", {}).get("delegated_policy_reviews", False)) is not bool:
+        raise SystemExit("areas.yaml: meta.delegated_policy_reviews must be a boolean")
     raw_areas = spec.get("areas", [])
     classify = spec.get("classify", {}) or {}
     keyword_rules = classify.get("keyword_rules", []) or []
@@ -502,6 +518,15 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             raise SystemExit(
                 f"areas.yaml: shared entry {s.get('glob')!r} carries a stale "
                 "'advisory' key; shared entries always block -- remove it"
+            )
+
+    for area in raw_areas:
+        team = area.get("github_team")
+        if not isinstance(team, str) or not re.fullmatch(
+            r"@[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9_-]*)?", team
+        ):
+            raise SystemExit(
+                f"areas.yaml: area {area.get('label')!r} requires a nonempty GitHub owner handle"
             )
 
     areas = [

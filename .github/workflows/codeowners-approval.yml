@@ -1,0 +1,71 @@
+name: Ownership policy approvals
+
+on:
+  workflow_run:
+    workflows: [codeowners]
+    types: [requested, completed]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# This workflow and its Python are loaded from the trusted default branch.
+# PR versions of scripts and workflows run only in the read-only structure job.
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    outputs:
+      prs: ${{ steps.prs.outputs.prs }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - id: prs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prs=$(python .github/codeowners/check_ownership_approvals.py --discover)
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+
+  approvals:
+    needs: discover
+    if: needs.discover.outputs.prs != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.prs) }}
+    concurrency:
+      group: ownership-approvals-${{ matrix.key }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Publish required ownership approval check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+          PR_BATCH: ${{ toJSON(matrix.prs) }}
+        run: python .github/codeowners/check_ownership_approvals.py --batch "$PR_BATCH"

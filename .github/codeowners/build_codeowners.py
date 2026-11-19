@@ -458,8 +458,12 @@ def _print_summary(
     pct = (100 * n_owned / n_tree) if n_tree else 100.0
     print(f"areas: {len(model.areas)} | tree files: {n_tree}")
     print(
-        f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}"
+        f"owned or delegated: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}"
     )
+    if model.delegated_paths():
+        print(
+            f"delegated to ownership-approvals: {', '.join(sorted(model.delegated_paths()))}"
+        )
     if unmatched:
         print("catch-all-only sample (add an explicit glob to cover these):")
         print("   ", unmatched[:15])

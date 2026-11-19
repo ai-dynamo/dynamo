@@ -49,6 +49,78 @@ adding required approvals.
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
 
+### Approval of ownership changes
+
+`meta.delegated_policy_reviews: true` delegates exactly `areas.yaml` and root
+`CODEOWNERS` to the required `ownership-approvals` check. The generated file ends
+with exact ownerless rules for those two paths; all other files retain native
+CODEOWNERS review. The existing `codeowners` check continues to validate coverage,
+contracts, tests and generated-file drift.
+
+The approval check compares effective owners before and after the proposed merge,
+using the canonical last-match-wins matcher. For every changed owner set, each
+previous and proposed owner must approve:
+
+| Ownership change | Required approvals |
+| --- | --- |
+| Ops → Ops + Runtime | Ops **and** Runtime |
+| Docs → Operator | Docs **and** Operator |
+| Ops + Runtime → Runtime | Ops **and** Runtime |
+| A + B → A + C | A, B **and** C |
+
+One eligible reviewer can represent multiple groups. The PR author and bots cannot
+approve; current team membership and the latest decisive review are used. Comments
+do not revoke approvals, but dismissals and changes-requested reviews do. Named
+individual co-owners must approve personally; a sole individual owner who authors
+the PR cannot self-approve. Email-only owners cannot be resolved by this check;
+use GitHub team or user handles for delegated policy changes.
+
+Approvals are bound to the ownership policy, so unrelated code pushes do not
+invalidate them. A later ownership edit does. Changes to enforcement Python or its
+workflows additionally require Ops and Process, and bind approvals to the actual
+enforcement file contents. Contract/default/delegation-setting changes require
+Process. Added or removed directory/wildcard scopes and precedence changes with no
+tracked witness also require Process: they can affect future files whose owners
+cannot be established from the current tree alone. Reassigning an existing scope
+or adding an exact-file override uses the affected owners directly.
+
+The trusted workflow reads policy blobs as data and never checks out or executes
+PR code with membership/write credentials. Its separately named check cannot be
+satisfied by rerunning an old structural `codeowners` job. It refreshes on PR
+updates, submitted/dismissed reviews and pushes to `main`. Missing API access or
+memberships blocks approval. Ownership-changing PRs sharing a head are blocked
+until they use distinct commits, because GitHub check-runs are commit-scoped.
+
+#### Rollout
+
+1. Provide `ORG_READ_TOKEN`, a token limited to organization **Members: read**, to
+   the trusted approval workflow. Its checks are published with `GITHUB_TOKEN`
+   (`checks: write`), preserving the GitHub Actions App identity.
+2. Add **`ownership-approvals` from GitHub Actions (App ID 15368)** to the required
+   checks for `main`. Retain the existing `codeowners` requirement. The structural
+   job rejects enabling delegation before this distinct requirement is present.
+3. Merge this rollout PR after normal native Ops/Process review. Its bootstrap job
+   supplies the new check only while live `main` explicitly disables delegation,
+   so native file owners still protect the policy change. Other open PRs
+   may wait for the new check until this merge installs the trusted workflow.
+4. The rollout push seeds existing open PRs in at most eight batches, with only two
+   runners active. Non-policy PRs receive a lightweight pass without a full fetch
+   or membership lookup. Later base-policy/tree changes refresh policy PRs only.
+   Review events use a lightweight relay with a different job name, so they cannot
+   replace a failed structural check. The workflow can also be dispatched manually
+   to refresh membership changes without a new PR commit.
+
+Branch-rule administration and secret provisioning are separate from changing
+repository files. Do not remove native protection or the activation guard before
+the required check is configured.
+
+All repository CI workflows remain under their existing Ops ownership. This
+design trusts that review boundary: App-ID pinning distinguishes GitHub Actions
+from user-posted statuses, but does not distinguish two workflows run by the same
+App. Someone authorized to change repository CI can change CI enforcement; an
+independent GitHub App or ruleset-required workflow would be needed to remove that
+existing trust relationship.
+
 ### Add owners without dropping existing accountability
 
 GitHub uses last-match-wins semantics, so a narrower row replaces the complete

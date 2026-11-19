@@ -356,6 +356,14 @@ def _render_codeowners(
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
+    if model.delegated_paths():
+        lines += [
+            "",
+            "# Ownership changes require the affected owners via the codeowners check.",
+            "# Empty exact rules replace blanket file-level review requests.",
+        ]
+        lines += [anchor(path) for path in sorted(model.delegated_paths())]
+
     stats = {
         "base": len(base_rules),
         "shared": len(shared_rules),

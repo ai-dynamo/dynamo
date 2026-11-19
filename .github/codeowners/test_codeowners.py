@@ -26,6 +26,7 @@ import yaml
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import check_ownership_approvals as approval_gate  # noqa: E402
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     _dead_patterns,
@@ -35,6 +36,7 @@ from build_codeowners import (  # noqa: E402
     split_coverage,
     strict_failure,
 )
+from check_ownership_approvals import fingerprint, merge_tree  # noqa: E402
 from codeowners_match import (  # noqa: E402
     Area,
     ResolvedModel,
@@ -56,6 +58,7 @@ from emit_codeowners import (  # noqa: E402
     render_contributors_md,
     team_externals_map,
 )
+from ownership_approvals import rendered_policy  # noqa: E402
 
 # ------------------------------------------------------------------
 # match() -- canonical CODEOWNERS path matcher
@@ -1134,15 +1137,13 @@ class TestIsPolicyChange:
     def test_codeowners_output_is_policy(self) -> None:
         assert is_policy_change(["CODEOWNERS"], self._AREAS, ".") is True
 
-    def test_codeowners_file_requests_only_process(self) -> None:
-        # GitHub requests every owner on the last matching line. A wide list
-        # on CODEOWNERS pages every codeowner group when the generated file
-        # changes, which is what happened on pull request 15170.
+    def test_policy_files_delegate_without_exempting_the_checker(self) -> None:
         root = Path(__file__).resolve().parents[2]
         rules = parse_codeowners((root / "CODEOWNERS").read_text())
-        assert resolve_owners(rules, "CODEOWNERS") == [
-            "@ai-dynamo/dynamo-process-codeowners"
-        ]
+        assert resolve_owners(rules, "CODEOWNERS") == []
+        assert resolve_owners(rules, ".github/codeowners/areas.yaml") == []
+        assert resolve_owners(rules, ".github/codeowners/ownership_approvals.py")
+        assert resolve_owners(rules, ".github/workflows/codeowners-approval.yml")
 
     def test_unrelated_change_is_not_policy(self) -> None:
         assert (
@@ -1161,7 +1162,7 @@ def _git(repo: Path, *args: str) -> None:
 
 def _init_repo(repo: Path) -> None:
     repo.mkdir()
-    _git(repo, "init", "-q")
+    _git(repo, "init", "-q", "-b", "codeowners-test")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
 
@@ -1873,3 +1874,140 @@ class TestRenderCodeownersWithExternals:
         model = self._model()
         plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
+
+
+class TestApprovalPolicySnapshots:
+    def test_unrelated_commit_preserves_review_but_policy_change_does_not(
+        self, tmp_path, monkeypatch
+    ):
+        repo = tmp_path / "policy"
+        _init_repo(repo)
+        policy = {
+            "meta": {"catch_all": "@root", "delegated_policy_reviews": True},
+            "areas": [
+                {"label": "old", "github_team": "@org/old", "path_globs": ["src/"]},
+                {"label": "new", "github_team": "@org/new", "path_globs": []},
+            ],
+        }
+        source = repo / ".github/codeowners"
+        source.mkdir(parents=True)
+        essential = [
+            ".github/workflows/codeowners.yml",
+            ".github/workflows/codeowners-approval.yml",
+            ".github/codeowners/check_ownership_approvals.py",
+            ".github/codeowners/ownership_approvals.py",
+        ]
+        for path in essential:
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("raise AssertionError('PR code must never execute')\n")
+        (source / "areas.yaml").write_text(yaml.safe_dump(policy))
+        (source / "external_contributors.yaml").write_text("contributors: []\n")
+        (repo / "CODEOWNERS").write_text(rendered_policy(policy, []))
+        (repo / "src").mkdir()
+        (repo / "src/a.py").write_text("pass\n")
+        _git(
+            repo,
+            "add",
+            ".github/codeowners/areas.yaml",
+            ".github/codeowners/external_contributors.yaml",
+            "CODEOWNERS",
+            "src/a.py",
+            *essential,
+        )
+        _git(repo, "commit", "-q", "-s", "-m", "base")
+        base = _head(repo)
+        policy["shared"] = [{"glob": "src/a.py", "owners": ["old", "new"]}]
+        (repo / "src/a.py").write_text("print('reviewed implementation')\n")
+        (source / "areas.yaml").write_text(yaml.safe_dump(policy))
+        (repo / "CODEOWNERS").write_text(rendered_policy(policy, []))
+        _git(repo, "add", ".github/codeowners/areas.yaml", "CODEOWNERS", "src/a.py")
+        _git(repo, "commit", "-q", "-s", "-m", "ownership transfer")
+        reviewed = _head(repo)
+        (repo / "src/a.py").write_text("print('unrelated implementation change')\n")
+        _git(repo, "add", "src/a.py")
+        _git(repo, "commit", "-q", "-s", "-m", "implementation")
+        monkeypatch.chdir(repo)
+        assert fingerprint(merge_tree(base, reviewed), False) == fingerprint(
+            "HEAD", False
+        )
+        pr = {
+            "number": 1,
+            "state": "open",
+            "base": {"sha": base, "ref": "main"},
+            "head": {"sha": _head(repo)},
+            "user": {"login": "author"},
+        }
+        reviews = [
+            {
+                "id": i,
+                "user": {"login": login, "type": "User"},
+                "state": "APPROVED",
+                "submitted_at": f"2026-11-0{i}T00:00:00Z",
+                "commit_id": reviewed,
+            }
+            for i, login in enumerate(["alice", "bob"], 1)
+        ]
+
+        def fake_api(endpoint, **kwargs):
+            if "/commits/" in endpoint and "/pulls?" in endpoint:
+                return [pr]
+            if "/reviews?" in endpoint:
+                return reviews
+            if "orgs/org/teams/old/members?" in endpoint:
+                return [{"login": "alice"}]
+            if "orgs/org/teams/new/members?" in endpoint:
+                return [{"login": "bob"}]
+            raise AssertionError(f"Unexpected API call: {endpoint}")
+
+        real_command = approval_gate.command
+
+        def local_command(*args, **kwargs):
+            return "" if args[:2] == ("git", "fetch") else real_command(*args, **kwargs)
+
+        monkeypatch.setattr(approval_gate, "api", fake_api)
+        monkeypatch.setattr(approval_gate, "command", local_command)
+        summary = approval_gate.evaluate("org/repo", pr, {})
+        assert "✅ @org/old" in summary
+        assert "✅ @org/new" in summary
+        assert "process-codeowners" not in summary
+        _git(repo, "switch", "-c", "new-target", base)
+        (repo / "src/a.py").write_text("print('concurrent target edit')\n")
+        _git(repo, "add", "src/a.py")
+        _git(repo, "commit", "-q", "-s", "-m", "target advances")
+        base = _head(repo)
+        _git(repo, "switch", "codeowners-test")
+        _git(
+            repo,
+            "merge",
+            "-s",
+            "ours",
+            "--signoff",
+            "-m",
+            "resolve source conflict",
+            "new-target",
+        )
+        pr["base"]["sha"], pr["head"]["sha"] = base, _head(repo)
+        assert "✅ @org/new" in approval_gate.evaluate("org/repo", pr, {})
+        policy["shared"].append({"glob": "src/b.py", "owners": ["old", "new"]})
+        (repo / "src/b.py").write_text("pass\n")
+        (source / "areas.yaml").write_text(yaml.safe_dump(policy))
+        (repo / "CODEOWNERS").write_text(rendered_policy(policy, []))
+        _git(repo, "add", ".github/codeowners/areas.yaml", "CODEOWNERS", "src/b.py")
+        _git(repo, "commit", "-q", "-s", "-m", "another transfer to the same groups")
+        assert fingerprint(
+            merge_tree(base, reviewed, tolerate_conflicts=True), False
+        ) != fingerprint("HEAD", False)
+        pr["head"]["sha"] = _head(repo)
+        with pytest.raises(ValueError, match="❌ @org/new"):
+            approval_gate.evaluate("org/repo", pr, {})
+        _git(
+            repo,
+            "mv",
+            ".github/workflows/codeowners-approval.yml",
+            ".github/workflows/renamed.yml",
+        )
+        _git(repo, "commit", "-q", "-s", "-m", "rename approval workflow")
+        pr["head"]["sha"] = _head(repo)
+        with pytest.raises(ValueError, match="Disable delegation"):
+            approval_gate.evaluate("org/repo", pr, {})
