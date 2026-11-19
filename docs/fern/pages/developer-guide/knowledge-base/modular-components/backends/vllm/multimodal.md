@@ -321,16 +321,24 @@ UUID-only cache reuse is currently limited to images in Dynamo. Audio and video
 parts must include a URL even when they also provide a UUID.
 
 UUIDs are opaque nonempty strings and must use the top-level field shown above.
-A UUID-only request fails on a cache miss because it contains no media payload
-to process. The error asks the client to resend the request with the image URL
-or inline image data and the same UUID. Cache entries are worker-local: every
-worker that processes the request's media needs its own entry. In non-Qwen
-disaggregated serving, both the prefill and decode workers perform this lookup,
-so warming only one worker is insufficient. Resending materialized image data
-can populate the workers handling that request; it does not warm other replicas.
-Eviction, a worker restart, or routing to different workers can require another
-resend. An ordinary URL-based cache miss downloads the image again without client
-intervention.
+A UUID-only request fails on a cache miss because it has no image to process.
+The error asks the client to resend the request with the image URL or inline
+image data and the same UUID.
+
+Cache entries are local to each worker:
+
+- Every worker that processes the image needs its own entry. In disaggregated
+  serving, both prefill and decode look up the image. Qwen-VL models using
+  Dynamo's embedding handoff are the exception: only prefill looks up the image,
+  and decode reuses prefill's image embeddings.
+- Resending the image can populate the workers that handle that request, not
+  other replicas.
+- Eviction, a worker restart, or routing to different workers can require
+  another resend.
+
+A cache miss on a request that includes the URL is handled automatically: the
+worker fetches the image if needed, without a client resend.
+
 Dynamo also rejects a media content part that has neither a URL nor a UUID.
 
 When KV-aware routing is enabled, requests with client UUIDs use text-prefix
