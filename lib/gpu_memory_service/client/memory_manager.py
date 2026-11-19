@@ -518,8 +518,10 @@ class GMSClientMemoryManager:
         phase over many allocations avoids alternating client and server driver
         calls for every allocation.
 
-        All or nothing: on failure every fd, handle and mapping made here is
-        released before the error propagates.
+        All or nothing for a failure that propagates, such as a failed export
+        or an interrupt: every fd, handle and mapping made here is released
+        first. A CUDA driver error does not propagate: ``cuda_check_result``
+        ends the process.
         """
         if self._granted_lock_type is None:
             raise RuntimeError("Memory manager holds no lock")
@@ -551,6 +553,8 @@ class GMSClientMemoryManager:
                     va, aligned_size, self.device, self._granted_lock_type
                 )
         except BaseException:
+            # A release that fails is logged and the unwind goes on: the caller
+            # needs the first error, and the rest still has to be released.
             for fd in fds:
                 if fd >= 0:
                     try:
@@ -602,6 +606,7 @@ class GMSClientMemoryManager:
                 entries.append((va, aligned_size, allocation_id))
             handles = self._bulk_map(entries)
         except BaseException:
+            # As in _bulk_map: a failed release must not hide the first error.
             for va, aligned_size, _ in entries:
                 try:
                     self._vmm.address_free(va, aligned_size)
@@ -1099,7 +1104,6 @@ class GMSClientMemoryManager:
         alloc_info: GetAllocationResponse,
         handle: int,
     ) -> None:
-        """Track ``va`` as mapped to ``alloc_info``'s allocation through ``handle``."""
         if mapping.allocation_id != alloc_info.allocation_id:
             self._inverse_mapping.pop(mapping.allocation_id, None)
         self._mappings[va] = mapping.with_server_identity(
