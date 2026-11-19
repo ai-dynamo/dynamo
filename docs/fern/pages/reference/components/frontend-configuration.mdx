@@ -410,69 +410,134 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 
 ## AIS prefill load model
 
-<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
-  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
-  data roots, selection policy and nested estimator controls. Defaults to
-  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
-  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
-</ParamField>
-
-Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
-
-
 These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model ais`.
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix, then decays only the oldest active prefill request on each worker for prompt-side load accounting.
 
-<ParamField path="--ais-backend" type="string" default="null">
+<ParamField path="--ais-perf-model" type="JSON/YAML file or inline JSON" default="null">
+  AIS perf model that the router predicts prefill durations with. Available since v1.8. The value
+  is one perf model config, or a list of configs with one `worker_type` each. Write it as a path
+  to a YAML or JSON file, or as inline JSON (text that starts with `{` or `[`):
+
+  ```bash
+  --ais-perf-model perf-model.yaml
+  --ais-perf-model '{"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm", "worker_type": "aggregated"}'
+  ```
+
+  The router takes the `prefill` config or the `aggregated` config of the value. A relative file
+  path starts at the working directory. Relative paths inside a file start at the folder of that
+  file. For the keys of a config, see
+  [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+  in the AISimulate documentation.
+
+  The flag without `--router-prefill-load-model ais` is an error:
+  `--ais-perf-model requires --router-prefill-load-model=ais`. The environment variable alone is
+  ignored when the load model is not `ais`. `--router-prefill-load-model ais` without an AIS input
+  is an error:
+  `--router-prefill-load-model=ais requires an AIS perf model: set --ais-perf-model or DYN_AIS_PERF_MODEL`.
+
+  Environment variable: `DYN_AIS_PERF_MODEL`
+</ParamField>
+
+<ParamField path="--router-prefill-load-worker-type" type="string" default="null">
+  Worker type whose config the router takes from `--ais-perf-model`. Available since v1.8. Set it
+  when the value is one config without `worker_type`, or a list with both a `prefill` and an
+  `aggregated` config. Like `--ais-perf-model`, the flag is an error without
+  `--router-prefill-load-model ais`, and the environment variable alone is ignored then.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>aggregated</Badge></span>
+
+  Environment variable: `DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE`
+</ParamField>
+
+The inputs below are deprecated. They still work and print one warning that names the inputs in
+use, for example
+`--ais-backend, --ais-system and --ais-model-path are deprecated and will be removed in v1.9; use --ais-perf-model.`
+A flat flag is named with the spelling that was typed, `--ais-` or `--aic-`, and a value from
+the environment is named by its variable.
+A deprecated input together with `--ais-perf-model` or `DYN_AIS_PERF_MODEL` is an error, for
+example `--ais-perf-model cannot be combined with --ais-backend`.
+
+The `--aic-*` spellings of the flat flags are deprecated with them. `--ais-nextn` is deprecated in
+the same way: write `nextn` in the config. `--ais-nextn-accept-rates` and `--ais-mtp-seed` are not
+deprecated and can be combined with `--ais-perf-model`.
+
+<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
+  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  data roots, selection policy and nested estimator controls. Defaults to
+  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
+  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
+
+  Environment variable: `DYN_AIS_PERF_CONFIG`
+</ParamField>
+
+<ParamField path="--ais-backend" type="string" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Backend family to model in AIS, for example `vllm` or `sglang`.
 
   Environment variable: `DYN_AIS_BACKEND`
 </ParamField>
 
-<ParamField path="--ais-system" type="string" default="null">
+<ParamField path="--ais-system" type="string" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   AIS hardware/system identifier, for example `h200_sxm`.
 
   Environment variable: `DYN_AIS_SYSTEM`
 </ParamField>
 
-<ParamField path="--ais-model-path" type="string" default="null">
+<ParamField path="--ais-model-path" type="string" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Model path or model identifier used for AIS perf lookup.
 
   Environment variable: `DYN_AIS_MODEL_PATH`
 </ParamField>
 
-<ParamField path="--ais-backend-version" type="string" default="backend-specific">
+<ParamField path="--ais-backend-version" type="string" default="backend-specific" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Pinned AIS database version. If omitted, Dynamo uses the backend default.
 
   Environment variable: `DYN_AIS_BACKEND_VERSION`
 </ParamField>
 
-<ParamField path="--ais-tp-size" type="integer" default="1">
+<ParamField path="--ais-tp-size" type="integer" default="1" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Tensor-parallel size to model in AIS.
 
   Environment variable: `DYN_AIS_TP_SIZE`
 </ParamField>
 
-<ParamField path="--ais-moe-tp-size" type="integer" default="null">
+<ParamField path="--ais-moe-tp-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   MoE tensor-parallel size for models that require AIS MoE parallelism.
 
   Environment variable: `DYN_AIS_MOE_TP_SIZE`
 </ParamField>
 
-<ParamField path="--ais-moe-ep-size" type="integer" default="null">
+<ParamField path="--ais-moe-ep-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   MoE expert-parallel size for models that require AIS MoE parallelism.
 
   Environment variable: `DYN_AIS_MOE_EP_SIZE`
 </ParamField>
 
-<ParamField path="--ais-attention-dp-size" type="integer" default="null">
+<ParamField path="--ais-attention-dp-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model`. Removed in v1.9.
+
   Attention data-parallel size for models that require AIS MoE parallelism.
 
   Environment variable: `DYN_AIS_ATTENTION_DP_SIZE`
 </ParamField>
 
-For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--ais-moe-tp-size` to the same value as `--ais-tp-size`, with `--ais-moe-ep-size 1` and `--ais-attention-dp-size 1`.
+With the flat flags, MoE models require `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--ais-moe-tp-size` to the same value as `--ais-tp-size`, with `--ais-moe-ep-size 1` and `--ais-attention-dp-size 1`.
 
 ## Fault tolerance
 
