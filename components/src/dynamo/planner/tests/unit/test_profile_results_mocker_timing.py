@@ -137,7 +137,7 @@ def test_mocker_engine_keeps_measured_prefill_time(input_tokens):
         extra_engine_args=json.dumps(engine_args),
     )
 
-    # The fit is within 12% of every such prefill point of this profile.
+    # The fit misses the measured prefill points of this profile by up to 11.7%.
     assert report.to_dict()["summary"]["mean_ttft_ms"] == pytest.approx(
         MEASURED_TTFT_MS[input_tokens], rel=0.12
     )
@@ -254,6 +254,7 @@ def test_existing_output_directory_is_refused(tmp_path):
     assert list((tmp_path / "out").iterdir()) == []
 
 
+@pytest.mark.timeout(180)
 @pytest.mark.integration
 def test_command_prints_the_file_it_wrote(tmp_path):
     output = tmp_path / "out"
