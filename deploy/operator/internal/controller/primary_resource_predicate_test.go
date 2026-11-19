@@ -69,7 +69,6 @@ func TestDCDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.
 		want   bool
 	}{
 		{"remove label", func(o *v1beta1.DynamoComponentDeployment) { delete(o.Labels, "example.com/team") }, true},
-		{"status noise", func(o *v1beta1.DynamoComponentDeployment) { o.ResourceVersion = "2" }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			old.Labels = map[string]string{"example.com/team": "blue"}

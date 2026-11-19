@@ -127,7 +127,6 @@ func SyncManagedServiceMetadata(
 // SyncResource, which owns the bookkeeping annotations: desired copies of them are ignored and
 // existing values are kept. existing is nil for a Service that does not exist yet.
 func managedServiceMetadataFor(existing, desired *corev1.Service) (map[string]string, map[string]string, error) {
-	// Keep authored bookkeeping keys out of the desired metadata and the inventory.
 	desired = desired.DeepCopy()
 	for _, key := range syncResourceBookkeepingAnnotations {
 		delete(desired.Annotations, key)
