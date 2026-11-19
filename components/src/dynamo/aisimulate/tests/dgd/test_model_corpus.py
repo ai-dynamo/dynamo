@@ -17,7 +17,7 @@ pytestmark = [
     pytest.mark.timeout(240),
 ]
 
-_SUITE = run_cases._ROOT / "testsuite-issue-8469.yaml"
+_SUITE = Path(__file__).resolve().parent / "comparison/testsuite-issue-8469.yaml"
 _GOLDEN_ROOT = run_cases.default_suite_output_root(_SUITE)
 _CASES = tuple(entry for entry in run_cases.load_suite(_SUITE) if entry.automatic)
 assert _CASES, f"no automatic comparison cases found in {_SUITE}"
