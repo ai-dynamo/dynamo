@@ -260,7 +260,7 @@ worker-local routes.
 
 Send no body or an empty JSON object. Drain returns 202 while completion is
 pending. Status and a successful resume return 200. Conflicts return 409,
-and discovery RPC failures return 503.
+and discovery RPC failures or unexpected scheduler probe errors return 503.
 Manual drain requires the TCP response plane. Other response planes return 409.
 
 
@@ -338,6 +338,73 @@ curl --fail-with-body -sS "$FRONTEND_URL/v1/chat/completions" \
 
 Expect a successful Chat Completions response with a `choices` array. Polling or
 resuming a different worker does not complete the selected worker's operation.
+
+### Drain a worker in a Prefill and Decode deployment
+
+This example runs one Prefill worker and one Decode worker on the same host.
+Start the discovery services as described in the
+[SGLang launch scripts](../../../../../recipes/cli-templates/sglang.mdx).
+Run the frontend and the two workers in separate terminals. Use the same model
+and namespace for both workers, a different GPU and system port for each, and
+the same KV page size.
+
+Start the frontend:
+
+```bash
+python3 -m dynamo.frontend \
+  --namespace sglang-pd-drain \
+  --request-plane tcp \
+  --response-plane tcp \
+  --http-port 8000
+```
+
+Start the Prefill worker:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8081 python3 -m dynamo.sglang \
+  --namespace sglang-pd-drain \
+  --model-path Qwen/Qwen3-0.6B \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 8998 \
+  --host 127.0.0.1 --port 40000 --dist-init-addr 127.0.0.1:29501 \
+  --tp 1 --dp-size 1 --page-size 16 \
+  --request-plane tcp --response-plane tcp \
+  --enable-forward-pass-metrics --disable-piecewise-cuda-graph
+```
+
+Start the Decode worker:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8082 python3 -m dynamo.sglang \
+  --namespace sglang-pd-drain \
+  --model-path Qwen/Qwen3-0.6B \
+  --disaggregation-mode decode \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 8998 \
+  --host 127.0.0.1 --port 40001 --dist-init-addr 127.0.0.1:29502 \
+  --tp 1 --dp-size 1 --page-size 16 \
+  --request-plane tcp --response-plane tcp \
+  --enable-forward-pass-metrics --disable-piecewise-cuda-graph
+```
+
+1. Select the worker to drain. Use `WORKER_URL=http://127.0.0.1:8081` for
+   Prefill or `WORKER_URL=http://127.0.0.1:8082` for Decode. On Kubernetes,
+   port-forward to the selected worker Pod's `DYN_SYSTEM_PORT` and use the local
+   forwarded address.
+2. Check `GET /engine/status` on that address. Confirm that the worker reports
+   `serving` and note its `worker_id`.
+3. Send `POST /engine/drain`. Poll `GET /engine/status` on the same address
+   until that worker reports `drained`. While the worker waits for idle
+   heartbeats, it reports `draining` with reason `scheduler_idle_pending`.
+   Use the curl commands in [Drain and resume a worker](#drain-and-resume-a-worker).
+4. To return the worker to routing, send `POST /engine/resume` to the same
+   address. Wait for `serving` and verify a request through the frontend.
+
+Prefill can reach `drained` while Decode still generates tokens for a request
+whose KV transfer finished. A deployment with one worker per role loses
+capacity for new requests when either worker withdraws. To keep serving new
+requests during a rollout, keep a ready worker of each role in discovery.
 
 ### Admission and completion semantics
 
