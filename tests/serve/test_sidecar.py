@@ -16,6 +16,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import (
     EngineMetrics,
@@ -32,6 +33,7 @@ from tests.utils.payload_builder import (
     forced_tool_call_payloads,
     http_cancellation_payloads,
     kv_routing_payload,
+    lora_chat_payload,
     sglang_generate_cancellation_payloads,
     stop_string_payloads,
 )
@@ -47,6 +49,22 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
 )
+
+
+def _sglang_reports_node_listeners() -> bool:
+    """Does the installed SGLang report `DeploymentInfo.node_listeners`?
+
+    The SGLang sidecar needs that table to serve DP>1 (sgl-project/sglang#46637).
+    Like `_trtllm_serves_openengine`, this reads the package without importing
+    it, so the DP>1 case runs once the pinned image has the field.
+    """
+    spec = importlib.util.find_spec("sglang")
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    for root in locations or ():
+        api_types = pathlib.Path(root) / "api" / "v1" / "api_types.py"
+        if api_types.is_file() and "node_listeners" in api_types.read_text():
+            return True
+    return False
 
 
 def _trtllm_serves_openengine() -> bool:
@@ -80,6 +98,8 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
     "skip in CI means the pin moved backwards."
 )
 
+
+MINIO_LORA = MinioLoraConfig()
 
 CANCELLATION_MAX_TOKENS = 2048
 CANCELLATION_CONTEXT_LEN = 4096
@@ -174,6 +194,8 @@ class SidecarConfig(EngineConfig):
     gpu_env: dict[str, tuple[int, ...]] = field(default_factory=dict)
     # Variable name -> (block size, range); set to the first port of a reserved block.
     port_env: dict[str, tuple[int, DynamoPortRange]] = field(default_factory=dict)
+    # Upload the test LoRA adapter to MinIO before launch.
+    needs_minio_lora: bool = False
 
 
 def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
@@ -211,6 +233,30 @@ sidecar_configs = {
             # The frontend matches stop strings; vLLM never receives them.
             *stop_string_payloads(
                 VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+        ],
+    ),
+    "vllm_aggregated_lora": SidecarConfig(
+        name="vllm_aggregated_lora",
+        directory=vllm_sidecar_dir,
+        script_name="agg_lora.sh",
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.gpu_1,
+            pytest.mark.model(MINIO_LORA.lora_repo),
+            pytest.mark.timeout(780),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        needs_minio_lora=True,
+        env={
+            **MINIO_LORA.get_env_vars(),
+            "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
+        },
+        request_payloads=[
+            lora_chat_payload(
+                lora_name=MINIO_LORA.lora_name, s3_uri=MINIO_LORA.get_s3_uri()
             ),
         ],
     ),
@@ -602,6 +648,11 @@ sidecar_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.skipif(
+                not _sglang_reports_node_listeners(),
+                reason="the installed SGLang does not report "
+                "DeploymentInfo.node_listeners, which the sidecar needs for DP>1",
+            ),
         ],
         model="silence09/DeepSeek-R1-Small-2layers",
         health_check_workers=True,
@@ -639,6 +690,8 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
         ports = allocate_contiguous_ports(1, block_size, port_range.value)
         request.addfinalizer(lambda ports=ports: deallocate_ports(ports))
         monkeypatch.setenv(name, str(ports[0]))
+    if config.needs_minio_lora:
+        request.getfixturevalue("minio_lora_service")
     return config
 
 

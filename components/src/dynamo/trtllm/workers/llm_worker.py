@@ -41,6 +41,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_embedding_cache_metrics,
     register_engine_metrics_callback,
 )
@@ -88,7 +89,9 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
-_MM_ROUTING_MODEL_TYPES = frozenset({"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "kimi_k25"})
+_MM_ROUTING_MODEL_TYPES = frozenset(
+    {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "kimi_k25"}
+)
 
 
 def _resolve_streaming_kv_events_config(
@@ -894,8 +897,9 @@ async def init_llm_worker(
                 )
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
-                _metric_prefixes = ["trtllm_"]
+                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix,
+                # plus any extra prefixes from DYN_EXTRA_METRIC_PREFIXES
+                _metric_prefixes = ["trtllm_", *get_extra_metric_prefixes()]
 
                 # Additional metrics (abort tracking, request types, KV transfer perf).
                 # Wrapped in try/except because AdditionalMetricsCollector depends on

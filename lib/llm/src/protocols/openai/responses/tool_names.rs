@@ -117,6 +117,10 @@ impl ToolNameMap {
     }
 
     /// Select native qualified names while retaining reversible fallback aliases.
+    pub(super) fn has_available_tools(&self) -> bool {
+        !self.available.is_empty()
+    }
+
     pub(super) fn native(&self) -> Self {
         let mut result = self.clone();
         for ((namespace, name), alias) in &mut result.by_identity {
@@ -137,7 +141,7 @@ impl ToolNameMap {
     }
 
     /// Restore the original namespace and name, treating unknown aliases as bare names.
-    pub(super) fn decode<'a>(&'a self, alias: &'a str) -> (Option<&'a str>, &'a str) {
+    pub(crate) fn decode<'a>(&'a self, alias: &'a str) -> (Option<&'a str>, &'a str) {
         self.by_alias
             .get(alias)
             .map(|(namespace, name)| (namespace.as_deref(), name.as_str()))

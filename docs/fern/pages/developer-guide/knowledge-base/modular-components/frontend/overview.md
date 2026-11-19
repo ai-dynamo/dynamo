@@ -66,14 +66,15 @@ kind: DynamoGraphDeployment
 metadata:
   name: frontend-example
 spec:
-  graphs:
-    - name: frontend
+  services:
+    Frontend:
+      componentType: frontend
       replicas: 1
-      services:
-        - name: Frontend
-          image: nvcr.io/nvidia/dynamo/dynamo-vllm:latest
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           command:
-            - python
+            - python3
             - -m
             - dynamo.frontend
             - --http-port
@@ -94,10 +95,11 @@ See the [KServe gRPC Frontend](frontend-guide.md) page for KServe configuration 
 
 Dynamo serves `/v1/responses` by converting each request to Chat Completions and converting the result back. The converted output differs from the OpenAI Responses API in these ways:
 
-- Reasoning items are always returned when the model produces reasoning, with the raw trace in `content` as `reasoning_text` parts and streamed through `reasoning_text` events. Dynamo does not generate reasoning summaries: `summary` remains empty even when `reasoning.summary` is requested.
-- Assistant messages carry `phase`. When the model's output parser delimits assistant messages, as the Muse Spark parser does, each message keeps the phase the parser reports. Otherwise text followed by a function call is `commentary`, and text still open when the response ends is `final_answer`. Text followed by more reasoning is `commentary` when the request can call tools (it defines tools and `tool_choice` is not `none`), and `final_answer` otherwise.
+- The existing `reasoning.summary` request option enables raw reasoning output. Dynamo returns it in `content` as `reasoning_text` parts and streams it through `reasoning_text` events. The `summary` array stays empty.
+- Assistant messages carry `phase`. When the model's output parser delimits assistant messages, as the Muse Spark parser does, each message keeps the phase the parser reports. Otherwise a function call closes preceding text as `commentary`. Resumed reasoning also closes preceding text as `commentary` when the request can call tools, even if the reasoning text is hidden. When no tool can be called, hidden reasoning keeps an undelimited message open. Text open at the end is `final_answer`.
 - For messages the parser does not delimit, streaming sets `phase` on `response.output_item.done` and in `response.completed`, not on `response.output_item.added`.
-- Non-streaming responses preserve the recorded post-parse output order when it still matches the final aggregated content and calls. A text, call, text sequence returns a `commentary` message, the call, and a `final_answer` message in both modes. If later post-processing invalidates the recorded order, conversion falls back to the aggregate fields and places text before calls.
+- Non-streaming responses preserve recorded post-parse order when it matches the final aggregated content and calls. With ordered deltas, a text, call, text sequence produces a `commentary` message, the call, and a `final_answer` message in either mode.
+- A legacy parser can combine visible text and reasoning into one delta without preserving their relative order. In that case streaming treats mixed text as a continuation of an open message when no reasoning span is active. Non-streaming falls back to the aggregate fields and places text before calls when their order is unknown.
 - When a request replays earlier output, consecutive assistant messages merge into one assistant turn regardless of `phase`, unless the model's chat template renders phases, as Muse Spark's does.
 
 ## Next Steps

@@ -14,12 +14,9 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
-use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
+use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
-    ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
-    ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
-    KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    apply_deprecated_overlap_score_weight_override,
+    KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
@@ -38,6 +35,11 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_scheduler::host::{
+    RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    TrackingHashAlgorithm as RsTrackingHashAlgorithm,
+};
+use dynamo_worker_selection::host::ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind;
 
 use super::ais_callback::create_ais_prefill_load_estimator;
 use super::replay::{
@@ -53,7 +55,7 @@ use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
 fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
-    config.validate_config().map_err(PyValueError::new_err)
+    config.validate().map_err(PyValueError::new_err)
 }
 
 fn warn_overlap_score_weight_deprecated() {
@@ -112,7 +114,7 @@ pub(super) fn normalize_ais_perf_config(
         py.import("builtins")?.call_method1("dict", (config,))?
     };
     let canonical = py
-        .import("aisimulate_core.sdk")?
+        .import("aisim_core.sdk")?
         .getattr("ForwardPassPerfModelConfig")?
         .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
     Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
@@ -287,15 +289,18 @@ impl KvRouterConfig {
                  selects worker-selection policy instance {instance:?} for {worker_type}"
             )));
         }
-        dynamo_router_policies::startup_policy_parameters(&self.inner, role)
-            .into_iter()
-            .map(|(name, value)| match value.as_f64() {
-                Some(value) => Ok((name, value)),
-                None => Err(PyValueError::new_err(format!(
-                    "policy parameter {name} is not a number: {value}"
-                ))),
-            })
-            .collect()
+        dynamo_router_policies::startup_policy_parameters(
+            &dynamo_worker_selection::host::SelectionConfig::from(&self.inner),
+            role,
+        )
+        .into_iter()
+        .map(|(name, value)| match value.as_f64() {
+            Some(value) => Ok((name, value)),
+            None => Err(PyValueError::new_err(format!(
+                "policy parameter {name} is not a number: {value}"
+            ))),
+        })
+        .collect()
     }
 
     #[getter]
@@ -928,14 +933,19 @@ async fn select_engine(
 #[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None))]
 pub fn run_input<'p>(
     py: Python<'p>,
-    distributed_runtime: super::DistributedRuntime,
+    distributed_runtime: Bound<'p, super::DistributedRuntime>,
     input: &str,
     engine_config: EngineConfig,
     frontend_route_extensions: Option<PyObject>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
-    let frontend_route_extensions =
-        super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
+    // Route handlers see this same object as `ctx.runtime`.
+    let frontend_route_extensions = super::frontend_routes::frontend_route_extensions_from_py(
+        py,
+        frontend_route_extensions,
+        distributed_runtime.clone().into_any().unbind(),
+    )?;
+    let distributed_runtime = distributed_runtime.borrow().clone();
     let plugins = crate::router_plugins(
         &engine_config
             .inner

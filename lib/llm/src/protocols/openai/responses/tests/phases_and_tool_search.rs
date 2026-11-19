@@ -234,14 +234,7 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
         events.extend(converter.emit_end_events());
         let events = stream_json(events).await;
         let completed = &events.last().unwrap()["response"];
-        // Private reasoning is returned only as the leading reasoning item.
-        let (reasoning, output) = completed["output"]
-            .as_array()
-            .unwrap()
-            .split_first()
-            .unwrap();
-        assert_eq!(reasoning["type"], "reasoning");
-        assert_eq!(reasoning["content"][0]["text"], "Private.");
+        let output = completed["output"].as_array().unwrap();
         assert_eq!(output.len(), 4, "{output:?}");
         assert!(!serde_json::to_string(output).unwrap().contains("Private."));
         assert_eq!(output[0]["phase"], "commentary");
@@ -301,8 +294,8 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
             chat_completion_to_response(unary, &Default::default(), None).unwrap(),
         )
         .unwrap();
-        let (unary_reasoning, unary) = unary["output"].as_array().unwrap().split_first().unwrap();
-        assert_eq!(unary_reasoning["content"], reasoning["content"]);
+        let unary = unary["output"].as_array().unwrap();
+        assert_eq!(unary.len(), 4);
         for index in [0, 2, 3] {
             assert_eq!(unary[index]["phase"], output[index]["phase"]);
             assert_eq!(unary[index]["content"], output[index]["content"]);
@@ -365,6 +358,19 @@ fn reasoning_chunk(
     chunk
 }
 
+fn scored_chunk(
+    mut chunk: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    token: &str,
+) -> crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    chunk.inner.choices[0].logprobs = Some(
+        serde_json::from_value(json!({
+            "content": [{"token": token, "bytes": token.as_bytes(), "logprob": -0.5, "top_logprobs": []}]
+        }))
+        .unwrap(),
+    );
+    chunk
+}
+
 #[tokio::test]
 async fn undelimited_text_call_text_has_matching_stream_and_unary_order() {
     let request = request(
@@ -374,20 +380,29 @@ async fn undelimited_text_call_text_has_matching_stream_and_unary_order() {
     for finish in ["stop", "length"] {
         let output = matching_stream_and_unary_output(
             vec![
-                raw_chunk("Checking.", None),
-                tool_chunk(Some("lookup"), Some("call-1"), "{}", None),
-                raw_chunk("Done.", Some(finish)),
+                scored_chunk(raw_chunk("Checking.", None), "Checking."),
+                scored_chunk(tool_chunk(Some("lookup"), Some("call-1"), "{}", None), "{}"),
+                scored_chunk(raw_chunk("Done.", Some(finish)), "Done."),
             ],
-            params(&request),
+            ResponseParams {
+                include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+                ..params(&request)
+            },
         )
         .await;
         assert_eq!(output.as_array().unwrap().len(), 3);
         assert_eq!(output[0]["phase"], "commentary");
         assert_eq!(output[0]["content"][0]["text"], "Checking.");
+        let commentary_scores = output[0]["content"][0]["logprobs"].as_array().unwrap();
+        assert_eq!(commentary_scores.len(), 1);
+        assert_eq!(commentary_scores[0]["token"], "Checking.");
         assert_eq!(output[1]["type"], "function_call");
         assert_eq!(output[1]["status"], "completed");
         assert_eq!(output[2]["phase"], "final_answer");
         assert_eq!(output[2]["content"][0]["text"], "Done.");
+        let answer_scores = output[2]["content"][0]["logprobs"].as_array().unwrap();
+        assert_eq!(answer_scores.len(), 1);
+        assert_eq!(answer_scores[0]["token"], "Done.");
         assert_eq!(
             output[2]["status"],
             if finish == "length" {
@@ -420,7 +435,14 @@ async fn undelimited_reasoning_order_and_terminal_status_match_streaming() {
                 chunks[2].inner.choices[0].finish_reason = None;
                 chunks.push(raw_chunk("Answer.", Some("length")));
             }
-            let output = matching_stream_and_unary_output(chunks, params(&request)).await;
+            let output = matching_stream_and_unary_output(
+                chunks,
+                ResponseParams {
+                    reasoning: super::requested_reasoning_params().reasoning,
+                    ..params(&request)
+                },
+            )
+            .await;
             assert_eq!(
                 output.as_array().unwrap().len(),
                 if final_answer { 4 } else { 3 }
@@ -447,6 +469,75 @@ async fn undelimited_reasoning_order_and_terminal_status_match_streaming() {
             }
         }
     }
+}
+
+#[rstest::rstest]
+#[case::no_tools(json!([]))]
+#[case::empty_namespace(json!([{"type":"namespace","name":"empty","description":"Empty","tools":[]}]))]
+#[tokio::test]
+async fn hidden_reasoning_keeps_undelimited_answer_together(#[case] tools: Value) {
+    let request = request(tools, json!("Answer."));
+    for finish_in_reasoning in [false, true] {
+        let mut chunks = vec![
+            raw_chunk("First. ", None),
+            reasoning_chunk("Private.", None),
+            raw_chunk("Second.", (!finish_in_reasoning).then_some("length")),
+        ];
+        if finish_in_reasoning {
+            chunks.push(reasoning_chunk("Truncated thought.", Some("length")));
+        }
+        let output = matching_stream_and_unary_output(chunks, params(&request)).await;
+        assert_eq!(output.as_array().unwrap().len(), 1);
+        assert_eq!(output[0]["phase"], "final_answer");
+        assert_eq!(output[0]["content"][0]["text"], "First. Second.");
+        assert_eq!(
+            output[0]["status"],
+            if finish_in_reasoning {
+                "completed"
+            } else {
+                "incomplete"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn truncating_hidden_reasoning_keeps_prior_message_and_call_completed() {
+    let request = request(
+        json!([{"type":"function","name":"lookup"}]),
+        json!("Lookup."),
+    );
+    let output = matching_stream_and_unary_output(
+        vec![
+            raw_chunk("Checking.", None),
+            tool_chunk(Some("lookup"), Some("call-1"), "{}", None),
+            reasoning_chunk("Truncated thought.", Some("length")),
+        ],
+        params(&request),
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 2);
+    assert_eq!(output[0]["phase"], "commentary");
+    assert_eq!(output[0]["status"], "completed");
+    assert_eq!(output[1]["type"], "function_call");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[tokio::test]
+async fn mixed_reasoning_delta_does_not_project_unattributed_scores() {
+    let mut chunk = scored_chunk(raw_chunk("Answer.", Some("stop")), "Private.");
+    chunk.inner.choices[0].delta.reasoning_content = Some("Private.".into());
+    let output = matching_stream_and_unary_output(
+        vec![chunk],
+        ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 1);
+    assert_eq!(output[0]["content"][0]["text"], "Answer.");
+    assert_eq!(output[0]["content"][0]["logprobs"], json!([]));
 }
 
 #[tokio::test]

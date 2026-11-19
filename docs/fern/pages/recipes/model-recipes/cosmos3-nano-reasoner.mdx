@@ -14,7 +14,7 @@ matched targets isolate routing behavior: pure round robin and round robin
 with a 300-second per-video session-affinity TTL.
 
 Each worker starts through the Cosmos3 NIM entrypoint. NIM profile selection
-reads `NIM_MODEL_TYPE=reasoner`, `NIM_MODEL_SIZE=nano`, and
+reads `NIM_MODEL_TYPE=reasoner`, `NIM_MODEL_VARIANT=nano`, and
 `NIM_PRECISION=fp8`, picks the matching model profile for the detected GPU,
 and then launches `dynamo.vllm` because `NIM_DYNAMO_WORKER=true`. The FP8 Nano
 model fits on one H200, so every GPU runs an independent replica. Each replica
@@ -65,7 +65,7 @@ reach a worker that has already processed that video.
 <Note>
 
 In a matched eight-H200 benchmark, per-video session affinity improved
-throughput at every tested concurrency (36% to 76% more requests/s) and
+throughput at every tested concurrency (33% to 82% more requests/s) and
 latency at higher concurrency. See
 [Measured performance](#measured-performance).
 
@@ -82,8 +82,10 @@ Run commands from the repository root:
 ```bash
 export CONTEXT="<your-kubernetes-context>"
 export NAMESPACE="<your-namespace>"
+export NGC_API_KEY="<your-ngc-api-key>"
 
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
+: "${NGC_API_KEY:?Set NGC_API_KEY to your NGC API key}"
 kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic ngc-api-secret \
   --from-literal=NGC_API_KEY="$NGC_API_KEY"
 ```
@@ -158,6 +160,8 @@ with a ReadWriteMany-capable storage class. Then run:
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-nano-reasoner/model-cache/model-cache.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job \
+  cosmos3-nano-reasoner-model-download --ignore-not-found
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-nano-reasoner/model-cache/model-download.yaml
 kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \
@@ -187,16 +191,20 @@ session-affinity manifest sets a 300-second TTL.
 
 ## Verify
 
-Forward the frontend Service and check that it serves the model:
+Forward the frontend Service. The command keeps running:
 
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" port-forward \
   "service/${DGD}-frontend" 8000:8000
+```
+
+In a second terminal, check that it serves the model:
+
+```bash
 curl -fsS http://localhost:8000/v1/models
 ```
 
-Run `curl` in a second terminal. The response lists
-`nvidia/cosmos3-nano-reasoner`.
+The response lists `nvidia/cosmos3-nano-reasoner`.
 
 ## Smoke test
 
@@ -224,7 +232,9 @@ The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosm
 generates 200 synthetic 30-second, 2 FPS videos with FFmpeg before the
 measured sweep, so no external dataset or credentials are needed. It then sends
 20 questions for each video at every concurrency level: 4,000 requests with
-exactly 128 output tokens each. For session affinity, AIPerf sends one
+exactly 128 output tokens each. Every request puts the video before the
+question, so all questions about one video share a prompt prefix. For session
+affinity, AIPerf sends one
 `X-Dynamo-Session-ID` value, generated per video, on all 20 questions about
 that video; pure round robin sends no session-affinity header.
 
@@ -252,15 +262,15 @@ Both profiles used the same 200 synthetic videos, 20 questions per video, and
 
 | Concurrency | Round-robin req/s | Affinity req/s | Throughput gain | Round-robin TTFT p50 | Affinity TTFT p50 |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1.91 | 2.60 | +36% | 61 ms | 58 ms |
-| 2 | 3.90 | 5.46 | +40% | 61 ms | 58 ms |
-| 4 | 7.71 | 10.86 | +41% | 61 ms | 57 ms |
-| 8 | 14.38 | 21.44 | +49% | 90 ms | 58 ms |
-| 16 | 21.39 | 37.68 | +76% | 303 ms | 62 ms |
+| 1 | 1.94 | 2.66 | +37% | 45 ms | 44 ms |
+| 2 | 4.17 | 5.55 | +33% | 45 ms | 43 ms |
+| 4 | 8.15 | 11.11 | +36% | 45 ms | 43 ms |
+| 8 | 15.19 | 22.06 | +45% | 46 ms | 43 ms |
+| 16 | 24.15 | 43.93 | +82% | 215 ms | 43 ms |
 
-At concurrency 16, session affinity produced 4,822 output tokens/s versus
-2,738 for round robin. Request-latency p50 fell from 674 ms to 409 ms, and
-TTFT p95 fell from 760 ms to 134 ms. Each worker processes a video the first
+At concurrency 16, session affinity produced 5,622 output tokens/s versus
+3,091 for round robin. Request-latency p50 fell from 583 ms to 349 ms, and
+TTFT p95 fell from 657 ms to 97 ms. Each worker processes a video the first
 time it sees it and reuses it for later questions. Round robin spreads a
 video's 20 questions across up to eight workers, so the video is processed on
 each of them, while session affinity processes it once.

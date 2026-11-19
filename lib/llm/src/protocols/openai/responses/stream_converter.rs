@@ -9,22 +9,20 @@
 //! `response.output_text.done` -> `response.content_part.done` ->
 //! `response.output_item.done` -> `response.completed`
 //!
-//! Output items appear in generation order. Raw reasoning is a `reasoning` item
-//! with `reasoning_text` events; no summary is synthesized. A turn's text can span
-//! several `message` items. A
-//! parser that delimits messages sets their phase. Otherwise text closed by a tool
-//! call is `commentary`, as is text closed by resumed reasoning when the request can
-//! call tools, and other text is the `final_answer`; that phase is set on `.done`,
-//! not on `.added`.
+//! The `reasoning.summary` request option enables raw `reasoning_text` events and
+//! reasoning items with an empty summary. A parser can supply message phases.
+//! Otherwise text closed by a tool call or by resumed reasoning with callable
+//! tools is commentary. Text open at the end is the final answer. Inferred
+//! phases first appear on the completed message.
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, IncompleteDetails, InputTokenDetails, Instructions, MessagePhase, OutputContent,
-    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, ReasoningItem, ReasoningTextContent, RefusalContent,
+    AssistantRole, IncompleteDetails, InputTokenDetails, Instructions, LogProb, MessagePhase,
+    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, ReasoningItem, ReasoningTextContent, RefusalContent,
     RequestToolChoiceParam, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseCustomToolCallInputDeltaEvent,
     ResponseCustomToolCallInputDoneEvent, ResponseError, ResponseErrorCode, ResponseFailedEvent,
@@ -41,9 +39,12 @@ use serde::{
 };
 use uuid::Uuid;
 
-use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 
-use super::{ResponseParams, responses_incomplete_reason};
+use super::{
+    ResponseParams, chat_logprobs_to_output_text, output_text_logprobs_to_events,
+    responses_incomplete_reason,
+};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::ResponsesContext;
 
@@ -70,10 +71,31 @@ pub struct ResponseStreamConverter {
     accumulated_refusal: String,
     text_content_index: Option<u32>,
     refusal_content_index: Option<u32>,
+    // Scores received since the last text delta. Chunks that show no text
+    // (reasoning, tool calls, a trailing EOS score) still carry scores, which
+    // ride on the next text delta or on `output_text.done`.
+    pending_logprobs: Vec<LogProb>,
+    // Scores already delivered for the open message's text part.
+    text_logprobs: Vec<LogProb>,
+    // Scores from chunks without content, waiting for the next content chunk
+    // to decide whether they are output text or hidden parser output.
+    unclassified_logprobs: Vec<LogProb>,
+    // Whether the last content chunk was reasoning or a tool call; trailing
+    // content-less scores at the end of the stream take that class.
+    last_scores_hidden: bool,
+    // A `MessageBoundary::End` arrived while scores are requested. The message
+    // stays open so a later score-only chunk (hidden EOS) still joins it; the
+    // next boundary, visible content, or the end of the stream closes it.
+    close_deferred: bool,
+    // The message as published in `output_item.done`, reused for the closed
+    // list and the terminal response instead of rebuilding its scores.
+    finished_message: Option<OutputMessage>,
     // Ordered reasoning spans; a new item opens when reasoning resumes after
     // a tool call or text.
     reasoning_items: Vec<ReasoningState>,
     active_reasoning_index: Option<usize>,
+    // A terminal interruption in suppressed reasoning belongs to that span.
+    ends_in_hidden_reasoning: bool,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
     // Hold custom calls and following tool headers until a completion boundary,
@@ -160,8 +182,15 @@ impl ResponseStreamConverter {
             accumulated_refusal: String::new(),
             text_content_index: None,
             refusal_content_index: None,
+            pending_logprobs: Vec::new(),
+            text_logprobs: Vec::new(),
+            unclassified_logprobs: Vec::new(),
+            last_scores_hidden: false,
+            close_deferred: false,
+            finished_message: None,
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
+            ends_in_hidden_reasoning: false,
             function_call_items: Vec::new(),
             deferred_tool_calls: Vec::new(),
             next_output_index: 0,
@@ -184,6 +213,7 @@ impl ResponseStreamConverter {
     }
 
     fn start_message(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        self.ends_in_hidden_reasoning = false;
         self.append_active_reasoning_done_events(events, OutputStatus::Completed);
         if !self.message_started {
             // Text or a refusal after tool calls proves those calls completed.
@@ -204,6 +234,65 @@ impl ResponseStreamConverter {
                     }),
                 });
             events.push(self.make_sse_event(&added));
+        }
+    }
+
+    /// Queue a choice's scores in arrival order; the next text delta, or the
+    /// close of the open message, carries them. Only output text is scored:
+    /// scores on reasoning or tool-call chunks are dropped. A chunk without
+    /// content (buffered parser output, the hidden EOS) takes the class of the
+    /// next content chunk, or of the last one when the stream ends, except on a
+    /// message-end chunk, whose scores belong to the message that ends.
+    fn queue_choice_logprobs(&mut self, choice: &ChatChoiceStream, end_boundary: bool) {
+        if !self.params.logprobs_requested() {
+            return;
+        }
+        let delta = &choice.delta;
+        let has_text = matches!(
+            delta.content.as_ref(),
+            Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty()
+        );
+        // There is no safe score split for a delta that mixes reasoning and text.
+        let hidden = delta
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+            || (!has_text
+                && delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty()));
+        // Known-hidden scores are dropped before any projection is built.
+        if hidden {
+            self.resolve_unclassified_logprobs(true);
+            return;
+        }
+        let own = choice
+            .logprobs
+            .as_ref()
+            .and_then(|lp| lp.content.as_deref())
+            .map(chat_logprobs_to_output_text)
+            .unwrap_or_default();
+        if has_text {
+            self.resolve_unclassified_logprobs(false);
+            self.pending_logprobs.extend(own);
+        } else if end_boundary {
+            let unclassified = std::mem::take(&mut self.unclassified_logprobs);
+            self.pending_logprobs.extend(unclassified);
+            self.pending_logprobs.extend(own);
+        } else {
+            self.unclassified_logprobs.extend(own);
+        }
+    }
+
+    /// Give the scores of content-less chunks the class of the content chunk
+    /// that follows them: output text keeps them, reasoning or a tool call drops
+    /// them.
+    fn resolve_unclassified_logprobs(&mut self, hidden: bool) {
+        self.last_scores_hidden = hidden;
+        let unclassified = std::mem::take(&mut self.unclassified_logprobs);
+        if !hidden {
+            self.pending_logprobs.extend(unclassified);
         }
     }
 
@@ -232,26 +321,31 @@ impl ResponseStreamConverter {
         reasoning: &str,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        if self.ends_in_hidden_reasoning {
+            return;
+        }
         let state_index = match self.active_reasoning_index {
             Some(state_index) => state_index,
             None => {
                 // Resumed reasoning proves the open message and pending tool calls
-                // completed, even if this chunk reports that the new reasoning
-                // exhausted the budget. Undelimited text followed by more reasoning
-                // is commentary only when a call can still follow, as in stock SGLang.
-                self.close_current_message_as(
-                    events,
-                    if self.params.tools_callable() {
-                        MessagePhase::Commentary
-                    } else {
-                        MessagePhase::FinalAnswer
-                    },
-                );
+                // reached a boundary. Keep undelimited text together if there
+                // will be no intervening reasoning item or distinct phase.
+                if let Some(phase) = self
+                    .params
+                    .phase_on_reasoning_boundary(self.message_phase, &self.tool_names)
+                {
+                    self.close_current_message_as(events, phase);
+                }
                 self.append_pending_function_call_done_events(
                     events,
                     OutputStatus::Completed,
                     false,
                 );
+
+                if !self.params.raw_reasoning_requested() {
+                    self.ends_in_hidden_reasoning = true;
+                    return;
+                }
 
                 let output_index = self.next_output_index;
                 self.next_output_index += 1;
@@ -434,7 +528,7 @@ impl ResponseStreamConverter {
                     .clone()
                     .unwrap_or(ServiceTierResponses::Auto),
             ),
-            top_logprobs: Some(0),
+            top_logprobs: Some(self.params.echoed_top_logprobs()),
             usage: self.usage.clone(),
         }
     }
@@ -521,8 +615,8 @@ impl ResponseStreamConverter {
         {
             self.incomplete_reason = Some(reason);
         }
-        // A visible boundary may arrive with the last argument fragment. Merge
-        // buffered bytes first, so a completed call is not mistaken for a cut tail.
+        // A boundary may arrive with the last fragment of an existing call.
+        // Flush that fragment before publishing the call's completion.
         let boundary_can_flush = matches!(
             &chunk.message_boundary,
             Some(super::super::chat_completions::MessageBoundary::Start(_))
@@ -532,23 +626,72 @@ impl ResponseStreamConverter {
                 || choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
         });
         let mut merged_arguments = HashSet::new();
-        if boundary_can_flush && !self.deferred_tool_calls.is_empty() {
+        if boundary_can_flush && !self.function_call_items.is_empty() {
             for choice in &chunk.inner.choices {
                 for call in choice.delta.tool_calls.iter().flatten() {
                     if self.params.parallel_tool_calls == Some(false) && call.index > 0 {
                         continue;
                     }
-                    if let Some(state) = self.function_call_items.get_mut(call.index as usize)
-                        && state.deferred
+                    let call_index = call.index as usize;
+                    if let Some(state) = self.function_call_items.get_mut(call_index)
+                        && state.output_status.is_none()
+                        && (state.started || state.deferred)
                         && let Some(arguments) =
                             call.function.as_ref().and_then(|f| f.arguments.as_ref())
                     {
                         state.accumulated_args.push_str(arguments);
                         state.pending_arg_deltas.push(arguments.clone());
                         merged_arguments.insert((choice.index, call.index));
+                        if state.started {
+                            self.append_function_call_delta_events(call_index, events);
+                        }
                     }
                 }
             }
+        }
+        // A message whose close was deferred for trailing scores closes before
+        // anything that belongs to the next item arrives.
+        let chunk_has_text = chunk.inner.choices.iter().any(|choice| {
+            matches!(choice.delta.content.as_ref(), Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty())
+        });
+        let chunk_has_reasoning = chunk.inner.choices.iter().any(|choice| {
+            choice
+                .delta
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty())
+        });
+        let chunk_has_content = chunk_has_text
+            || chunk_has_reasoning
+            || chunk.inner.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .refusal
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
+                    || choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+            });
+        let end_boundary = matches!(
+            &chunk.message_boundary,
+            Some(super::super::chat_completions::MessageBoundary::End)
+        );
+        if self.close_deferred
+            && (chunk_has_content
+                || matches!(
+                    &chunk.message_boundary,
+                    Some(super::super::chat_completions::MessageBoundary::Start(_))
+                ))
+        {
+            // Content-less scores since the boundary take this chunk's class
+            // before the close drains them into the ending message.
+            if chunk_has_content {
+                self.resolve_unclassified_logprobs(!chunk_has_text || chunk_has_reasoning);
+            }
+            self.close_current_message(events);
         }
         let mut should_finish_function_calls = false;
         match &chunk.message_boundary {
@@ -565,12 +708,20 @@ impl ResponseStreamConverter {
                 self.start_message(events);
             }
             Some(super::super::chat_completions::MessageBoundary::End) => {
-                self.close_current_message(events);
+                // Scores that still belong to this message (its EOS) can arrive
+                // after the boundary, so keep it open until the next item.
+                if self.params.logprobs_requested() && self.message_started {
+                    self.close_deferred = true;
+                } else {
+                    self.close_current_message(events);
+                }
             }
             None => {}
         }
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
+
+            self.queue_choice_logprobs(choice, end_boundary);
 
             // Handle text content deltas — extract text from the enum
             let content_text = match &delta.content {
@@ -587,17 +738,19 @@ impl ResponseStreamConverter {
                 .as_deref()
                 .filter(|reasoning| !reasoning.is_empty());
             let refusal = delta.refusal.as_deref().filter(|text| !text.is_empty());
-            // A delta carrying text or a refusal and reasoning while a message is
-            // open continues that message before the reasoning that follows it.
+            // Mixed legacy deltas have no intra-delta order. Without an active
+            // reasoning span, continue an open message before processing reasoning.
             let reasoning_after_text = (content_text.is_some() || refusal.is_some())
                 && self.message_started
-                && self.active_reasoning_index.is_none();
+                && self.active_reasoning_index.is_none()
+                && !self.ends_in_hidden_reasoning;
 
             if !reasoning_after_text && let Some(reasoning) = reasoning {
                 self.append_reasoning_delta(reasoning, events);
             }
 
             if let Some(content) = content_text {
+                self.ends_in_hidden_reasoning = false;
                 // Starting the answer is an explicit reasoning phase boundary.
                 // The reasoning item completed even when this same chunk also
                 // reports that the answer exhausted the output budget.
@@ -621,6 +774,7 @@ impl ResponseStreamConverter {
 
                 // Emit text delta
                 self.accumulated_text.push_str(content);
+                let delta_logprobs = std::mem::take(&mut self.pending_logprobs);
                 let text_delta =
                     ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
                         sequence_number: self.next_seq(),
@@ -628,12 +782,14 @@ impl ResponseStreamConverter {
                         output_index: self.message_output_index,
                         content_index,
                         delta: content.to_string(),
-                        logprobs: Some(vec![]),
+                        logprobs: Some(output_text_logprobs_to_events(&delta_logprobs)),
                     });
+                self.text_logprobs.extend(delta_logprobs);
                 events.push(self.make_sse_event(&text_delta));
             }
 
             if let Some(refusal) = refusal {
+                self.ends_in_hidden_reasoning = false;
                 self.append_active_reasoning_done_events(events, OutputStatus::Completed);
                 let content_index = match self.refusal_content_index {
                     Some(index) => index,
@@ -695,6 +851,10 @@ impl ResponseStreamConverter {
                             deferred: false,
                             output_status: None,
                         });
+                    }
+
+                    if self.function_call_items[tc_index].output_status.is_some() {
+                        continue;
                     }
 
                     // Update call_id and name if provided
@@ -770,6 +930,7 @@ impl ResponseStreamConverter {
                         self.deferred_tool_calls.push(tc_index);
                     }
                     if should_start || should_defer {
+                        self.ends_in_hidden_reasoning = false;
                         // Starting an allowed tool call is an explicit reasoning
                         // phase boundary, independent of the finish reason. Text
                         // before the call is commentary and closes before it.
@@ -1024,7 +1185,10 @@ impl ResponseStreamConverter {
     }
 
     fn item_output_status(&self, output_index: u32) -> OutputStatus {
-        if self.incomplete_reason.is_some() && Some(output_index) == self.terminal_output_index() {
+        if !self.ends_in_hidden_reasoning
+            && self.incomplete_reason.is_some()
+            && Some(output_index) == self.terminal_output_index()
+        {
             OutputStatus::Incomplete
         } else {
             OutputStatus::Completed
@@ -1043,6 +1207,36 @@ impl ResponseStreamConverter {
         self.output_with_status(self.output_status())
     }
 
+    /// The open message's parts for the close events; the token record moves
+    /// out instead of being copied. A message closed again (an error after its
+    /// completion) republishes the content it already published.
+    fn take_message_content(&mut self) -> Vec<OutputMessageContent> {
+        if let Some(finished) = &self.finished_message {
+            return finished.content.clone();
+        }
+        let mut parts = Vec::with_capacity(2);
+        if let Some(index) = self.text_content_index {
+            parts.push((
+                index,
+                OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(std::mem::take(&mut self.text_logprobs)),
+                }),
+            ));
+        }
+        if let Some(index) = self.refusal_content_index {
+            parts.push((
+                index,
+                OutputMessageContent::Refusal(RefusalContent {
+                    refusal: self.accumulated_refusal.clone(),
+                }),
+            ));
+        }
+        parts.sort_unstable_by_key(|(index, _)| *index);
+        parts.into_iter().map(|(_, part)| part).collect()
+    }
+
     fn message_content(&self) -> Vec<OutputMessageContent> {
         let mut parts = Vec::with_capacity(2);
         if let Some(index) = self.text_content_index {
@@ -1051,7 +1245,7 @@ impl ResponseStreamConverter {
                 OutputMessageContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
                     annotations: vec![],
-                    logprobs: Some(vec![]),
+                    logprobs: Some(self.text_logprobs.clone()),
                 }),
             ));
         }
@@ -1068,6 +1262,12 @@ impl ResponseStreamConverter {
     }
 
     fn message_output(&self, output_status: OutputStatus) -> OutputMessage {
+        // After the close events the published message is reused as-is.
+        if let Some(finished) = &self.finished_message {
+            let mut message = finished.clone();
+            message.status = self.message_output_status.unwrap_or(output_status);
+            return message;
+        }
         OutputMessage {
             id: self.message_item_id.clone(),
             content: self.message_content(),
@@ -1152,10 +1352,22 @@ impl ResponseStreamConverter {
             );
             self.text_content_index = Some(index);
         }
+        // Scores that arrived after the last text delta complete this text
+        // part's record. Trailing content-less scores (the hidden EOS) take the
+        // class of the last content chunk: kept after text, dropped after a
+        // tool call.
+        let last_hidden = self.last_scores_hidden;
+        self.resolve_unclassified_logprobs(last_hidden);
+        let late_logprobs = std::mem::take(&mut self.pending_logprobs);
+        self.text_logprobs.extend(late_logprobs);
 
-        for (index, content) in self.message_content().into_iter().enumerate() {
+        // The parts are built once and travel through the events by value: each
+        // event hands its payload back after serialization, so the token record
+        // is not copied per event.
+        let mut content = Vec::with_capacity(2);
+        for (index, part) in self.take_message_content().into_iter().enumerate() {
             let content_index = index as u32;
-            let part = match content {
+            let part = match part {
                 OutputMessageContent::OutputText(text) => {
                     let done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
                         sequence_number: self.next_seq(),
@@ -1163,7 +1375,9 @@ impl ResponseStreamConverter {
                         output_index: self.message_output_index,
                         content_index,
                         text: text.text.clone(),
-                        logprobs: Some(vec![]),
+                        logprobs: Some(output_text_logprobs_to_events(
+                            text.logprobs.as_deref().unwrap_or_default(),
+                        )),
                     });
                     events.push(self.make_sse_event(&done));
                     OutputContent::OutputText(text)
@@ -1188,14 +1402,39 @@ impl ResponseStreamConverter {
                 part,
             });
             events.push(self.make_sse_event(&done));
+            let ResponseStreamEvent::ResponseContentPartDone(done) = done else {
+                unreachable!("content part event was just built")
+            };
+            content.push(match done.part {
+                OutputContent::OutputText(text) => OutputMessageContent::OutputText(text),
+                OutputContent::Refusal(refusal) => OutputMessageContent::Refusal(refusal),
+                OutputContent::ReasoningText(_) => {
+                    unreachable!("message parts are text or refusal")
+                }
+            });
         }
 
+        let message = OutputMessage {
+            id: self.message_item_id.clone(),
+            content,
+            role: AssistantRole::Assistant,
+            phase: self.message_phase,
+            status: self.message_output_status.unwrap_or(output_status),
+        };
         let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
             sequence_number: self.next_seq(),
             output_index: self.message_output_index,
-            item: OutputItem::Message(self.message_output(output_status)),
+            item: OutputItem::Message(message),
         });
         events.push(self.make_sse_event(&item_done));
+        let ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+            item: OutputItem::Message(message),
+            ..
+        }) = item_done
+        else {
+            unreachable!("output item event was just built")
+        };
+        self.finished_message = Some(message);
     }
 
     fn close_current_message(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
@@ -1203,10 +1442,12 @@ impl ResponseStreamConverter {
             return;
         }
         self.close_open_message_item(events, OutputStatus::Completed);
-        self.closed_messages.push((
-            self.message_output_index,
-            self.message_output(OutputStatus::Completed),
-        ));
+        let message = self
+            .finished_message
+            .take()
+            .unwrap_or_else(|| self.message_output(OutputStatus::Completed));
+        self.closed_messages
+            .push((self.message_output_index, message));
         self.message_item_id = format!("msg_{}", Uuid::new_v4().simple());
         self.message_started = false;
         self.message_output_status = None;
@@ -1215,6 +1456,8 @@ impl ResponseStreamConverter {
         self.accumulated_refusal.clear();
         self.text_content_index = None;
         self.refusal_content_index = None;
+        self.text_logprobs.clear();
+        self.close_deferred = false;
     }
 
     /// Close the open message, labelling it `phase` unless a parser boundary
@@ -1248,6 +1491,11 @@ impl ResponseStreamConverter {
         // whether the still-open reasoning item completed or was truncated.
         self.append_active_reasoning_done_events(events, output_status);
 
+        // A message that ended at a parser boundary completed; it only waited for
+        // trailing scores, which the close now drains into it.
+        if self.close_deferred {
+            self.close_current_message(events);
+        }
         // Only the terminal item was cut short, and the terminal response reports it
         // that way. The `output_item.done` event has to agree, or a client sees one
         // item marked incomplete in the stream and completed in the final response.
@@ -1302,7 +1550,15 @@ impl ResponseStreamConverter {
     ) -> Result<Event, anyhow::Error> {
         let output_status = OutputStatus::Incomplete;
         self.append_active_reasoning_done_events(events, output_status);
-        self.close_open_message_item(events, output_status);
+        if self.close_deferred {
+            self.close_current_message(events);
+        }
+        let message_status = if self.ends_in_hidden_reasoning {
+            OutputStatus::Completed
+        } else {
+            output_status
+        };
+        self.close_open_message_item(events, message_status);
         self.append_pending_function_call_done_events(events, output_status, false);
 
         let mut response =
@@ -1913,8 +2169,321 @@ mod tests {
         );
     }
 
+    fn logprob_tokens(logprobs: &serde_json::Value) -> Vec<&str> {
+        logprobs
+            .as_array()
+            .expect("logprobs is an array")
+            .iter()
+            .map(|entry| entry["token"].as_str().unwrap())
+            .collect()
+    }
+
+    fn scored(
+        mut chunk: NvCreateChatCompletionStreamResponse,
+        token: &str,
+    ) -> NvCreateChatCompletionStreamResponse {
+        chunk.inner.choices[0].logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [{
+                    "token": token,
+                    "logprob": -0.5,
+                    "bytes": token.as_bytes(),
+                    "top_logprobs": [{"token": token, "logprob": -0.5, "bytes": token.as_bytes()}]
+                }],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+        chunk
+    }
+
+    fn logprob_params() -> ResponseParams {
+        use dynamo_protocols::types::responses::IncludeEnum;
+
+        ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            top_logprobs: Some(1),
+            ..default_params()
+        }
+    }
+
+    /// Every chat score reaches the client once, in generation order: a text
+    /// delta carries the scores received since the previous delta, and scores
+    /// after the last delta complete the record on `output_text.done`.
+    #[test]
+    fn requested_logprobs_ride_on_text_deltas_and_done() {
+        let mut score_only = finish_chunk(FinishReason::Stop);
+        score_only.inner.choices[0] =
+            crate::protocols::openai::chat_completions::unified_parser::empty_choice(0);
+        let score_only = scored(score_only, "D");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        // Reasoning is not output text: neither its text nor its score is published.
+        assert!(
+            conv.process_chunk(&scored(reasoning_chunk("think"), "A"))
+                .is_empty()
+        );
+
+        let events = conv.process_chunk(&scored(text_chunk("hi"), "B"));
+        let delta = events
+            .iter()
+            .find(|event| event_type(event) == "response.output_text.delta")
+            .expect("text delta");
+        assert_eq!(logprob_tokens(&event_json(delta)["logprobs"]), ["B"]);
+
+        let events = conv.process_chunk(&scored(text_chunk("!"), "C"));
+        assert_eq!(logprob_tokens(&event_json(&events[0])["logprobs"]), ["C"]);
+
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        assert!(conv.process_chunk(&score_only).is_empty());
+
+        let events = conv.emit_end_events();
+        let done = event_json(&events[0]);
+        assert_eq!(done["type"], "response.output_text.done");
+        assert_eq!(logprob_tokens(&done["logprobs"]), ["B", "C", "D"]);
+        assert_eq!(done["logprobs"][0]["top_logprobs"][0]["token"], "B");
+
+        let completed = event_json(events.last().unwrap());
+        assert_eq!(completed["response"]["top_logprobs"], 1);
+        let text = &completed["response"]["output"][0]["content"][0];
+        assert_eq!(text["text"], "hi!");
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["B", "C", "D"]);
+        assert_eq!(text["logprobs"][0]["bytes"], serde_json::json!([66]));
+    }
+
+    /// Scores on the chunk that ends a message belong to that message, and scores
+    /// on the chunk that starts the next one belong to the next.
+    #[test]
+    fn boundary_chunk_scores_stay_with_their_message() {
+        use super::super::super::chat_completions::MessageBoundary;
+        use dynamo_protocols::types::responses::MessagePhase;
+
+        let mut end = finish_chunk(FinishReason::Stop);
+        end.inner.choices[0].finish_reason = None;
+        end.message_boundary = Some(MessageBoundary::End);
+        let end = scored(end, "B");
+        let mut start = finish_chunk(FinishReason::Stop);
+        start.inner.choices[0].finish_reason = None;
+        start.message_boundary = Some(MessageBoundary::Start(MessagePhase::FinalAnswer));
+        let start = scored(start, "C");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("first"), "A"));
+        conv.process_chunk(&end);
+        conv.process_chunk(&start);
+        conv.process_chunk(&scored(text_chunk("second"), "D"));
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        let _ = conv.emit_end_events();
+
+        let messages: Vec<Vec<String>> = conv
+            .completed_output()
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Message(message) => Some(
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            OutputMessageContent::OutputText(text) => text.logprobs.as_ref(),
+                            _ => None,
+                        })
+                        .flatten()
+                        .map(|entry| entry.token.clone())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages, [["A", "B"], ["C", "D"]]);
+    }
+
+    /// A message closed by a parser `End` boundary still owns the EOS score that a
+    /// later score-only terminal chunk carries: its close waits for that chunk, so
+    /// `output_text.done` and the completed output both hold the full record.
+    #[test]
+    fn end_boundary_waits_for_trailing_scores() {
+        use super::super::super::chat_completions::MessageBoundary;
+
+        let mut end = finish_chunk(FinishReason::Stop);
+        end.inner.choices[0].finish_reason = None;
+        end.message_boundary = Some(MessageBoundary::End);
+        let eos = scored(finish_chunk(FinishReason::Stop), "E");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Done."), "A"));
+        // The boundary alone publishes nothing yet.
+        assert!(conv.process_chunk(&end).is_empty());
+        assert!(conv.process_chunk(&eos).is_empty());
+
+        let events = conv.emit_end_events();
+        assert_eq!(
+            event_types(&events),
+            [
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+        let done = event_json(&events[0]);
+        assert_eq!(logprob_tokens(&done["logprobs"]), ["A", "E"]);
+        let item = event_json(&events[2]);
+        assert_eq!(item["item"]["status"], "completed");
+        assert_eq!(
+            logprob_tokens(&item["item"]["content"][0]["logprobs"]),
+            ["A", "E"]
+        );
+        let completed = event_json(&events[3]);
+        assert_eq!(completed["response"]["output"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            logprob_tokens(&completed["response"]["output"][0]["content"][0]["logprobs"]),
+            ["A", "E"]
+        );
+    }
+
+    /// The parser sends buffered tool-call scores on content-less chunks and marks
+    /// only the completing chunk with `tool_calls`. Those scores take the class of
+    /// that chunk and are dropped, as is a trailing control token after the call.
+    #[test]
+    fn tool_call_scores_on_content_less_chunks_are_dropped() {
+        let empty = |token: &str| {
+            let mut chunk = finish_chunk(FinishReason::Stop);
+            chunk.inner.choices[0].finish_reason = None;
+            scored(chunk, token)
+        };
+        let call = scored(
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                Some("get_weather"),
+                Some("{\"city\":\"Paris\"}"),
+            ),
+            "D",
+        );
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Let me check."), "A"));
+        conv.process_chunk(&empty("<tool_call>"));
+        conv.process_chunk(&empty("<function=get_weather>"));
+        conv.process_chunk(&call);
+        conv.process_chunk(&empty("</tool_call>"));
+        conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        let events = conv.emit_end_events();
+
+        let completed = event_json(events.last().unwrap());
+        let output = completed["response"]["output"].as_array().unwrap();
+        let text = output
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("text message");
+        assert_eq!(logprob_tokens(&text["content"][0]["logprobs"]), ["A"]);
+        assert!(output.iter().any(|item| item["type"] == "function_call"));
+    }
+
+    /// After a commentary message ends, a tool call takes the next scores and a
+    /// trailing control token after the call is dropped in streaming as in unary.
+    #[test]
+    fn trailing_scores_after_tool_call_are_dropped() {
+        use super::super::super::chat_completions::MessageBoundary;
+
+        let mut end = finish_chunk(FinishReason::Stop);
+        end.inner.choices[0].finish_reason = None;
+        end.message_boundary = Some(MessageBoundary::End);
+        let call = scored(
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                Some("get_weather"),
+                Some("{\"city\":\"Paris\"}"),
+            ),
+            "D",
+        );
+        let mut eom = finish_chunk(FinishReason::ToolCalls);
+        eom.inner.choices[0].finish_reason = None;
+        let eom = scored(eom, "<|eom|>");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Checking."), "A"));
+        conv.process_chunk(&end);
+        conv.process_chunk(&call);
+        conv.process_chunk(&eom);
+        conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        let events = conv.emit_end_events();
+
+        let completed = event_json(events.last().unwrap());
+        let output = completed["response"]["output"].as_array().unwrap();
+        let text = output
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("commentary message");
+        assert_eq!(logprob_tokens(&text["content"][0]["logprobs"]), ["A"]);
+    }
+
+    /// An error after the message completed closes it again; the republished
+    /// message keeps the scores it already published instead of an empty record.
+    #[test]
+    fn error_after_completion_keeps_published_scores() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Checking."), "A"));
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        let events = conv.emit_end_events();
+        let completed = event_json(events.last().unwrap());
+        assert_eq!(
+            logprob_tokens(&completed["response"]["output"][0]["content"][0]["logprobs"]),
+            ["A"]
+        );
+
+        let events = conv.emit_error_events(ResponseError {
+            misalignment: None,
+            code: ResponseErrorCode::ServerError,
+            message: "tool arguments were malformed".into(),
+        });
+        let done = event_json(&events[0]);
+        assert_eq!(done["type"], "response.output_text.done");
+        assert_eq!(logprob_tokens(&done["logprobs"]), ["A"]);
+        let failed = event_json(events.last().unwrap());
+        assert_eq!(failed["type"], "response.failed");
+        assert_eq!(
+            logprob_tokens(&failed["response"]["output"][0]["content"][0]["logprobs"]),
+            ["A"]
+        );
+    }
+
+    /// Without `include: message.output_text.logprobs`, chat scores are dropped and
+    /// the schema-required arrays stay empty.
+    #[test]
+    fn logprobs_stay_empty_without_include() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        let events = conv.process_chunk(&scored(text_chunk("hi"), "A"));
+        let delta = events
+            .iter()
+            .find(|event| event_type(event) == "response.output_text.delta")
+            .expect("text delta");
+        assert_eq!(event_json(delta)["logprobs"], serde_json::json!([]));
+
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        let events = conv.emit_end_events();
+        let done = event_json(&events[0]);
+        assert_eq!(done["logprobs"], serde_json::json!([]));
+        let completed = event_json(events.last().unwrap());
+        assert_eq!(completed["response"]["top_logprobs"], 0);
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["logprobs"],
+            serde_json::json!([])
+        );
+    }
+
     /// The V1 tool jail can send late scores on an empty-delta choice after `finish_reason`.
-    /// Responses carries no chat logprobs, so that choice must not change the output.
+    /// Without an `include` request Responses drops chat logprobs, so that choice must not
+    /// change the output.
     #[test]
     fn post_finish_score_only_choice_emits_no_events() {
         let mut score_only = finish_chunk(FinishReason::Stop);
@@ -2699,35 +3268,17 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_without_requested_summary_streams_reasoning_text() {
+    fn test_reasoning_only_without_opt_in_leaves_an_empty_streamed_output() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
 
         let events = conv.process_chunk(&reasoning_chunk("raw reasoning"));
+        assert!(events.is_empty());
+        let events = conv.emit_end_events();
+        assert_eq!(event_types(&events), ["response.completed"]);
         assert_eq!(
-            event_types(&events),
-            vec![
-                "response.output_item.added".to_string(),
-                "response.content_part.added".to_string(),
-                "response.reasoning_text.delta".to_string(),
-            ]
+            event_json(&events[0])["response"]["output"],
+            serde_json::json!([])
         );
-        let end_types = event_types(&conv.emit_end_events());
-        assert_eq!(
-            end_types,
-            vec![
-                "response.reasoning_text.done".to_string(),
-                "response.content_part.done".to_string(),
-                "response.output_item.done".to_string(),
-                "response.completed".to_string(),
-            ]
-        );
-
-        let output = conv.completed_output();
-        let [OutputItem::Reasoning(reasoning)] = output.as_slice() else {
-            panic!("expected only the reasoning output");
-        };
-        assert!(reasoning.summary.is_empty());
-        assert_eq!(reasoning_text(reasoning), "raw reasoning");
     }
 
     /// Reasoning that resumes after text closes the text and opens a new reasoning
@@ -2744,9 +3295,10 @@ mod tests {
         MessagePhase::FinalAnswer
     )]
     fn test_reasoning_after_text_is_emitted_and_splits_messages(
-        #[case] params: ResponseParams,
+        #[case] mut params: ResponseParams,
         #[case] closed_phase: MessagePhase,
     ) {
+        params.reasoning = reasoning_params().reasoning;
         let mut conv = ResponseStreamConverter::new("test-model".into(), params);
 
         let _ = conv.process_chunk(&reasoning_chunk("plan"));
@@ -2819,7 +3371,11 @@ mod tests {
     /// to the open message before the reasoning closes it.
     #[test]
     fn test_delta_with_text_and_reasoning_continues_open_text_first() {
-        let mut conv = ResponseStreamConverter::new("test-model".into(), tool_params());
+        let params = ResponseParams {
+            reasoning: reasoning_params().reasoning,
+            ..tool_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
         let _ = conv.process_chunk(&text_chunk("Let me"));
 
         let mut both = text_chunk(" check.");
@@ -2855,7 +3411,7 @@ mod tests {
     /// as its second part before the reasoning closes the message.
     #[test]
     fn test_delta_with_refusal_and_reasoning_continues_open_message_first() {
-        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let mut conv = ResponseStreamConverter::new("test-model".into(), reasoning_params());
         let _ = conv.process_chunk(&text_chunk("Let me check."));
 
         let mut both = text_chunk("");
@@ -3324,8 +3880,8 @@ mod tests {
 
     #[test]
     fn test_every_added_output_item_is_done_once() {
-        for (params, fail) in [(default_params(), false), (default_params(), true)] {
-            let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        for fail in [false, true] {
+            let mut conv = ResponseStreamConverter::new("test-model".into(), reasoning_params());
             let mut events = Vec::new();
             for chunk in [
                 reasoning_chunk("plan"),
@@ -3540,19 +4096,40 @@ mod tests {
     }
 
     #[test]
-    fn test_completed_output_keeps_tool_before_later_text() {
+    fn test_later_text_closes_tool_after_coalesced_argument_delta() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.emit_start_events();
         let _ = conv.process_chunk(&tool_call_chunk(
             0,
             Some("call-1"),
             Some("search"),
-            Some("{}"),
+            Some(r#"{"q":"#),
         ));
-        let _ = conv.process_chunk(&text_chunk("Searching."));
+        let mut both = tool_call_chunk(0, None, None, Some("1}"));
+        both.inner.choices[0].delta.content =
+            Some(ChatCompletionMessageContent::Text("Searching.".into()));
+        let events = conv.process_chunk(&both);
+        assert_eq!(
+            &event_types(&events)[..4],
+            &[
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.output_item.added",
+            ]
+        );
+        assert_eq!(event_json(&events[0])["delta"], "1}");
+        assert_eq!(event_json(&events[1])["arguments"], r#"{"q":1}"#);
+        assert!(
+            conv.process_chunk(&tool_call_chunk(0, None, None, Some("late")))
+                .is_empty()
+        );
 
         let output = conv.completed_output();
-        assert!(matches!(output[0], OutputItem::FunctionCall(_)));
+        let OutputItem::FunctionCall(call) = &output[0] else {
+            panic!("expected the completed call before the message")
+        };
+        assert_eq!(call.arguments, r#"{"q":1}"#);
         assert!(matches!(output[1], OutputItem::Message(_)));
     }
 
