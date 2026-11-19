@@ -811,6 +811,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_chat_top_logprobs_candidates_carry_token_id() {
+        let candidates = vec![
+            common::llm_backend::TopLogprob {
+                rank: 1,
+                token_id: 2,
+                token: Some("hi".to_string()),
+                logprob: -0.25,
+                bytes: Some(b"hi".to_vec()),
+            },
+            common::llm_backend::TopLogprob {
+                rank: 2,
+                token_id: 7,
+                token: Some("yo".to_string()),
+                logprob: -1.0,
+                bytes: Some(b"yo".to_vec()),
+            },
+        ];
+        // Selected token (id 1) is absent from the candidates, so it is appended.
+        let out = convert_backend_top_logprobs(&candidates, "hello", 1, -0.5, false);
+        let ids: Vec<_> = out.iter().map(|e| e.token_id).collect();
+        assert_eq!(ids, vec![Some(2), Some(7), Some(1)]);
+    }
+
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
         let messages = vec![ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
