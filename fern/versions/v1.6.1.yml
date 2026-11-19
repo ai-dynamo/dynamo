@@ -217,6 +217,11 @@ navigation:
         contents:
           - page: Observability
             path: ../pages-v1.6.1/kubernetes/operations/observability.mdx
+          - section: Cold Start Optimizations
+            collapsed: true
+            contents:
+              - page: Dynamo Snapshot
+                path: ../pages-v1.6.1/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
           - page: Benchmarking with AIPerf
             path: ../pages-v1.6.1/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
