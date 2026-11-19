@@ -22,8 +22,7 @@ on:
 permissions:
   contents: read
   actions: write
-  issues: write
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: rerun-ci-${{ inputs.pr_number }}
