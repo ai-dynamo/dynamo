@@ -28,9 +28,6 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
-/// Engine retains parser stop strings while frontend trims ordinary user stops.
-pub const VISIBLE_STOP_STRINGS_CAPABILITY: &str = "visible_stop_strings";
-
 /// Require a closed reasoning prefill when a supported parser disables thinking.
 pub const REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY: &str = "require_closed_reasoning_prefill";
 
@@ -40,6 +37,54 @@ pub const REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY: &str =
 
 /// Render Responses context overflow as an in-protocol failed event stream.
 pub const RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY: &str = "responses_context_overflow_events";
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct GenerationCapabilities: u8 {
+        const CLOSED_REASONING_PREFILL = 1 << 0;
+        const REJECT_INCOMPLETE_TOOL_CALLS = 1 << 1;
+        const RESPONSES_OVERFLOW_EVENTS = 1 << 2;
+    }
+}
+
+impl GenerationCapabilities {
+    const RUNTIME_KEYS: [(Self, &'static str); 3] = [
+        (
+            Self::CLOSED_REASONING_PREFILL,
+            REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+        ),
+        (
+            Self::REJECT_INCOMPLETE_TOOL_CALLS,
+            REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
+        ),
+        (
+            Self::RESPONSES_OVERFLOW_EVENTS,
+            RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY,
+        ),
+    ];
+
+    pub(crate) fn advertised(config: &ModelRuntimeConfig) -> Self {
+        Self::RUNTIME_KEYS
+            .into_iter()
+            .filter_map(|(flag, key)| {
+                (config
+                    .runtime_data
+                    .get(key)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true))
+                .then_some(flag)
+            })
+            .fold(Self::empty(), |advertised, flag| advertised | flag)
+    }
+
+    pub(crate) fn retain_on(self, config: &mut ModelRuntimeConfig) {
+        for (flag, key) in Self::RUNTIME_KEYS {
+            if !self.contains(flag) {
+                config.runtime_data.remove(key);
+            }
+        }
+    }
+}
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";

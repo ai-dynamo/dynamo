@@ -805,7 +805,14 @@ impl DeltaAggregator {
                             aggregator.has_message_phases = true;
                             aggregator.response_events = parsed.events;
                         }
-                        if parsed.incomplete_native_call
+                        // A complete first call satisfies the single-call contract even
+                        // when native generation produces an unfinished sibling.
+                        let incomplete_selected_call = parsed.incomplete_native_call
+                            && !(parsing_options.reject_incomplete_native_tool_calls
+                                && parsing_options.parallel_tool_calls == Some(false)
+                                && !parsed.tool_calls.is_empty());
+                        if incomplete_selected_call
+                            && !parsing_options.suppress_tool_calls
                             && super::unified_parser::rejects_incomplete_native_tool_call(
                                 family,
                                 choice
@@ -816,7 +823,7 @@ impl DeltaAggregator {
                         {
                             return Err(super::unified_parser::incomplete_tool_call_error());
                         }
-                        if parsed.incomplete_native_call
+                        if incomplete_selected_call
                             && matches!(
                                 choice.finish_reason,
                                 Some(
@@ -895,27 +902,6 @@ impl DeltaAggregator {
                     &parsing_options.tools,
                 )
                 .await;
-                if super::unified_parser::rejects_incomplete_native_tool_call(
-                    parser,
-                    choice
-                        .finish_reason
-                        .unwrap_or(dynamo_protocols::types::FinishReason::Stop),
-                    parsing_options.reject_incomplete_native_tool_calls,
-                ) && super::unified_parser::first_unquoted_native_tool_call_marker(
-                    &choice.text,
-                    "glm47",
-                )
-                .is_some()
-                    && super::unified_parser::glm_unfinished_call(&choice.text)
-                        .map_err(|error| {
-                            dynamo_runtime::error::DynamoError::from(
-                                error.as_ref() as &(dyn std::error::Error + 'static)
-                            )
-                        })?
-                        .is_some()
-                {
-                    return Err(super::unified_parser::incomplete_tool_call_error());
-                }
                 let (tool_calls, content) = match parse_result {
                     Ok(result) => result,
                     Err(error) => {
@@ -4329,38 +4315,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_glm47_complete_call_then_truncated_second_is_suppressed() {
+        use dynamo_protocols::types::FinishReason;
+
         // First call complete, second truncated mid-argument.
         let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>US/E";
-        let delta = create_test_delta(
-            0,
-            text,
-            Some(dynamo_protocols::types::Role::Assistant),
-            Some(dynamo_protocols::types::FinishReason::Length),
-            None,
-            None,
-        );
-        let stream = Box::pin(stream::iter(vec![delta]));
-        let result =
-            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
-                .await
-                .unwrap();
+        for (strict, terminal, expected_finish) in [
+            (false, FinishReason::Length, FinishReason::Length),
+            (true, FinishReason::Stop, FinishReason::ToolCalls),
+        ] {
+            let delta = create_test_delta(
+                0,
+                text,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(terminal),
+                None,
+                None,
+            );
+            let result = DeltaAggregator::apply(
+                Box::pin(stream::iter([delta])),
+                ParsingOptions::new(Some("glm47".into()), None)
+                    .with_parallel_tool_calls(Some(false))
+                    .with_reject_incomplete_native_tool_calls(strict),
+            )
+            .await
+            .unwrap();
 
-        let choice = &result.inner.choices[0];
-        // First complete call is parsed into tool_calls and remains available.
-        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
-        assert_eq!(
-            tool_calls.len(),
-            1,
-            "first complete call must be structured"
-        );
-        assert_eq!(tool_calls[0].function.name, "get_weather");
-        assert_eq!(choice.message.content, None);
-        assert!(
-            !serde_json::to_string(choice)
-                .unwrap()
-                .contains("<tool_call>get_time"),
-            "truncated second call markup must not leak into the response"
-        );
+            let choice = &result.inner.choices[0];
+            assert_eq!(choice.finish_reason, Some(expected_finish));
+            let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(tool_calls[0].function.name, "get_weather");
+            assert_eq!(choice.message.content, None);
+            assert!(
+                !serde_json::to_string(choice)
+                    .unwrap()
+                    .contains("<tool_call>get_time")
+            );
+        }
     }
 
     #[tokio::test]

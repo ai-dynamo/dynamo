@@ -567,11 +567,18 @@ fn is_context_overflow_diagnostic(message: &str) -> bool {
             && message.contains("exceed"))
 }
 
+fn is_context_length_dynamo_error(error: &dynamo_runtime::error::DynamoError) -> bool {
+    is_invalid_argument(error)
+        && (matches!(
+            error.public_details(),
+            Some(dynamo_runtime::error::PublicDetails::ContextLength { .. })
+        ) || is_context_overflow_diagnostic(error.message()))
+}
+
 fn responses_overflow_stream(
     model: String,
     params: ResponseParams,
     context: Option<crate::protocols::unified::ResponsesContext>,
-    error: &ErrorResponse,
 ) -> Response {
     use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
     let mut converter = match context {
@@ -581,8 +588,8 @@ fn responses_overflow_stream(
     let mut events = converter.emit_start_events();
     events.extend(converter.emit_error_events(ResponseError {
         misalignment: None,
-        code: responses_error_code(error, true),
-        message: error.1.message.clone(),
+        code: ResponseErrorCode::Other("context_length_exceeded".into()),
+        message: "Request exceeds the model context length".into(),
     }));
     Sse::new(stream::iter(events)).into_response()
 }
@@ -3239,10 +3246,8 @@ impl BackendErrorInfo {
     }
 
     fn with_semantic(mut self, error: Option<&dynamo_runtime::error::DynamoError>) -> Self {
-        if self.status == StatusCode::BAD_REQUEST
-            && let Some(error) = error.filter(|error| is_invalid_argument(error))
-        {
-            self.context_overflow |= is_context_overflow_diagnostic(error.message());
+        if self.status == StatusCode::BAD_REQUEST {
+            self.context_overflow |= error.is_some_and(is_context_length_dynamo_error);
         }
         self.semantic = error.cloned();
         self
@@ -3647,7 +3652,10 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             && let Some(mut response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
         {
-            if context_overflow && response.0 == StatusCode::BAD_REQUEST {
+            if context_overflow
+                && response.0 == StatusCode::BAD_REQUEST
+                && response.1.details.is_none()
+            {
                 response.1.message = "Request exceeds the model context length".to_string();
                 response.1.details = Some(Box::new(serde_json::json!({"type": "context_length"})));
             }
@@ -5350,27 +5358,34 @@ async fn responses(
     tracing::trace!("Issuing generate call for responses");
 
     // issue the generate call on the engine
-    let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
-        }
-        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        err_response
-    });
-    let engine_stream = match engine_stream {
+    let engine_stream = match engine.generate(request).await {
         Ok(stream) => stream,
-        Err(error) if streaming && context_overflow_events && is_context_length_error(&error) => {
-            return Ok(responses_overflow_stream(
-                model,
-                response_params,
-                responses_ctx,
-                &error,
-            ));
+        Err(error) => {
+            if super::metrics::request_was_rejected(error.as_ref()) {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::Responses);
+            }
+            let report_overflow = streaming && context_overflow_events;
+            // Classify the sidecar's typed refusal before public rendering redacts
+            // the diagnostic. The rendered status still owns delivery semantics.
+            let context_overflow = report_overflow
+                && find_canonical_error_in_chain(error.as_ref())
+                    .is_some_and(is_context_length_dynamo_error);
+            let response = ErrorMessage::from_anyhow(error, "Failed to generate completions");
+            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            if report_overflow
+                && response.0 == StatusCode::BAD_REQUEST
+                && (context_overflow || is_context_length_error(&response))
+            {
+                return Ok(responses_overflow_stream(
+                    model,
+                    response_params,
+                    responses_ctx,
+                ));
+            }
+            return Err(response);
         }
-        Err(error) => return Err(error),
     };
 
     // Capture the context to cancel the stream if the client disconnects
@@ -5397,7 +5412,6 @@ async fn responses(
                     model,
                     response_params,
                     responses_ctx,
-                    &error,
                 ));
             }
             Err(error) => return Err(error),
@@ -7185,7 +7199,7 @@ mod tests {
                     ResponseErrorCode::Other("context_length_exceeded".into())
                 );
                 let response =
-                    responses_overflow_stream("m".into(), ResponseParams::default(), None, &error);
+                    responses_overflow_stream("m".into(), ResponseParams::default(), None);
                 assert_eq!(response.status(), StatusCode::OK);
                 let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                     .await

@@ -414,6 +414,7 @@ pub(crate) struct UnifiedRequestPolicy {
     pub structured_response: bool,
     pub multiple_choices: bool,
     pub reject_incomplete_native_tool_calls: bool,
+    pub single_tool_call: bool,
 }
 
 impl UnifiedRequestPolicy {
@@ -1523,7 +1524,7 @@ fn batch_tool_output_mode(
 
 /// Ask the grammar owner which source bytes remain uncommitted. A literal tool
 /// closer inside an argument must not hide an unfinished sibling from recovery.
-pub(crate) fn glm_unfinished_call(input: &str) -> anyhow::Result<Option<usize>> {
+fn glm_unfinished_call(input: &str) -> anyhow::Result<Option<usize>> {
     let mut parser = create_unified_parser_for_family(GLM47_UNIFIED_FAMILY, &[])?;
     let mut output = UnifiedParserOutput::default();
     parser.parse_into(input, &mut output)?;
@@ -2062,6 +2063,7 @@ impl QuotedControlMarkerProbe {
 pub(crate) struct ChoiceState {
     native_grammar_state: NativeGrammarState,
     incomplete_native_call: bool,
+    retain_first_glm_call: bool,
     family: String,
     message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
@@ -2239,6 +2241,7 @@ impl ChoiceState {
                 NativeGrammarState::None
             },
             incomplete_native_call: false,
+            retain_first_glm_call: false,
             family: family.to_string(),
             message_boundaries: Vec::new(),
             parser,
@@ -2878,13 +2881,20 @@ impl ChoiceState {
     }
 
     fn has_incomplete_native_tool_call(&self) -> bool {
-        self.incomplete_native_call || !self.pending_tool_calls.is_empty()
+        (self.incomplete_native_call || !self.pending_tool_calls.is_empty())
+            && !self.first_glm_call_is_complete()
     }
 
     fn has_incomplete_tool_call(&self) -> bool {
-        self.has_incomplete_native_tool_call()
+        (self.incomplete_native_call
+            || !self.pending_tool_calls.is_empty()
             || !self.pending_parsed_tool_calls.is_empty()
-            || has_incomplete_call_evidence(&self.parser_call_completion)
+            || has_incomplete_call_evidence(&self.parser_call_completion))
+            && !self.first_glm_call_is_complete()
+    }
+
+    fn first_glm_call_is_complete(&self) -> bool {
+        self.retain_first_glm_call && self.parser_call_completion.get(&0) == Some(&true)
     }
 
     /// OpenAI streaming contract: `Stop` becomes `ToolCalls` only when every emitted
@@ -3265,6 +3275,7 @@ fn parse_complete_in_mode(
 #[derive(Default)]
 struct ChoiceRecord {
     incomplete_native_call: bool,
+    retain_first_glm_call: bool,
     opened_calls: HashSet<usize>,
     tool_ids_emitted: HashSet<usize>,
     tool_types_emitted: HashSet<usize>,
@@ -3519,13 +3530,20 @@ fn stream_chunks_for_choices(
 
 impl ChoiceRecord {
     fn has_incomplete_native_tool_call(&self) -> bool {
-        self.incomplete_native_call || !self.pending_tool_calls.is_empty()
+        (self.incomplete_native_call || !self.pending_tool_calls.is_empty())
+            && !self.first_glm_call_is_complete()
     }
 
     fn has_incomplete_tool_call(&self) -> bool {
-        self.has_incomplete_native_tool_call()
+        (self.incomplete_native_call
+            || !self.pending_tool_calls.is_empty()
             || !self.pending_parsed_tool_calls.is_empty()
-            || has_incomplete_call_evidence(&self.parser_call_completion)
+            || has_incomplete_call_evidence(&self.parser_call_completion))
+            && !self.first_glm_call_is_complete()
+    }
+
+    fn first_glm_call_is_complete(&self) -> bool {
+        self.retain_first_glm_call && self.parser_call_completion.get(&0) == Some(&true)
     }
 
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
@@ -3537,6 +3555,7 @@ impl ChoiceRecord {
     }
 
     fn remember_state(&mut self, state: &ChoiceState) {
+        self.retain_first_glm_call = state.retain_first_glm_call;
         self.incomplete_native_call |= state.incomplete_native_call;
         self.opened_calls.extend(state.opened_calls.iter().copied());
         self.tool_ids_emitted
@@ -3971,6 +3990,9 @@ where
     let argument_framing = argument_framing(&guided_tool_constraint);
     let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
+    let retain_first_glm_call = family == GLM47_UNIFIED_FAMILY
+        && policy.reject_incomplete_native_tool_calls
+        && policy.single_tool_call;
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
         let mut states: HashMap<u32, ChoiceState> = HashMap::new();
@@ -4075,6 +4097,7 @@ where
                     // built for it (e.g. its first-ever chunk is already-parsed),
                     // so it is not invisible to `finish_unterminated_choices`.
                     let record = records.entry(original.index).or_default();
+                    record.retain_first_glm_call = retain_first_glm_call;
                     let pending_whitespace =
                         std::mem::take(&mut record.pending_guided_prefill_whitespace);
                     if !pending_whitespace.is_empty() {
@@ -4508,6 +4531,7 @@ where
                         let cache = if uses_request_prefill { harmony_prefill_cache.as_mut() } else { None };
                         match ChoiceState::new_with_prefill_cache(family, &tools, choice_prefill, mode, guided_streaming, argument_framing, cache) {
                             Ok(mut state) => {
+                                state.retain_first_glm_call = retain_first_glm_call;
                                 state.preserve_message_phases(family == MUSE_SPARK_UNIFIED_FAMILY);
                                 // Only a successful checkpoint replaces the request seed.
                                 // Detours use a fresh response parser and never this seed.
@@ -11004,6 +11028,7 @@ pub(crate) mod tests {
             message_boundaries: Vec::new(),
             native_grammar_state: NativeGrammarState::None,
             incomplete_native_call: false,
+            retain_first_glm_call: false,
             family: "test".to_string(),
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),

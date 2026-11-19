@@ -189,15 +189,16 @@ Forced choices can install guided JSON or family-native structural tags. A mode 
 
 ## Incomplete GLM Tool Calls
 
-On the TensorRT-LLM OpenEngine sidecar, an incomplete native GLM tool call at a
-backend `stop` or `tool_calls` finish or unexpected stream end triggers a
-`BackendProtocol` failure. Both unified/V2 and legacy/V1 GLM parsing enforce
-this behavior.
+With unified (V2) GLM parsing on the TensorRT-LLM OpenEngine sidecar, an incomplete
+native tool call at a backend `stop` or `tool_calls` finish or unexpected stream end
+triggers a `BackendProtocol` failure when the request permits that call.
+For `parallel_tool_calls: false`, a completed first call satisfies the request
+even if a later call is incomplete.
 
-Already-parsed text is emitted before a streaming failure; a non-streaming
-request fails instead of returning a partial result. A backend `length` finish
-retains its token-limit behavior. Deployments without this capability retain
-their existing length/suppression behavior. Check the raw generated tool-call
+Streaming emits already-parsed text before the failure. A non-streaming request
+returns an error. A backend `length` finish retains its token-limit behavior.
+Legacy (V1) parsing and deployments without the strict capability use their
+existing recovery and suppression behavior. Check the raw generated tool-call
 envelope and backend finish reason when investigating this error.
 
 ## Known limitations and follow-up

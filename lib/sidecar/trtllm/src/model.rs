@@ -7,7 +7,6 @@ use dynamo_backend_common::{EngineConfig, LlmRegistration};
 use dynamo_llm::local_model::runtime_config::{
     REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY, REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
     RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
-    VISIBLE_STOP_STRINGS_CAPABILITY,
 };
 
 /// Model identity and registration metadata for the TensorRT-LLM sidecar.
@@ -48,7 +47,6 @@ impl ConfiguredModel {
         }
 
         for capability in [
-            VISIBLE_STOP_STRINGS_CAPABILITY,
             REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
             REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
             RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY,

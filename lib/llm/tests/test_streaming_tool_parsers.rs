@@ -183,7 +183,6 @@ async fn parse_response_stream(
                 None,  // No tool_definitions in this test
                 false, // No structural_tag in this test
                 false,
-                false,
                 stream,
             ))
         } else {
@@ -2051,7 +2050,6 @@ mod tests {
             None,
             false,
             false,
-            false,
             Box::pin(futures::stream::iter(chunks)),
         )
         .collect()
@@ -2116,7 +2114,6 @@ mod tests {
             None,
             false,
             true,
-            false,
             Box::pin(futures::stream::iter(chunks)),
         )
         .collect()
@@ -2161,7 +2158,6 @@ mod tests {
             Some("hermes".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
-            false,
             false,
             false,
             Box::pin(futures::stream::iter(chunks)),
@@ -2231,7 +2227,6 @@ async fn run_glm47_jail(
         Some("glm47".to_string()),
         None,
         None,
-        false,
         false,
         false,
         Box::pin(stream::iter(chunks)),

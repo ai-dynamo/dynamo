@@ -1002,7 +1002,9 @@ For streaming `/v1/responses` requests on a deployment advertising
 `responses_context_overflow_events=true`, context overflow returns HTTP 200
 with a terminal `response.failed` event whose
 `response.error.code` is `context_length_exceeded`. The TensorRT-LLM sidecar
-advertises this capability. Clients must inspect terminal SSE events; HTTP 200
+advertises this capability. During a rolling upgrade, the frontend enables each
+generation capability once every worker in its serving group advertises it.
+Clients must inspect terminal SSE events. HTTP 200
 alone does not mean generation succeeded. An overflow detected before streaming
 begins still produces `response.created`, `response.in_progress`, and
 `response.failed` events with the same response ID.
