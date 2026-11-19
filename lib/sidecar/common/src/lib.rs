@@ -3,9 +3,6 @@
 
 //! Shared infrastructure for Rust sidecars.
 
-#[cfg(feature = "jemalloc")]
-#[doc(hidden)]
-pub mod allocator;
 mod args;
 mod endpoint;
 mod error;
@@ -28,6 +25,8 @@ pub mod v14 {
 }
 
 pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
+#[cfg(feature = "jemalloc")]
+pub use dynamo_allocator::jemalloc_global_allocator;
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
 pub use error::{
     SidecarStartupError, cancelled, cannot_connect, connection_timeout, engine_shutdown,

@@ -16,6 +16,7 @@ name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-router-policies = { workspace = true }
 async-trait = { workspace = true }
 dynamo-kv-events = { workspace = true }

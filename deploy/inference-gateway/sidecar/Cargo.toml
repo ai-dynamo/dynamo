@@ -16,6 +16,7 @@ name = "dynamo-epp-sidecar"
 path = "src/bin/dynamo-epp-sidecar.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

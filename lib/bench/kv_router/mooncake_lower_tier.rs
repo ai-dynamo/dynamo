@@ -242,13 +242,21 @@ impl LowerTierRun<ConcurrentRadixTreeCompressed> {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Allocator {
+    #[cfg(feature = "system-allocator")]
     Glibc,
     Jemalloc,
 }
 
-/// Bytes the allocator has handed out and not freed: jemalloc's `stats.allocated` when jemalloc
-/// is preloaded, else glibc's in-use plus mmapped heap.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+/// Bytes the built-in jemalloc has handed out and not freed. `None` without the `heap-stats`
+/// feature, which builds jemalloc with statistics.
+#[cfg(not(feature = "system-allocator"))]
+fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
+    Ok(dynamo_allocator::allocated().map(|bytes| (Allocator::Jemalloc, bytes)))
+}
+
+/// Bytes the system allocator has handed out and not freed: jemalloc's `stats.allocated` when
+/// jemalloc is preloaded, else glibc's in-use plus mmapped heap.
+#[cfg(all(feature = "system-allocator", target_os = "linux", target_env = "gnu"))]
 fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
     type Mallctl = unsafe extern "C" fn(
         *const libc::c_char,
@@ -301,7 +309,10 @@ fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
     Ok(Some((Allocator::Jemalloc, allocated as u64)))
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+#[cfg(all(
+    feature = "system-allocator",
+    not(all(target_os = "linux", target_env = "gnu"))
+))]
 fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
     Ok(None)
 }

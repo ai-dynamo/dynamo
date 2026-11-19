@@ -1,5 +1,12 @@
 # KV Router Indexer Benchmark
 
+## Allocator
+
+The bench targets in this crate build jemalloc in as their global allocator,
+with the options Dynamo ships (`lib/allocator/src/lib.rs`), so nothing needs
+preloading. Add `system-allocator` to a target's features to leave it on the
+system allocator, for example to heap-profile with a preloaded jemalloc.
+
 ## Mooncake replay
 
 `mooncake_bench` uses deadline-driven replay for the production thread-pool
@@ -27,7 +34,8 @@ application.
 Preparation consumes and releases the parsed trace, generated replay artifacts,
 worker timelines, and intermediate payload owners. The timed process retains
 only the prepared schedule, one flattened query-hash slab, and backend state.
-On Linux, the benchmark returns free preparation pages with `malloc_trim` and
+On Linux, the benchmark returns free preparation pages to the operating system
+(a jemalloc arena purge, or `malloc_trim` in a `system-allocator` build) and
 waits a fixed five seconds before constructing backend workers. It then
 page-touches the schedule once and performs the fixed lookup warm-up before
 timing. This explicit quiescence prevents the parallel event-generation phase
@@ -233,8 +241,9 @@ The run mirrors the router's `Indexer::Concurrent`:
   has drained, so a lower tier that falls behind fails `kept_up`.
 - After the run, the lower tier's (block, owner) memberships in each domain must
   equal the host tiers' live blocks, or the run is invalid. Its heap is the drop
-  in allocated bytes when it alone is dropped, from glibc or a preloaded
-  jemalloc.
+  in allocated bytes when it alone is dropped. It is reported by a `heap-stats`
+  build, which compiles jemalloc with the statistics that timing builds leave
+  out, and by a `system-allocator` build, from glibc or a preloaded jemalloc.
 
 ```bash
 cargo bench --package dynamo-bench --bench mooncake_bench \

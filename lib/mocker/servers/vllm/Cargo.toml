@@ -17,6 +17,7 @@ name = "dynamo-vllm-mocker-server"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-sidecar-common = { workspace = true }
 dynamo-vllm-sidecar = { path = "../../../sidecar/vllm" }

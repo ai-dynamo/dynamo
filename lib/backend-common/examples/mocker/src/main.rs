@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 mod engine;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 fn main() -> anyhow::Result<()> {
     let (engine, config) = engine::MockerBackend::from_args(None)?;
     dynamo_backend_common::run(Arc::new(engine), config)

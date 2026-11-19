@@ -40,6 +40,8 @@ use dynamo_scheduler::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 use dynamo_slot_tracker::BusyThresholds;
 use tokio_util::sync::CancellationToken;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 const BLOCK_SIZE: u32 = 16;
 
 fn prompt_tokens() -> Vec<u32> {

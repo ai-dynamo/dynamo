@@ -55,6 +55,9 @@ use mooncake_shared::{
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 const BLOCK_SIZE: u32 = 128;
 // mooncake_trace_1000.jsonl records one hash per 512-token trace block.
 const TRACE_BLOCK_SIZE: u32 = 512;

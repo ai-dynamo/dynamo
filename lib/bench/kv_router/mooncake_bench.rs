@@ -31,6 +31,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[cfg(target_os = "linux")]
 const PRE_RUN_QUIESCENCE_MS: u64 = 5_000;
 #[cfg(not(target_os = "linux"))]
@@ -410,6 +413,9 @@ async fn run_open_loop_for_config(
 fn quiesce_prepared_heap() {
     // Corpus construction releases large, multi-threaded preparation arenas.
     // Return their free pages and let reclamation settle before backend workers start.
+    #[cfg(not(feature = "system-allocator"))]
+    dynamo_allocator::purge();
+    #[cfg(feature = "system-allocator")]
     unsafe {
         libc::malloc_trim(0);
     }

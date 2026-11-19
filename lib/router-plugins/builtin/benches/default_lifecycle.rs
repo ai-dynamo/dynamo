@@ -12,6 +12,8 @@ use dynamo_scheduler::host::{
 use std::sync::Arc;
 use std::time::Duration;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 fn bench(c: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

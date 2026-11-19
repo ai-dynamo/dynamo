@@ -36,6 +36,8 @@ use dynamo_worker_selection::{
 };
 use rustc_hash::FxHashMap;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[derive(Default)]
 struct BenchWorkerConfig {
     taints: HashSet<String>,

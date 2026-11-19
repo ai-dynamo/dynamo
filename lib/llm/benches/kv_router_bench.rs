@@ -41,6 +41,8 @@ use dynamo_mocker::loadgen::RouterSequence;
 use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
 use dynamo_router_protocol::worker::WorkerId;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
 const KV_EVENT_SUBJECT: &str = "kv-events";

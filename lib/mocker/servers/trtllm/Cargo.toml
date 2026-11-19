@@ -17,6 +17,7 @@ name = "dynamo-trtllm-mocker-server"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-trtllm-sidecar = { path = "../../../sidecar/trtllm" }
 

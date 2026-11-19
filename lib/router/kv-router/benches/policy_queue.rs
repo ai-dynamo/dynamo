@@ -28,6 +28,8 @@ use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use tokio::time::Instant;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[derive(Debug, Clone, Copy)]
 struct BenchRequest {
     dispatchable: bool,

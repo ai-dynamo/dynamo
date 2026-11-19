@@ -15,6 +15,7 @@ name = "global-discovery-service"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-global-common = { workspace = true }
 dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }

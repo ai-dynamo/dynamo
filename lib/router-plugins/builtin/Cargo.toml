@@ -26,6 +26,8 @@ tracing.workspace = true
 libc = { workspace = true }
 
 [dev-dependencies]
+# For the benches. Path-only, so publishing strips it.
+dynamo-allocator = { path = "../../allocator" }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 dynamo-kv-hints = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"] }

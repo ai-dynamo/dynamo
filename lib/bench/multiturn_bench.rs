@@ -24,6 +24,9 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------

@@ -16,6 +16,8 @@ use dynamo_llm::tokenizers::traits::{Encoder, Tokenizer};
 use dynamo_llm::types::TokenIdType;
 use std::path::Path;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 const TEST_TOKENIZER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"

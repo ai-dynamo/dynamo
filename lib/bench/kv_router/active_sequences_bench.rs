@@ -18,6 +18,9 @@ use dynamo_bench::kv_router_common::issuer::{parse_cpu_list, pin_current_thread_
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 fn init_sequence_logging(enabled: bool) {
     if !enabled {
         return;

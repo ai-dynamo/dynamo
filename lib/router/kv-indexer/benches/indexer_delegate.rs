@@ -13,6 +13,8 @@ use dynamo_kv_indexer::{
     ConcurrentRadixTreeCompressed, KvIndexerDelegate, KvIndexerInterface, ThreadPoolIndexer,
 };
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 struct Delegate;
 impl KvIndexerDelegate for Delegate {
     fn on_create(&self, hash: ExternalSequenceBlockHash) {

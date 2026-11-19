@@ -9,6 +9,8 @@ use criterion::{
 use dynamo_llm::preprocessor::media::{Decoder, EncodedMediaData, MediaDecoder};
 use rayon::{ThreadPoolBuilder, prelude::*};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 const RUN_CONCURRENT_SWEEP_ENV: &str = "RUN_VIDEO_DECODE_SWEEP";
 const BENCH_INPUT_ENV: &str = "VIDEO_DECODE_BENCH_INPUT";
 const NUM_FRAMES_ENV: &str = "VIDEO_DECODE_BENCH_NUM_FRAMES";

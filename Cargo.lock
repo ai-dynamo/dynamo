@@ -2309,6 +2309,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-allocator"
+version = "1.8.0"
+dependencies = [
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "dynamo-backend-common"
 version = "1.8.0"
 dependencies = [
@@ -2347,6 +2356,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "dynamo-allocator",
  "dynamo-data-gen",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -2475,6 +2485,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "dynamo-allocator",
  "futures",
  "reqwest 0.12.28",
  "serde",
@@ -2505,6 +2516,7 @@ dependencies = [
  "axum 0.8.4",
  "bytes",
  "dashmap",
+ "dynamo-allocator",
  "dynamo-kv-events",
  "dynamo-kv-router",
  "dynamo-llm",
@@ -2604,6 +2616,7 @@ dependencies = [
  "axum 0.8.4",
  "blake3",
  "clap",
+ "dynamo-allocator",
  "dynamo-global-common",
  "dynamo-global-discovery-client",
  "dynamo-http-server",
@@ -2630,6 +2643,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "axum 0.8.4",
  "clap",
+ "dynamo-allocator",
  "dynamo-global-common",
  "dynamo-global-discovery-client",
  "dynamo-global-router",
@@ -2752,6 +2766,7 @@ version = "1.8.0"
 dependencies = [
  "criterion",
  "derive_builder",
+ "dynamo-allocator",
  "dynamo-tokens",
  "rmp-serde",
  "rstest 0.18.2",
@@ -2783,6 +2798,7 @@ dependencies = [
  "blake3",
  "criterion",
  "dashmap",
+ "dynamo-allocator",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-router-protocol",
@@ -2817,6 +2833,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "dynamo-admission",
+ "dynamo-allocator",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-kv-hints",
@@ -2880,6 +2897,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-admission",
+ "dynamo-allocator",
  "dynamo-bench",
  "dynamo-decisions",
  "dynamo-global-common",
@@ -3129,6 +3147,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dashmap",
+ "dynamo-allocator",
  "dynamo-backend-common",
  "dynamo-mocker",
  "dynamo-runtime",
@@ -3280,6 +3299,7 @@ version = "1.8.0"
 dependencies = [
  "async-trait",
  "criterion",
+ "dynamo-allocator",
  "dynamo-kv-hints",
  "dynamo-kv-router",
  "dynamo-scheduler",
@@ -3326,6 +3346,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-allocator",
  "dynamo-error",
  "dynamo-truthy",
  "educe",
@@ -3471,6 +3492,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "clap",
+ "dynamo-allocator",
  "dynamo-backend-common",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -3522,6 +3544,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "dynamo-allocator",
  "dynamo-backend-common",
  "dynamo-runtime",
  "futures",
@@ -3531,7 +3554,6 @@ dependencies = [
  "serde_json",
  "temp-env",
  "tempfile",
- "tikv-jemallocator",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -3664,6 +3686,7 @@ dependencies = [
  "async-stream",
  "clap",
  "dashmap",
+ "dynamo-allocator",
  "dynamo-backend-common",
  "dynamo-mocker",
  "dynamo-trtllm-sidecar",
@@ -3741,6 +3764,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "clap",
+ "dynamo-allocator",
  "dynamo-backend-common",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -10243,6 +10267,17 @@ dependencies = [
  "lazy_static",
  "regex",
  "rustc-hash 2.1.2",
+]
+
+[[package]]
+name = "tikv-jemalloc-ctl"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "661f1f6a57b3a36dc9174a2c10f19513b4866816e13425d3e418b11cc37bc24c"
+dependencies = [
+ "libc",
+ "paste",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

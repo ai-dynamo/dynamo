@@ -30,6 +30,9 @@ use dynamo_mocker::replay::{
 };
 use serde_json::{Value, json};
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RouterModeArg {
     RoundRobin,

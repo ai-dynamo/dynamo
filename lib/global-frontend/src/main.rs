@@ -25,6 +25,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// The log filter without `DYN_LOG`: the router core logs each selection at
 /// INFO, which `--use-selection-core` would turn into a line per request.
 const DEFAULT_LOG: &str = "info,dynamo_kv_router::scheduling::selector=warn";
