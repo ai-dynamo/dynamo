@@ -263,7 +263,9 @@ def test_explicit_opt_in_names_unqualified_runtime_setting(
     runtime = profile["vllm_config"]
     setattr(getattr(runtime, section) if section else runtime, name, value)
     original = dict(profile["runtime_config"].runtime_data)
-    with pytest.raises(ValueError, match=name):
+    with pytest.raises(
+        ValueError, match=f"runtime qualification failed: requires .*{name}"
+    ):
         decisions.qualify_vllm_decision_runtime(
             profile["vllm_config"], profile["config"]
         )
