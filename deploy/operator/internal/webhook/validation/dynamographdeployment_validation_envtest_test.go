@@ -3159,11 +3159,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "adding an ordinary Grove worker to an LPX-only graph rejects a new headless Service error",
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = digitLeadingDGDName
-				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
 			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = digitLeadingDGDName
-				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
 				dgd.Spec.Components = append(dgd.Spec.Components, betaDGDForAdmission(nil).Spec.Components[1])
 			}),
 			wantWebhookErrs: []string{groveDigitNameErr},
