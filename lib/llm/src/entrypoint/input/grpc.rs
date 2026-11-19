@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
-    local_model::runtime_config::TokenizerBackend,
+    local_model::{NativeParserOverrides, runtime_config::TokenizerBackend},
     namespace::NamespaceFilter,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -74,6 +74,7 @@ pub async fn run(
                 model.metrics_prefix(),
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
+                model.native_parser_overrides().clone(),
             )
             .await?;
             grpc_service
@@ -146,6 +147,7 @@ async fn run_watcher(
     metrics_prefix: Option<String>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
+    native_parser_overrides: NativeParserOverrides,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled (mirrors http.rs;
     // additionally gated on DYN_LORA_ALLOCATION_ENABLED inside start_lora_controller). Without
@@ -169,6 +171,7 @@ async fn run_watcher(
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
+    watch_obj.set_native_parser_overrides(native_parser_overrides);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

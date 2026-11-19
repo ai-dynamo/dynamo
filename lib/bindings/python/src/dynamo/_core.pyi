@@ -3123,6 +3123,8 @@ class EntrypointArgs:
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+        native_tool_call_parser: Optional[str] = None,
+        native_reasoning_parser: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3166,6 +3168,8 @@ class EntrypointArgs:
             reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
             default_chat_template_kwargs: Chat template kwargs that the frontend applies
                 under each request's own kwargs, for every discovered model
+            native_tool_call_parser: Tool call parser override for the native chat processor
+            native_reasoning_parser: Reasoning parser override for the native chat processor
         """
         ...
 

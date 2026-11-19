@@ -26,6 +26,8 @@ def clear_input_mode_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_CHAT_PROCESSOR_CONFIG",
         "DYN_FRONTEND_ROUTE_EXTENSIONS",
         "DYN_PREPROCESS_WORKERS",
+        "DYN_TOOL_CALL_PARSER",
+        "DYN_REASONING_PARSER",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -64,7 +66,51 @@ def test_native_chat_processor_keeps_non_http_modes(
     assert config.chat_processor == "dynamo"
 
 
-def test_http_sglang_processor_keeps_parser_options(
+@pytest.mark.parametrize(
+    ("option", "env_var", "env_value", "cli_value"),
+    [
+        pytest.param(
+            "tool-call-parser", "DYN_TOOL_CALL_PARSER", "glm47", "hermes", id="tool"
+        ),
+        pytest.param(
+            "reasoning-parser", "DYN_REASONING_PARSER", "glm45", "qwen3", id="reasoning"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("use_env", "use_cli"),
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=["unset", "env-only", "cli-only", "cli-overrides-env"],
+)
+@pytest.mark.parametrize("processor", ["dynamo", "sglang"])
+def test_http_processor_parser_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    option: str,
+    env_var: str,
+    env_value: str,
+    cli_value: str,
+    use_env: bool,
+    use_cli: bool,
+    processor: str,
+) -> None:
+    argv = ["dynamo.frontend", "--dyn-chat-processor", processor]
+    expected = None
+    if use_env:
+        monkeypatch.setenv(env_var, env_value)
+        expected = env_value
+    if use_cli:
+        argv.extend([f"--{option}", cli_value])
+        expected = cli_value
+    monkeypatch.setattr(sys, "argv", argv)
+
+    config, _, processor_flags, _ = parse_args()
+
+    assert config.chat_processor == processor
+    assert processor_flags is not None
+    assert getattr(processor_flags, option.replace("-", "_")) == expected
+
+
+def test_http_sglang_processor_keeps_chat_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -74,15 +120,15 @@ def test_http_sglang_processor_keeps_parser_options(
             "dynamo.frontend",
             "--dyn-chat-processor",
             "sglang",
-            "--tool-call-parser",
-            "qwen",
+            "--chat-template",
+            "custom.jinja",
         ],
     )
 
-    config, _, sglang_flags, _ = parse_args()
+    _, _, processor_flags, _ = parse_args()
 
-    assert config.chat_processor == "sglang"
-    assert sglang_flags.tool_call_parser == "qwen"
+    assert processor_flags is not None
+    assert processor_flags.chat_template == "custom.jinja"
 
 
 @pytest.fixture

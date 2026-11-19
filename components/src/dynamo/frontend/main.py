@@ -30,6 +30,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.configuration.utils import add_argument
 from dynamo.llm import (
     AisPerfConfig,
     EngineType,
@@ -286,7 +287,7 @@ def parse_args() -> (
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
-        Tuple of (FrontendConfig, vllm_flags, sglang_flags, chat_processor_provider).
+        Tuple of (FrontendConfig, vllm_flags, processor_flags, chat_processor_provider).
         The last is the resolved provider of a custom ``--dyn-chat-processor``.
     """
 
@@ -326,7 +327,7 @@ def parse_args() -> (
         )
 
     vllm_flags = None
-    sglang_flags = None
+    processor_flags = None
 
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
@@ -369,12 +370,25 @@ def parse_args() -> (
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
         _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
-    elif config.chat_processor == "sglang":
-        sglang_parser = argparse.ArgumentParser(add_help=False)
-        sglang_parser.add_argument("--tool-call-parser", default=None)
-        sglang_parser.add_argument("--reasoning-parser", default=None)
-        sglang_parser.add_argument("--chat-template", default=None)
-        sglang_flags, remaining = sglang_parser.parse_known_args(unknown)
+    elif config.chat_processor in ("dynamo", "sglang"):
+        processor_parser = argparse.ArgumentParser(add_help=False)
+        add_argument(
+            processor_parser,
+            flag_name="--tool-call-parser",
+            env_var="DYN_TOOL_CALL_PARSER",
+            default=None,
+            help="Tool call parser name.",
+        )
+        add_argument(
+            processor_parser,
+            flag_name="--reasoning-parser",
+            env_var="DYN_REASONING_PARSER",
+            default=None,
+            help="Reasoning parser name.",
+        )
+        if config.chat_processor == "sglang":
+            processor_parser.add_argument("--chat-template", default=None)
+        processor_flags, remaining = processor_parser.parse_known_args(unknown)
         if remaining:
             logger.error(f"Unknown arguments specified: {remaining}")
             sys.exit(1)
@@ -382,7 +396,7 @@ def parse_args() -> (
         if unknown:
             logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
-    return config, vllm_flags, sglang_flags, chat_processor_provider
+    return config, vllm_flags, processor_flags, chat_processor_provider
 
 
 def _export_transport_tls_env(config: FrontendConfig) -> None:
@@ -433,7 +447,7 @@ async def async_main():
     # bind that port before the worker, causing port conflicts and/or scraping the
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
-    config, vllm_flags, sglang_flags, chat_processor_provider = parse_args()
+    config, vllm_flags, processor_flags, chat_processor_provider = parse_args()
     dump_config(config.dump_config_to, config)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
@@ -538,9 +552,14 @@ async def async_main():
         kwargs["chat_engine_factory"] = chat_engine_factory
     elif config.chat_processor == "sglang":
         chat_engine_factory = setup_sglang_engine_factory(
-            config, sglang_flags
+            config, processor_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+    elif config.chat_processor == "dynamo":
+        if processor_flags is None:
+            raise RuntimeError("Dynamo chat processor flags were not parsed")
+        kwargs["native_tool_call_parser"] = processor_flags.tool_call_parser
+        kwargs["native_reasoning_parser"] = processor_flags.reasoning_parser
     elif chat_processor_provider is not None:
         kwargs["chat_engine_factory"] = setup_custom_chat_engine_factory(
             config, chat_processor_provider
