@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: trtllm-agg-66403990
+  name: trtllm-agg-269bae5a
 spec:
   components:
   - name: Frontend
@@ -44,9 +44,9 @@ spec:
           - --expert-parallel-size
           - '1'
           - --max-batch-size
-          - '48'
+          - '32'
           - --max-num-tokens
-          - '4576'
+          - '4544'
           - --trtllm.kv_cache_config.dtype
           - fp8
           - --trtllm.kv_cache_config.tokens_per_block

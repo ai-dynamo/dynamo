@@ -36,7 +36,11 @@ def test_model_corpus_dgd_goldens(entry: run_cases.SuiteEntry, tmp_path: Path) -
 
     assert failures == [], "\n".join(failures)
     golden_dir = _GOLDEN_ROOT / entry.hardware / entry.case
-    golden_paths = {path.name: path for path in sorted(golden_dir.glob("dgd-*.yaml"))}
+    golden_paths = {
+        path.name: path
+        for path in sorted(golden_dir.glob("dgd-*.yaml"))
+        if not path.name.endswith(".new.yaml")
+    }
     assert golden_paths, f"{golden_dir} has no checked-in DGD goldens"
     actual_paths = {
         path.name: path for path in sorted(case.generated_dir.glob("dgd-*.yaml"))
