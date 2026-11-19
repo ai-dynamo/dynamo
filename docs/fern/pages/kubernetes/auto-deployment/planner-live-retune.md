@@ -6,8 +6,8 @@ subtitle: Let the Planner tune the KV router and its own scaling parameters on a
 ---
 
 > [!CAUTION]
-> **Experimental, development clusters only.** Live retune builds on DGDR v1beta2, which the
-> operator serves only with the experimental `dgdrV1Beta2.enabled` Helm value, and it writes
+> **Experimental, development clusters only.** Live retune builds on DGDR v1beta2, which is
+> available without an API feature gate. Retune remains disabled by default and writes
 > router parameters through the frontend admin API, which has no authentication. Do not enable it
 > on a cluster that serves production traffic.
 
@@ -84,9 +84,9 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 
 ## Prerequisites
 
-- **Operator with DGDR v1beta2 traces.** Install the platform chart with
-  `dynamo-operator.dgdrV1Beta2.enabled=true` and an operator that accepts `spec.workload.trace`.
-  Also set `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` to grant the Planner
+- **Operator with DGDR v1beta2 traces.** Use an operator that accepts `spec.workload.trace`.
+  Set both `dynamo-operator.dgdrV1Beta2.enabled=true` and
+  `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` to grant the Planner
   ServiceAccount the access it needs (see [RBAC](#rbac)).
   In a cluster-wide install, the operator must also hold the DGDR v1beta2 Run and Candidate
   permissions of [ai-dynamo/dynamo#17308](https://github.com/ai-dynamo/dynamo/pull/17308); see
