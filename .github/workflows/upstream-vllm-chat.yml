@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Upstream vLLM chat behavior
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Dynamo commit with an existing vllm-runtime-test CI image and this test suite'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  upstream-vllm-chat:
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: upstream-vllm-chat
+      framework: vllm
+      test_type: upstream-chat
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: vllm-runtime
+      source_ref: ${{ inputs.source_ref }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      run_gpu_parallel_tests: false
+      gpu_test_markers: upstream_vllm and vllm and gpu_1
+      gpu_test_timeout_minutes: 30
+      prepare_upstream_vllm_chat: true
+      dd_flaky_retry_enabled: 'false'
+    secrets: inherit
