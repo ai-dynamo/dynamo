@@ -14,7 +14,9 @@ Both components are built from pull requests that are not yet merged upstream. P
 | Component | What it does | Source |
 |---|---|---|
 | KAI-Scheduler | Tracks each GPU's free compute as well as its memory, picks a GPU for each fractional pod, and records the GPU and the share on the pod | [KAI-Scheduler#2368](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368) at `44d1d0a966465c69b1fd0d24b40b9a1ebb73699e` |
-| kai-gpu-fractioning | Node agents. `mpsd` runs the MPS control daemon and creates one namespace per container, `fractiond` (an NRI plugin) gives each container its namespace and memory cap, and `metricsd` exports metrics | [gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147) at `af0544e4dbd1d8e03ca14fc1e06d6265fabed99b` |
+| gpu-fractioning | Node agents. `mpsd` runs the MPS control daemon and creates one namespace per container, `fractiond` (an NRI plugin) gives each container its namespace and memory cap, and `metricsd` exports metrics | [gpu-fractioning#147](https://github.com/kai-scheduler/gpu-fractioning/pull/147) at `af0544e4dbd1d8e03ca14fc1e06d6265fabed99b` |
+
+![KAI-Scheduler is the orchestrator: it picks a GPU and a share for each pod. kai-gpu-fractioning runs the per-node infrastructure on every GPU node: mpsd runs the MPS server, fractiond gives each container its MPS namespace and memory cap, and metricsd exports metrics. Pods A and B each run on half of one GPU.](../../../assets/img/gpu-sharing-install-architecture.svg)
 
 The two are a matched pair: the scheduler writes annotations that only this node agent reads. Build and install both from the commits above, and don't mix either with an upstream release.
 

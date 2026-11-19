@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">GPU fractions on Kubernetes</title>
+  <desc id="desc">KAI-Scheduler is the orchestrator: it picks a GPU and a share for each pod. kai-gpu-fractioning runs the per-node infrastructure on every GPU node: mpsd runs the MPS server, fractiond gives each container its MPS namespace and memory cap, and metricsd exports metrics. Pods A and B each run on half of one GPU.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="900.0" height="520.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU fractions on Kubernetes</text>
+  <text x="24.0" y="104.0" font-size="16" font-weight="700" fill="#5A6270" text-anchor="start">Orchestrator</text>
+  <rect x="190.0" y="70.0" width="686.0" height="56.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="2.5"/>
+  <text x="533.0" y="105.0" font-size="20" font-weight="700" fill="#3B6B00" text-anchor="middle">KAI-Scheduler</text>
+  <line x1="533.0" y1="128.0" x2="533.0" y2="170.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="545.0" y="154.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">GPU + share</text>
+  <text x="24.0" y="210.0" font-size="16" font-weight="700" fill="#5A6270" text-anchor="start">Per-node</text>
+  <text x="24.0" y="230.0" font-size="16" font-weight="700" fill="#5A6270" text-anchor="start">infrastructure</text>
+  <rect x="190.0" y="176.0" width="686.0" height="328.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="208.0" y="208.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU node</text>
+  <text x="858.0" y="208.0" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="end">kai-gpu-fractioning</text>
+  <rect x="208.0" y="226.0" width="207.3" height="44.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="311.7" y="253.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">mpsd</text>
+  <rect x="429.3" y="226.0" width="207.3" height="44.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="533.0" y="253.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">fractiond</text>
+  <rect x="650.7" y="226.0" width="207.3" height="44.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="754.3" y="253.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">metricsd</text>
+  <rect x="208.0" y="296.0" width="207.3" height="44.0" fill="#FFFFFF" rx="8" stroke="#9CA3AF" stroke-width="1.8"/>
+  <text x="311.7" y="323.6" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">MPS server</text>
+  <line x1="311.7" y1="270.0" x2="311.7" y2="293.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <rect x="208.0" y="366.0" width="650.0" height="120.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="224.0" y="432.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU</text>
+  <rect x="280.0" y="376.0" width="278.0" height="100.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="419.0" y="431.2" font-size="15" font-weight="700" fill="#3B6B00" text-anchor="middle">Pod A</text>
+  <rect x="568.0" y="376.0" width="278.0" height="100.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.8"/>
+  <text x="707.0" y="431.2" font-size="15" font-weight="700" fill="#1F5FB8" text-anchor="middle">Pod B</text>
+  <line x1="311.7" y1="340.0" x2="311.7" y2="363.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+</svg>
