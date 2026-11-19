@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 module.exports = async function rerunFailedCI({ github, context, core }) {
-  const WORKFLOWS = new Set(['.github/workflows/pr.yaml', '.github/workflows/pr-xpu.yaml']);
   const COPY_PR_BOT_ID = 138252374;
   const ACTIONS_BOT_ID = 41898282;
   const FAILED = new Set(['failure', 'timed_out']);
@@ -65,40 +64,29 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
     return mirror.commit.sha === sha;
   }
   const messages = [];
-  const copiedApproved = await currentApproval(true);
-  let runs = [];
-  if (copiedApproved) {
-    runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
-      ...repo, branch, head_sha: sha, event: 'push', per_page: 100,
-    });
-  } else {
-    messages.push('PR and PR-XPU need a copied branch for the current head. Request `/ok to test <sha>` first.');
+  const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+    ...repo, head_sha: sha, branch: pull.head.ref, event: 'pull_request', per_page: 100,
+  });
+  if (await currentApproval(true)) {
+    runs.push(...await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+      ...repo, head_sha: sha, branch, event: 'push', per_page: 100,
+    }));
   }
   const latest = new Map();
   for (const run of runs) {
-    if (!WORKFLOWS.has(run.path) || run.head_sha !== sha || run.head_branch !== branch ||
-        run.event !== 'push' || run.actor.id !== COPY_PR_BOT_ID) continue;
-    if (!latest.has(run.path) || run.id > latest.get(run.path).id) latest.set(run.path, run);
-  }
-
-  const preMergeRuns = await github.paginate(github.rest.actions.listWorkflowRuns, {
-    ...repo, workflow_id: 'pre-merge.yml', head_sha: sha,
-    branch: pull.head.ref, event: 'pull_request', per_page: 100,
-  });
-  for (const run of preMergeRuns) {
-    if (run.path !== '.github/workflows/pre-merge.yml' || run.event !== 'pull_request' ||
-        run.head_sha !== sha || run.head_branch !== pull.head.ref) continue;
-    // Fork runs can omit PR metadata. Do not guess which PR or target branch they tested.
-    if (!run.pull_requests.some(pr => pr.number === issue.number &&
-        pr.head.sha === sha && pr.base.ref === pull.base.ref)) {
-      messages.push(`[Pre Merge run ${run.id}](${run.html_url}): PR association is unavailable or differs. Retry from Actions if needed.`);
-      continue;
-    }
+    if (run.head_sha !== sha) continue;
+    const copiedRun = run.event === 'push' && run.head_branch === branch &&
+      run.actor.id === COPY_PR_BOT_ID;
+    const pullRun = run.event === 'pull_request' && run.head_branch === pull.head.ref &&
+      run.pull_requests.some(pr => pr.number === issue.number &&
+        pr.head.sha === sha && pr.base.ref === pull.base.ref);
+    if (!copiedRun && !pullRun) continue;
     if (!latest.has(run.path) || run.id > latest.get(run.path).id) latest.set(run.path, run);
   }
 
   const candidates = [];
-  for (const run of latest.values()) {
+  const existingRuns = [...latest.values()].filter(run => run.conclusion !== 'skipped');
+  for (const run of existingRuns) {
     const link = `[${run.path.split('/').pop()} run ${run.id}](${run.html_url})`;
     // A delayed command cannot select a run or attempt created after that command.
     if (Date.parse(run.updated_at) > Date.parse(comment.created_at)) {
@@ -117,7 +105,7 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
       else messages.push(`${link}: no failed jobs.`);
     }
   }
-  if (!latest.size) messages.push('No supported CI runs exist for the current PR commit.');
+  if (!existingRuns.length) messages.push('No matching CI runs were found for the current PR commit.');
 
   // Persist reservations BEFORE retry requests. This also covers delayed API state
   // and workflow reruns after a process failure. User comments cannot forge them.

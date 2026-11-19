@@ -75,13 +75,13 @@ or multiple major components require a
     CI. Wait for that action rather than repeatedly pushing unchanged commits.
 
     To retry failed jobs for the current PR commit, comment `/rerun ci` on the pull request.
-    This command requires repository write access. It retries failed Pre Merge, PR, and PR-XPU jobs
-    and their dependent jobs. Independent successful jobs retain their results.
-    PR and PR-XPU retries require prior CI approval for the current commit.
-    A 👍 reaction acknowledges the command after the permission check.
+    This command requires repository write access. It includes only workflows with runs for the
+    current PR commit. Skipped workflows are excluded. Failed jobs and their dependent jobs receive
+    retries. Independent successful jobs retain their results.
+    Workflows on the copied PR branch require prior CI approval for the current commit.
 
-    The command checks each Pre Merge run's PR number and target branch.
-    If GitHub omits that PR association, use the linked run's retry controls in Actions.
+    PR-event runs must match the PR number and target branch.
+    Runs without that PR association are excluded.
 
     <Info>
     You are responsible for understanding and validating all submitted code, including code

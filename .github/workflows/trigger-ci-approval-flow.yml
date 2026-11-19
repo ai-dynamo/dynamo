@@ -39,8 +39,8 @@
 # base and head have not changed. A push can arrive after this check, so the CI
 # trigger must also check the command's SHA when approval is required.
 
-# Maintainers can retry failed Pre Merge, PR, and PR-XPU jobs with `/rerun ci`.
-# PR and PR-XPU retries require a copied branch for the current PR head.
+# Maintainers can retry failed jobs from existing PR runs with `/rerun ci`.
+# Copied-branch retries require approval for the current PR head.
 
 name: Trigger CI Approval Flow
 
