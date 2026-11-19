@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package semanticenv composes Kubernetes environments without expanding runtime
+// Package semanticenv composes Kubernetes environments without rewriting authored
 // values. List order is binding within a layer; dependencies order entries across
-// layers. Callers supply layers from general to specific, retaining their sources
-// until composition is complete.
+// layers. Callers retain general-to-specific sources until composition is complete.
+// Replay optionally evaluates known values for consumers of the composed list.
 package semanticenv
 
 import (
@@ -147,22 +147,10 @@ func addEdge(entries []entry, from, to int) {
 func references(value string) []string {
 	// Kubernetes consumes escaped dollar pairs before recognizing $(NAME).
 	var names []string
-	for i := 0; i+1 < len(value); i++ {
-		if value[i] != '$' {
-			continue
-		}
-		switch value[i+1] {
-		case '$':
-			i++
-		case '(':
-			end := strings.IndexByte(value[i+2:], ')')
-			if end < 0 {
-				return names
-			}
-			names = append(names, value[i+2:i+2+end])
-			i += end + 2
-		}
-	}
+	expand(value, len(value), func(name string) string {
+		names = append(names, name)
+		return ""
+	})
 	return names
 }
 

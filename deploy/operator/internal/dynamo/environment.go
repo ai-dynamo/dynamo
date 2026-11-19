@@ -219,8 +219,19 @@ func (p *podEnvironment) capture(pod *corev1.PodSpec) semanticenv.ContainerLayer
 	return p.containers
 }
 
-// apply finalizes containers when there are no remaining provider mutations.
-// pod must not be nil. A nil collector leaves legacy rendering unchanged.
-func (p *podEnvironment) apply(pod *corev1.PodSpec) error {
-	return p.capture(pod).Apply(pod)
+// FinalizePodSpec composes env sources before consumers inspect runtime values.
+// pod must be non-nil with its main or selected capture container first. Nil
+// layers retain legacy rendering and its earlier backend mutation timing.
+// nativeSidecar is the component-wide mode, including compute-only worker roles.
+func FinalizePodSpec(pod *corev1.PodSpec, layers semanticenv.ContainerLayers, backend BackendFramework, nativeSidecar bool, containerGPUs ContainerGPUCount) error {
+	if err := layers.Apply(pod); err != nil {
+		return err
+	}
+	if layers == nil || backend != BackendFrameworkSGLang || nativeSidecar {
+		return nil
+	}
+
+	// Only the combined runtime's main container owns generated exporter ports.
+	container := &pod.Containers[0]
+	return reserveNixlExporterPorts(container, containerGPUs, semanticenv.Replay(container.Env))
 }

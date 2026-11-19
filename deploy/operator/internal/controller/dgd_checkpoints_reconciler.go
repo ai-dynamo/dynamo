@@ -1158,7 +1158,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 			environment.Bind(container, "operator.gpuMemoryService", gms.ClientEnvironment(true))
 		}
 	}
-	if err := environment.Apply(&podTemplate.Spec); err != nil {
+	if err := dynamo.FinalizePodSpec(&podTemplate.Spec, environment, backendFramework, dynamo.GetComponentDynamoSidecar(componentForJob) != nil, func() (int64, error) { return 0, nil }); err != nil {
 		return corev1.PodTemplateSpec{}, err
 	}
 	return podTemplate, nil

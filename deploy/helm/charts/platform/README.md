@@ -175,6 +175,11 @@ cross-layer overrides or references. Within one input list, Kubernetes still lea
 reference literal unless an external value is available; those entries are not reordered.
 The operator does not fetch ConfigMaps or Secrets for sorting.
 
+Order-only environment edits propagate to workloads for these origins. The NIXL exporter-port lookup
+replays known references without rewriting the manifest or requiring runtime inputs to be
+resolvable. SGLang keeps existing port declarations when the NIXL exporter base port is unknown;
+automatic scrape-port alignment is not guaranteed in that case. Known invalid ports still fail.
+
 **Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
 variable before dependent variables within the same list. Use component entries to override graph
 defaults; dependent entries in other layers will reference the effective override. Do not depend

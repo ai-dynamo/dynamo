@@ -1590,7 +1590,7 @@ func BackendFactory(
 ) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
-		return &SGLangBackend{roleLaunchOwnership: roleLaunchOwnership}
+		return &SGLangBackend{roleLaunchOwnership: roleLaunchOwnership, environment: environment}
 	case BackendFrameworkVLLM:
 		return &VLLMBackend{
 			ParentGraphDeploymentName: parentGraphDeploymentName,
@@ -1752,7 +1752,7 @@ func GenerateBasePodSpec(
 	if err != nil {
 		return nil, err
 	}
-	if err := environment.apply(pod); err != nil {
+	if err := FinalizePodSpec(pod, environment.capture(pod), backendFramework, nativeSidecar, containerGPUs); err != nil {
 		return nil, err
 	}
 	return pod, nil
@@ -2457,7 +2457,7 @@ func GeneratePodSpecForComponent(
 	if err != nil {
 		return nil, err
 	}
-	if err := layers.Apply(pod); err != nil {
+	if err := FinalizePodSpec(pod, layers, backendFramework, GetComponentDynamoSidecar(component) != nil, containerGPUs); err != nil {
 		return nil, err
 	}
 	return pod, nil
@@ -3420,7 +3420,7 @@ func generatePodSpecForRole(
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
 		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount), environment)
-		if err := environment.apply(gmsPodSpec); err != nil {
+		if err := FinalizePodSpec(gmsPodSpec, environment.capture(gmsPodSpec), BackendFrameworkNoop, false, containerGPUs); err != nil {
 			return nil, err
 		}
 		return gmsPodSpec, nil
@@ -3445,7 +3445,7 @@ func generatePodSpecForRole(
 	if isInterPodGMS {
 		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), environment)
 	}
-	if err := environment.apply(podSpec); err != nil {
+	if err := FinalizePodSpec(podSpec, environment.capture(podSpec), backendFramework, nativeSidecar, containerGPUs); err != nil {
 		return nil, err
 	}
 

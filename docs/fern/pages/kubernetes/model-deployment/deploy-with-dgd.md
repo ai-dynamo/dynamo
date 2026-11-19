@@ -585,6 +585,16 @@ shell syntax such as `$NAME` is not a Kubernetes reference. ConfigMap/Secret val
 and provider-injected variables remain runtime inputs; the operator does not fetch or expand them
 for ordering.
 
+For SGLang's NIXL exporter-port lookup, the operator replays the final ordered list without changing
+the manifest. Earlier known values are substituted once, including Kubernetes dollar escaping;
+a later definition does not retroactively change an earlier expansion. Values from `valueFrom`,
+`envFrom`, or providers such as Grove remain unknown. An unresolved value alone does not cause
+rendering to fail. Replay also leaves values unknown if their expansion exceeds its shared
+1 MiB output budget. For example, the lookup can resolve
+`NIXL_TELEMETRY_PROMETHEUS_PORT: "$(BASE_PORT)"` when `BASE_PORT` is known earlier in the final list.
+If the base port is unknown, the operator retains existing port declarations; automatic scrape-port
+alignment is not guaranteed. A known invalid port still fails rendering.
+
 Use unique names within the DGD's root `spec.env` list (`spec.envs` in `v1alpha1`), regardless
 of origin. An update may retain an existing duplicate list only when the complete ordered list
 is unchanged. Changing any value, source, position, or member requires unique names throughout
@@ -623,6 +633,10 @@ DGDs created by an operator older than 1.8.0, or without the
 output after an operator upgrade. See the
 [Dynamo Platform v1.8.0 upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#environment-variable-order-in-newly-created-dgds)
 for migration guidance.
+
+For origins 1.8.0 and later, changing only environment-list order is a workload change and is
+propagated to the selected provider. Switching to order-sensitive resource hashing may update
+top-level bookkeeping annotations, but does not change an otherwise unchanged workload spec.
 
 <Tabs>
 <Tab title="vLLM" language="vllm">

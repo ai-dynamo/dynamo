@@ -48,6 +48,52 @@ func TestSnapshotEnvironmentRetainsFourSourceLayers(t *testing.T) {
 	require.Equal(t, []string{"STORAGE", "NATS_SERVER", "MODEL"}, relevant)
 }
 
+func TestSnapshotSGLangLookupUsesFinalJobEnvironment(t *testing.T) {
+	for _, targetName := range []string{"main", "writer"} {
+		for _, test := range []struct {
+			name string
+			base corev1.EnvVar
+			port int32
+		}{
+			{name: "known job override", base: corev1.EnvVar{Name: "BASE", Value: "30500"}, port: 30500},
+			{name: "opaque job override", base: corev1.EnvVar{Name: "BASE", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "settings", Key: "port"}}}, port: 19090},
+		} {
+			t.Run(targetName+"/"+test.name, func(t *testing.T) {
+				t.Log("The port reference is resolved only after the selected capture container's job override")
+				main := corev1.Container{Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.sglang"},
+					Env:   []corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"}, {Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"}, {Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"}},
+					Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: 19090}},
+				}
+				component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{main}}},
+					Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: targetName,
+						Job: &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: targetName, Env: []corev1.EnvVar{test.base},
+						}}}}},
+					}},
+				}
+				if targetName != "main" {
+					writer := *main.DeepCopy()
+					writer.Name = targetName
+					component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, writer)
+				}
+				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+					Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: "BASE", Value: "30000"}}},
+				}
+				original := component.DeepCopy()
+				reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
+				pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkSGLang)
+				require.NoError(t, err)
+				require.Equal(t, targetName, pod.Spec.Containers[0].Name)
+				require.Contains(t, pod.Spec.Containers[0].Ports, corev1.ContainerPort{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: test.port})
+				require.Contains(t, pod.Spec.Containers[0].Env, corev1.EnvVar{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"})
+				require.Equal(t, original, component)
+			})
+		}
+	}
+}
+
 func TestSnapshotGMSPhysicalSetupPreservesComposedEnvironment(t *testing.T) {
 	t.Log("The target and extra capture client have already composed GMS bindings")
 	pod := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
