@@ -1638,10 +1638,19 @@ pub fn chat_completion_to_response(
     params: &ResponseParams,
     api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
+    use super::chat_completions::{MessageBoundary, ResponseOutputEvent};
+
     let names = params.tool_name_map();
     let allowed_names = params.allowed_backend_names(&names);
     let nvext = nv_resp.nvext.clone();
-    let response_events = nv_resp.response_events;
+    let mut response_events = nv_resp.response_events;
+    let omitted_terminal_tool_call = matches!(
+        response_events.last(),
+        Some(ResponseOutputEvent::OmittedTerminalToolCall)
+    );
+    if omitted_terminal_tool_call {
+        response_events.pop();
+    }
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -1649,7 +1658,7 @@ pub fn chat_completion_to_response(
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
     let mut incomplete_reason = None;
-    let mut ends_in_hidden_reasoning = false;
+    let mut ends_in_omitted_item = false;
     let include_reasoning = params.raw_reasoning_requested();
     // Every token record the backend scored, in generation order. Responses
     // carries them on the text part, so hold them until the output exists.
@@ -1674,20 +1683,18 @@ pub fn chat_completion_to_response(
             chat_logprobs_to_output_text(&raw_scores[start.min(end)..end])
         };
         let only_score_events = !response_events.is_empty()
-            && response_events
-                .iter()
-                .all(super::chat_completions::ResponseOutputEvent::is_score);
+            && response_events.iter().all(ResponseOutputEvent::is_score);
         if only_score_events {
             // No message phases: the score bookkeeping alone says which ranges are
             // output text.
             let mut cursor = 0;
             for event in &response_events {
                 match event {
-                    super::chat_completions::ResponseOutputEvent::Scores(count) => {
+                    ResponseOutputEvent::Scores(count) => {
                         text_logprobs.extend(project(cursor, cursor + count));
                         cursor += count;
                     }
-                    super::chat_completions::ResponseOutputEvent::HiddenScores(count) => {
+                    ResponseOutputEvent::HiddenScores(count) => {
                         cursor += count;
                     }
                     _ => {}
@@ -1786,12 +1793,9 @@ pub fn chat_completion_to_response(
             // Batch parsing can supply boundaries without ordered reasoning
             // events. Preserve its aggregate reasoning in that case; explicit
             // ordered events are authoritative and must not duplicate it.
-            let ordered_reasoning = response_events.iter().any(|event| {
-                matches!(
-                    event,
-                    super::chat_completions::ResponseOutputEvent::Reasoning(_)
-                )
-            });
+            let ordered_reasoning = response_events
+                .iter()
+                .any(|event| matches!(event, ResponseOutputEvent::Reasoning(_)));
             output.retain(|item| !ordered_reasoning && matches!(item, OutputItem::Reasoning(_)));
             let mut phase = None;
             let mut text = String::new();
@@ -1826,7 +1830,6 @@ pub fn chat_completion_to_response(
                     *open = false;
                 }
             };
-            use super::chat_completions::{MessageBoundary, ResponseOutputEvent};
             for event in response_events {
                 match event {
                     ResponseOutputEvent::Scores(count) => {
@@ -1849,7 +1852,7 @@ pub fn chat_completion_to_response(
                         );
                         phase = Some(next);
                         open = true;
-                        ends_in_hidden_reasoning = false;
+                        ends_in_omitted_item = false;
                     }
                     ResponseOutputEvent::Boundary(MessageBoundary::End) => {
                         flush(
@@ -1875,7 +1878,7 @@ pub fn chat_completion_to_response(
                                 &mut pending_scores,
                             );
                         }
-                        ends_in_hidden_reasoning = !include_reasoning;
+                        ends_in_omitted_item = !include_reasoning;
                         if include_reasoning {
                             output.push(OutputItem::Reasoning(reasoning_item(
                                 format!("rs_{}", Uuid::new_v4().simple()),
@@ -1884,11 +1887,12 @@ pub fn chat_completion_to_response(
                             )));
                         }
                     }
-                    ResponseOutputEvent::Reasoning(_) => {}
+                    ResponseOutputEvent::Reasoning(_)
+                    | ResponseOutputEvent::OmittedTerminalToolCall => {}
                     ResponseOutputEvent::Text(delta) => {
                         if !delta.is_empty() {
                             text.push_str(&delta);
-                            ends_in_hidden_reasoning = false;
+                            ends_in_omitted_item = false;
                         }
                     }
                     ResponseOutputEvent::ToolCall(id) => {
@@ -1901,7 +1905,7 @@ pub fn chat_completion_to_response(
                             &mut pending_scores,
                         );
                         if let Some(call) = replay_calls.iter().find(|call| call.id == id) {
-                            ends_in_hidden_reasoning = false;
+                            ends_in_omitted_item = false;
                             output.push(params.tool_output(
                                 format!("fc_{}", Uuid::new_v4().simple()),
                                 call.id.clone(),
@@ -1917,7 +1921,10 @@ pub fn chat_completion_to_response(
                 &mut output,
                 &mut text,
                 phase,
-                if incomplete_reason.is_some() && !ends_in_hidden_reasoning {
+                if incomplete_reason.is_some()
+                    && !ends_in_omitted_item
+                    && !omitted_terminal_tool_call
+                {
                     OutputStatus::Incomplete
                 } else {
                     OutputStatus::Completed
@@ -1951,7 +1958,7 @@ pub fn chat_completion_to_response(
             // Refusals have no parser boundary event. Retain them on the final
             // visible message rather than dropping them during reconstruction.
             if let Some(refusal) = refusal {
-                ends_in_hidden_reasoning = false;
+                ends_in_omitted_item = false;
                 let target = output.iter_mut().rev().find_map(|item| match item {
                     OutputItem::Message(message)
                         if message.phase != Some(MessagePhase::Commentary) =>
@@ -1975,8 +1982,9 @@ pub fn chat_completion_to_response(
             }
         }
 
+        ends_in_omitted_item |= omitted_terminal_tool_call;
         if output.is_empty() {
-            ends_in_hidden_reasoning = false;
+            ends_in_omitted_item = false;
             output.push(make_text_message(
                 message_id,
                 String::new(),
@@ -2017,7 +2025,7 @@ pub fn chat_completion_to_response(
     } else {
         Status::Completed
     };
-    if incomplete_reason.is_some() && !ends_in_hidden_reasoning {
+    if incomplete_reason.is_some() && !ends_in_omitted_item {
         // The budget runs out once, inside the item the model was still writing.
         // Earlier output items were complete and must not be relabelled.
         if let Some(item) = output.last_mut() {

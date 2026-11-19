@@ -20,7 +20,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_protocols::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 use dynamo_runtime::engine::DataStream;
 use dynamo_runtime::error::DynamoError;
 
@@ -475,6 +475,23 @@ impl DeltaAggregator {
             && calls
                 .iter()
                 .all(|call| self.recorded_calls.contains(&call.id))
+    }
+
+    fn terminal_tool_call_was_omitted(&self, choice: &DeltaChoice) -> bool {
+        // Refusal and multimodal content are not represented in response_events.
+        if choice.finish_reason != Some(FinishReason::Length)
+            || self.has_unordered_deltas
+            || choice.refusal.is_some()
+            || !choice.content_parts.is_empty()
+        {
+            return false;
+        }
+        let last_item = self.response_events.iter().rfind(|event| {
+            !event.is_score()
+                && !matches!(event, ResponseOutputEvent::Boundary(MessageBoundary::End))
+        });
+        matches!(last_item, Some(ResponseOutputEvent::ToolCall(id))
+            if !choice.tool_calls.iter().flatten().any(|call| call.id == *id))
     }
 
     /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -1016,11 +1033,11 @@ impl DeltaAggregator {
         }
 
         // Extract aggregated choices and sort them by index.
+        let first_choice = aggregator.choices.get(&0);
         let preserves_recorded_order = aggregator.has_message_phases
-            || aggregator
-                .choices
-                .get(&0)
-                .is_some_and(|choice| aggregator.response_events_match_choice(choice));
+            || first_choice.is_some_and(|choice| aggregator.response_events_match_choice(choice));
+        let omitted_terminal_tool_call =
+            first_choice.is_some_and(|choice| aggregator.terminal_tool_call_was_omitted(choice));
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
@@ -1039,18 +1056,20 @@ impl DeltaAggregator {
             );
         }
 
-        // Construct the final response object.
+        // Preserve metadata even when the aggregate no longer matches the recorded items.
+        if !preserves_recorded_order {
+            aggregator
+                .response_events
+                .retain(ResponseOutputEvent::is_score);
+        }
+        if omitted_terminal_tool_call {
+            aggregator
+                .response_events
+                .push(ResponseOutputEvent::OmittedTerminalToolCall);
+        }
+
         let response = NvCreateChatCompletionResponse {
-            // Drop unreliable item order but retain score bookkeeping for the aggregate.
-            response_events: if preserves_recorded_order {
-                aggregator.response_events
-            } else {
-                aggregator
-                    .response_events
-                    .into_iter()
-                    .filter(ResponseOutputEvent::is_score)
-                    .collect()
-            },
+            response_events: aggregator.response_events,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,

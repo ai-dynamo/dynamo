@@ -331,6 +331,8 @@ pub enum ResponseOutputEvent {
     /// The next `n` entries arrived on reasoning or tool-call chunks. They are not
     /// output text, so a Responses projection skips them.
     HiddenScores(usize),
+    /// The token limit interrupted a terminal tool call omitted from the aggregate.
+    OmittedTerminalToolCall,
 }
 
 impl ResponseOutputEvent {

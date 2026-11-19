@@ -437,6 +437,42 @@ async fn coalesced_tool_continuation_preserves_call_before_text_in_both_modes() 
 }
 
 #[tokio::test]
+async fn omitted_terminal_tool_call_keeps_previous_unary_items_completed() {
+    use crate::protocols::openai::chat_completions::DeltaAggregator;
+    use dynamo_runtime::protocols::annotated::Annotated;
+
+    let mut tail = tool_chunk(Some("lookup"), Some("call-2"), r#"{"q":"#, Some("length"));
+    tail.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index = 1;
+    let chunks = [
+        raw_chunk("Checking.", None),
+        tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":1}"#, None),
+        tail,
+    ];
+    let aggregated = DeltaAggregator::apply(
+        futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let response = serde_json::to_value(
+        chat_completion_to_response(aggregated, &ResponseParams::default(), None).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(
+        response["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    let output = response["output"].as_array().unwrap();
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["phase"], "commentary");
+    assert_eq!(output[0]["status"], "completed");
+    assert_eq!(output[1]["call_id"], "call-1");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[tokio::test]
 async fn undelimited_reasoning_order_and_terminal_status_match_streaming() {
     for callable_tools in [false, true] {
         let request = request(
