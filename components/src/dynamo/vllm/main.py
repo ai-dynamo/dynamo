@@ -64,7 +64,7 @@ from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
-from dynamo.vllm.worker_factory import WorkerFactory
+from dynamo.vllm.worker_factory import WorkerFactory, shutdown_unserved_engine
 
 from . import envs, fork_safety
 from .args import (
@@ -308,36 +308,48 @@ async def worker(argv: list[str] | None = None) -> None:
             stat_logger_factory,
         )
 
-    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-        await initialize_configured_artifact_runtime()
+    try:
+        if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+            await initialize_configured_artifact_runtime()
 
-    shutdown_event = asyncio.Event()
-    state_agent_lifecycle = StateAgentLifecycle()
+        shutdown_event = asyncio.Event()
+        state_agent_lifecycle = StateAgentLifecycle()
 
-    async def close_worker_resources() -> None:
-        await _close_worker_resources(state_agent_lifecycle)
+        async def close_worker_resources() -> None:
+            await _close_worker_resources(state_agent_lifecycle)
 
-    runtime, loop = create_runtime(
-        discovery_backend=config.discovery_backend,
-        request_plane=config.request_plane,
-        event_plane=config.event_plane,
-        response_plane=config.response_plane,
-    )
+        runtime, loop = create_runtime(
+            discovery_backend=config.discovery_backend,
+            request_plane=config.request_plane,
+            event_plane=config.event_plane,
+            response_plane=config.response_plane,
+        )
 
-    if snapshot_controller is not None:
-        # The flock lives on the open fd, not on any Python reference; the
-        # kernel releases it when the process exits.
-        await elect_and_wake(snapshot_controller.pause_controller, runtime)
+        if snapshot_controller is not None:
+            # The flock lives on the open fd, not on any Python reference; the
+            # kernel releases it when the process exits.
+            await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
-    # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
-    # there
-    install_signal_handlers(
-        loop,
-        runtime,
-        shutdown_endpoints,
-        shutdown_event,
-        pre_shutdown_callback=close_worker_resources,
-    )
+        # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
+        # there
+        install_signal_handlers(
+            loop,
+            runtime,
+            shutdown_endpoints,
+            shutdown_event,
+            pre_shutdown_callback=close_worker_resources,
+        )
+    except BaseException:
+        # No worker owns the engine built above yet. EngineCore is a non-daemon
+        # child: left running, it can block this process's exit. (A snapshot
+        # engine is not shut down here.)
+        if prebuilt_engine is not None:
+            try:
+                shutdown_unserved_engine(prebuilt_engine)
+            except Exception:
+                # Logged only: the startup error below is the one to report.
+                logger.exception("Failed to shut down the engine after startup failed")
+        raise
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     try:

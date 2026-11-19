@@ -1614,6 +1614,7 @@ async def _enter_restore_path(
     factory: WorkerFactory | None = None,
     gms_shadow_mode: bool = False,
     prebuilt_engine: SnapshotEngineSetupResult | None = None,
+    endpoint_error: Exception | None = None,
 ) -> None:
     """Run one worker-creation path; it ends in ``register`` or the error under test."""
     method_name, mode = _RESTORE_PATHS[path]
@@ -1624,6 +1625,7 @@ async def _enter_restore_path(
     factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
     runtime = Mock()
     runtime.endpoint.return_value = endpoint
+    runtime.endpoint.side_effect = endpoint_error
     config = _make_config(
         disaggregation_mode=mode,
         namespace="dyn",
@@ -1940,6 +1942,33 @@ async def test_prebuilt_engine_is_used_and_still_goes_through_election(
         FPM_SET_WORKER_ID_METHOD_NAME, _RESTORED_ENDPOINT_ID
     )
     factory._maybe_wait_for_failover_lock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["decode", "prefill"])
+@pytest.mark.parametrize("built", ["snapshot", "prebuilt"])
+async def test_engine_built_before_the_runtime_is_shut_down_when_endpoint_setup_fails(
+    path: str, built: str, restore_path_stubs
+):
+    """Such an engine is already running when the worker starts, so the worker
+    owns it before its first endpoint exists."""
+    ready, engine_client = _restore_snapshot_engine()
+    register = AsyncMock(side_effect=_ReachedRegistration)
+    endpoint_error = RuntimeError("endpoint setup failed")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await _enter_restore_path(
+            path,
+            ready if built == "snapshot" else None,
+            register,
+            _restored_endpoint(),
+            prebuilt_engine=ready if built == "prebuilt" else None,
+            endpoint_error=endpoint_error,
+        )
+
+    assert exc_info.value is endpoint_error
+    register.assert_not_awaited()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
 async def _never_answers(*_args, **_kwargs) -> None:

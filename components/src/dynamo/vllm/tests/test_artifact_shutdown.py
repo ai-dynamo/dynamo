@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -167,6 +168,95 @@ async def test_fork_builds_the_engine_before_the_runtime(
         assert isinstance(prebuilt[1], vllm_main.StatLoggerFactory)
     else:
         assert prebuilt is None
+
+
+def _fork_engine_client(vllm_main, monkeypatch) -> Mock:
+    """Select fork and stub the engine it builds ahead of the runtime."""
+    config = vllm_main.parse_args_with_model_fetch.return_value
+    config.worker_start_method = "fork"
+    engine_client = Mock()
+    engine_setup = (
+        engine_client,
+        SimpleNamespace(shutdown_timeout=5.0),
+        Mock(),
+        None,
+        Mock(),
+    )
+    monkeypatch.setattr(vllm_main, "setup_vllm_engine", Mock(return_value=engine_setup))
+    return engine_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["artifact_runtime", "runtime", "cancellation"])
+async def test_fork_shuts_the_engine_down_when_startup_fails_before_a_worker_owns_it(
+    monkeypatch, tmp_path, vllm_main, failure
+) -> None:
+    _patch_worker_startup(vllm_main, monkeypatch, tmp_path, factory_create=None)
+    engine_client = _fork_engine_client(vllm_main, monkeypatch)
+    # Cancellation, like Ctrl-C, is not an Exception.
+    startup_error: BaseException = (
+        asyncio.CancelledError()
+        if failure == "cancellation"
+        else RuntimeError(f"{failure} failed")
+    )
+    if failure == "artifact_runtime":
+        monkeypatch.setenv("DYNAMO_ARTIFACT_CONFIG", str(tmp_path / "artifact.json"))
+        vllm_main.initialize_configured_artifact_runtime.side_effect = startup_error
+    else:
+        monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
+        vllm_main.create_runtime.side_effect = startup_error
+
+    with pytest.raises(type(startup_error)) as exc_info:
+        await vllm_main.worker([])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    vllm_main.WorkerFactory.return_value.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fork_startup_error_propagates_when_the_engine_shutdown_fails_too(
+    monkeypatch, tmp_path, vllm_main, caplog
+) -> None:
+    _patch_worker_startup(vllm_main, monkeypatch, tmp_path, factory_create=None)
+    engine_client = _fork_engine_client(vllm_main, monkeypatch)
+    engine_client.shutdown.side_effect = RuntimeError("engine already dead")
+    monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
+    vllm_main.create_runtime.side_effect = RuntimeError("runtime failed")
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="runtime failed"):
+            await vllm_main.worker([])
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert "Failed to shut down the engine after startup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_fails", [False, True])
+async def test_fork_leaves_the_engine_to_the_worker_it_was_handed_to(
+    monkeypatch, tmp_path, vllm_main, worker_fails
+) -> None:
+    """From factory.create() on, the worker's lifecycle shuts the engine down."""
+    _patch_worker_startup(
+        vllm_main,
+        monkeypatch,
+        tmp_path,
+        factory_create=RuntimeError("worker failed") if worker_fails else None,
+    )
+    engine_client = _fork_engine_client(vllm_main, monkeypatch)
+    monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
+
+    if worker_fails:
+        with pytest.raises(RuntimeError, match="worker failed"):
+            await vllm_main.worker([])
+    else:
+        await vllm_main.worker([])
+
+    create = vllm_main.WorkerFactory.return_value.create
+    create.assert_awaited_once()
+    assert create.await_args.kwargs["prebuilt_engine"][0][0] is engine_client
+    engine_client.shutdown.assert_not_called()
 
 
 @pytest.mark.asyncio
