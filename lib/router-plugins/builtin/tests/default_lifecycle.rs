@@ -424,3 +424,111 @@ worker_selection:
         );
     }
 }
+
+/// A selection service running `policy_type` on two idle workers that hold nothing.
+/// `queue_threshold` is `router_queue_threshold`; `None` turns the queue off.
+async fn soft_affinity_service(
+    policy_type: &str,
+    queue_threshold: Option<f64>,
+) -> (SelectionService, tempfile::NamedTempFile) {
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        format!("worker_selection:\n  aggregated: {policy_type}\n"),
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        use_kv_events: true,
+        router_queue_threshold: queue_threshold,
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    let mut registry = default_registry();
+    register(&mut registry).unwrap();
+    let service = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
+        .indexer_threads(1)
+        .build()
+        .await
+        .unwrap();
+    for worker_id in [1, 2] {
+        service
+            .upsert_worker(WorkerRequest {
+                kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+                ..worker(worker_id)
+            })
+            .await
+            .unwrap();
+    }
+    (service, policy_file)
+}
+
+/// Book one eight-token request on `worker_id`, so it carries one more active request.
+async fn load_worker(service: &SelectionService, worker_id: u64) {
+    let mut load = reserve_request(&format!("load-{worker_id}"));
+    load.prompt.token_ids = Some((100..108).collect());
+    load.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
+    service.select_and_reserve(load).await.unwrap();
+}
+
+fn bound_request(selection_id: &str, worker_id: u64) -> SelectAndReserveRequest {
+    let mut request = prompt_request(selection_id);
+    request.affinity_target = Some(WorkerAffinityTarget::new(worker_id, None));
+    request
+}
+
+/// Soft affinity under `dynamo-two-tier-cost-fn` works as it does under the built-in selector: an
+/// eligible target wins over a less-loaded worker (the two-tier load path) and over a worker that
+/// holds more of the prompt (the two-tier cache tier), with the queue off and on. Before two-tier
+/// used the exclusive affinity target, it picked worker 2 in both cases.
+#[tokio::test]
+async fn soft_affinity_target_wins_under_two_tier_as_under_the_default() {
+    // 100x max_num_batched_tokens turns the queue on but never marks a worker full.
+    for policy_type in ["dynamo-default-cost-fn", "dynamo-two-tier-cost-fn"] {
+        for queue_threshold in [None, Some(100.0)] {
+            let case = format!("{policy_type} queue_threshold={queue_threshold:?}");
+
+            let (service, _policy_file) = soft_affinity_service(policy_type, queue_threshold).await;
+            load_worker(&service, 1).await;
+            let response = service
+                .select_and_reserve(bound_request("bound-loaded", 1))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.worker_id, 1,
+                "{case}: target vs. less-loaded worker"
+            );
+
+            // Worker 2 holds six of the prompt's eight blocks, above two-tier's 0.5 cache threshold.
+            let (service, _policy_file) = soft_affinity_service(policy_type, queue_threshold).await;
+            store_prefix(&service, 2, 6).await;
+            let response = service
+                .select_and_reserve(bound_request("bound-cached", 1))
+                .await
+                .unwrap();
+            assert_eq!(response.worker_id, 1, "{case}: target vs. prefix holder");
+        }
+    }
+}
+
+/// The cases above are real conflicts for two-tier: without a target it takes the less-loaded
+/// worker, and with equal load it takes the prefix holder through the cache tier.
+#[tokio::test]
+async fn two_tier_without_a_target_picks_worker_2_in_both_cases() {
+    let (service, _policy_file) = soft_affinity_service("dynamo-two-tier-cost-fn", None).await;
+    load_worker(&service, 1).await;
+    let response = service
+        .select_and_reserve(prompt_request("unbound-loaded"))
+        .await
+        .unwrap();
+    assert_eq!(response.worker_id, 2, "least-loaded worker");
+
+    let (service, _policy_file) = soft_affinity_service("dynamo-two-tier-cost-fn", None).await;
+    store_prefix(&service, 2, 6).await;
+    load_worker(&service, 1).await;
+    load_worker(&service, 2).await;
+    let response = service
+        .select_and_reserve(prompt_request("unbound-cached"))
+        .await
+        .unwrap();
+    assert_eq!(response.worker_id, 2, "cache tier at equal load");
+}

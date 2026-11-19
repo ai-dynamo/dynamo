@@ -679,6 +679,54 @@ fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
     }
 }
 
+/// Every shipped policy that holds a soft session on its worker does so through the host's
+/// exclusive affinity target, for every role and with or without conditional disagg. A policy left
+/// out of this list silently ignores `--router-session-affinity-mode soft`.
+#[test]
+fn soft_affinity_policies_use_exclusive_affinity_for_every_role() {
+    let mut registry = default_registry();
+    dynamo_router_policies::register(&mut registry).unwrap();
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    for policy_type in ["dynamo-default-cost-fn", "kvcr", "dynamo-two-tier-cost-fn"] {
+        std::fs::write(
+            policy_file.path(),
+            format!(
+                "worker_selection:\n  aggregated: {policy_type}\n  prefill: {policy_type}\n  decode: {policy_type}\n  encode: {policy_type}\n"
+            ),
+        )
+        .unwrap();
+        for conditional_disagg_enabled in [false, true] {
+            for role in [
+                WorkerType::Aggregated,
+                WorkerType::Prefill,
+                WorkerType::Decode,
+                WorkerType::Encode,
+            ] {
+                let config = KvRouterConfig {
+                    conditional_disagg_enabled,
+                    router_policy_config: Some(policy_file.path().display().to_string()),
+                    ..Default::default()
+                };
+                let factory = registry
+                    .resolve_for_worker_type(&config, role)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{policy_type} resolves for {role:?}"));
+                let policy = factory(
+                    &SelectionConfig::from(&config),
+                    role,
+                    RoutingPartitionRef::new("model", "default"),
+                );
+                assert!(
+                    <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::uses_exclusive_affinity_target(
+                        &policy
+                    ),
+                    "{policy_type} {role:?} conditional_disagg={conditional_disagg_enabled}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn mandatory_pin_is_preserved() {
     let (workers, mut request) = fixture(4, 17);
