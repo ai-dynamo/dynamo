@@ -1,6 +1,6 @@
 ---
 name: dynamo-interconnect-check
-description: Validate that a Dynamo deployment's NIXL/UCX/NCCL interconnect is ready for disaggregated serving over RDMA/NVLink. Use after deploy-dynamo-recipe brings a deployment up (especially disagg/multi-node) to confirm the KV transport is correct; use troubleshoot-dynamo for diagnosing already-failed pods.
+description: Check NIXL, UCX and NCCL fabric readiness over RDMA or NVLink for disaggregated Dynamo serving; not for deploys, crashing pods or router modes.
 license: Apache-2.0
 metadata:
   author: Dan Gil <dagil@nvidia.com>

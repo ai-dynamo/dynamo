@@ -1,6 +1,6 @@
 ---
 name: dynamo-router-starter
-description: Start or patch Dynamo router modes and run router endpoint smoke checks. Use for round-robin, KV-aware, least-loaded, or device-aware routing setup; use deploy-dynamo-recipe for recipe deployment and troubleshoot-dynamo for failure diagnosis.
+description: Enable or switch Dynamo router modes such as KV-aware or round-robin and smoke-test the endpoint; not for deploys, 500 errors or NIXL checks.
 license: Apache-2.0
 metadata:
   author: Dan Gil <dagil@nvidia.com>

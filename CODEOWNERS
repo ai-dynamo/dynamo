@@ -342,8 +342,8 @@
 # === process  (@ai-dynamo/dynamo-process-codeowners) ===
 /.ai/                                                                                                   @ai-dynamo/dynamo-process-codeowners
 /DCO.md                                                                                                 @ai-dynamo/dynamo-process-codeowners
-/skills                                                                                                 @ai-dynamo/dynamo-process-codeowners
 /LICENSE                                                                                                @ai-dynamo/dynamo-process-codeowners
+/skills/                                                                                                @ai-dynamo/dynamo-process-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners
 /.claude/                                                                                               @ai-dynamo/dynamo-process-codeowners
 /AGENTS.md                                                                                              @ai-dynamo/dynamo-process-codeowners
@@ -630,6 +630,7 @@ requirements.txt                                                                
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.codex/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /agents/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/skills/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /Cargo.lock                                                                                             @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /Cargo.toml                                                                                             @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners

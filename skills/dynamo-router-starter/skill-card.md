@@ -1,5 +1,5 @@
 ## Description: <br>
-Validate that a Dynamo deployment's NIXL/UCX/NCCL interconnect is ready for disaggregated serving over RDMA/NVLink. <br>
+Enable or switch Dynamo router modes such as KV-aware or round-robin and smoke-test the endpoint; not for deploys, 500 errors or NIXL checks. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
@@ -9,7 +9,7 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers deploying Dynamo disaggregated or multi-node recipes who need to confirm the NIXL/UCX/NCCL transport fabric is operational before trusting benchmark numbers. <br>
+Developers and engineers configuring Dynamo routing modes (round-robin, KV-aware, least-loaded, or device-aware) and verifying endpoint health via smoke tests. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -19,13 +19,13 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
-- [Interconnect Env Vars & IB Capability Checklist](references/interconnect-env-vars.md) <br>
-- [Dynamo GitHub Repository](https://github.com/ai-dynamo/dynamo) <br>
+- [Router Modes Reference](references/router-modes.md) <br>
+- [Dynamo Releases](https://github.com/ai-dynamo/dynamo/releases/latest) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Shell commands, Analysis] <br>
-**Output Format:** [Structured JSON with ok/warn/fail/skipped verdicts per check] <br>
+**Output Type(s):** [Shell commands, Configuration instructions] <br>
+**Output Format:** [Markdown with inline bash code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 

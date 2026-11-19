@@ -188,4 +188,4 @@ docs/fern/components/nightly-selector-data.generated.ts
 /runs/
 
 # Agent skill-tool scratch: a per-session lease marker, never shared state.
-.agents/skills/.lease.json
+skills/.lease.json

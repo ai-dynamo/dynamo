@@ -217,10 +217,10 @@ repos:
         - prometheus_client>=0.23.1
         - openai
     - id: validate-skills
-      name: Validate .agents/skills SKILL.md frontmatter and AGENTS.md index
+      name: Validate skills/ SKILL.md frontmatter and AGENTS.md index
       entry: python3 scripts/validate_skills.py
       language: python
-      files: ^(\.agents/skills/|AGENTS\.md$)
+      files: ^(skills/|AGENTS\.md$)
       pass_filenames: false
       additional_dependencies:
         - pyyaml

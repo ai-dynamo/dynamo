@@ -33,8 +33,8 @@ _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 # examples/backends/sglang/test_sglang_profile.py assumes a server the harness
 # never starts, and defaulting it into pre_merge makes the CPU job run it.
 # Anything under these roots that carries its own markers is unaffected.
-# ``skills`` is a symlink to ``.agents/skills``, so resolve() lands on
-# ``.agents``; both names are listed because either can reach collection.
+# ``.agents/skills`` is a symlink to ``skills``, so resolve() lands on
+# ``skills``; both names are listed because either can reach collection.
 _UNMANAGED_PATHS = (
     ("examples",),
     ("skills",),

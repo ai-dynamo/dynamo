@@ -426,7 +426,7 @@ areas:
   - DCO.md
   - LICENSE
   - SECURITY.md
-  - skills
+  - skills/
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
   path_globs:
@@ -634,6 +634,10 @@ shared:
   - router
   - agents
 - glob: .agents/
+  owners:
+  - process
+  - agents
+- glob: skills/
   owners:
   - process
   - agents

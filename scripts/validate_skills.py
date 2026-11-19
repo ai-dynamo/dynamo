@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate agent skills under .agents/skills/ against the conventions
+"""Validate agent skills under skills/ against the conventions
 documented in the Skills section of AGENTS.md.
 
-For every .agents/skills/<dir>/SKILL.md this checks that:
+For every skills/<dir>/SKILL.md this checks that:
   - the file starts with a parseable YAML frontmatter block
   - frontmatter `name` equals the directory name and is kebab-case
   - `description` is a non-empty string of at most 1024 characters
@@ -146,13 +146,13 @@ def check_index(agents_md, skill_names, errors):
     for name in sorted(listed - skill_names):
         errors.append(
             f"{agents_md.name}: Skills index lists '{name}' but "
-            f".agents/skills/{name}/ does not exist"
+            f"skills/{name}/ does not exist"
         )
 
 
 def main():
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parents[1]
-    skills_dir = root / ".agents" / "skills"
+    skills_dir = root / "skills"
     if not skills_dir.is_dir():
         print(f"error: {skills_dir} is not a directory", file=sys.stderr)
         return 1
