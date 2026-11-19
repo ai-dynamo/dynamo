@@ -19,8 +19,8 @@ pub use crate::compat::scheduling::{
     SharedCacheOverlapScore, TierOverlapBlocks, TieredOverlapRefresher, WorkerAvailabilityProvider,
     WorkerEligibilityError, WorkerIdSet, WorkerOverlapScore, WorkerPlacement,
     WorkerSelectionInputTrigger, WorkerSelectionPolicyError, effective_prefill_tokens, overlap,
-    overlap_refresh, policy, policy_queue, prefill_load, prefill_load_hint_from_effective_tokens,
-    queue, request_classifier, selector,
+    overlap_refresh, policy_queue, prefill_load, prefill_load_hint_from_effective_tokens, queue,
+    request_classifier, selector,
 };
 #[cfg(test)]
 mod policy_queue_tests;
