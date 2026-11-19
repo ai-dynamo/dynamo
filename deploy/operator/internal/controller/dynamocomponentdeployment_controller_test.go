@@ -21,9 +21,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
+
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -51,12 +54,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -802,7 +807,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
-	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
@@ -813,6 +818,253 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
 	require.NotEqual(t, service.Name, lws.Name)
+}
+
+// multinodeLWSTestDCD builds a two-node multinode DCD with the given name.
+func multinodeLWSTestDCD(t *testing.T, name string) *v1beta1.DynamoComponentDeployment {
+	t.Helper()
+	replicas := int32(1)
+	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		Name:      name,
+		Namespace: "default",
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkSGLang),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "PrefillWorker",
+				DynamoNamespace: new("default"),
+				ComponentType:   commonconsts.ComponentTypePrefill,
+				Replicas:        &replicas,
+				Multinode:       &v1alpha1.MultinodeSpec{NodeCount: 2},
+				Resources:       &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Image:   "test-image:latest",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.sglang"},
+					},
+				},
+			},
+		},
+	})
+	dcd.UID = types.UID(name + "-uid")
+	return dcd
+}
+
+func multinodeLWSTestReconciler(objects ...client.Object) *DynamoComponentDeploymentReconciler {
+	objects = append(objects, &corev1.ServiceAccount{
+		Name:      "default-test-sa",
+		Namespace: "default",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
+		},
+	})
+	return &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objects...).WithStatusSubresource(objects...).Build(),
+		Recorder:      events.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+}
+
+// controller-revision-hash=<statefulset>-<10-char hash> must fit 63 chars for
+// the leader StatefulSet <lws> and each worker StatefulSet <lws>-<groupIndex>.
+func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetRevisionLabels(t *testing.T) {
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
+	maxRevisionHash := strings.Repeat("9", 10)
+
+	tests := []struct {
+		name    string
+		dcdName string
+	}{
+		{name: "ticket prefill worker", dcdName: "kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"},
+		{name: "ticket decode worker", dcdName: "kimi-k3-sglang-gb200-disagg-agentic-decodeworker-978c2008"},
+		{name: "longest name that fits every group", dcdName: strings.Repeat("a", 43)},
+		{name: "first name requiring shortening", dcdName: strings.Repeat("a", 44)},
+		{name: "old one-digit boundary", dcdName: strings.Repeat("a", 48)},
+		{name: "one character over the boundary", dcdName: strings.Repeat("a", 49)},
+		{name: "short name", dcdName: "test-component"},
+	}
+
+	lwsNames := map[string]string{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render the workload twice to check stable, distinct names")
+			dcd := multinodeLWSTestDCD(t, tt.dcdName)
+			r := multinodeLWSTestReconciler(dcd)
+
+			lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			again, _, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
+			require.NoError(t, err)
+			require.Equal(t, lws.Name, again.Name, "LWS name must be deterministic")
+			require.NotEqual(t, tt.dcdName, lws.Name, "LWS name must not collide with the component Service name")
+			require.Empty(t, validation.IsDNS1035Label(lws.Name))
+
+			t.Log("Validate revision labels at the first, two-digit, and largest group indexes")
+			legacyName := tt.dcdName + "-0"
+			fitsLegacy := len(legacyName)+len("-999999-")+len(maxRevisionHash) <= validation.LabelValueMaxLength
+			groupIndexes := []string{"0", "10", "999999"}
+			if fitsLegacy {
+				require.Equal(t, legacyName, lws.Name, "names that already fit must not change")
+			}
+
+			statefulSetNames := []string{lws.Name}
+			for _, groupIndex := range groupIndexes {
+				statefulSetNames = append(statefulSetNames, lws.Name+"-"+groupIndex)
+			}
+			for _, statefulSetName := range statefulSetNames {
+				require.Empty(t, validation.IsDNS1123Label(statefulSetName), statefulSetName)
+				revisionLabel := statefulSetName + "-" + maxRevisionHash
+				require.Empty(t, validation.IsValidLabelValue(revisionLabel),
+					"controller-revision-hash %q is %d characters", revisionLabel, len(revisionLabel))
+			}
+			lwsNames[tt.dcdName] = lws.Name
+		})
+	}
+
+	require.NotEqual(t,
+		lwsNames["kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"],
+		lwsNames["kimi-k3-sglang-gb200-disagg-agentic-decodeworker-978c2008"])
+}
+
+// Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSet
+// checks migration and scaling without interrupting supported or serving legacy workers.
+func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSet(t *testing.T) {
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
+	const dcdName = "kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"
+	tests := []struct {
+		name               string
+		dcdName            string
+		readyReplicas      int32
+		ownedByDCD         bool
+		failReplacementLWS bool
+		replacementExists  bool
+		wantLegacyGone     bool
+		legacyBecomesReady bool
+		foreignReplacement bool
+	}{
+		{name: "legacy LWS controlled by the DCD is deleted", ownedByDCD: true, wantLegacyGone: true},
+		{name: "legacy LWS controlled by another object is kept", ownedByDCD: false, wantLegacyGone: false},
+		{name: "legacy LWS is kept when the replacement fails to sync", ownedByDCD: true, failReplacementLWS: true, wantLegacyGone: false},
+		{name: "serving 51-character legacy LWS is kept", dcdName: strings.Repeat("a", 49), readyReplicas: 1, ownedByDCD: true, replacementExists: true},
+		{name: "serving 52-character legacy LWS is kept", dcdName: strings.Repeat("a", 50), readyReplicas: 1, ownedByDCD: true, replacementExists: true},
+		{name: "partly serving legacy LWS is kept", readyReplicas: 1, ownedByDCD: true, replacementExists: true},
+		{name: "old 50-character name is kept even while unready", dcdName: strings.Repeat("a", 48), ownedByDCD: true, replacementExists: true},
+		{name: "legacy becomes ready while replacement is created", dcdName: strings.Repeat("a", 49), ownedByDCD: true, legacyBecomesReady: true},
+		{name: "serving legacy keeps another component's replacement", readyReplicas: 1, ownedByDCD: true, replacementExists: true, foreignReplacement: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Create an existing legacy LWS and an unready replacement")
+			ctx := context.Background()
+			name := dcdName
+			if tt.dcdName != "" {
+				name = tt.dcdName
+			}
+			dcd := multinodeLWSTestDCD(t, name)
+			legacyName := legacyLeaderWorkerSetName(name)
+			legacy := &leaderworkersetv1.LeaderWorkerSet{
+				Name: legacyName, Namespace: "default",
+				Status: leaderworkersetv1.LeaderWorkerSetStatus{ReadyReplicas: tt.readyReplicas},
+			}
+			if tt.ownedByDCD {
+				legacy.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+			} else {
+				other := multinodeLWSTestDCD(t, "other-component")
+				legacy.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(other, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+			}
+			replacement := &leaderworkersetv1.LeaderWorkerSet{Name: leaderWorkerSetName(dcd), Namespace: "default"}
+			replacement.OwnerReferences = []metav1.OwnerReference{
+				*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+			}
+			if tt.foreignReplacement {
+				other := multinodeLWSTestDCD(t, "replacement-owner")
+				replacement.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(other, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+			}
+			r := multinodeLWSTestReconciler(dcd, legacy)
+			if tt.replacementExists {
+				r = multinodeLWSTestReconciler(dcd, legacy, replacement)
+			}
+			if tt.failReplacementLWS || tt.legacyBecomesReady {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if _, ok := obj.(*leaderworkersetv1.LeaderWorkerSet); ok {
+							if tt.failReplacementLWS {
+								return errors.New("injected LeaderWorkerSet create failure")
+							}
+							if err := c.Create(ctx, obj, opts...); err != nil {
+								return err
+							}
+
+							// Expose legacy readiness between replacement sync and cleanup.
+							current := &leaderworkersetv1.LeaderWorkerSet{}
+							if err := c.Get(ctx, client.ObjectKeyFromObject(legacy), current); err != nil {
+								return err
+							}
+							current.Status.ReadyReplicas = 1
+							return c.Status().Update(ctx, current)
+						}
+						return c.Create(ctx, obj, opts...)
+					},
+				})
+			}
+
+			t.Log("Reconcile without deleting serving or previously supported legacy workers")
+			result, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
+			boundedName := leaderWorkerSetName(dcd)
+			require.NotEqual(t, legacyName, boundedName)
+			if tt.failReplacementLWS {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			t.Log("Reconcile again after readiness changes to converge on one managed LWS")
+			if tt.legacyBecomesReady {
+				for range 3 {
+					result, err = r.reconcileLeaderWorkerSetResources(ctx, dcd)
+					require.NoError(t, err)
+				}
+			}
+			if !tt.failReplacementLWS {
+				err = r.Get(ctx, client.ObjectKeyFromObject(replacement), &leaderworkersetv1.LeaderWorkerSet{})
+				if tt.ownedByDCD && !tt.wantLegacyGone && !tt.foreignReplacement {
+					require.True(t, k8serrors.IsNotFound(err), "unused replacement should be deleted, got %v", err)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+
+			t.Log("Check legacy ownership and serving groups still control cleanup")
+			if tt.ownedByDCD && !tt.failReplacementLWS && !tt.wantLegacyGone {
+				require.Equal(t, []string{legacyName}, result.serviceReplicaStatus.ComponentNames)
+			}
+
+			if !tt.failReplacementLWS {
+				t.Log("Scale past group index 9 without renaming the selected LWS")
+				dcd.Spec.Replicas = new(int32(11))
+				again, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
+				require.NoError(t, err)
+				require.Equal(t, result.serviceReplicaStatus.ComponentNames, again.serviceReplicaStatus.ComponentNames)
+			}
+			err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
+			if tt.wantLegacyGone {
+				require.True(t, k8serrors.IsNotFound(err), "legacy LWS should be deleted, got %v", err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t *testing.T) {
@@ -946,13 +1198,16 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWit
 	require.Equal(t, commonconsts.ComponentTypeWorker, componentType)
 }
 
+// TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFromLeaderWorkerSet
+// checks that a long legacy LWS preserves worker identity without a Service fallback.
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFromLeaderWorkerSet(t *testing.T) {
+	t.Log("Create a long legacy LWS whose worker identity has no Service fallback")
 	s := scheme.Scheme
 	require.NoError(t, v1beta1.AddToScheme(s))
 	require.NoError(t, leaderworkersetv1.AddToScheme(s))
 
 	dcd := &v1beta1.DynamoComponentDeployment{
-		Name:      "qwen-vllmdecodeworker",
+		Name:      strings.Repeat("a", 49),
 		Namespace: "default",
 		Labels: map[string]string{
 			commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
@@ -981,7 +1236,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 		},
 	}
 	existingLeaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
-		Name:      leaderWorkerSetName(dcd),
+		Name:      legacyLeaderWorkerSetName(dcd.Name),
 		Namespace: dcd.Namespace,
 		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
 			LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
@@ -1008,6 +1263,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 		},
 	}
 
+	t.Log("Resolve worker identity and render both pod roles with the same identity")
 	componentType, err := r.getDCDWorkloadComponentType(context.Background(), dcd)
 	require.NoError(t, err)
 	require.Equal(t, commonconsts.ComponentTypeWorker, componentType)
@@ -1148,6 +1404,8 @@ func (m *mockDockerSecretRetriever) GetSecrets(namespace, imageName string) ([]s
 	return m.GetSecretsFunc(namespace, imageName)
 }
 
+// TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet checks that the
+// selected workload name and desired replica count reach the rendered resource.
 func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.T) {
 	var limit = new(resource.MustParse("250Mi"))
 	limit.SetMilli(new(resource.MustParse("1Gi")).MilliValue() / 2)
@@ -1621,7 +1879,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
-			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt)
+			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt, leaderWorkerSetName(tt.args.opt.dynamoComponentDeployment))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoComponentDeploymentReconciler.generateLeaderWorkerSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -2397,6 +2655,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 		name                         string
 		replicas                     int32
 		existingDeployment           *appsv1.Deployment
+		existingObjects              []client.Object
 		wantComponentReconcileResult ComponentReconcileResult
 	}{
 		{
@@ -2477,6 +2736,70 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:               "crash-looping Pod the Deployment selects",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment(),
+			existingObjects: []client.Object{
+				crashLoopTestPod("test-component-a", crashLoopTestDCDName),
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   dcdReasonContainerCrashLooping,
+				message:  "pod test-component-a container main restarted 3 times, last exit code 1 (Error)",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
+				},
+			},
+		},
+		{
+			name:               "crash-looping Pod outside the Deployment's selector",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment(),
+			existingObjects: []client.Object{
+				crashLoopTestPod("other-component-a", "other-component"),
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
+				},
+			},
+		},
+		{
+			name:               "terminating crash-looping Pod during a rollout",
+			replicas:           1,
+			existingDeployment: crashLoopTestDeployment(),
+			existingObjects:    []client.Object{crashLoopTestTerminatingPod()},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionFalse,
+				reason:   "DeploymentNotReady",
+				message:  "Deployment is not ready",
+				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+					ComponentKind:     v1beta1.ComponentKindDeployment,
+					ComponentNames:    []string{"test-component"},
+					Replicas:          1,
+					UpdatedReplicas:   1,
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2527,9 +2850,11 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				}
 				objects = append(objects, ownedDeployment)
 			}
+			objects = append(objects, tt.existingObjects...)
 
 			// Set up fake client with the DCD and existing Deployment
 			fakeKubeClient := fake.NewClientBuilder().
+				WithIndex(&corev1.Pod{}, podcontroller.SelectorIndex, podcontroller.SelectorIndexValues).
 				WithScheme(s).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
@@ -2560,6 +2885,40 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
+}
+
+// The DCD whose Deployment the crash-loop cases reconcile.
+const (
+	crashLoopTestDCDName   = "test-component"
+	crashLoopTestNamespace = "default"
+)
+
+// crashLoopTestDeployment describes the unready Deployment of the crash-loop
+// cases' DCD.
+func crashLoopTestDeployment() *appsv1.Deployment {
+	return &appsv1.Deployment{
+		Name:       crashLoopTestDCDName,
+		Namespace:  crashLoopTestNamespace,
+		Generation: 1,
+		Spec: appsv1.DeploymentSpec{
+			Replicas: new(int32(1)),
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+		},
+	}
+}
+
+// crashLoopTestTerminatingPod describes a crash-looping Pod of the crash-loop
+// cases' DCD that a rollout is deleting.
+func crashLoopTestTerminatingPod() *corev1.Pod {
+	pod := crashLoopTestPod("test-component-previous-a", crashLoopTestDCDName)
+	pod.DeletionTimestamp = new(metav1.Now())
+	// The fake client refuses a deleted object that no finalizer holds.
+	pod.Finalizers = []string{"test.nvidia.com/hold"}
+	return pod
 }
 
 func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testing.T) {
@@ -2620,6 +2979,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 	}
 
 	fakeKubeClient := fake.NewClientBuilder().
+		WithIndex(&corev1.Pod{}, podcontroller.SelectorIndex, podcontroller.SelectorIndexValues).
 		WithScheme(s).
 		WithObjects(dcd, deployment).
 		WithStatusSubresource(dcd, deployment).

@@ -13,6 +13,7 @@ pytest.importorskip(
 
 from sglang.srt.managers.io_struct import EmbeddingReqInput  # noqa: E402
 
+from dynamo.llm.exceptions import InvalidArgument  # noqa: E402
 from dynamo.sglang.health_check import SglangEmbeddingHealthCheckPayload  # noqa: E402
 from dynamo.sglang.request_handlers.embedding import (  # noqa: E402
     embedding_handler as eh,
@@ -156,3 +157,17 @@ async def test_batched_tokenized_input_gets_unique_request_ids():
     assert request.input_ids == token_ids
     assert request.rid == ["embedding-trace-0", "embedding-trace-1"]
     assert request.external_trace_header is None
+
+
+@pytest.mark.asyncio
+async def test_chat_style_messages_are_rejected():
+    handler = _handler()
+    request = {
+        "model": "embedding-model",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    with pytest.raises(InvalidArgument, match="vLLM embedding workers only"):
+        async for _ in handler.generate(request, _Context()):
+            pass
+    assert handler.engine.async_encode_calls == []

@@ -86,18 +86,34 @@ def _main_container(component: dict) -> dict:
             "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
         ),
         (
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
-            "nvcr.io/nvidia/ai-dynamo/dynamo-planner@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
         ),
         (
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
             "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner",
+        ),
+        (
+            "dynamo-frontend",
+            "dynamo-planner",
+        ),
+        (
+            "localhost:5000/dynamo-frontend",
+            "localhost:5000/dynamo-planner",
+        ),
+        (
+            "localhost:5000/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "localhost:5000/dynamo-planner:1.2.3",
         ),
     ],
 )
-def test_derive_planner_image_preserves_registry_tag_and_digest(
+def test_derive_planner_image_uses_the_shared_release_tag(
     image: str, expected: str
-):
+) -> None:
     assert derive_planner_image(image) == expected
 
 
@@ -110,24 +126,67 @@ def test_derive_planner_image_preserves_registry_tag_and_digest(
             "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         ),
         (
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
-            "sglang",
-            "nvcr.io/nvidia/ai-dynamo/sglang-runtime@sha256:deadbeef",
-        ),
-        (
             "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
             "trtllm",
-            "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3@sha256:deadbeef",
+            "sglang",
+            "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3@sha256:deadbeef",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend",
+            "vllm",
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime",
+        ),
+        (
+            "dynamo-frontend",
+            "vllm",
+            "vllm-runtime",
+        ),
+        (
+            "localhost:5000/dynamo-frontend",
+            "vllm",
+            "localhost:5000/vllm-runtime",
+        ),
+        (
+            "localhost:5000/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "vllm",
+            "localhost:5000/vllm-runtime:1.2.3",
         ),
     ],
 )
-def test_derive_backend_image_preserves_registry_tag_and_digest(
+def test_derive_backend_image_uses_the_shared_release_tag(
     image: str, backend: str, expected: str
-):
+) -> None:
     assert derive_backend_image(image, backend) == expected
 
 
-def test_add_planner_to_config_uses_dynamo_planner_image():
+@pytest.mark.parametrize(
+    "target",
+    ["planner", "backend"],
+)
+@pytest.mark.parametrize(
+    "image",
+    [
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
+        "localhost:5000/dynamo-frontend@sha256:deadbeef",
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:",
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:@sha256:deadbeef",
+    ],
+)
+def test_sibling_image_derivation_rejects_digest_only_and_empty_tag_references(
+    target: str, image: str
+) -> None:
+    with pytest.raises(ValueError, match="shared release tag"):
+        if target == "planner":
+            derive_planner_image(image)
+        else:
+            derive_backend_image(image, "vllm")
+
+
+def test_add_planner_to_config_uses_planner_image_and_entrypoint():
     image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3"
     dgdr = _make_dgdr(image)
     config = _base_dgd_config(image)
@@ -135,8 +194,9 @@ def test_add_planner_to_config_uses_dynamo_planner_image():
     add_planner_to_config(dgdr, config)
 
     planner = _component_map(config)["Planner"]
-    planner_image = _main_container(planner)["image"]
-    assert planner_image == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
+    container = _main_container(planner)
+    assert container["image"] == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
+    assert container["command"] == ["python3", "-m", "dynamo.planner"]
     assert "scalingAdapter" not in planner
 
 

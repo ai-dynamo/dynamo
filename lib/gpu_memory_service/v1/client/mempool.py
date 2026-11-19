@@ -22,7 +22,6 @@ from gpu_memory_service.v1.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.v1.client.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,
 )
-from gpu_memory_service.v1.device import get_socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -78,16 +77,8 @@ class TorchMempoolMemoryClient:
         try:
             self._device = torch.cuda.current_device()
             vmm = get_vmm()
-            weights = GMSClientMemoryManager(
-                get_socket_path(self._device, _WEIGHTS),
-                vmm,
-                self._device,
-            )
-            kv_cache = GMSClientMemoryManager(
-                get_socket_path(self._device, _KV_CACHE),
-                vmm,
-                self._device,
-            )
+            weights = GMSClientMemoryManager(_WEIGHTS, vmm, self._device)
+            kv_cache = GMSClientMemoryManager(_KV_CACHE, vmm, self._device)
             self._weights = weights
             self._kv_cache = kv_cache
             self._active_domain: ContextVar[str | None] = ContextVar(

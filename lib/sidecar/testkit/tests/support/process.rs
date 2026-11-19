@@ -87,6 +87,15 @@ impl Environment {
     }
 
     pub async fn cards(&self) -> Vec<ModelDeploymentCard> {
+        self.worker_cards()
+            .await
+            .into_iter()
+            .map(|(_, card)| card)
+            .collect()
+    }
+
+    /// This namespace's model cards, each with the worker that published it.
+    pub async fn worker_cards(&self) -> Vec<(u64, ModelDeploymentCard)> {
         self.runtime
             .discovery()
             .list(DiscoveryQuery::AllModels)
@@ -94,8 +103,12 @@ impl Environment {
             .unwrap()
             .into_iter()
             .filter_map(|instance| match &instance {
-                DiscoveryInstance::Model { namespace, .. } if namespace == &self.namespace => {
-                    Some(instance.deserialize_model().unwrap())
+                DiscoveryInstance::Model {
+                    namespace,
+                    instance_id,
+                    ..
+                } if namespace == &self.namespace => {
+                    Some((*instance_id, instance.deserialize_model().unwrap()))
                 }
                 _ => None,
             })
@@ -112,9 +125,13 @@ impl Environment {
             .await
             .unwrap();
         Arc::new(
-            Router::from_client(client, RouterMode::RoundRobin)
-                .await
-                .unwrap(),
+            Router::from_client_with_options(
+                client,
+                RouterMode::RoundRobin,
+                dynamo_llm::kv_router::plugins::push_router_options(),
+            )
+            .await
+            .unwrap(),
         )
     }
 
@@ -170,8 +187,9 @@ impl Environment {
         &self,
         endpoint: &str,
         mode: DisaggregationMode,
+        grace_secs: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, grace_secs)
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -200,6 +218,10 @@ pub struct Frontend {
 
 impl Frontend {
     pub async fn start(env: &Environment) -> Self {
+        Self::start_with_migration(env, 0).await
+    }
+
+    pub async fn start_with_migration(env: &Environment, migration_limit: u32) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let service = HttpService::builder()
@@ -215,7 +237,7 @@ impl Frontend {
                 router_mode: RouterMode::RoundRobin,
                 ..Default::default()
             },
-            0,
+            migration_limit,
             None,
             None,
             None,
@@ -246,15 +268,21 @@ impl Frontend {
         }
     }
 
-    pub fn generate(&self, model: &str, id: &str, is_streaming: bool) -> reqwest::RequestBuilder {
-        self.client
-            .post(&self.url)
-            .header("x-dynamo-request-id", id)
-            .json(&serde_json::json!({
-                "model": model, "prompt": "hello", "max_tokens": 3,
-                "stream": is_streaming, "temperature": 0, "ignore_eos": true,
-                "nvext": {"extra_fields": ["completion_token_ids"]},
-            }))
+    pub fn generate(&self, model: &str, is_streaming: bool) -> reqwest::RequestBuilder {
+        self.generate_tokens(model, is_streaming, 3)
+    }
+
+    pub fn generate_tokens(
+        &self,
+        model: &str,
+        is_streaming: bool,
+        max_tokens: u32,
+    ) -> reqwest::RequestBuilder {
+        self.client.post(&self.url).json(&serde_json::json!({
+            "model": model, "prompt": "hello", "max_tokens": max_tokens,
+            "stream": is_streaming, "temperature": 0, "ignore_eos": true,
+            "nvext": {"extra_fields": ["completion_token_ids"]},
+        }))
     }
 
     pub async fn shutdown(mut self) {
@@ -298,8 +326,11 @@ impl Process {
             DisaggregationMode::Decode => "decode",
             DisaggregationMode::Encode => "encode",
         };
-        let stdout = env.root.path().join(format!("{role}.stdout"));
-        let stderr = env.root.path().join(format!("{role}.stderr"));
+        // Several children can share a role, so number their logs.
+        static SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let index = SPAWNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stdout = env.root.path().join(format!("{role}-{index}.stdout"));
+        let stderr = env.root.path().join(format!("{role}-{index}.stderr"));
         let mut command = F::command(&env.model);
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();

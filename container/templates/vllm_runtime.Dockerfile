@@ -14,6 +14,15 @@ FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
+{% if variant == "enterprise" %}
+# The NIM base image ends as its non-root `nim` user.
+USER root
+# The NIM base removes some packages but keeps their conffiles (dpkg state rc).
+# Purge them so compliance does not attribute packages that no longer ship.
+RUN dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
+# Dynamo resets the NIM entrypoint and never starts the NIM nginx proxy.
+RUN rm -rf /opt/nim/.local/nginx
+{% endif %}
 
 {% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
 ARG PYTHON_VERSION
@@ -96,6 +105,8 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 # rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -106,8 +117,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
+        libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
@@ -239,7 +263,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisim-*.whl && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
@@ -253,8 +277,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
 # inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
 # (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+# libjemalloc2 lets CPython and C code opt into jemalloc via
+# LD_PRELOAD; it is not preloaded by default.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -329,7 +353,7 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-{% if device == "cuda" %}
+{% if device == "cuda" and variant != "enterprise" %}{# The enterprise base ships no distro FFmpeg stack to purge. #}
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
 # against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
 # codec packages and replace them with the LGPL-only in-tree ffmpeg built in
@@ -339,21 +363,36 @@ RUN apt-get update && \
 # safe. dpkg-query keeps the match robust across base-image/arch version
 # suffixes (e.g. libavcodec58 vs 60).
 #
-# This grep is the COMPLETE, auditable set of what leaves the image: there is
-# deliberately NO apt-get autoremove, so the removal can never cascade into
-# unrelated auto-installed packages. That matters because the base image marks
-# both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
-# runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the torch
-# wheels here ship no bundled cublas and load the system copies) as
-# auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
-# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
-# LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
-# dead weight, not a compliance issue.
+# This grep, together with `dependents` below, is the COMPLETE, auditable set
+# of what leaves the image: there is deliberately NO apt-get autoremove, so the
+# removal never sweeps up unrelated auto-installed packages. That matters
+# because the base image marks both the gcc/g++/make toolchain
+# (torch.inductor/Triton JIT shell out to it at runtime) and the CUDA math libs
+# (libcublas/libcusolver/libcusparse — the torch wheels here ship no bundled
+# cublas and load the system copies) as auto-installed. A bare
+# `autoremove --purge` sweeps all of those as "orphaned", which broke runtime
+# JIT (missing C compiler) in the 1.3.0 rc image. Any LGPL/BSD media libs left
+# orphaned (libva, libvdpau, ...) are license-clean dead weight, not a
+# compliance issue. librist, and the mbedTLS and cJSON libraries that only
+# librist uses, are named because nothing else links them.
+#
+# apt-get purge does remove each installed package that depends on a purged
+# one. In the current base, those are the seven packages in `dependents`. A
+# simulated purge runs first, and the build fails unless it removes every
+# matched package and nothing outside the match and `dependents`. A new
+# dependent in a later base then stops the build instead of leaving the image
+# unnoticed.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite|librist[0-9]|libmbedcrypto|libmbedtls|libmbedx509|libcjson)' \
         || true); \
+    dependents="libjack-jackd2-0 libopenmpt0t64 libpocketsphinx3 libpulse0 libsdl2-2.0-0 libsndfile1 libsphinxbase3t64"; \
     if [ -n "$purge" ]; then \
+        removed=$(apt-get -s purge $purge | awk '/^(Remv|Purg) /{sub(/:.*/, "", $2); print $2}'); \
+        [ -n "$removed" ] || { echo "ERROR: a simulated purge of the matched packages removes nothing" >&2; exit 1; }; \
+        kept=$(printf '%s\n' $purge | grep -vxF "$removed" || true); \
+        extra=$(printf '%s\n' $removed | grep -vxF "$(printf '%s\n' $purge $dependents)" || true); \
+        [ -z "$kept$extra" ] || { echo "ERROR: the purge would keep: ${kept:-none}; and also remove: ${extra:-none}" >&2; exit 1; }; \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
     fi; \
     rm -rf /var/lib/apt/lists/*
@@ -399,7 +438,7 @@ RUN set -eu; \
     /usr/local/bin/ffprobe -hide_banner -version >/dev/null \
       || { echo "ERROR: shipped ffprobe is missing or cannot start" >&2; exit 1; }
 
-{% if device == "cuda" %}
+{% if device == "cuda" and variant != "enterprise" %}{# The enterprise base's own PyNvVideoCodec is kept as shipped. #}
 # Delete the base image's PyNvVideoCodec before the install below replaces it.
 # The vllm-openai base ships 2.0.4, which bundles a complete FFmpeg including a
 # libavcodec the codec gate denies on presence.
@@ -455,7 +494,18 @@ RUN set -eu; \
 # cache would sit in an inherited layer, so removing it here does not shrink
 # the pulled image, it only drops it from the final filesystem view, which is
 # what the compliance scanners see.
-{% if device == "cuda" %}
+{% if device == "cuda" and variant == "enterprise" %}{# Install the list without PyNvVideoCodec; the base's copy must remain. #}
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.vllm.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
+    grep -v -e '^PyNvVideoCodec' /tmp/requirements.vllm.txt > /tmp/requirements.vllm.enterprise.txt && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg \
+        --no-deps --requirement /tmp/requirements.vllm.enterprise.txt && \
+    rm -f /tmp/requirements.vllm.enterprise.txt && \
+    rm -rf /opt/uv/cache && \
+    python3 -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('PyNvVideoCodec') else 'ERROR: the base image no longer ships PyNvVideoCodec')"
+{%- elif device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
@@ -468,7 +518,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # Assert what the removal and install left. The pin is repeated from the
 # requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
-    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
@@ -515,55 +565,56 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 RUN rm -rf /workspace/vllm
 
 {% if device == "cuda" %}
-# Transitional: this exists only until the base image stops shipping these.
+# Transitional: this exists only until no upstream brings these in.
 # The permanent statement of what may ship is
 # tests/dependencies/test_no_software_video_codecs.py -- when this purge
 # becomes redundant, delete it and keep those assertions.
-# Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
-# base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
-# PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
-# keeps OpenCV for mistral_common's cv2.resize, rebuilt at the base image's
-# version with video backends disabled. Other codec-bearing wheels are removed.
+# Remove the codec-bearing video-DECODE wheels from system Python, whether the
+# base image shipped them or the installs above pulled them in (vLLM-Omni brings
+# PyAV and full OpenCV). Each bundles its own full ffmpeg carrying software
+# H.264/H.265/AAC; PyAV and decord additionally ship GPL libx264/libx265. Dynamo's
+# vLLM component keeps OpenCV for mistral_common's cv2.resize: when no other cv2
+# remains (a base may ship a codec-free one in a venv ahead of system Python), it
+# is rebuilt at the removed version with video backends disabled.
 # (PyNvVideoCodec is KEPT for NVDEC hardware decode -- see the note below.) The in-tree
 # LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
-    OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    SYS_PYTHON=/usr/bin/python3; \
+    OPENCV_VERSION="$("${SYS_PYTHON}" -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
     if [ -z "${OPENCV_VERSION}" ]; then \
-        OPENCV_VERSION="$(python3 -m pip show opencv-python 2>/dev/null | awk '/^Version:/{print $2}')"; \
+        OPENCV_VERSION="$("${SYS_PYTHON}" -m pip show opencv-python 2>/dev/null | awk '/^Version:/{print $2}')"; \
     fi; \
-    test -n "${OPENCV_VERSION}" || { echo "ERROR: base image must provide version metadata for opencv-python-headless or opencv-python" >&2; exit 1; }; \
-    python3 -m pip uninstall --yes \
+    "${SYS_PYTHON}" -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec \
         || true; \
-    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    SITE_PACKAGES="$("${SYS_PYTHON}" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
     rm -rf \
         "${SITE_PACKAGES}"/av "${SITE_PACKAGES}"/av-*.dist-info "${SITE_PACKAGES}"/av.libs \
         "${SITE_PACKAGES}"/cv2 "${SITE_PACKAGES}"/opencv_python*.dist-info "${SITE_PACKAGES}"/opencv_python*.libs \
         "${SITE_PACKAGES}"/decord "${SITE_PACKAGES}"/decord-*.dist-info "${SITE_PACKAGES}"/decord.libs \
         "${SITE_PACKAGES}"/decord2 "${SITE_PACKAGES}"/decord2-*.dist-info "${SITE_PACKAGES}"/decord2.libs \
-        "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info \
+        "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info "${SITE_PACKAGES}"/torchcodec.libs \
         /root/.cache/pip; \
-    # Guard EVERY purged wheel: the uninstall above is `|| true`, so a package
-    # that survived (rename, new bundling) would otherwise pass silently. decord2
-    # imports as `decord`, so both are covered by the one check.
-    ! python3 -c "import cv2" 2>/dev/null; \
-    ! python3 -c "import av" 2>/dev/null; \
-    ! python3 -c "import decord" 2>/dev/null; \
-    ! python3 -c "import torchcodec" 2>/dev/null; \
-    ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
-    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
-    python3 -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
-    rm -rf /root/.cache/pip; \
+    # The uninstall above is `|| true`, so a package that survived (rename, new
+    # bundling) must fail here. decord2 imports as `decord`.
+    "${SYS_PYTHON}" -c "import importlib.util as u, sys; left=[m for m in ('cv2', 'av', 'decord', 'torchcodec') if u.find_spec(m)]; sys.exit('ERROR: still in system Python: ' + ', '.join(left) if left else 0)"; \
+    if ! python3 -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('cv2') else 1)"; then \
+        test -n "${OPENCV_VERSION}" || { echo "ERROR: no cv2 remains and no opencv-python-headless or opencv-python version metadata was found to rebuild it" >&2; exit 1; }; \
+        ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
+        CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
+        "${SYS_PYTHON}" -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
+        rm -rf /root/.cache/pip; \
+    fi; \
     python3 -c "import cv2; cv2.resize"; \
-    ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
+    python3 -c "import os, sys; libs=[os.path.join(p, n) for p in sys.path if p and os.path.isdir(p) for n in os.listdir(p) if n.startswith('opencv_python') and n.endswith('.libs')]; sys.exit('ERROR: cv2 ships vendored libraries: ' + ', '.join(libs) if libs else 0)"; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
-# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.3 by
+# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.4 by
 # the removal and requirements install above: the base image's 2.0.4 bundles a
-# full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.3
+# full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.4
 # bundles only libavutil.so.61 + libavformat.so.63 (FFmpeg 9.0.1, container
 # demux, no software codec). It provides the built-in H.264/H.265 video-input
 # path (NVDEC hardware decode via libnvcuvid;
@@ -572,18 +623,17 @@ RUN set -eux; \
 # pod/runtimeClass does not drop it.
 #
 # This deliberately overrides a dependency of vLLM's: `importlib.metadata.requires
-# ("vllm")` lists `PyNvVideoCodec==2.0.4`, an exact pin, and the image ships 2.2.3
-# against it. Unlike the equivalent override in trtllm_runtime.Dockerfile, do not
-# expect a resolver complaint in the build log to confirm it -- that stage runs
-# real `pip`, which prints one; this one runs `uv pip install --no-deps`, which
-# does not. `uv pip check` on the finished image is what surfaces it.
+# ("vllm")` lists `PyNvVideoCodec==2.0.4`, an exact pin, and the image ships 2.2.4
+# against it. Do not expect a resolver complaint in the build log to confirm it:
+# this stage runs `uv pip install --no-deps`, which prints none. `uv pip check`
+# on the finished image is what surfaces it.
 #
 # The override is deliberate: 2.0.4 is the version whose bundled libavcodec the
 # codec gate rejects, so the override is the point. vLLM's own consumer is
 # vllm/multimodal/video_decoders/pynvvideocodec.py
 # (PyNvVideoCodecVideoBackendMixin), and everything it touches -- SimpleDecoder,
 # OutputColorType, get_batch_frames_by_index, get_stream_metadata,
-# reconfigure_decoder -- still exists in 2.2.3. The one API 2.2.3 drops is
+# reconfigure_decoder -- still exists in 2.2.4. The one API 2.2.x drops is
 # SimpleDecoder.stop(), which neither vLLM nor Dynamo calls. Re-check that list
 # when the base image moves.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility

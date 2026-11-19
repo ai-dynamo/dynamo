@@ -21,13 +21,11 @@ spec:
           spec:
             containers:
             - name: main
-              image: example.invalid/lpu-runtime:test
+              image: example.invalid/quasar:test
               args: []
               resources:
                 limits:
                   lpu.nvidia.com/devices: '1'
-              command:
-              - /bin/quasar-entrypoint
               readinessProbe:
                 failureThreshold: 3
                 initialDelaySeconds: 10
@@ -54,8 +52,6 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
-              - name: config
-                mountPath: /configs
               - name: host-dev
                 mountPath: /dev
               - name: host-sys
@@ -116,83 +112,12 @@ spec:
           spec:
             containers:
             - name: main
-              image: example.invalid/lpu-runtime:test
-              args:
-              - --instance-model-name
-              - test/v3-specdecode
-              - --mpirun-path
-              - /bin/mpirun
-              - --mpi-ssh-cmd
-              - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /tmp/dynamo-lpu-ssh/private.key
-              - --agent-wd
-              - /tmp
-              - --conductor-bind-host
-              - 0.0.0.0
-              - --conductor-hostname
-              - $(POD_IP)
-              - --control-server-addr
-              - $(POD_IP):51045
-              - --json-logs
-              - --disable-tracing
-              - --mpi-use-tcp
-              - --agent-disable-auto-restart
-              - --agent-server-max-retries
-              - '60'
-              - --agent-server-retry-sleep-dur
-              - 2s
-              - --graceful-shutdown-timeout
-              - 0s
-              - --response-timeout
-              - 120s
-              - --frontend-type
-              - dynamo
-              - --endpoint-id
-              - dyn://$(DYN_NAMESPACE).backend.generate
-              - --store-backend
-              - kubernetes
-              - --allocation
-              - $(LPX_ALLOCATION)
-              - --agent-env-vars
-              - BMC_SSH_ENABLED=false
-              - --agent-env-vars
-              - LPU_FPGA_AUTOMATIC_JTAG_RECOVERY=false
-              - --agent-env-vars
-              - LPU_FPGA_RECONFIGURE_METHOD=cvp
-              - --agent-env-vars
-              - LPU_PARTITION_RUNNER_DATAPLANE=pcie
-              - --agent-env-vars
-              - LPU_PARTITION_RUNNER_PCIE_SOURCE_PORT=33000
-              - --agent-env-vars
-              - LPU_RUNNER_OUTSTANDING_TASK_DRAIN_TIMEOUT_SECONDS=10
-              - --agent-env-vars
-              - LPU_VSAP_DIB_BARRIER_BEFORE_PUSH_ENABLED=true
-              - --agent-env-vars
-              - LPU_VSAP_MAX_TENSORS_PER_CHUNK=4
-              - --agent-env-vars
-              - REDFISH_BMC_ENABLED=false
-              command:
-              - /bin/nova
+              image: example.invalid/quasar:test
               env:
-              - name: NOVA_PIPELINE_TYPE
-                value: 'SpecDecode'
-              - name: NOVA_DRAFT_MODEL_PATH
-                value: '$(LPX_DRAFT_MODEL_PATH)'
-              - name: NOVA_DRAFT_RESOLVED_PARTITIONS_DIR
-                value: '/configs'
-              - name: NOVA_TARGET_MODEL_PATH
-                value: '$(LPX_TARGET_MODEL_PATH)'
-              - name: NOVA_TARGET_RESOLVED_PARTITIONS_DIR
-                value: '/configs'
-              - name: NOVA_MODEL_BASE_PATHS
-                value: /nfs
-              - name: NOVA_NODE_NAME_TEMPLATE
-                value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
-              - name: OMPI_ALLOW_RUN_AS_ROOT
-                value: '1'
-              - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
-                value: '1'
-              - name: OMPI_MCA_plm_rsh_args
-                value: -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentityFile=/tmp/dynamo-lpu-ssh/private.key
+              - name: DRAFT_MODEL_PATH
+                value: $(LPX_DRAFT_MODEL_PATH)
+              - name: TARGET_MODEL_PATH
+                value: $(LPX_TARGET_MODEL_PATH)
               readinessProbe:
                 httpGet:
                   path: /readyz
@@ -206,8 +131,6 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
-              - name: config
-                mountPath: /configs
               - name: single-v2-ssh-key
                 mountPath: /tmp/dynamo-lpu-ssh
             initContainers:

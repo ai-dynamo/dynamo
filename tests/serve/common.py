@@ -32,7 +32,12 @@ from tests.utils.payload_builder import (
     make_completions_health_check,
     make_images_health_check,
 )
-from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    CompletionPayload,
+    EngineFailurePayload,
+    ImagesPayload,
+)
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 DEFAULT_TIMEOUT = 10
@@ -53,6 +58,8 @@ def _tail_logs(content: str, *, lines: int = 80) -> str:
 _ENDPOINT_HEALTH_CHECK_FACTORIES = (
     (CompletionPayload, make_completions_health_check),
     (ChatPayload, make_chat_health_check),
+    # Its single request must not reach a frontend that would still reject it.
+    (EngineFailurePayload, make_chat_health_check),
     (ImagesPayload, make_images_health_check),
 )
 

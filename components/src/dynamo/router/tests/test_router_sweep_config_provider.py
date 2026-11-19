@@ -12,16 +12,13 @@ from copy import deepcopy
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import CandidateContext, SweepContext
-from aisimulate.sweeper.replay import BackendDeploymentSpec
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import CandidateContext, SweepContext
+from aisim.sweeper.replay import BackendDeploymentSpec
 
 import dynamo.router.simulation.provider as router_provider_module
 from dynamo.router.simulation import create_provider
@@ -32,6 +29,13 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.planner,
 ]
+
+# For tests of the sources that the deprecated router section reads (the AIS
+# load model without ``ais_perf_model``). Its warning is tested in
+# test_router_ais_perf_model_key.py.
+_old_router_section = pytest.mark.filterwarnings(
+    "ignore:router.prefill_load_model.type:FutureWarning"
+)
 
 
 def _sweep_context() -> SweepContext:
@@ -177,6 +181,14 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.compile_prediction({"not_a_router_knob": True}, prediction_context)
+    with pytest.raises(ValueError, match="less than or equal to 31536000"):
+        adapter.compile_prediction(
+            {
+                "policy": "kv_router",
+                "conversation_affinity": {"ttl_seconds": 31_536_001},
+            },
+            prediction_context,
+        )
     with pytest.raises(ValueError, match="round_robin rejects"):
         adapter.compile_recommendation(
             {
@@ -225,6 +237,37 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
     assert replay_spec.runtime_hooks[0].config["ais_perf_config"] is None
 
 
+def test_public_router_search_without_policy_matches_recommendation() -> None:
+    adapter = create_provider()
+    plan = adapter.generate_search_space(
+        {"prefill_load_model": {"type": {"choices": ["none", "ais"]}}},
+        _sweep_context(),
+    )
+
+    assert plan.state["public_schema"] is True
+    assert plan.fragment.choices_by_branch["agg"] == {
+        "mode": ["round_robin", "kv_router"]
+    }
+    (conditional,) = plan.fragment.conditional_by_branch["agg"]
+    assert conditional.values == ["kv_router"]
+    assert conditional.choices["prefill_load_model_type"] == ["none", "ais"]
+    replay_spec = adapter.materialize_replay(
+        plan, {"mode": "round_robin"}, _candidate_context()
+    )
+    assert replay_spec.config == {
+        "policy": "round_robin",
+        "prefill_load_model": {"type": "none"},
+    }
+
+
+def test_public_router_search_without_policy_rejects_unknown_fields() -> None:
+    with pytest.raises(ValueError, match="types"):
+        create_provider().generate_search_space(
+            {"prefill_load_model": {"types": "ais"}},
+            _sweep_context(),
+        )
+
+
 def test_public_router_prediction_materializes_runtime_hook() -> None:
     replay_spec = create_provider().compile_prediction(
         {
@@ -248,6 +291,42 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
     }
 
 
+def test_public_router_prediction_forwards_use_kv_events() -> None:
+    replay_spec = create_provider().compile_prediction(
+        {"policy": "kv_router", "use_kv_events": False},
+        PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+    )
+
+    assert replay_spec.config["use_kv_events"] is False
+    assert (
+        replay_spec.runtime_hooks[0].config["router_config"]["use_kv_events"] is False
+    )
+    with pytest.raises(ValueError, match="do not accept null"):
+        create_provider().compile_prediction(
+            {"policy": "kv_router", "use_kv_events": None},
+            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+        )
+
+
+def test_public_router_policy_config_reaches_runtime_config() -> None:
+    context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
+    replay_spec = create_provider().compile_prediction(
+        {"policy": "kv_router", "policy_config": "two-tier.yaml"},
+        context,
+    )
+
+    assert replay_spec.config["policy_config"] == "two-tier.yaml"
+    router_config = replay_spec.runtime_hooks[0].config["router_config"]
+    assert router_config["router_policy_config"] == "two-tier.yaml"
+
+    with pytest.raises(ValueError, match="round_robin requires"):
+        create_provider().compile_prediction(
+            {"policy": "round_robin", "policy_config": "two-tier.yaml"},
+            context,
+        )
+
+
+@_old_router_section
 def test_public_router_ais_load_model_reaches_runtime_config() -> None:
     replay_spec = create_provider().compile_prediction(
         {
@@ -279,7 +358,7 @@ def test_public_router_ais_load_model_reaches_runtime_config() -> None:
 
     hook_config = replay_spec.runtime_hooks[0].config
     assert hook_config["router_config"]["router_prefill_load_model"] == "ais"
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     assert (
         hook_config["ais_perf_config"]
@@ -331,7 +410,8 @@ def test_public_router_preserves_external_fpm_path_and_controls(
         with pytest.raises(ValueError, match="conflicting fpm_parquet_path"):
             create_provider().compile_prediction(public, context)
     else:
-        replay_spec = create_provider().compile_prediction(public, context)
+        with pytest.warns(FutureWarning, match="without router.ais_perf_model"):
+            replay_spec = create_provider().compile_prediction(public, context)
         perf_config = replay_spec.runtime_hooks[0].config["ais_perf_config"]
         assert perf_config["worker_type"] == "prefill"
         assert perf_config["systems_paths"] == [str(root) for root in roots]
@@ -444,6 +524,7 @@ def test_mixed_router_policy_preserves_continuous_and_log_ranges() -> None:
     assert round_robin.runtime_hooks == ()
 
 
+@_old_router_section
 def test_candidate_ais_materialization_preserves_independent_router_controls(
     tmp_path,
 ) -> None:

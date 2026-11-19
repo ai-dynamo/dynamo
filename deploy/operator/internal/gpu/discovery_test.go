@@ -51,6 +51,100 @@ func newFakeClient(objs ...client.Object) client.Reader {
 		Build()
 }
 
+func TestGPUDiscovery_TotalGPUs(t *testing.T) {
+	for _, source := range []string{"node labels", "DCGM"} {
+		t.Run(source, func(t *testing.T) {
+			tests := []struct {
+				name         string
+				h100Counts   []int
+				h100VRAM     []int
+				h100Models   []string
+				a100Counts   []int
+				filterSKU    nvidiacomv1beta1.GPUSKUType
+				wantSKU      nvidiacomv1beta1.GPUSKUType
+				wantPerNode  int
+				wantNodes    int
+				wantTotal    int
+				wantSelected int
+			}{
+				{name: "different node sizes", h100Counts: []int{8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12, wantSelected: 8},
+				{name: "maximum selected after smaller node", h100Counts: []int{4, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12, wantSelected: 8},
+				{name: "same selected shape", h100Counts: []int{8, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 16, wantSelected: 16},
+				{name: "different VRAM per GPU", h100Counts: []int{8, 8}, h100VRAM: []int{81920, 40960}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 16, wantSelected: 8},
+				{name: "unknown models remain separate GPU types", h100Counts: []int{8, 8}, h100Models: []string{"FutureGPU-A", "FutureGPU-B"}, wantPerNode: 8, wantNodes: 1, wantTotal: 8, wantSelected: 8},
+				{name: "unfiltered excludes other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12, wantSelected: 8},
+				{name: "filter selects other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, filterSKU: "a100_sxm", wantSKU: "a100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 10, wantSelected: 8},
+				{name: "discovery does not cap totals", h100Counts: []int{8, 8, 8, 8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 5, wantTotal: 36, wantSelected: 32},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Log("creating GPU nodes and DCGM exporters for each SKU")
+					var objects []client.Object
+					metrics := make(map[string]GPUInfo)
+					for _, group := range []struct {
+						model  string
+						vram   int
+						counts []int
+						vrams  []int
+						models []string
+					}{
+						{model: "H100-SXM5-80GB", vram: 81920, counts: tt.h100Counts, vrams: tt.h100VRAM, models: tt.h100Models},
+						{model: "A100-SXM4-40GB", vram: 40960, counts: tt.a100Counts},
+					} {
+						for index, count := range group.counts {
+							vram := group.vram
+							if index < len(group.vrams) {
+								vram = group.vrams[index]
+							}
+							model := group.model
+							if index < len(group.models) {
+								model = group.models[index]
+							}
+							name := fmt.Sprintf("gpu-node-%d", len(metrics))
+							ip := fmt.Sprintf("10.0.0.%d", len(metrics)+1)
+							objects = append(objects, &corev1.Node{
+								Name: name,
+								Labels: map[string]string{
+									LabelGPUCount: fmt.Sprint(count), LabelGPUProduct: model, LabelGPUMemory: fmt.Sprint(vram),
+								},
+							}, &corev1.Pod{
+								Name: name, Namespace: "gpu-operator",
+								Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+								Spec:   corev1.PodSpec{NodeName: name},
+								Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+							})
+							metrics[buildDCGMEndpoint(ip)] = GPUInfo{NodeName: name, GPUsPerNode: count, Model: model, VRAMPerGPU: vram}
+						}
+					}
+					k8sClient := newFakeClient(objects...)
+
+					t.Log("discovering the selected SKU's actual GPU total")
+					var info *GPUInfo
+					var err error
+					if source == "DCGM" {
+						discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+							scraped, ok := metrics[endpoint]
+							if !ok {
+								return nil, fmt.Errorf("unexpected DCGM endpoint %q", endpoint)
+							}
+							return &scraped, nil
+						})
+						info, err = discovery.DiscoverGPUsFromDCGMFiltered(t.Context(), k8sClient, nil, tt.filterSKU)
+					} else {
+						info, err = DiscoverGPUsFiltered(t.Context(), k8sClient, tt.filterSKU)
+					}
+					require.NoError(t, err)
+					assert.Equal(t, tt.wantSKU, info.System)
+					assert.Equal(t, tt.wantPerNode, info.GPUsPerNode)
+					assert.Equal(t, tt.wantNodes, info.NodesWithGPUs)
+					assert.Equal(t, tt.wantTotal, info.TotalGPUs)
+					assert.Equal(t, tt.wantSelected, info.SelectedShapeGPUs)
+				})
+			}
+		})
+	}
+}
+
 func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	ctx := context.Background()
 
@@ -70,6 +164,7 @@ func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	require.NotNil(t, gpuInfo)
 
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
+	assert.Equal(t, 8, gpuInfo.TotalGPUs)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
 	assert.Equal(t, "h100_sxm", string(gpuInfo.System))
@@ -103,6 +198,7 @@ func TestDiscoverGPUs_MultipleNodesHomogeneous(t *testing.T) {
 	require.NotNil(t, gpuInfo)
 
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
+	assert.Equal(t, 16, gpuInfo.TotalGPUs)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
 }
@@ -1061,6 +1157,63 @@ func TestScrapeMetricsEndpoint_ConnectionReuse(t *testing.T) {
 	})
 }
 
+func TestDiscoverGPUsFromDCGM_DeduplicatesNodes(t *testing.T) {
+	tests := []struct {
+		name              string
+		counts            [2]int
+		vram              [2]int
+		failFirstExporter bool
+		wantVRAM          int
+	}{
+		{name: "matching reports", counts: [2]int{8, 8}, vram: [2]int{81920, 81920}, wantVRAM: 81920},
+		{name: "first exporter fails", counts: [2]int{8, 8}, vram: [2]int{81920, 81920}, failFirstExporter: true, wantVRAM: 81920},
+		{name: "larger count last", counts: [2]int{4, 8}, vram: [2]int{81920, 40960}, wantVRAM: 40960},
+		{name: "larger count first", counts: [2]int{8, 4}, vram: [2]int{40960, 81920}, wantVRAM: 40960},
+		{name: "higher VRAM last", counts: [2]int{8, 8}, vram: [2]int{40960, 81920}, wantVRAM: 81920},
+		{name: "higher VRAM first", counts: [2]int{8, 8}, vram: [2]int{81920, 40960}, wantVRAM: 81920},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("creating two exporters on one node and one on another node")
+			var objects []client.Object
+			metrics := make(map[string]GPUInfo)
+			for i, node := range []string{"node-a", "node-a", "node-b"} {
+				ip := fmt.Sprintf("10.0.0.%d", i+1)
+				count, vram := 4, 81920
+				if i < 2 {
+					count, vram = tt.counts[i], tt.vram[i]
+				}
+				metrics[buildDCGMEndpoint(ip)] = GPUInfo{GPUsPerNode: count, Model: "H100-SXM5-80GB", VRAMPerGPU: vram}
+				objects = append(objects, &corev1.Pod{
+					Name: fmt.Sprintf("dcgm-%d", i), Namespace: "gpu-operator",
+					Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+					Spec:   corev1.PodSpec{NodeName: node},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+				})
+			}
+			discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+				if tt.failFirstExporter && endpoint == buildDCGMEndpoint("10.0.0.1") {
+					return nil, errors.New("exporter unavailable")
+				}
+				scraped, ok := metrics[endpoint]
+				if !ok {
+					return nil, fmt.Errorf("unexpected DCGM endpoint %q", endpoint)
+				}
+				return &scraped, nil
+			})
+
+			t.Log("counting each successfully discovered node once")
+			info, err := discovery.DiscoverGPUsFromDCGM(t.Context(), newFakeClient(objects...), nil)
+			require.NoError(t, err)
+			assert.Equal(t, 8, info.GPUsPerNode)
+			assert.Equal(t, tt.wantVRAM, info.VRAMPerGPU)
+			assert.Equal(t, 2, info.NodesWithGPUs)
+			assert.Equal(t, 12, info.TotalGPUs)
+			assert.Equal(t, 8, info.SelectedShapeGPUs)
+		})
+	}
+}
+
 func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	ctx := context.Background()
 
@@ -1118,6 +1271,7 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	require.Equal(t, 1, callCount)
 
 	require.Equal(t, info1, info2)
+	require.Equal(t, 4, info2.TotalGPUs)
 }
 
 func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
@@ -1216,11 +1370,13 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 		&corev1.Pod{
 			Name: "dcgm-h100", Namespace: "gpu-operator",
 			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+			Spec:   corev1.PodSpec{NodeName: "node-h100"},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
 		},
 		&corev1.Pod{
 			Name: "dcgm-a100", Namespace: "gpu-operator",
 			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+			Spec:   corev1.PodSpec{NodeName: "node-a100"},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
 		},
 	}
