@@ -1554,6 +1554,8 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            // Returned with the admitted response; the queue does not use it.
+            backend_priority: _,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
