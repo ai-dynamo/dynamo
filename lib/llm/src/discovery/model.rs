@@ -920,7 +920,7 @@ impl Model {
                 Err(self.engine_error(false))
             };
         }
-        self.select_worker_set_with_snapshot(
+        self.select_worker_set_with_projection(
             |ws| {
                 if capability.is_some_and(|capability| !ws.supports_runtime_capability(capability))
                 {
@@ -931,41 +931,10 @@ impl Model {
                     .map(|engine| (engine, ws.parsing_options()))
             },
             WorkerSet::worker_count,
-            |(engine, parsing), selected, snapshot| {
-                let omit_images =
-                    Self::namespace_input_modality_support(snapshot, selected.namespace(), "image")
-                        == Some(false);
-                (engine, parsing, omit_images)
-            },
+            |(engine, parsing), selected| (engine, parsing, selected.allows_image_omission()),
         )
         .map(Some)
         .ok_or_else(|| self.engine_error(self.has_chat_engine()))
-    }
-
-    fn namespace_input_modality_support(
-        snapshot: &[&WorkerSet],
-        namespace: &str,
-        modality: &str,
-    ) -> Option<bool> {
-        let mut unknown = false;
-        let mut found = false;
-        for set in snapshot.iter().filter(|set| set.namespace() == namespace) {
-            found = true;
-            let value = set
-                .card()
-                .runtime_config
-                .runtime_data
-                .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES);
-            match value.and_then(serde_json::Value::as_array) {
-                Some(values) if values.iter().all(serde_json::Value::is_string) => {
-                    if values.iter().any(|value| value.as_str() == Some(modality)) {
-                        return Some(true);
-                    }
-                }
-                _ => unknown = true,
-            }
-        }
-        if unknown || !found { None } else { Some(false) }
     }
 
     /// Select a chat engine from a WorkerSet that advertises `capability`.
@@ -1096,10 +1065,10 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
     {
-        self.select_worker_set_with_snapshot(extract, count_workers, |value, _, _| value)
+        self.select_worker_set_with_projection(extract, count_workers, |value, _| value)
     }
 
-    fn select_worker_set_with_snapshot<T, U, F, C, M>(
+    fn select_worker_set_with_projection<T, U, F, C, M>(
         &self,
         extract: F,
         count_workers: C,
@@ -1108,7 +1077,7 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
-        M: Fn(T, &WorkerSet, &[&WorkerSet]) -> U,
+        M: Fn(T, &WorkerSet) -> U,
     {
         // One immutable membership map drives both the readiness filter and
         // candidate eligibility, so a concurrent add/remove can't make us treat a
@@ -1138,7 +1107,7 @@ impl Model {
             if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
-            return extract(ws).map(|value| project(value, ws, &snapshot));
+            return extract(ws).map(|value| project(value, ws));
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
@@ -1164,7 +1133,7 @@ impl Model {
             return eligible
                 .into_iter()
                 .next()
-                .map(|(val, _, ws)| project(val, ws, &snapshot));
+                .map(|(val, _, ws)| project(val, ws));
         }
 
         // Weighted random selection proportional to worker count
@@ -1172,7 +1141,7 @@ impl Model {
         let mut pick = rand::rng().random_range(0..total_weight);
         for (val, weight, ws) in eligible {
             if pick < weight {
-                return Some(project(val, ws, &snapshot));
+                return Some(project(val, ws));
             }
             pick -= weight;
         }
@@ -2867,12 +2836,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn image_omission_follows_selected_deployment_and_pipeline_peers() {
+    #[tokio::test]
+    async fn image_omission_follows_selected_deployment_and_pipeline_peers() {
+        use crate::discovery::{CommittedWorkerSetTarget, WorkerSetTarget};
+        use crate::kv_router::{EncoderRouter, PrefillRouter};
         use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        use dynamo_runtime::distributed::DistributedConfig;
+        use dynamo_runtime::{DistributedRuntime, Runtime};
+
         let model = Model::new("test".into());
         let text_engine = make_test_chat_engine();
         let vision_engine = make_test_chat_engine();
+        let runtime = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let component = runtime
+            .namespace("text".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let (_activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let prefill = PrefillRouter::new(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            1,
+            None,
+            None,
+            None,
+            crate::session_affinity::SessionAffinityMode::Hard,
+            "test".to_string(),
+            "text".to_string(),
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let encoder = EncoderRouter::new("test".into(), "text".into());
         let make_set = |namespace: &str, modalities: Option<Vec<&str>>, worker_type| {
             let mut card = ModelDeploymentCard::with_name_only("test");
             card.worker_type = Some(worker_type);
@@ -2890,6 +2891,8 @@ mod tests {
         };
         let mut text = make_set("text", Some(vec!["text"]), WorkerType::Aggregated);
         text.chat_engine = Some(text_engine.clone());
+        text.prefill_router = Some(prefill.clone());
+        text.encoder_router = Some(encoder.clone());
         model.add_worker_set("text".into(), Arc::new(text));
         assert!(model.get_chat_engine_with_image_policy().unwrap().2);
         let mut vision = make_set("vision", Some(vec!["image"]), WorkerType::Aggregated);
@@ -2912,67 +2915,64 @@ mod tests {
         }
         model.remove_worker_set("vision");
 
-        for peer in [WorkerType::Prefill, WorkerType::Encode] {
-            model.add_worker_set(
-                "text:peer".into(),
-                Arc::new(make_set("text", Some(vec!["image"]), peer)),
-            );
+        let mut inactive = make_set("text", Some(vec!["image"]), WorkerType::Aggregated);
+        inactive.chat_engine = Some(vision_engine.clone());
+        let (_workers_tx, workers_rx) = watch::channel(Vec::new());
+        inactive.set_instance_watcher(workers_rx);
+        model.add_worker_set("text:idle".into(), Arc::new(inactive));
+        assert!(model.get_chat_engine_with_image_policy().unwrap().2);
+
+        for (role, modalities) in [
+            (WorkerType::Prefill, Some(vec!["image"])),
+            (WorkerType::Encode, Some(vec!["image"])),
+            (WorkerType::Prefill, None),
+        ] {
+            let peer = make_set("text", modalities, role);
+            let target = WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint: component.endpoint(format!("{role:?}")),
+                group: "peer".into(),
+                generation: 1,
+                card: Arc::new(peer.card().clone()),
+                admitted_ids: watch::channel(vec![1]).1,
+            });
+            model.add_worker_set("text:peer".into(), Arc::new(peer));
+            assert!(model.get_chat_engine_with_image_policy().unwrap().2);
+            match role {
+                WorkerType::Prefill => prefill.set_target(Some(target)),
+                WorkerType::Encode => encoder.set_target(Some(target)),
+                _ => unreachable!(),
+            }
             assert!(
                 !model.get_chat_engine_with_image_policy().unwrap().2,
-                "the {peer:?} capability must preserve images"
+                "the selected {role:?} target requires preserving images"
             );
             model.remove_worker_set("text:peer");
+            prefill.set_target(None);
+            encoder.set_target(None);
         }
-        model.add_worker_set(
-            "text:prefill".into(),
-            Arc::new(make_set("text", None, WorkerType::Prefill)),
-        );
-        assert!(
-            !model.get_chat_engine_with_image_policy().unwrap().2,
-            "an unknown pipeline peer must preserve images"
-        );
     }
 
     #[test]
-    fn input_modality_support_preserves_unknown_and_pipeline_peers() {
+    fn input_modality_support_preserves_unknown_or_malformed_metadata() {
         use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
         for (values, expected) in [
-            (vec![], None),
-            (vec![None], None),
-            (vec![Some(serde_json::json!(["text"]))], Some(false)),
-            (vec![Some(serde_json::json!(["text", "image"]))], Some(true)),
-            (vec![Some(serde_json::json!(["text"])), None], None),
-            (
-                vec![
-                    Some(serde_json::json!(["text"])),
-                    Some(serde_json::json!(["image"])),
-                ],
-                Some(true),
-            ),
-            (vec![Some(serde_json::json!([7]))], None),
-            (vec![Some(serde_json::json!("text"))], None),
+            (None, false),
+            (Some(serde_json::json!([])), false),
+            (Some(serde_json::json!(["text"])), true),
+            (Some(serde_json::json!(["text", "audio"])), true),
+            (Some(serde_json::json!(["text", "image"])), false),
+            (Some(serde_json::json!(["text", "unknown"])), false),
+            (Some(serde_json::json!(["text", 7])), false),
+            (Some(serde_json::json!("text")), false),
         ] {
-            let model = Model::new("test".into());
-            for (index, value) in values.into_iter().enumerate() {
-                let name = index.to_string();
-                let mut card = ModelDeploymentCard::with_name_only("test");
-                if let Some(value) = value {
-                    card.runtime_config
-                        .runtime_data
-                        .insert(SUPPORTED_INPUT_MODALITIES.into(), value);
-                }
-                let checksum = card.mdcsum().to_string();
-                model.add_worker_set(
-                    name.clone(),
-                    Arc::new(WorkerSet::new("pipeline".into(), checksum, card)),
-                );
+            let mut card = ModelDeploymentCard::with_name_only("test");
+            if let Some(value) = values {
+                card.runtime_config
+                    .runtime_data
+                    .insert(SUPPORTED_INPUT_MODALITIES.into(), value);
             }
-            let sets = model.worker_sets.load();
-            let snapshot: Vec<_> = sets.values().map(Arc::as_ref).collect();
-            assert_eq!(
-                Model::namespace_input_modality_support(&snapshot, "pipeline", "image"),
-                expected
-            );
+            let set = WorkerSet::new("pipeline".into(), card.mdcsum().to_string(), card);
+            assert_eq!(set.allows_image_omission(), expected);
         }
     }
 }

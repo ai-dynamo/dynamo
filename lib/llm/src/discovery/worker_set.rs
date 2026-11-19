@@ -41,6 +41,19 @@ use crate::{
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
 
+fn card_excludes_image_input(card: &ModelDeploymentCard) -> bool {
+    card.runtime_config
+        .runtime_data
+        .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|modalities| {
+            !modalities.is_empty()
+                && modalities
+                    .iter()
+                    .all(|modality| matches!(modality.as_str(), Some("text" | "video" | "audio")))
+        })
+}
+
 /// A topology hop must retain the provider's admission and configuration, even
 /// when other cards share its endpoint or the endpoint is reused by a successor.
 #[derive(Clone)]
@@ -75,6 +88,13 @@ pub(crate) enum WorkerSetTarget {
 }
 
 impl WorkerSetTarget {
+    pub(crate) fn allows_image_omission(&self) -> bool {
+        match self {
+            Self::Committed(target) => card_excludes_image_input(&target.card),
+            Self::Legacy(_) => false,
+        }
+    }
+
     pub(crate) fn id(&self) -> WorkerSetTargetId {
         match self {
             Self::Committed(target) => WorkerSetTargetId::Committed {
@@ -329,6 +349,18 @@ impl WorkerSet {
 
     pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
         self.topology_target.as_ref()
+    }
+
+    pub(super) fn allows_image_omission(&self) -> bool {
+        card_excludes_image_input(self.card())
+            && self
+                .prefill_router
+                .as_ref()
+                .is_none_or(|router| router.target_allows_image_omission())
+            && self
+                .encoder_router
+                .as_ref()
+                .is_none_or(|router| router.target_allows_image_omission())
     }
 
     pub fn mdcsum(&self) -> &str {

@@ -1148,18 +1148,20 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
 A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
 
 When rejection is disabled, the frontend automatically replaces each image block
-with the literal text `[image omitted]` only when **all advertised pipeline roles
-in the selected deployment explicitly exclude images** through
+with the literal text `[image omitted]` only when **the selected worker set and
+its committed prefill and encoder targets explicitly exclude images** through
 `supported_input_modalities` runtime metadata. This contract applies to any
 backend that advertises it; the TensorRT-LLM sidecar derives the metadata from
 `Control.GetModelInfo`. An image-capable peer, missing metadata, or malformed
 metadata preserves the image path. Capabilities in other deployment namespaces
 do not affect the decision.
 
-Omission applies to Chat Completions, Responses, Anthropic Messages, and Messages
-token counting. It preserves surrounding text, message order, and tool-result
-IDs. URL/base64 images and cached UUID/file references are omitted before media
-loading. Audio/video handling and native image-generation endpoints are unchanged.
+Omission applies to Chat Completions, Responses, and Anthropic Messages. It
+preserves surrounding text, message order, and tool-result IDs. URL/base64
+images and cached UUID/file references are omitted before media loading.
+Anthropic token counting estimates the original request because generation
+can select a deployment that processes images. Audio/video handling and native
+image-generation endpoints are unchanged.
 To reject images instead of replacing them, enable `--reject-media` below.
 
 <ParamField path="--reject-media" type="boolean" default="false">

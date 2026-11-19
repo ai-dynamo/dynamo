@@ -1074,27 +1074,15 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
     if request.has_thread() {
         return Err(thread_unsupported_response());
     }
-    let (model, _) = request.identity();
-    let canonical = state
-        .manager()
-        .resolve_canonical_name(resolve_request_model(&model, template.as_ref()));
-    let should_omit_images = !state.media_rejection().enabled()
-        && super::image_omission::select_chat_engine(&state, &canonical)
-            .is_ok_and(|(_, _, omit)| omit);
-    let request = if should_omit_images {
-        request
-            .omit_images()
-            .map_err(|error| AnthropicHandlerError::validation(error).into_response())?
-    } else {
-        request
-    };
+    // Count the original input because the subsequent Messages request may
+    // select a deployment that processes its images.
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;

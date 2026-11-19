@@ -211,6 +211,45 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
             kind: String,
             #[serde(borrow)]
             content: Option<&'a RawValue>,
+            #[serde(borrow)]
+            source: Option<&'a RawValue>,
+        }
+        fn present_raw_value<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<&'de RawValue>, D::Error> {
+            <&RawValue>::deserialize(deserializer).map(Some)
+        }
+        fn valid_image_source(source: &RawValue) -> bool {
+            // Match AnthropicImageSource without allocating the image data.
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Source<'a> {
+                #[serde(rename = "type", borrow)]
+                kind: std::borrow::Cow<'a, str>,
+                #[serde(default, borrow, deserialize_with = "present_raw_value")]
+                media_type: Option<&'a RawValue>,
+                #[serde(default, borrow, deserialize_with = "present_raw_value")]
+                data: Option<&'a RawValue>,
+                #[serde(default, borrow, deserialize_with = "present_raw_value")]
+                url: Option<&'a RawValue>,
+            }
+            let Ok(source) = serde_json::from_str::<Source<'_>>(source.get()) else {
+                return false;
+            };
+            let is_string = |value: &RawValue| value.get().starts_with('"');
+            match source.kind.as_ref() {
+                "base64" => {
+                    source.media_type.is_some_and(is_string)
+                        && source.data.is_some_and(is_string)
+                        && source.url.is_none()
+                }
+                "url" => {
+                    source.url.is_some_and(is_string)
+                        && source.media_type.is_none()
+                        && source.data.is_none()
+                }
+                _ => false,
+            }
         }
         fn image_blocks<'a>(content: &'a RawValue, nested: bool, images: &mut Vec<&'a RawValue>) {
             let Ok(blocks) = serde_json::from_str::<Vec<&RawValue>>(content.get()) else {
@@ -220,7 +259,7 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
                 let Ok(block) = serde_json::from_str::<Block<'_>>(raw.get()) else {
                     continue;
                 };
-                if block.kind == "image" {
+                if block.kind == "image" && block.source.is_some_and(valid_image_source) {
                     images.push(raw);
                 } else if nested
                     && block.kind == "tool_result"
