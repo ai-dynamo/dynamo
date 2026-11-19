@@ -727,6 +727,8 @@ impl From<LoadThresholdConfig> for BusyThresholds {
                 .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
             prefill_busy_threshold_frac: config.active_prefill_tokens_threshold_frac,
             decode_busy_threshold_frac: config.active_decode_blocks_threshold,
+            // The host's reject thresholds have no request-count limit.
+            request_busy_threshold_frac: None,
         }
     }
 }

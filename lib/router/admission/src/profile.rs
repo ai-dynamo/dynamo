@@ -68,8 +68,10 @@ pub struct PolicyClassConfig {
     pub quantum: usize,
     /// Time-to-first-token budget in whole milliseconds, at most `u32::MAX` (about 49.7 days),
     /// or `None` when the class sets none. An EDF class orders a request without an explicit
-    /// deadline by its router ingress plus this budget. Other orders neither sort nor expire
-    /// by it.
+    /// deadline by its router ingress plus this budget. A WSPT class orders by it only once it
+    /// has run out: such a request goes ahead of the requests of its strict tier still within
+    /// budget, behind any explicit deadline. FCFS ignores it. No order expires by it without
+    /// `controlled_delay`.
     pub slo_ttft_ms: Option<NonZeroU32>,
     /// Controlled delay, EDF classes only: the online router rejects a request still waiting
     /// for admission when its due time passes. That is its explicit deadline, which wins even
@@ -188,6 +190,7 @@ impl PolicyProfile {
                 prefill_busy_threshold: None,
                 prefill_busy_threshold_frac: router_queue_threshold,
                 decode_busy_threshold_frac: None,
+                request_busy_threshold_frac: None,
             },
             request_queue_limit_per_worker: None,
             raw_isl_token_queue_limit_per_worker: None,

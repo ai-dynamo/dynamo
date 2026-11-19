@@ -174,6 +174,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         data_parallel_size: None,
         max_num_batched_tokens: Some(1024),
         total_kv_blocks: None,
+        max_num_seqs: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
@@ -3959,6 +3960,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         data_parallel_size: endpoints.len().max(1) as u32,
         max_num_batched_tokens: None,
         total_kv_blocks: None,
+        max_num_seqs: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),
@@ -5128,4 +5130,26 @@ mod hint_policies {
             "{record:?}"
         );
     }
+}
+
+#[test]
+fn a_registered_worker_carries_its_request_slots_to_the_scheduler() {
+    use crate::selection::types::{WorkerCatalogRecord, WorkerPatchRequest};
+    use crate::selector::WorkerCapacityExt;
+    use dynamo_worker_selection::WorkerCapacity;
+
+    let mut request = worker(1);
+    request.max_num_seqs = Some(8);
+    let mut record = WorkerCatalogRecord::new(request);
+    let slots = |record: &WorkerCatalogRecord| {
+        WorkerCapacity::of(&record.scheduler_config().unwrap()).max_num_seqs()
+    };
+    assert_eq!(slots(&record), Some(8));
+
+    // A patch that names the field replaces it; one that does not keeps it.
+    let patch = |body| serde_json::from_value::<WorkerPatchRequest>(body).unwrap();
+    record.apply_patch(patch(serde_json::json!({"max_num_seqs": 4})));
+    assert_eq!(slots(&record), Some(4));
+    record.apply_patch(patch(serde_json::json!({"block_size": 16})));
+    assert_eq!(slots(&record), Some(4));
 }

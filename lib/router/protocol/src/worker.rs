@@ -45,6 +45,7 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 pub struct WorkerCapacity {
     max_num_batched_tokens: Option<u64>,
     total_kv_blocks: Option<u64>,
+    max_num_seqs: Option<u64>,
 }
 
 impl WorkerCapacity {
@@ -54,7 +55,15 @@ impl WorkerCapacity {
         Self {
             max_num_batched_tokens: max_num_batched_tokens.filter(|&value| value > 0),
             total_kv_blocks: total_kv_blocks.filter(|&value| value > 0),
+            max_num_seqs: None,
         }
+    }
+
+    /// The same capacity with the rank's `max_num_seqs`. A reported zero means unreported,
+    /// as for the other values.
+    pub fn with_max_num_seqs(mut self, max_num_seqs: Option<u64>) -> Self {
+        self.max_num_seqs = max_num_seqs.filter(|&value| value > 0);
+        self
     }
 
     /// Prefill tokens the rank batches per engine step, when reported.
@@ -67,6 +76,12 @@ impl WorkerCapacity {
     /// the process total divided by the rank count), so treat it as approximate.
     pub fn total_kv_blocks(self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    /// Requests the rank runs at once, when reported: the engine's batch size, by whatever
+    /// name it has there.
+    pub fn max_num_seqs(self) -> Option<u64> {
+        self.max_num_seqs
     }
 
     /// The budget fractional prefill thresholds are taken of: `max_num_batched_tokens`, or
