@@ -20,6 +20,8 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 NAMESPACE = "pd-discovery"
 SIDE_CHANNEL_KEY = "side_channel"
 INTERVAL = 2.0  # seconds between checks
+# Seconds for one connection, so a stuck decode worker can't block the watch.
+CONNECT_TIMEOUT = 5.0
 
 uvloop.install()
 
@@ -27,12 +29,14 @@ uvloop.install()
 async def connect(decode_id: int, address: dict, my_id: int):
     """The operation to run against a new decode worker: connect to its server."""
     host, port = address["host"], address["port"]
-    reader, writer = await asyncio.open_connection(host, port)
-    writer.write(f"hello from prefill {my_id:x}\n".encode())
-    await writer.drain()
-    reply = (await reader.readline()).decode().strip()
-    writer.close()
-    await writer.wait_closed()
+    async with asyncio.timeout(CONNECT_TIMEOUT):
+        reader, writer = await asyncio.open_connection(host, port)
+        try:
+            writer.write(f"hello from prefill {my_id:x}\n".encode())
+            await writer.drain()
+            reply = (await reader.readline()).decode().strip()
+        finally:
+            writer.close()
     print(f"prefill {my_id:x}: decode {decode_id:x} at {host}:{port} -> {reply!r}")
 
 
@@ -55,12 +59,13 @@ async def watch_decode_workers(runtime: DistributedRuntime, my_id: int):
             )
 
         for key in current.keys() - known.keys():
-            # A worker can stop before this connection, so log the failure and
-            # retry on the next check instead of stopping the watch.
+            # A worker can stop or stall before this connection, so log the
+            # failure (TimeoutError is an OSError) and retry on the next check
+            # instead of stopping the watch.
             try:
                 await connect(key[0], current[key], my_id)
             except OSError as e:
-                print(f"prefill {my_id:x}: decode {key[0]:x} failed: {e}")
+                print(f"prefill {my_id:x}: decode {key[0]:x} failed: {e!r}")
                 continue
             known[key] = current[key]
 

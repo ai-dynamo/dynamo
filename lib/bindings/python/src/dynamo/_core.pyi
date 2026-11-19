@@ -248,7 +248,8 @@ class Endpoint:
         Each config is a copy: changing it does not change what the instance
         published. A value an instance set with
         ``set_engine_specific(key, json_text)`` is in ``runtime_data[key]`` as
-        the same JSON text.
+        JSON text for the same value; whitespace can differ, so parse it with
+        ``json.loads`` rather than comparing text.
         """
         ...
 
