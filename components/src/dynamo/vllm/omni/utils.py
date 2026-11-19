@@ -18,6 +18,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import compute_num_frames, parse_size
+from dynamo.vllm.omni.request_validation import json_schema_stage_index
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
@@ -387,6 +388,8 @@ async def parse_omni_request(
     output_modalities: list,
     default_video_fps: int = 16,
     tokenizer_getter=None,
+    *,
+    stage_config: Any | None = None,
 ) -> dict:
     """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
 
@@ -400,6 +403,12 @@ async def parse_omni_request(
       original_prompt:      rich prompt dict with geometry/params for processor functions
       sampling_params_list: raw user overrides dict (height/width/nvext) or None for chat
     """
+    json_schema_stage_index(
+        request,
+        [stage_config] if stage_config is not None else None,
+        staged=True,
+        output_modalities=output_modalities,
+    )
     _, request_type = parse_request_type(request, output_modalities)
 
     if request_type in (RequestType.VIDEO_GENERATION, RequestType.IMAGE_GENERATION):

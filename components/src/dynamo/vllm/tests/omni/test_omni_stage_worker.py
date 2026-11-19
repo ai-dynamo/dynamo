@@ -12,6 +12,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from dynamo.vllm.tests.test_structured_output_validation import (
+    native_validation_config as native_validation_config,
+)
+
 try:
     from PIL import Image
     from vllm.exceptions import VLLMValidationError
@@ -92,13 +96,218 @@ def _make_stage_config(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def _make_worker(engine=None, stage_config=None, connectors=None, stage_id=0):
+def _make_worker(
+    engine=None, stage_config=None, connectors=None, stage_id=0, output_modalities=None
+):
     return OmniStageWorker(
         engine=engine or _MockEngine(),
         stage_config=stage_config or _make_stage_config(),
         connectors=connectors or {},
         stage_id=stage_id,
+        output_modalities=output_modalities,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True], ids=["direct", "stage0"])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("enum_values", [("ok",), ()], ids=["valid", "invalid"])
+async def test_json_schema_without_supported_stage_rejected_before_engine_dispatch(
+    routed, streaming, enum_values
+):
+    engine = _MockEngine()
+    worker = _make_worker(engine=engine)
+    request = {
+        "messages": [{"role": "user", "content": "Respond with JSON"}],
+        "stream": streaming,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {"type": "string", "enum": list(enum_values)},
+            },
+        },
+    }
+    if routed:
+        request["request_id"] = "json-schema-request"
+
+    with pytest.raises(InvalidArgument) as caught:
+        _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert str(caught.value) == (
+        "response_format.type=json_schema is not supported by this "
+        "Dynamo vLLM-Omni configuration"
+    )
+    assert engine.received_prompt is None
+    assert engine.received_request_id is None
+
+
+def _json_schema_request(*, valid=True, streaming=False, routed=True):
+    request = {
+        "messages": [{"role": "user", "content": "Respond with JSON"}],
+        "stream": streaming,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "enum": ["ok"] if valid else []}
+                    },
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    }
+    if routed:
+        request["request_id"] = "json-schema-request"
+    return request
+
+
+def _schema_stage_config(**overrides):
+    fields = dict(
+        stage_id=0,
+        stage_type="llm",
+        is_comprehension=True,
+        final_output=True,
+        final_output_type="text",
+    )
+    fields.update(overrides)
+    return _make_stage_config(**fields)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True], ids=["direct", "stage0"])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("valid", [False, True], ids=["invalid", "valid"])
+async def test_json_schema_native_validation_without_sampling_defaults(
+    native_validation_config, routed, streaming, valid
+):
+    from vllm.config import StructuredOutputsConfig
+    from vllm.sampling_params import StructuredOutputsParams
+
+    model, tokenizer = native_validation_config
+    received = []
+    engine = _MockEngine()
+    original_generate = engine.generate
+
+    def generate(prompt, *, request_id, sampling_params_list):
+        async def stream():
+            params = sampling_params_list[0]
+            received.append(params)
+            params.verify(
+                model, None, StructuredOutputsConfig(backend="xgrammar"), tokenizer
+            )
+            async for chunk in original_generate(
+                prompt, request_id=request_id, sampling_params_list=sampling_params_list
+            ):
+                yield chunk
+
+        return stream()
+
+    engine.generate = generate
+    worker = _make_worker(
+        engine=engine, stage_config=_schema_stage_config(), output_modalities=["text"]
+    )
+    request = _json_schema_request(valid=valid, streaming=streaming, routed=routed)
+    response = worker.generate(request, _MockContext())
+    if valid:
+        chunks = [chunk async for chunk in response]
+        assert len(chunks) == 1
+        assert "shm_meta" in chunks[0]
+        assert "sampling_params_list" not in chunks[0]
+    else:
+        with pytest.raises(
+            InvalidArgument,
+            match="^Invalid JSON schema: enum array must not be empty$",
+        ):
+            _ = [chunk async for chunk in response]
+    assert len(received) == 1
+    assert isinstance(received[0].structured_outputs, StructuredOutputsParams)
+    assert (
+        received[0].structured_outputs.json
+        == request["response_format"]["json_schema"]["schema"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_json_schema_does_not_leak_into_next_request_or_stage(
+    native_validation_config,
+):
+    from vllm.config import StructuredOutputsConfig
+
+    model, tokenizer = native_validation_config
+    engine = _MockEngine()
+    original_generate = engine.generate
+
+    def generate(prompt, *, request_id, sampling_params_list):
+        async def stream():
+            if sampling_params_list is not None:
+                sampling_params_list[0].verify(
+                    model, None, StructuredOutputsConfig(backend="xgrammar"), tokenizer
+                )
+            async for chunk in original_generate(
+                prompt, request_id=request_id, sampling_params_list=sampling_params_list
+            ):
+                yield chunk
+
+        return stream()
+
+    engine.generate = generate
+    connector = MagicMock()
+    connector.put.return_value = (True, 0, {"name": "text-result"})
+    worker = _make_worker(
+        engine=engine,
+        stage_config=_schema_stage_config(),
+        connectors={("0", "1"): connector},
+        output_modalities=["text"],
+    )
+
+    constrained = [
+        chunk async for chunk in worker.generate(_json_schema_request(), _MockContext())
+    ]
+    first_params = engine.received_sampling_params_list[0]
+    assert first_params.structured_outputs is not None
+    assert "sampling_params_list" not in constrained[0]
+    assert "response_format" not in constrained[0]
+    assert "response_format" not in constrained[0]["original_prompt"]
+
+    with pytest.raises(InvalidArgument, match="^Invalid JSON schema:"):
+        _ = [
+            chunk
+            async for chunk in worker.generate(
+                _json_schema_request(valid=False), _MockContext()
+            )
+        ]
+
+    request = {"messages": [{"role": "user", "content": "ordinary text"}]}
+    _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+    assert engine.received_sampling_params_list is None
+
+
+@pytest.mark.asyncio
+async def test_json_schema_engine_failure_propagates_without_error_chunk():
+    failure = RuntimeError("private-schema-compiler-diagnostic")
+    engine = _MockEngine()
+
+    async def generate(*args, **kwargs):
+        raise failure
+        yield
+
+    engine.generate = generate
+    worker = _make_worker(
+        engine=engine, stage_config=_schema_stage_config(), output_modalities=["text"]
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        _ = [
+            chunk
+            async for chunk in worker.generate(_json_schema_request(), _MockContext())
+        ]
+
+    assert caught.value is failure
 
 
 @pytest.mark.asyncio

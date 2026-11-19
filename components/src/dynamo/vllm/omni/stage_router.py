@@ -29,6 +29,7 @@ from dynamo.vllm.omni.output_formatter import (
     OutputFormatter,
     _normalize_image_output_options,
 )
+from dynamo.vllm.omni.request_validation import json_schema_stage_index
 from dynamo.vllm.omni.stage_worker import (
     _connector_key,
     _ensure_stage_connectors,
@@ -114,6 +115,12 @@ class OmniStageRouter:
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
         """Run the request through each stage and format the final output."""
+        json_schema_stage_index(
+            request,
+            self.stage_configs,
+            staged=True,
+            output_modalities=self.config.output_modalities,
+        )
         request_id = str(uuid.uuid4())
         parsed_request, request_type = parse_request_type(
             request, self.config.output_modalities

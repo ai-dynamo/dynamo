@@ -468,6 +468,7 @@ vllm_configs = {
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
+        script_args=["--structured-outputs-config", '{"backend":"xgrammar"}'],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_2,
@@ -736,6 +737,7 @@ vllm_configs = {
         name="guided_decoding",
         directory=vllm_dir,
         script_name="agg.sh",
+        script_args=["--structured-outputs-config", '{"backend":"xgrammar"}'],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,

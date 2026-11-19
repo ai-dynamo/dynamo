@@ -59,12 +59,17 @@ class StructuredOutputErrorPayload(_StructuredOutputPayload):
     def before_request(self) -> None:
         self._before = self._worker_requests()
 
+    def accepts_status_code(self, status_code: int) -> bool:
+        """Prefill can reject a stream before its HTTP headers are committed."""
+        return status_code == 400 or (self.http_stream and status_code == 200)
+
     def validate(self, response: requests.Response, content: str) -> None:
+        assert self.accepts_status_code(response.status_code), response.status_code
         assert not any(
             private in content
             for private in ("private_status", "/project/", "/private/")
         ), content
-        if self.http_stream:
+        if response.status_code == 200:
             chunks = parse_sse_json_chunks(content)
             errors = [chunk["error"] for chunk in chunks if "error" in chunk]
             assert len(errors) == 1, content
@@ -88,13 +93,8 @@ class StructuredOutputErrorPayload(_StructuredOutputPayload):
             error = json.loads(content)
             error_type = "Bad Request"
 
-        # Auto may reject in xgrammar or fall back to guidance before rejecting.
-        assert error["message"] in {
-            "Invalid JSON schema: enum array must not be empty",
-            "Invalid JSON schema: a required property is unsatisfiable",
-        }, error
         assert error == {
-            "message": error["message"],
+            "message": "Invalid JSON schema: enum array must not be empty",
             "type": error_type,
             "code": 400,
         }, error
@@ -104,7 +104,7 @@ class StructuredOutputErrorPayload(_StructuredOutputPayload):
         ), "The invalid schema was rejected before reaching a worker"
 
 
-class StructuredOutputNullPayload(_StructuredOutputPayload):
+class StructuredOutputValidPayload(_StructuredOutputPayload):
     def validate(self, response: requests.Response, content: str) -> None:
         if self.http_stream:
             chunks = parse_sse_json_chunks(content)
@@ -122,13 +122,13 @@ class StructuredOutputNullPayload(_StructuredOutputPayload):
             result = json.loads(content)
             assert result["choices"][0]["finish_reason"] == "stop", result
             text = result["choices"][0]["message"]["content"]
-        assert json.loads(text) == {"private_status": None}, text
+        assert json.loads(text) == {"private_status": "ok"}, text
 
 
 def structured_output_validation_payloads(
     worker_port_envs: tuple[str, ...],
 ) -> list[BasePayload]:
-    """Pair each worker rejection with the reported schema's valid auto fallback."""
+    """Pair each xgrammar worker rejection with a valid constrained request."""
     payloads: list[BasePayload] = []
     for streaming in (False, True):
         body = {
@@ -154,17 +154,13 @@ def structured_output_validation_payloads(
                 worker_port_envs=worker_port_envs,
             )
         )
-        nullable_schema = {
+        valid_schema = {
             **schema,
-            "properties": {
-                "private_status": {
-                    "oneOf": [{"type": "string", "enum": []}, {"type": "null"}]
-                }
-            },
+            "properties": {"private_status": {"type": "string", "enum": ["ok"]}},
         }
         payloads.append(
-            StructuredOutputNullPayload(
-                body={**body, "guided_json": nullable_schema},
+            StructuredOutputValidPayload(
+                body={**body, "guided_json": valid_schema},
                 expected_response=[],
                 expected_log=[],
                 http_stream=streaming,

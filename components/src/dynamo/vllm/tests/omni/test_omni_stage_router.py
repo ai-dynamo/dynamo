@@ -336,6 +336,125 @@ async def test_generate_delegates_formatting_to_output_formatter(nvext, expected
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("enum_values", [("ok",), ()], ids=["valid", "invalid"])
+async def test_json_schema_without_stage_metadata_rejected_before_stage_dispatch(
+    streaming, enum_values
+):
+    client = SimpleNamespace(round_robin=AsyncMock())
+    router = _make_router(
+        [_make_stage_cfg(0)], {"stage0": client}, output_modalities=["text"]
+    )
+    request = {
+        "messages": [{"role": "user", "content": "Respond with JSON"}],
+        "stream": streaming,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {"type": "string", "enum": list(enum_values)},
+            },
+        },
+    }
+
+    with pytest.raises(InvalidArgument) as caught:
+        _ = [chunk async for chunk in router.generate(request, context=None)]
+
+    assert str(caught.value) == (
+        "response_format.type=json_schema is not supported by this "
+        "Dynamo vLLM-Omni configuration"
+    )
+    client.round_robin.assert_not_awaited()
+    router._formatter.format.assert_not_awaited()
+
+
+def _text_stage_cfg(stage_id=0, **overrides):
+    config = _make_stage_cfg(stage_id)
+    config.stage_type = "llm"
+    config.is_comprehension = True
+    config.final_output = True
+    config.final_output_type = "text"
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_json_schema_forwarded_raw_to_supported_single_text_stage(streaming):
+    received = []
+
+    async def stage0_handler(request):
+        received.append(request)
+        return {"shm_meta": {"name": "result"}, "finished": True}
+
+    router = _make_router(
+        [_text_stage_cfg()],
+        {"stage0": _StageClient(stage0_handler)},
+        output_modalities=["text"],
+    )
+
+    async def format_output(*args, **kwargs):
+        yield {"choices": [{"delta": {"content": "ok"}}]}
+
+    router._format_output = format_output
+    request = {
+        "messages": [{"role": "user", "content": "Respond with JSON"}],
+        "stream": streaming,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {"type": "string", "enum": ["ok"]},
+            },
+        },
+    }
+
+    chunks = [chunk async for chunk in router.generate(request, context=None)]
+
+    assert chunks == [{"choices": [{"delta": {"content": "ok"}}]}]
+    assert len(received) == 1
+    assert received[0]["response_format"] == request["response_format"]
+    assert "sampling_params_list" not in received[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    "topology", ["text-then-audio", "later-text", "ambiguous-text"]
+)
+async def test_json_schema_rejects_unsupported_staged_topology(topology, streaming):
+    text = _text_stage_cfg()
+    other = _text_stage_cfg(1, is_comprehension=False, final_output_type="audio")
+    if topology == "later-text":
+        text, other = (
+            _text_stage_cfg(0, is_comprehension=False, final_output=False),
+            _text_stage_cfg(1),
+        )
+    elif topology == "ambiguous-text":
+        other = _text_stage_cfg(1)
+    clients = {
+        "stage0": SimpleNamespace(round_robin=AsyncMock()),
+        "stage1": SimpleNamespace(round_robin=AsyncMock()),
+    }
+    router = _make_router([text, other], clients, output_modalities=["text"])
+    request = {
+        "messages": [{"role": "user", "content": "Respond with JSON"}],
+        "stream": streaming,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "string"}},
+        },
+    }
+
+    with pytest.raises(InvalidArgument, match="not supported"):
+        _ = [chunk async for chunk in router.generate(request, context=None)]
+
+    for client in clients.values():
+        client.round_robin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_invalid_image_output_format_is_rejected_before_stage_call():
     stage_called = False
 

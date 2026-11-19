@@ -71,6 +71,13 @@ from dynamo.vllm.omni.output_formatter import (
     OutputFormatter,
     _normalize_image_output_options,
 )
+from dynamo.vllm.omni.request_validation import (
+    UNSUPPORTED_JSON_SCHEMA_MESSAGE,
+    apply_json_schema_response_format,
+    is_json_schema_request,
+    is_llm_stage,
+    json_schema_stage_index,
+)
 from dynamo.vllm.omni.utils import (
     audio_output_is_cumulative,
     build_image_generation_prompt,
@@ -382,6 +389,13 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
+        schema_request = is_json_schema_request(request)
+        if schema_request:
+            json_schema_stage_index(
+                request,
+                self.engine_client.stage_configs,
+                output_modalities=self.config.output_modalities,
+            )
         try:
             parsed_request_raw, request_type = parse_request_type(
                 request, self.config.output_modalities
@@ -425,17 +439,18 @@ class OmniHandler(BaseOmniHandler):
             "prompt": inputs.prompt,
             "request_id": request_id,
         }
+        if schema_request:
+            generate_kwargs["output_modalities"] = ["text"]
         if inputs.request_type == RequestType.AUDIO_GENERATION:
             inputs.sampling_params_list = streaming_sampling_params(
                 self.engine_client, inputs.sampling_params_list
             )
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
-            # Note: For diffusion paths, lora_request is embedded in sampling_params_list
-            # and will be refreshed in create_generator under the admission lock.
-            # We do NOT add it here; instead, it's updated via _apply_lora_to_sampling_params.
-        # Keep top-level LoRA only for paths that do not carry stage params.
-        if inputs.lora_request is not None and inputs.sampling_params_list is None:
+        # Diffusion embeds LoRA in stage params; text LoRA remains top-level.
+        if inputs.lora_request is not None and (
+            inputs.sampling_params_list is None or schema_request
+        ):
             generate_kwargs["lora_request"] = inputs.lora_request
 
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
@@ -463,7 +478,7 @@ class OmniHandler(BaseOmniHandler):
             # because AsyncOmni diffusion stages read LoRA from the params, not from
             # the top-level generate() argument.
             if admitted_lora_request is not None:
-                if inputs.sampling_params_list is not None:
+                if inputs.sampling_params_list is not None and not schema_request:
                     # Diffusion path: update embedded LoRA in sampling params
                     # This must happen BEFORE generate() is called to take effect
                     self._apply_lora_to_sampling_params(
@@ -719,6 +734,15 @@ class OmniHandler(BaseOmniHandler):
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
+        schema_stage = (
+            json_schema_stage_index(
+                request,
+                self.engine_client.stage_configs,
+                output_modalities=self.config.output_modalities,
+            )
+            if is_json_schema_request(request)
+            else None
+        )
         text_prompt = self._extract_text_prompt(request)
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
@@ -726,7 +750,28 @@ class OmniHandler(BaseOmniHandler):
         output_modalities = {
             str(modality).lower() for modality in (self.config.output_modalities or [])
         }
-        if "image" in output_modalities:
+        if schema_stage is not None:
+            prompt = OmniTextPrompt(prompt=text_prompt)
+            stages = self.engine_client.stage_configs
+            defaults = list(self.engine_client.default_sampling_params_list or [])
+            if not defaults:
+                defaults = [None] * len(stages)
+            if len(defaults) != len(stages):
+                raise InvalidArgument(UNSUPPORTED_JSON_SCHEMA_MESSAGE)
+            sampling_params_list = []
+            for default, stage in zip(defaults, stages, strict=True):
+                if default is None or isinstance(default, dict):
+                    if not is_llm_stage(stage):
+                        raise InvalidArgument(UNSUPPORTED_JSON_SCHEMA_MESSAGE)
+                    default = SamplingParams(**(default or {}))
+                sampling_params_list.append(copy.deepcopy(default))
+            sampling_params_list[schema_stage] = apply_json_schema_response_format(
+                request, sampling_params_list[schema_stage]
+            )
+            sampling_params_list = streaming_sampling_params(
+                self.engine_client, sampling_params_list
+            )
+        elif "image" in output_modalities:
             width, height = image_generation_size_from_request(request)
             prompt = build_image_generation_prompt(
                 text_prompt,
