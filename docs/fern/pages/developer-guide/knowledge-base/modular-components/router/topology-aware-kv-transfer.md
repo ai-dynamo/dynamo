@@ -76,7 +76,7 @@ sequenceDiagram
     DR->>D: select compatible or preferred decode worker
 ```
 
-The prefill router builds the decode constraint before dispatching prefill when the selected worker is already known. This keeps `required` policy fail-closed: if the router cannot derive authoritative decode constraints for a required policy, it fails the request instead of dispatching prefill and then discovering that decode cannot be routed safely. With `DYN_ROUTER_MODE=kv`, it also checks that an available decode worker carries the required taint, and fails the request with a `WorkerUnavailable` error (HTTP 503) if none does.
+The prefill router builds the decode constraint before dispatching prefill when the selected worker is already known. This keeps `required` policy fail-closed: if the router cannot derive authoritative decode constraints for a required policy, it fails the request instead of dispatching prefill and then discovering that decode cannot be routed safely. With `DYN_ROUTER_MODE=kv`, it also checks that an available decode worker carries the required taint, and fails the request with a `WorkerUnavailable` error (HTTP 503) if none does. A decode worker is available when it is registered and the frontend has not marked it down; until the frontend has discovered its first decode worker, every registered decode worker counts as available.
 
 ## Enforcement Modes
 

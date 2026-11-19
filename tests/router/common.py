@@ -2672,16 +2672,22 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 # decode worker.
                 for attempt in range(20):
                     # A fresh prompt each time, so blocks cached on zone a don't decide.
+                    # Not streamed, so a failure can't hide behind a 200 that opens a stream.
                     unpinned_payload = {
                         **test_payload,
                         "messages": [{"role": "user", "content": uuid.uuid4().hex}],
+                        "stream": False,
                     }
-                    await post_expect_status(
+                    body = await post_expect_status(
                         session,
                         unpinned_payload,
                         200,
                         f"Expected unpinned request {attempt} to avoid zone b",
                     )
+                    choices = json.loads(body).get("choices") or []
+                    assert choices and choices[0].get(
+                        "finish_reason"
+                    ), f"Unpinned request {attempt} did not complete: {body}"
 
         asyncio.run(run_requests())
 

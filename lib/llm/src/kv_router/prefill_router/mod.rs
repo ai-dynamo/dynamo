@@ -27,7 +27,8 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{
-        ModelManager, RuntimeConfigWatch, WorkerSetTarget, WorkerSetTargetId, has_kv_transfer_peer,
+        ModelManager, RuntimeConfigWatch, WorkerSetTarget, WorkerSetTargetId,
+        available_peer_taints, has_kv_transfer_peer,
     },
     kv_router::{KvRouter, RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
@@ -594,7 +595,8 @@ impl
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
-        if preselected_worker.is_none() {
+        // A pinned prefill worker is not steered: the dispatch check reports a stranded pin.
+        if !pins_prefill_worker(prefill_req.routing.as_ref()) {
             self.steer_prefill_to_decode_reachable_workers(&mut prefill_req, &binding.endpoint_id);
         }
 
@@ -790,6 +792,17 @@ impl
     }
 }
 
+/// Whether the request pins its prefill worker. Prefill selection falls back to
+/// `backend_instance_id` when `prefill_worker_id` is unset.
+fn pins_prefill_worker(routing: Option<&RoutingHints>) -> bool {
+    routing.is_some_and(|routing| {
+        routing
+            .prefill_worker_id
+            .or(routing.backend_instance_id)
+            .is_some()
+    })
+}
+
 /// Intersect the request's allowlist with `reachable`. Leave it unchanged if that would
 /// leave no candidate; the dispatch preflight then rejects the pick.
 fn restrict_to_reachable(routing: &mut RoutingHints, reachable: &HashSet<WorkerId>) {
@@ -945,15 +958,16 @@ impl PrefillRouter {
         // Mark both watches seen before reading them: a change made during the computation
         // then invalidates the entry rather than being missed.
         prefill_configs.mark_unchanged();
-        let reachable = {
-            let decode = decode_configs.borrow_and_update();
-            self.model_manager.kv_transfer_reachable_workers(
-                endpoint_id,
-                &decode,
-                decode_available.as_deref(),
-            )
-        }
-        .map(Arc::new);
+        // Release the decode watch before reading the prefill one: both are the same watch
+        // when prefill and decode share an endpoint.
+        let decode_taints = available_peer_taints(
+            &decode_configs.borrow_and_update(),
+            decode_available.as_deref(),
+        );
+        let reachable = self
+            .model_manager
+            .kv_transfer_reachable_workers(endpoint_id, &decode_taints)
+            .map(Arc::new);
         self.decode_reachability
             .store(Some(Arc::new(DecodeReachability {
                 endpoint_id: endpoint_id.clone(),
@@ -1513,6 +1527,24 @@ mod tests {
         routing.allowed_worker_ids = Some(HashSet::from([3]));
         restrict_to_reachable(&mut routing, &HashSet::from([1, 2]));
         assert_eq!(routing.allowed_worker_ids, Some(HashSet::from([3])));
+    }
+
+    #[test]
+    fn a_backend_instance_pin_also_pins_prefill() {
+        assert!(!pins_prefill_worker(None));
+        assert!(!pins_prefill_worker(Some(&RoutingHints::default())));
+        for routing in [
+            RoutingHints {
+                prefill_worker_id: Some(1),
+                ..Default::default()
+            },
+            RoutingHints {
+                backend_instance_id: Some(1),
+                ..Default::default()
+            },
+        ] {
+            assert!(pins_prefill_worker(Some(&routing)), "{routing:?}");
+        }
     }
 
     /// A KV-plane decode `RoutingHost` in a process-local runtime.
