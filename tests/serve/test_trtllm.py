@@ -80,6 +80,7 @@ trtllm_configs = {
         script_name="agg_metrics.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.9 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -150,6 +151,7 @@ trtllm_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
@@ -244,6 +246,7 @@ trtllm_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.router,
+            pytest.mark.smoke,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,

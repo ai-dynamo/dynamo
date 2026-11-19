@@ -594,6 +594,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
+@pytest.mark.smoke
 @pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
