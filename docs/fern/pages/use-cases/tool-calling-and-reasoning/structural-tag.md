@@ -182,6 +182,8 @@ non-strict also gets no structural tag from the registry; see
 [Schema Modes](#schema-modes). Use the global opt-out above to disable optional
 structural guidance.
 
+For integrated vLLM workers, use the structured-output backend `auto` or `xgrammar` with Dynamo-generated structural tags. A worker configured with `guidance`, `outlines`, or `lm-format-enforcer` rejects the modern tag format before generation and names the incompatible backend in the error. Requests that carry a plain JSON schema still use the configured backend. The `guidance` backend also accepts legacy structural tags with `triggers` and `structures`.
+
 ## Supported Parsers
 
 Not all parsers support structural tags. Parsers without a structural-tag

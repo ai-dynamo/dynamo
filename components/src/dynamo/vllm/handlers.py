@@ -6,6 +6,7 @@ import base64
 import binascii
 import functools
 import importlib
+import json
 import logging
 import math
 import os
@@ -1033,6 +1034,30 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
     _ep_capacity_inflight: Optional["asyncio.Future[dict]"] = None
     _ep_capacity_executor: Optional[ThreadPoolExecutor] = None
+
+    def _validate_structural_tag_backend(self, sampling_params: SamplingParams) -> None:
+        structured_outputs = sampling_params.structured_outputs
+        if structured_outputs is None or not structured_outputs.structural_tag:
+            return
+
+        # The selected worker knows the effective backend, even when workers
+        # serving the same model have different structured-output settings.
+        backend = self.engine_client.vllm_config.structured_outputs_config.backend
+        if backend in ("auto", "xgrammar"):
+            return
+        if backend == "guidance":
+            try:
+                tag = json.loads(structured_outputs.structural_tag)
+            except json.JSONDecodeError:
+                # vLLM owns validation of malformed client-supplied tags.
+                return
+            if isinstance(tag, dict) and {"triggers", "structures"} <= tag.keys():
+                return
+
+        raise InvalidArgument(
+            f"vLLM structured-output backend {backend!r} does not support this "
+            "structural tag. Configure the worker to use 'auto' or 'xgrammar'."
+        )
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -3850,6 +3875,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 enable_rl=self.config.enable_rl,
             )
         )
+        self._validate_structural_tag_backend(sampling_params)
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)
@@ -4306,6 +4332,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
+        self._validate_structural_tag_backend(sampling_params)
 
         kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 
