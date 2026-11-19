@@ -1285,7 +1285,9 @@ impl Metrics {
     /// MDC metrics (from ModelDeploymentCard):
     /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
     /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
-    /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
+    ///
+    /// Frontend config metrics (set alongside the MDC metrics):
+    /// - `{prefix}_model_migration_limit` - IntGaugeVec for the frontend's `--migration-limit` for the model
     ///
     /// ## Runtime Config Polling Configuration
     ///
@@ -1669,7 +1671,7 @@ impl Metrics {
         let model_migration_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
-                "Total number of request migrations due to worker unavailability",
+                "Total number of permitted request migration attempts after a worker failure",
             ),
             &["model", frontend_service::MIGRATION_TYPE_LABEL],
         )
@@ -2006,8 +2008,14 @@ impl Metrics {
     }
 
     /// Update metrics from a ModelDeploymentCard
-    /// This updates both runtime config metrics and MDC-specific metrics
-    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    /// This updates both runtime config metrics and MDC-specific metrics.
+    /// `migration_limit` is the frontend's configured limit: it is what `Migration`
+    /// enforces, while workers leave `card.migration_limit` at 0.
+    pub fn update_metrics_from_mdc(
+        &self,
+        card: &ModelDeploymentCard,
+        migration_limit: u32,
+    ) -> anyhow::Result<()> {
         self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
 
         self.model_context_length
@@ -2020,7 +2028,7 @@ impl Metrics {
 
         self.model_migration_limit
             .with_label_values(&[&card.display_name])
-            .set(card.migration_limit as i64);
+            .set(i64::from(migration_limit));
 
         tracing::debug!(
             model = %card.display_name,
@@ -2030,17 +2038,11 @@ impl Metrics {
         Ok(())
     }
 
-    /// Increment the migration counter for a new request migration
-    pub fn inc_migration_new_request(&self, model: &str) {
+    /// Increment the migration counter when a permitted retry begins.
+    /// `migration_type` names the failure that caused the replacement.
+    pub fn inc_migration(&self, model: &str, migration_type: &str) {
         self.model_migration_total
-            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
-            .inc();
-    }
-
-    /// Increment the migration counter for an ongoing request migration
-    pub fn inc_migration_ongoing_request(&self, model: &str) {
-        self.model_migration_total
-            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .with_label_values(&[model, migration_type])
             .inc();
     }
 
@@ -3077,6 +3079,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     let mut annotated = annotated.0;
     if let Some(data) = annotated.data.as_mut() {
         data.tool_call_completion.clear();
+        data.model_eos.clear();
     }
 
     if let Some(metrics) = annotated
@@ -3305,6 +3308,25 @@ mod tests {
         worker_tx.send(Vec::new()).unwrap();
         assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
         assert!(!load_ready());
+    }
+
+    #[test]
+    fn migration_limit_gauge_reports_frontend_limit() {
+        let metrics = Metrics::new();
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "test-model".to_string();
+        // Workers publish 0 here; the frontend's own limit must win.
+        card.migration_limit = 0;
+
+        metrics.update_metrics_from_mdc(&card, 3).unwrap();
+
+        assert_eq!(
+            metrics
+                .model_migration_limit
+                .with_label_values(&["test-model"])
+                .get(),
+            3
+        );
     }
 
     #[test]
@@ -3775,6 +3797,7 @@ mod tests {
                 ..Default::default()
             }),
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         let annotated = crate::types::Annotated::from_data(data);
 
@@ -4889,12 +4912,14 @@ mod tests {
                 complete: true,
             },
         ];
+        annotated.data.as_mut().unwrap().model_eos = vec![0];
         let transported: crate::types::Annotated<NvCreateChatCompletionStreamResponse> =
             serde_json::from_value(serde_json::to_value(&annotated).unwrap()).unwrap();
         assert_eq!(
             transported.data.as_ref().unwrap().tool_call_completion,
             annotated.data.as_ref().unwrap().tool_call_completion
         );
+        assert_eq!(transported.data.as_ref().unwrap().model_eos, vec![0]);
 
         let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
         let result = process_chat_response_using_event_converter_and_observe_metrics(
@@ -4917,6 +4942,7 @@ mod tests {
             "typed metrics must be skipped on the SSE wire"
         );
         assert!(json.get("tool_call_completion").is_none());
+        assert!(json.get("model_eos").is_none());
 
         drop(collector);
 
@@ -5612,6 +5638,7 @@ mod tests {
                     prompt_logprobs: None,
                     llm_metrics: None,
                     tool_call_completion: Vec::new(),
+                    model_eos: Vec::new(),
                 },
             ),
             event: None,
@@ -6004,6 +6031,7 @@ mod tests {
                 llm_metrics,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
             Annotated {
                 data: Some(response),

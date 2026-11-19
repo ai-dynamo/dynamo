@@ -254,6 +254,42 @@ func TestV1beta2RequestControllerCancelsTheActiveRunBeforeStartingTheNext(t *tes
 	}
 }
 
+func TestV1beta2RequestControllerRerunIntentStartsANewRunWithTheSameSearchInput(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	originalInput := request.Spec.NativeSearchInput.DeepCopy()
+	f := newDGDRV1beta2Fixture(t, request)
+	f.reconcile()
+
+	t.Log("Set only explicit rerun intent and simulate the API server advancing the generation")
+	updated := f.request()
+	updated.Spec.Rerun = &nvidiacomv1beta2.RerunSpec{Reason: "repeat after catalog refresh"}
+	updated.Generation = 2
+	if err := f.client.Update(t.Context(), updated); err != nil {
+		t.Fatalf("update rerun intent: %v", err)
+	}
+
+	t.Log("The normal generation lifecycle requests cancellation of the active Run")
+	f.reconcile()
+	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "2" {
+		t.Fatalf("cancellation generation = %q, want 2", got)
+	}
+
+	t.Log("Completing cancellation creates a replacement that freezes the rerun reason")
+	f.updateRunStatus(setCompletedForTest)
+	f.reconcile()
+	f.reconcile()
+	replacement := f.run("search-2")
+	if replacement.Spec.Rerun == nil || replacement.Spec.Rerun.Reason != "repeat after catalog refresh" {
+		t.Fatalf("replacement rerun = %#v, want explicit reason", replacement.Spec.Rerun)
+	}
+
+	t.Log("The replacement preserves every other search and publication input")
+	replacement.Spec.Rerun = nil
+	if !apiequality.Semantic.DeepEqual(replacement.Spec.NativeSearchInput, *originalInput) {
+		t.Fatalf("replacement input = %#v, want original input %#v", replacement.Spec.NativeSearchInput, *originalInput)
+	}
+}
+
 func TestV1beta2RequestControllerDoesNotStartANewGenerationWhileTheRunCacheLags(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: "search-1"}
@@ -726,6 +762,8 @@ func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testin
 	request := dgdrV1beta2Request(true)
 	const overrides = `{"traffic":{"source":{"input_tokens":null}},"optimizer":{"max_trials":null}}`
 	request.Spec.AISim.InputOverrides = &runtime.RawExtension{Raw: []byte(overrides)}
+	const dgdOverrides = `{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`
+	request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(dgdOverrides)}}
 	f := newDGDRV1beta2Fixture(t, request)
 
 	run, err := f.reconciler.buildRun(request)
@@ -741,6 +779,13 @@ func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testin
 	request.Spec.AISim.InputOverrides.Raw[0] = '['
 	if got := string(run.Spec.AISim.InputOverrides.Raw); got != overrides {
 		t.Fatalf("Run inputOverrides changed with the Request: %s", got)
+	}
+	if run.Spec.Overrides == nil || run.Spec.Overrides.DGD == nil {
+		t.Fatal("Run lost spec.overrides.dgd")
+	}
+	request.Spec.Overrides.DGD.Raw[0] = '['
+	if got := string(run.Spec.Overrides.DGD.Raw); got != dgdOverrides {
+		t.Fatalf("Run DGD override changed with the Request: %s", got)
 	}
 }
 

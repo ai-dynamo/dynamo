@@ -20,11 +20,11 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Dict, Literal, Optional, Protocol, cast
+from typing import Annotated, Any, Dict, Literal, Optional, Protocol, Union, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import yaml
@@ -43,6 +43,7 @@ from pydantic import (
     model_validator,
 )
 
+from dynamo.common.ais_perf_model import load_document
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.batch_policy_config import BatchSchedulingPolicyConfig
 from dynamo.planner.config.defaults import SLAPlannerDefaults
@@ -143,6 +144,42 @@ class AISDatasetProfileSpec(BaseModel):
         return value
 
 
+def ais_perf_model_role_config(
+    worker_type: str, config: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the perf model config of one worker type, checked, with every default.
+
+    ``config`` holds AISimulate ``ForwardPassPerfModelConfig`` keys and no
+    ``from``. A ``worker_type`` it writes must be ``worker_type``. AISimulate
+    checks the values and reads the paths the config names, so those must
+    exist where this is called. A wrong config is a ``ValueError``.
+    """
+    # Operator schema generation imports this module without the optional
+    # estimator runtime. Require AIS only when validating an AIS config.
+    # The package root loads native APIs lazily and types them as object;
+    # import the typed native module directly.
+    from aisim_core._native import RustForwardPassPerfModel
+    from aisim_core.sdk import ForwardPassPerfModelConfig
+
+    written = deepcopy(dict(config))
+    if written.get("worker_type", worker_type) != worker_type:
+        raise ValueError(f"AIS role {worker_type!r} conflicts with worker_type")
+    written["worker_type"] = worker_type
+    try:
+        # Use the installed SDK's fields/defaults; never duplicate its
+        # expanding schema or discard an unrecognized input field.
+        request = ForwardPassPerfModelConfig(**written)
+        # AISimulate exposes native APIs lazily through module __getattr__.
+        cast(Any, RustForwardPassPerfModel).normalize_config(
+            json.dumps(request.to_dict())
+        )
+        # Keep authored roots portable and controls explicit; to_dict()
+        # resolves package/env roots on the machine doing validation.
+        return asdict(request)
+    except TypeError as error:
+        raise ValueError(f"invalid AIS config for {worker_type}: {error}") from error
+
+
 class AISPerfModelSpec(BaseModel):
     """Role-indexed AISimulate canonical configurations.
 
@@ -170,33 +207,71 @@ class AISPerfModelSpec(BaseModel):
     def validate_role_identity(
         cls, roles: dict[str, dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
-        # Operator schema generation imports this module without the optional
-        # estimator runtime. Require AIS only when validating an AIS config.
-        # The package root loads native APIs lazily and types them as object;
-        # import the typed native module directly.
-        from aisimulate_core._native import RustForwardPassPerfModel
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        return {
+            role: ais_perf_model_role_config(role, config)
+            for role, config in roles.items()
+        }
 
-        result = {}
-        for role, config in roles.items():
-            config = deepcopy(config)
-            if config.get("worker_type", role) != role:
-                raise ValueError(f"AIS role {role!r} conflicts with worker_type")
-            config["worker_type"] = role
-            try:
-                # Use the installed SDK's fields/defaults; never duplicate its
-                # expanding schema or discard an unrecognized input field.
-                request = ForwardPassPerfModelConfig(**config)
-                # AISimulate exposes native APIs lazily through module __getattr__.
-                cast(Any, RustForwardPassPerfModel).normalize_config(
-                    json.dumps(request.to_dict())
-                )
-                # Keep authored roots portable and controls explicit; to_dict()
-                # resolves package/env roots on the machine doing validation.
-                result[role] = asdict(request)
-            except TypeError as error:
-                raise ValueError(f"invalid AIS config for {role}: {error}") from error
-        return result
+
+# What PlannerConfig.ais_perf_model holds: the deprecated mapping with roles
+# and dataset_profiles, one perf model config, or a list of configs.
+AISPerfModelValue = Union[AISPerfModelSpec, dict[str, Any], list[dict[str, Any]]]
+
+# How messages name the form of ais_perf_model that replaces roles and
+# dataset_profiles.
+AIS_PERF_MODEL_NEW_FORM = (
+    "ais_perf_model with one perf model config or a list of configs "
+    "(one per worker_type)"
+)
+_AIS_PERF_MODEL_OLD_KEYS = frozenset({"roles", "dataset_profiles"})
+
+
+def ais_perf_model_old_form_names(value: Any) -> list[str]:
+    """Return the deprecated keys an ``ais_perf_model`` value is written with.
+
+    The list is empty for ``None`` and for one config or a list of configs.
+    """
+    if not isinstance(value, AISPerfModelSpec):
+        return []
+    names = []
+    if value.roles:
+        names.append("ais_perf_model.roles")
+    if value.dataset_profiles:
+        names.append("ais_perf_model.dataset_profiles")
+    return names or ["ais_perf_model.roles"]
+
+
+def _ais_perf_model_config_keys() -> set[str]:
+    """Return the keys one perf model config can have."""
+    try:
+        # Operator schema generation imports this module without the optional
+        # estimator runtime; without it no key can be told apart.
+        from aisim_core.sdk import ForwardPassPerfModelConfig
+    except ImportError:
+        return set()
+    return {"from", *(field.name for field in fields(ForwardPassPerfModelConfig))}
+
+
+def _reject_unknown_config_keys(value: Any, config_keys: set[str]) -> None:
+    """Raise ``ValueError`` for keys that no perf model config has.
+
+    ``value`` is one config or a list of configs that the loader accepted; a
+    key written without a value is not looked at.
+    """
+    if not config_keys:
+        # Without the estimator runtime no key can be told apart.
+        return
+    bare = isinstance(value, Mapping)
+    for position, config in enumerate([value] if bare else value, start=1):
+        unknown = sorted(
+            key
+            for key, item in config.items()
+            if item is not None and key not in config_keys
+        )
+        if unknown:
+            # Entries are counted from 1, as in the loader's own errors.
+            where = "ais_perf_model" if bare else f"ais_perf_model: entry {position}"
+            raise ValueError(f"{where}: unknown keys: {', '.join(unknown)}")
 
 
 class ExternalPluginEntry(BaseModel):
@@ -808,7 +883,9 @@ class RetuneEngineSpec(BaseModel):
 
         ``router_config`` is ``KvRouterConfig.from_json`` of the startup
         snapshot merged with ``router_overrides``; ``ais_perf_config`` is
-        rebuilt as ``AisPerfConfig``. Called inside sweep worker processes,
+        returned as ``router_ais_perf_model``, or as the deprecated
+        ``ais_perf_config`` (the native object) when its worker type is not the
+        one the replay's router reads. Called inside sweep worker processes,
         because the native objects cannot be pickled.
         """
 
@@ -816,15 +893,29 @@ class RetuneEngineSpec(BaseModel):
         # native extension; only replay workers construct these objects.
         from dynamo.llm import AisPerfConfig, KvRouterConfig
 
-        # Every field is a run_trace_replay kwarg; model_dump deep-copies.
+        # Every field but the pinned perf config is a run_trace_replay kwarg
+        # under its own name; model_dump deep-copies.
         kwargs = self.model_dump()
+        perf_config = kwargs.pop("ais_perf_config")
+        disaggregated = (
+            self.prefill_engine_args is not None or self.decode_engine_args is not None
+        )
+        router_worker_type = "prefill" if disaggregated else "aggregated"
+        if (
+            perf_config is not None
+            and perf_config.get("worker_type") != router_worker_type
+        ):
+            # Only the deprecated ais_perf_config= of the outer replay pins such
+            # a config: it takes any worker type, and router_ais_perf_model=
+            # would refuse this one.
+            kwargs["ais_perf_config"] = AisPerfConfig(config=perf_config)
+        else:
+            kwargs["router_ais_perf_model"] = perf_config
         overrides = dict(router_overrides or {})
         if self.router_config is not None or overrides:
             kwargs["router_config"] = KvRouterConfig.from_json(
                 json.dumps({**(self.router_config or {}), **overrides})
             )
-        if self.ais_perf_config is not None:
-            kwargs["ais_perf_config"] = AisPerfConfig(config=kwargs["ais_perf_config"])
         return kwargs
 
 
@@ -1043,6 +1134,10 @@ DGDR_TIMEOUT_MARGIN_SECONDS = 600.0
 # DGDR v1beta2 ``spec.recommendation.maxCandidates`` maximum: one Request (a
 # grid shard) carries at most this many router points.
 DGDR_MAX_SHARD_POINTS = 100
+# History buckets per throughput interval one DGDR Request carries as its
+# inner planners' load-predictor warmup (Scenario 2), and each Candidate
+# again as its replayable config: it bounds the objects' size.
+DGDR_MAX_WARMUP_BUCKETS = 1024
 # Router knobs a DGDR v1beta2 Request can search, by public name
 # (``contracts.DGDR_ROUTER_KNOBS``); the Request's router section has no
 # place for the retune extension knobs.
@@ -1086,19 +1181,31 @@ def dgdr_rounds(points: int, parallelism: int) -> int:
 
 
 def dgdr_need_seconds(
-    points: int, dgdr: DgdrExecutorConfig, *, needs_cut: bool
+    points: int,
+    dgdr: DgdrExecutorConfig,
+    *,
+    needs_cut: bool,
+    needs_history: bool = False,
 ) -> float:
-    """Wall-clock seconds one DGDR shard of ``points`` router points needs.
+    """Wall-clock seconds one DGDR shard of ``points`` candidate points needs.
 
-    ``cut_budget`` (when the window file must still be cut) + Run Job
-    start-up + ``dgdr_rounds(points, run.parallelism)`` rounds of
+    ``cut_budget`` (when the window file must still be cut) + another
+    ``cut_budget`` (when the history must still be read and the predictor
+    pre-sweep run, Scenario 2) + Run Job start-up +
+    ``dgdr_rounds(points, run.parallelism)`` rounds of
     ``candidate_timeout``. ``parallelism`` is the configured value; Job
     resources may lower it, so this is optimistic.
     """
 
     rounds = dgdr_rounds(points, dgdr.run.parallelism)
     cut = dgdr.cut_budget_seconds if needs_cut else 0.0
-    return cut + dgdr.job_startup_seconds + rounds * dgdr.run.candidate_timeout_seconds
+    history = dgdr.cut_budget_seconds if needs_history else 0.0
+    return (
+        cut
+        + history
+        + dgdr.job_startup_seconds
+        + rounds * dgdr.run.candidate_timeout_seconds
+    )
 
 
 def balanced_shard_parts(
@@ -1696,22 +1803,67 @@ class PlannerConfig(BaseModel):
             "the legacy profile_results_dir file loader)."
         ),
     )
-    ais_perf_model: Optional[AISPerfModelSpec] = Field(
+    ais_perf_model: Optional[AISPerfModelValue] = Field(
         default=None,
         description=(
-            "Role-indexed AISimulate ForwardPassPerfModelConfig mappings. "
-            "The SDK owns estimator selection, tuning, and validation; "
-            "new configs default to auto selection with fallback denied."
+            "AISimulate perf model of the workers the Planner scales: one perf "
+            "model config (a mapping), or a list of configs with one "
+            "worker_type each (prefill, decode or aggregated). A config holds "
+            "AISimulate ForwardPassPerfModelConfig keys, or `from` to take "
+            "them from a template file, a dataset or a state snapshot. The "
+            "value is stored as written. A config without `from` is checked "
+            "when the Planner config is loaded; a config with `from` is read "
+            "and checked when the Planner first needs the model. The SDK owns "
+            "estimator selection, tuning, and validation; new configs default "
+            "to auto selection with fallback denied. The older mapping with "
+            "`roles` and `dataset_profiles` is deprecated."
         ),
     )
+
+    @field_validator("ais_perf_model", mode="before")
+    @classmethod
+    def read_ais_perf_model_form(cls, value: Any) -> Any:
+        if value is None or isinstance(value, AISPerfModelSpec):
+            return value
+        if isinstance(value, str):
+            raise ValueError(
+                "ais_perf_model must be a perf model config (a mapping) or a list "
+                "of configs, not a string; a file path is not read here"
+            )
+        if isinstance(value, Mapping):
+            other_keys = value.keys() - _AIS_PERF_MODEL_OLD_KEYS
+            if not other_keys:
+                return AISPerfModelSpec.model_validate(value)
+            config_keys = _ais_perf_model_config_keys()
+            if _AIS_PERF_MODEL_OLD_KEYS & value.keys():
+                if other_keys & config_keys:
+                    raise ValueError(
+                        "ais_perf_model mixes the old form (roles, dataset_profiles) "
+                        f"with other keys ({', '.join(sorted(map(str, other_keys)))}); "
+                        "write one form"
+                    )
+                # A misspelled key of the old form keeps that form's error.
+                return AISPerfModelSpec.model_validate(value)
+            if config_keys and not other_keys & config_keys:
+                # No key of either form: the old form's error names each key.
+                return AISPerfModelSpec.model_validate(value)
+        elif isinstance(value, list):
+            config_keys = _ais_perf_model_config_keys()
+        else:
+            return AISPerfModelSpec.model_validate(value)
+        # Only the syntax and the names of the keys are checked here: no file
+        # the value names is opened. The values of the configs the mode uses
+        # are checked with the mode, in _validate_config.
+        load_document(value)
+        _reject_unknown_config_keys(value, config_keys)
+        return deepcopy(value)
 
     @model_validator(mode="before")
     @classmethod
     def reject_retired_perf_model_config(cls, values):
         if isinstance(values, dict) and "aic_perf_model" in values:
             raise ValueError(
-                "aic_perf_model is no longer supported; use ais_perf_model.roles "
-                "with canonical AISimulate configurations"
+                f"aic_perf_model is no longer supported; use {AIS_PERF_MODEL_NEW_FORM}"
             )
         return values
 
@@ -1854,6 +2006,14 @@ class PlannerConfig(BaseModel):
 
     # Global planner environment
     global_planner_namespace: Optional[str] = None
+    global_planner_managed_allocation: bool = Field(
+        default=False,
+        description=(
+            "Set when the Global Planner runs managed_allocation. Stable "
+            "same-count recommendations are then published as demand, so a "
+            "hold can cancel older retained demand."
+        ),
+    )
 
     # Scaling mode flags
     enable_throughput_scaling: bool = SLAPlannerDefaults.enable_throughput_scaling
@@ -2249,6 +2409,13 @@ class PlannerConfig(BaseModel):
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
             )
+        if (
+            self.global_planner_managed_allocation
+            and self.environment != "global-planner"
+        ):
+            raise ValueError(
+                "global_planner_managed_allocation requires environment='global-planner'"
+            )
 
         # Retune-only mode needs both flags explicitly false, so a config that
         # relies on easy-mode forcing keeps autoscaling when retune is added.
@@ -2363,15 +2530,42 @@ class PlannerConfig(BaseModel):
                 "decode": ("decode",),
                 "agg": ("aggregated",),
             }[self.mode]
-            for role in required_roles:
-                if (
-                    role not in self.ais_perf_model.roles
-                    and role not in self.ais_perf_model.dataset_profiles
-                ):
-                    raise ValueError(
-                        f"ais_perf_model.roles.{role} or dataset_profiles.{role} "
-                        f"is required for mode={self.mode!r}"
-                    )
+            if isinstance(self.ais_perf_model, AISPerfModelSpec):
+                for role in required_roles:
+                    if (
+                        role not in self.ais_perf_model.roles
+                        and role not in self.ais_perf_model.dataset_profiles
+                    ):
+                        raise ValueError(
+                            f"ais_perf_model.roles.{role} or dataset_profiles.{role} "
+                            f"is required for mode={self.mode!r}"
+                        )
+            else:
+                document = load_document(self.ais_perf_model)
+                entries = {}
+                for role in required_roles:
+                    try:
+                        entries[role] = document.select(role)
+                    except ValueError as error:
+                        written = ", ".join(document.worker_types)
+                        raise ValueError(
+                            f"ais_perf_model: mode={self.mode!r} needs an entry for "
+                            f"worker type {role!r}; it has: "
+                            f"{written or 'one config without worker_type'}"
+                        ) from error
+                for role, entry in entries.items():
+                    if "from" in entry:
+                        # Its source is read when the Planner first needs the
+                        # model: the file need not exist where this runs.
+                        continue
+                    try:
+                        ais_perf_model_role_config(role, entry)
+                    # AISimulate reports perf data it cannot find as a
+                    # RuntimeError.
+                    except (ValueError, OSError, RuntimeError) as error:
+                        raise ValueError(
+                            f"ais_perf_model entry for {role}: {error}"
+                        ) from error
 
         intervals = [float(self.load_adjustment_interval_seconds)]
         if self.enable_throughput_scaling:
@@ -2451,12 +2645,12 @@ class PlannerConfig(BaseModel):
         planner_domain = expand_planner_domain(self)
         router_domain = expand_router_domain(retune)
 
-        if self.enable_throughput_scaling and retune.history_seconds is not None:
+        if retune.history_seconds is not None:
             required = required_history_seconds(self, planner_domain)
             if retune.history_seconds < required:
                 raise ValueError(
                     f"retune.history_seconds must be >= {required:g}s "
-                    "(throughput_adjustment_interval_seconds x "
+                    "(the largest throughput_adjustment_interval_seconds x "
                     "max(prophet_window_size, kalman_min_points) over the "
                     "current predictor and the load_predictor candidates) to "
                     "warm throughput predictors"
@@ -2466,17 +2660,19 @@ class PlannerConfig(BaseModel):
             raise ValueError(
                 "retune requires a non-empty router or planner search domain"
             )
-        size = grid_size(router_domain, planner_domain.grid)
+        size = grid_size(router_domain) * len(planner_domain.points)
         if size > retune.max_candidates:
+            description = describe_grid(
+                router_domain, planner_domain.grid, len(planner_domain.points)
+            )
             raise ValueError(
                 f"retune grid has {size} candidates, exceeding "
                 f"retune.max_candidates={retune.max_candidates} "
-                f"({describe_grid(router_domain, planner_domain.grid)}); an "
-                "omitted AISimulate knob searches its default domain, so pin "
-                "knobs with a scalar to shrink the grid"
+                f"({description}); an omitted AISimulate knob searches its "
+                "default domain, so pin knobs with a scalar to shrink the grid"
             )
         if retune.executor == "dgdr":
-            self._validate_live_retune_budget(retune, router_domain)
+            self._validate_live_retune_budget(retune, router_domain, planner_domain)
 
     def _validate_live_retune(self, retune: RetuneConfig) -> None:
         """Configuration premises P1, P2, P3 and P5 of live retune.
@@ -2523,15 +2719,12 @@ class PlannerConfig(BaseModel):
                 f"{DGDR_TIMEOUT_MARGIN_SECONDS:g} = {limit:g} with executor "
                 f"'dgdr' (P1), got {retune.timeout_seconds:g}"
             )
-        if self.scaling_enabled():
+        if retune.router is None:
             raise ValueError(
-                "retune.executor 'dgdr' supports retune-only mode (P2): set "
-                "enable_load_scaling and enable_throughput_scaling both to false"
-            )
-        if retune.planner is not None:
-            raise ValueError(
-                "retune.executor 'dgdr' retunes the router only (P2); remove "
-                "retune.planner"
+                "retune.executor 'dgdr' requires retune.router (P2): every DGDR "
+                "Request sets the three router knobs; to retune the Planner "
+                "alone, pin overlap_score_credit, prefill_load_scale and "
+                "temperature to the frontend's startup values with scalars"
             )
         self._validate_live_retune_router(retune)
         _validate_dgdr_engine(dgdr.engine, self.mode, self.backend)
@@ -2583,7 +2776,7 @@ class PlannerConfig(BaseModel):
         if "prefill_load_model" not in spec:
             return
         # Imported on use: the adapter schema imports this module.
-        from aisimulate.config.common import Choices
+        from aisim.config.common import Choices
 
         from dynamo.planner.retune.domains import parse_retune_section
 
@@ -2601,41 +2794,75 @@ class PlannerConfig(BaseModel):
                 f"executor 'dgdr' (P3), got {written}"
             )
 
-    @staticmethod
     def _validate_live_retune_budget(
-        retune: RetuneConfig, router_domain: Mapping[str, Sequence[float]]
+        self,
+        retune: RetuneConfig,
+        router_domain: Mapping[str, Sequence[float]],
+        planner_domain: Any,
     ) -> None:
         """P13: the largest grid shard can finish within the sweep deadline.
 
         The baseline can fall in any grid shard, and a window whose baseline
         shard cannot finish fails with ``launch_too_late``, so the largest
         shard must fit. The domain is the widest one: a zero startup credit
-        only narrows it at runtime.
+        only narrows it at runtime, and folding inactive fields to the
+        baseline's values only merges planner points. With scaling, the
+        planner points are one more shard dimension, the history read and
+        the predictor pre-sweep take another ``cut_budget_seconds``, and the
+        warmup a Request carries is bounded by ``DGDR_MAX_WARMUP_BUCKETS``
+        buckets per throughput interval.
         """
 
         dgdr = retune.dgdr
         if dgdr is None or retune.timeout_seconds is None:
             # _validate_live_retune rejects both first.
             raise ValueError("retune.executor 'dgdr' requires dgdr and timeout_seconds")
+        scaling = self.scaling_enabled()
+        if scaling:
+            # Imported on use: the module imports this one at module scope.
+            from dynamo.planner.retune.domains import (
+                required_history_seconds,
+                throughput_intervals,
+            )
+
+            intervals = throughput_intervals(self, planner_domain.points)
+            history_s = retune.history_seconds
+            if history_s is None:
+                history_s = required_history_seconds(self, planner_domain)
+            if intervals and history_s / min(intervals) > DGDR_MAX_WARMUP_BUCKETS:
+                raise ValueError(
+                    f"retune history of {history_s:g}s at the shortest throughput "
+                    f"interval {min(intervals)}s is "
+                    f"{math.ceil(history_s / min(intervals))} warmup buckets, more "
+                    f"than the {DGDR_MAX_WARMUP_BUCKETS} a DGDR Request carries "
+                    "(P13); lower retune.history_seconds or the predictor window"
+                )
         sizes = [len(values) for values in router_domain.values()]
+        if scaling:
+            sizes.append(len(planner_domain.points))
         parts = balanced_shard_parts(
             sizes, dgdr.run.max_shards, parallelism=dgdr.run.parallelism
         )
         points = largest_shard_points(sizes, parts)
         if points > DGDR_MAX_SHARD_POINTS:
             raise ValueError(
-                f"the retune router grid of {math.prod(sizes)} points cannot be "
+                f"the retune grid of {math.prod(sizes)} points cannot be "
                 f"split into at most retune.dgdr.run.max_shards="
                 f"{dgdr.run.max_shards} Cartesian shards of at most "
                 f"{DGDR_MAX_SHARD_POINTS} points (P13); the largest would have "
                 f"{points}. Raise max_shards or pin router knobs with a scalar"
             )
-        need = dgdr_need_seconds(points, dgdr, needs_cut=True)
+        need = dgdr_need_seconds(points, dgdr, needs_cut=True, needs_history=scaling)
         if need > retune.timeout_seconds:
             rounds = dgdr_rounds(points, dgdr.run.parallelism)
+            history = (
+                f"cut_budget_seconds {dgdr.cut_budget_seconds:g} for the history + "
+                if scaling
+                else ""
+            )
             raise ValueError(
                 f"the largest retune grid shard ({points} points) needs "
-                f"{need:g}s: cut_budget_seconds {dgdr.cut_budget_seconds:g} + "
+                f"{need:g}s: {history}cut_budget_seconds {dgdr.cut_budget_seconds:g} + "
                 f"job_startup_seconds {dgdr.job_startup_seconds:g} + {rounds} "
                 f"rounds x candidate_timeout_seconds "
                 f"{dgdr.run.candidate_timeout_seconds:g}, more than "
@@ -2648,36 +2875,33 @@ class PlannerConfig(BaseModel):
         self,
         grid: Mapping[str, Sequence[Any]],
         public_names: Mapping[str, str],
+        *,
+        load_scaling: Optional[bool] = None,
+        throughput_scaling: Optional[bool] = None,
     ) -> dict[str, list[Any]]:
         """Reject planner grid fields that are inert in this configuration.
 
         ``grid`` is keyed by ``PlannerConfig`` field; ``public_names`` gives
-        the ``retune.planner`` name to report. Each value must pass the
-        field's strict validation, as a runtime reconfiguration would.
-        Returns the grid with validated values (``80`` becomes ``80.0`` for a
-        float field), so candidates compare equal to the live config by key.
+        the ``retune.planner`` name to report. ``load_scaling`` and
+        ``throughput_scaling`` say whether some grid point scales that way
+        (default: this config does). Each value must pass the field's strict
+        validation, as a runtime reconfiguration would. Returns the grid with
+        validated values (``80`` becomes ``80.0`` for a float field), so
+        candidates compare equal to the live config by key.
         """
 
-        active_endpoints = (
-            {"min_endpoint"}
-            if self.mode == "agg"
-            else {"prefill_min_endpoint", "decode_min_endpoint"}
-        )
+        if load_scaling is None:
+            load_scaling = self.enable_load_scaling
+        if throughput_scaling is None:
+            throughput_scaling = self.enable_throughput_scaling
         validated: dict[str, list[Any]] = {}
         for key, values in grid.items():
             name = f"retune.planner.{public_names.get(key, key)}"
-            if key in ("min_endpoint", "prefill_min_endpoint", "decode_min_endpoint"):
-                relevant = key in active_endpoints
-                requirement = (
-                    "mode='agg' (use prefill_min_workers/decode_min_workers in disagg)"
-                    if key == "min_endpoint"
-                    else "mode='disagg' (use min_workers in agg)"
-                )
-            elif key == "max_throughput_scaling_replicas":
-                relevant = self.enable_throughput_scaling
+            if key == "max_throughput_scaling_replicas":
+                relevant = throughput_scaling
                 requirement = "enable_throughput_scaling"
             elif key == "load_scaling_down_sensitivity":
-                relevant = self.enable_load_scaling
+                relevant = load_scaling
                 requirement = "enable_load_scaling"
             elif key in (
                 "prefill_scale_up_queue_tokens",
@@ -2689,7 +2913,8 @@ class PlannerConfig(BaseModel):
                 relevant = self.optimization_target == "load"
                 requirement = "optimization_target='load'"
             else:
-                # min_gpu_budget / max_gpu_budget apply to any scaling mode.
+                # The scaling-policy fields: expand_planner_domain keeps only
+                # the policies that apply.
                 relevant = True
                 requirement = ""
             if not relevant:
@@ -2735,6 +2960,11 @@ class PlannerConfig(BaseModel):
             ) from e
 
         return cls.model_validate(data)
+
+    @property
+    def fpm_max_age_seconds(self) -> float:
+        """Freshness window of live FPM samples: three load intervals."""
+        return 3.0 * self.load_adjustment_interval_seconds
 
     @classmethod
     def _load_from_file(cls, path: Path) -> "PlannerConfig":

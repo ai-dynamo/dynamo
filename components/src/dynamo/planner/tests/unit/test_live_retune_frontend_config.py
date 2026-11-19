@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
@@ -125,6 +125,15 @@ def trace_env(**overrides: Any) -> list[dict[str, Any]]:
         "DYN_REQUEST_TRACE_CAPACITY": {
             "name": "DYN_REQUEST_TRACE_CAPACITY",
             "value": "8192",
+        },
+        # The admin listener that serves /router_policy (P10).
+        "DYN_ENABLE_FRONTEND_ADMIN_API": {
+            "name": "DYN_ENABLE_FRONTEND_ADMIN_API",
+            "value": "1",
+        },
+        "DYN_FRONTEND_ADMIN_HOST": {
+            "name": "DYN_FRONTEND_ADMIN_HOST",
+            "value": "0.0.0.0",
         },
     }
     for name, entry in overrides.items():
@@ -1031,6 +1040,30 @@ def test_p4_rejects(args, env, match):
 def test_p4_accepts(args, env):
     report = evaluate(with_frontend(args=args, env=trace_env(**env)))
     assert report.p4_ok, report.reasons
+
+
+@pytest.mark.parametrize(
+    "worker_type",
+    ["prefill", {"valueFrom": {"configMapKeyRef": {"name": "c", "key": "t"}}}],
+)
+def test_worker_type_env_is_not_a_violation(worker_type):
+    # The variable only chooses the entry of an AIS perf model, and the load
+    # model here is 'none'.
+    env = {"DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE": worker_type}
+    args = (*KV_ARGS, "--router-prefill-load-model", "none")
+
+    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    assert report.p4_ok, report.reasons
+
+    # Another router variable next to it is still reported, alone.
+    env["DYN_ROUTER_POSITIONAL_SEARCH_MODE"] = "x"
+    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    reasons = reasons_matching(report, "P4:")
+    assert not report.p4_ok
+    assert any("DYN_ROUTER_POSITIONAL_SEARCH_MODE" in reason for reason in reasons)
+    assert not any(
+        "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE" in reason for reason in report.reasons
+    )
 
 
 def test_p4_unsearched_knob_when_router_domain_is_pinned():
@@ -1997,6 +2030,9 @@ def test_worker_env_from_is_warned_once():
     assert report.p4_ok and report.spec_ok, report.reasons
     env_from = sorted(w for w in report.warnings if "envFrom" in w)
     assert env_from == [
+        "P10: the frontend uses envFrom, which the planner cannot read; it "
+        "assumes envFrom sets no DYN_FRONTEND_ADMIN_PORT and calls port 8002. "
+        "Set DYN_FRONTEND_ADMIN_PORT in the container's env to be sure",
         "P4: the frontend container uses envFrom secretRef 'hf-token-secret'; "
         "the planner cannot read it and assumes it sets no router env (P14 "
         "still checks the routers' policy parameters)",
@@ -2024,7 +2060,7 @@ def uncached_model_warning():
 
 @pytest.mark.usefixtures("uncached_model_warning")
 def test_p6_without_aisimulate_is_not_checked(monkeypatch):
-    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", None)
+    monkeypatch.setitem(sys.modules, "aisim_core.sdk.common", None)
     assert fc._model_warning("acme/private-model") is None
 
 
@@ -2033,9 +2069,9 @@ def test_p6_broken_aisimulate_warns(monkeypatch, caplog):
     def broken(name: str) -> Any:
         raise RuntimeError("broken install")
 
-    module = types.ModuleType("aisimulate_core.sdk.common")
+    module = types.ModuleType("aisim_core.sdk.common")
     module.__getattr__ = broken  # type: ignore[method-assign]
-    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", module)
+    monkeypatch.setitem(sys.modules, "aisim_core.sdk.common", module)
     warning = fc._model_warning(MODEL)
     assert warning is not None and warning.startswith("P6: cannot check")
     assert "RuntimeError: broken install" in warning
@@ -2315,6 +2351,24 @@ P10_CASES = [
         },
         None,
     ),
+    # The admin listener that serves /router_policy.
+    (
+        {"DYN_ENABLE_FRONTEND_ADMIN_API": None},
+        None,
+        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1",
+    ),
+    (
+        {"DYN_FRONTEND_ADMIN_HOST": None},
+        None,
+        "its admin listener binds 127.0.0.1 by default",
+    ),
+    ({"DYN_FRONTEND_ADMIN_PORT": "9100"}, None, None),
+    # The planner reads the pod spec, where $(VAR) is not expanded yet.
+    (
+        {"DYN_FRONTEND_ADMIN_PORT": "$(DYN_POD_NAME)"},
+        None,
+        "DYN_FRONTEND_ADMIN_PORT must be a literal value",
+    ),
 ]
 
 
@@ -2332,6 +2386,27 @@ def test_p10_trace_recipe(env, frontend_kwargs, match):
     else:
         assert any(match in r for r in p10), p10
         assert not report.spec_ok
+
+
+def test_p10_warns_when_env_from_could_set_the_admin_port():
+    def with_env_from(env: list[dict[str, Any]], source: dict[str, Any]) -> dict:
+        component = frontend(env=env)
+        component["podTemplate"]["spec"]["containers"][0]["envFrom"] = [source]
+        return dgd(component, worker(), planner())
+
+    def port_warnings(report: Any) -> list[str]:
+        return [w for w in report.warnings if "DYN_FRONTEND_ADMIN_PORT" in w]
+
+    source = {"configMapRef": {"name": "frontend-env"}}
+    report = evaluate(with_env_from(trace_env(), source))
+    assert report.spec_ok, report.reasons
+    assert port_warnings(report), report.warnings
+    # An explicit env entry wins over envFrom.
+    report = evaluate(with_env_from(trace_env(DYN_FRONTEND_ADMIN_PORT="8002"), source))
+    assert report.spec_ok and not port_warnings(report)
+    # A prefixed source cannot define the name.
+    report = evaluate(with_env_from(trace_env(), {**source, "prefix": "APP_"}))
+    assert report.spec_ok and not port_warnings(report)
 
 
 def test_p10_custom_segments_dir_and_graph_env():

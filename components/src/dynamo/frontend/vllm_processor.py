@@ -41,8 +41,13 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
-from dynamo.vllm.errors import vllm_client_error_to_http_error
+from dynamo.llm.exceptions import (
+    HttpError,
+    InvalidArgument,
+    RoutedEngineError,
+    WorkerUnavailable,
+)
+from dynamo.vllm.errors import vllm_client_error_to_public_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .structural_tag_policy import (
@@ -59,7 +64,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
+    request_id_from_context,
     resolve_chat_template,
 )
 
@@ -95,6 +100,21 @@ def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
     ):
         return top_logprobs
     return None
+
+
+def _choice_top_logprobs(request: dict[str, Any]) -> int | None:
+    """How many alternatives each response logprob entry lists.
+
+    With explicit ``logprob_token_ids`` the worker scores the sampled token and
+    each named id, and vLLM's chat server lists them all, whatever
+    ``top_logprobs`` says.
+    """
+    count = _sampling_logprobs_count(
+        request.get("logprobs"), request.get("top_logprobs")
+    )
+    if count is not None and (token_ids := request.get("logprob_token_ids")):
+        return len(token_ids) + 1
+    return count
 
 
 def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
@@ -148,7 +168,7 @@ def _chat_choice_logprobs(
 
     Each record has ``token_id``, ``logprob``, and ``top``. ``top`` is the
     raw per-position list of ``{rank, token_id, token, logprob, bytes}``,
-    including the sampled token. The content entry keeps the sampled token.
+    which may omit the sampled token. The content entry keeps the sampled token.
     ``top_logprobs`` on the entry is the rank-sorted prefix of length
     ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
     ``return_tokens_as_token_ids`` formats every token and its bytes as
@@ -638,6 +658,16 @@ def _inject_routing_metadata(
         target["mm_routing_info"] = mm_routing_info
 
 
+def _request_cache_salt(request: dict[str, Any]) -> str | None:
+    """Match the public precedence of Rust's ``request_cache_salt``."""
+    nvext = request.get("nvext")
+    salt = nvext.get("cache_salt") if isinstance(nvext, dict) else None
+    if isinstance(salt, str) and salt:
+        return salt
+    salt = request.get("cache_salt")
+    return salt if isinstance(salt, str) and salt else None
+
+
 async def _build_engine_inputs(
     renderer: Any,
     engine_prompt: dict[str, Any],
@@ -680,6 +710,18 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 continue
             if image_url.get("detail") is None:
                 image_url["detail"] = "auto"
+
+
+# Request fields the vLLM worker applies from extra_args.sampling_options, sent
+# as the client wrote them: the Rust preprocessor's `sampling_passthrough_args`
+# (lib/llm/src/preprocessor.rs) without `detokenize`, which the worker's token
+# path always turns off.
+_SAMPLING_PASSTHROUGH_FIELDS = (
+    "allowed_token_ids",
+    "bad_words_token_ids",
+    "logprob_token_ids",
+    "vllm_xargs",
+)
 
 
 def _disabled_as_unset(value: Any, requested: Any) -> Any:
@@ -931,13 +973,18 @@ class VllmProcessor:
         except VLLMClientError as exc:
             # vLLM 0.27 replaced many request-side ValueError/TypeError raises
             # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
-            # Dynamo's HTTP boundary.
-            raise vllm_client_error_to_http_error(exc) from exc
+            # Dynamo's HTTP boundary. A 400 keeps its reason for the client.
+            raise vllm_client_error_to_public_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
-        request_id = random_uuid()
+        """Preprocess a chat request and yield responses from the routed engine.
+
+        Local vLLM processing handles tokenization and response assembly, while
+        routing metadata and worker arguments carry request settings to inference.
+        """
+        request_id = request_id_from_context(context)
 
         _reject_unsupported_chat_logprobs(
             request.get("logprobs"),
@@ -1014,6 +1061,10 @@ class VllmProcessor:
             request_for_sampling.logprobs,
             getattr(request_for_sampling, "top_logprobs", None),
         )
+        # Explicit logprob_token_ids set the width, so vLLM's verify rejects a
+        # top-k count next to them; the worker nulls it the same way.
+        if getattr(sampling_params, "logprob_token_ids", None):
+            sampling_params.logprobs = None
         # Response metadata is opt-in, even if generation_config enables it.
         if request.get("prompt_logprobs") is None or (
             request.get("stream") is True
@@ -1028,6 +1079,7 @@ class VllmProcessor:
         # below. Prefer the OpenAI-compatible root-level field, fall back to the
         # legacy nvext passthrough.
         thinking_token_budget = resolve_thinking_token_budget(request)
+        cache_salt = _request_cache_salt(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed
@@ -1038,7 +1090,7 @@ class VllmProcessor:
                 self.input_processor.renderer,
                 engine_prompt,
                 tokens,
-                cache_salt=request_for_sampling.cache_salt,
+                cache_salt=cache_salt,
                 mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
                 defer_multimodal_processing=mm_uuids is not None,
             )
@@ -1096,8 +1148,27 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if cache_salt is not None:
+            # The router and worker must use the same public namespace. The
+            # worker adds the internal KV-event tag when it builds its prompt.
+            dynamo_preproc["routing"] = {
+                **(dynamo_preproc["routing"] or {}),
+                "cache_salt": cache_salt,
+            }
+            dynamo_preproc.setdefault("extra_args", {})["nvext"] = {
+                "cache_salt": cache_salt
+            }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
+        sampling_passthrough = {
+            key: request[key]
+            for key in _SAMPLING_PASSTHROUGH_FIELDS
+            if request.get(key) is not None
+        }
+        if sampling_passthrough:
+            dynamo_preproc.setdefault("extra_args", {})[
+                "sampling_options"
+            ] = sampling_passthrough
         if reasoning_metadata.engine_reasoning_ended is not None:
             dynamo_preproc[
                 "reasoning_ended"
@@ -1269,10 +1340,7 @@ class VllmProcessor:
         audio_count = len(_mm_counts.get("audio_url", []))
         pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
         emitted_choice_tokens: dict[int, list[int]] = {}
-        choice_top_logprobs = _sampling_logprobs_count(
-            request.get("logprobs"),
-            request.get("top_logprobs"),
-        )
+        choice_top_logprobs = _choice_top_logprobs(request)
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
@@ -1487,7 +1555,7 @@ class VllmProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": choices,
                         "created": int(time.time()),
                         "model": request["model"],
@@ -1547,6 +1615,10 @@ class VllmProcessor:
             # that 503 into a 500; let the binding restore the class instead.
             raise
         except InvalidArgument:
+            raise
+        except RoutedEngineError:
+            # Keep the worker's error class (for example CapacityExhausted, HTTP 529);
+            # an error envelope would turn it into a 500.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

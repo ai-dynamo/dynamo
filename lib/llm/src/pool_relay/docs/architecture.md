@@ -24,6 +24,7 @@ Wire semantics are specified in [the gRPC contract](grpc-contract.md) and
 | [`actor.rs`](../actor.rs) | Exact rank ownership, refcounts, CKF mutation, and publication cuts. |
 | [`topology.rs`](../topology.rs), [`load.rs`](../load.rs) | Serving readiness, worker-authoritative KV load, and per-pool router scheduler load. |
 | [`serving_load.rs`](../serving_load.rs) | Frontend-load aggregation and the serving-load snapshot behind `SubscribeServingLoad`. |
+| [`routing_pool.rs`](../routing_pool.rs) | The routing pool's Global Discovery registration (`POST /pools`), under the model the topology names. |
 | [`publication.rs`](../publication.rs) | Transport-neutral source, streams, frames, and error categories. |
 | [`publication/hub.rs`](../publication/hub.rs), [`publication/stream.rs`](../publication/stream.rs) | Lazy mirrors, bounded fanout, snapshot bootstrap, and stream continuity. |
 | [`wan/grpc.rs`](../wan/grpc.rs), [`wan/grpc/config.rs`](../wan/grpc/config.rs) | gRPC adapter facade and configuration. |

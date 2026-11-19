@@ -83,6 +83,8 @@ async def worker(runtime: DistributedRuntime) -> None:
         connection_revision=args.connection_revision,
         global_discovery_url=args.global_discovery_url,
         routing_pool=args.routing_pool,
+        routing_pool_region=args.routing_pool_region,
+        routing_pool_frontends=list(args.routing_pool_frontends),
     )
     await relay.start()
     diagnostics = PoolRelayDiagnostics(relay)

@@ -193,6 +193,7 @@ fn make_stream_delta(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     })
 }
 
@@ -917,6 +918,7 @@ fn make_stream_delta_with_reasoning(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     })
 }
 
@@ -986,11 +988,11 @@ async fn test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring()
 }
 
 #[tokio::test]
-async fn test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser() {
+async fn test_batch_experimental_flag_rejects_unsupported_v2_parser() {
     if test_utils::run_isolated(
         concat!(
             module_path!(),
-            "::test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser"
+            "::test_batch_experimental_flag_rejects_unsupported_v2_parser"
         ),
         &[(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")],
     ) {
@@ -999,7 +1001,7 @@ async fn test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser() {
 
     let error = NvCreateChatCompletionResponse::from_annotated_stream(
         futures::stream::iter([make_stream_delta(Some("answer"), None)]),
-        ParsingOptions::new(Some("hermes".to_string()), None)
+        ParsingOptions::new(Some("unknown_parser".to_string()), None)
             .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
     )
     .await
@@ -1240,7 +1242,7 @@ async fn explicit_v2_rejects_unsupported_batch_parser_for_every_tool_choice() {
             tool_name: "weather".to_string(),
         },
     ] {
-        let options = ParsingOptions::new(Some("hermes".to_string()), None)
+        let options = ParsingOptions::new(Some("unknown_parser".to_string()), None)
             .with_guided_tool_constraint(constraint);
         let result = NvCreateChatCompletionResponse::from_annotated_stream(
             futures::stream::iter([make_stream_delta(Some("raw output"), None)]),

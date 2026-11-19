@@ -422,6 +422,7 @@ mod tests {
                 x_request_id: None,
                 finish_reason_metadata: Default::default(),
                 client_tool_call_ids: None,
+                client_tool_names: None,
             });
             if already_finished {
                 tracker.record_finish();
@@ -586,6 +587,33 @@ mod tests {
                 .input_length,
             3
         );
+    }
+
+    #[test]
+    fn agent_context_reads_client_tool_names_from_context() {
+        let mut request = preprocessed_request(SamplingOptions::default());
+        request.agent_context = Some(AgentContext {
+            session_id: "root".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            agent_headers: Default::default(),
+            input_trigger: None,
+        });
+        let tracker = Some(Arc::new(RequestTracker::new()));
+
+        let plain = Context::new(());
+        let state =
+            build_request_end_trace_state_for_policy(&request, &tracker, &plain, 2, true).unwrap();
+        assert!(state.agent.as_ref().unwrap().client_tool_names.is_none());
+
+        let mut context = Context::new(());
+        context.insert(
+            crate::request_trace::CLIENT_TOOL_NAMES_CONTEXT_KEY,
+            crate::request_trace::ClientToolNames(Arc::new(Default::default())),
+        );
+        let state = build_request_end_trace_state_for_policy(&request, &tracker, &context, 2, true)
+            .unwrap();
+        assert!(state.agent.as_ref().unwrap().client_tool_names.is_some());
     }
 
     #[test]

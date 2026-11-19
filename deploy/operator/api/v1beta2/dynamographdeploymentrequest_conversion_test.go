@@ -111,6 +111,8 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 					InputOverrides: &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
 				},
 				Recommendation: &RecommendationSpec{MaxCandidates: 3},
+				Rerun:          &RerunSpec{Reason: "repeat after catalog refresh"},
+				Overrides:      &OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}},
 			},
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
@@ -261,6 +263,17 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 			},
 		},
 		{
+			name: "v1beta2 rerun spec",
+			spoke: &DynamoGraphDeploymentRequest{
+				Spec: DynamoGraphDeploymentRequestSpec{
+					NativeSearchInput: NativeSearchInput{
+						Rerun: &RerunSpec{Reason: "repeat"},
+					},
+					V1Beta1: &apiextensionsv1.JSON{Raw: []byte(`{"model":"legacy"}`)},
+				},
+			},
+		},
+		{
 			name: "v1beta1 spec",
 			hub: &v1beta1.DynamoGraphDeploymentRequest{
 				Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
@@ -299,7 +312,7 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 func TestNativeV1Beta2SpecFields(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Verify the shared input contains exactly the AISimulate-native fields.")
+	t.Log("Verify the shared input contains the complete frozen search and publication intent.")
 	nativeType := reflect.TypeFor[NativeSearchInput]()
 	gotNative := make([]string, nativeType.NumField())
 	for i := range nativeType.NumField() {
@@ -313,6 +326,8 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		"Objective",
 		"AISim",
 		"Recommendation",
+		"Rerun",
+		"Overrides",
 	}
 	if !reflect.DeepEqual(gotNative, wantNative) {
 		t.Fatalf("native search input fields = %v, want %v", gotNative, wantNative)
@@ -349,6 +364,8 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		"objective":      {NativeSearchInput: NativeSearchInput{Objective: &ObjectiveSpec{}}},
 		"aisim":          {NativeSearchInput: NativeSearchInput{AISim: &AISimSpec{}}},
 		"recommendation": {NativeSearchInput: NativeSearchInput{Recommendation: &RecommendationSpec{}}},
+		"rerun":          {NativeSearchInput: NativeSearchInput{Rerun: &RerunSpec{Reason: "repeat"}}},
+		"overrides":      {NativeSearchInput: NativeSearchInput{Overrides: &OverridesSpec{}}},
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {

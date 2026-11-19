@@ -87,14 +87,14 @@ tests:
           value: "true"
         documentIndex: 1
 
-  - it: registers Run admission only when the v1beta2 API is enabled
+  - it: registers Run and Candidate admission only when the v1beta2 API is enabled
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
       dynamo-operator.dgdrV1Beta2.enabled: true
     asserts:
       - lengthEqual:
           path: webhooks
-          count: 5
+          count: 6
         documentIndex: 0
       - equal:
           path: webhooks[4].name
@@ -119,12 +119,35 @@ tests:
       - notExists:
           path: webhooks[4].namespaceSelector
         documentIndex: 0
+      - equal:
+          path: webhooks[5].name
+          value: vdynamographdeploymentcandidate.kb.io
+        documentIndex: 0
+      - equal:
+          path: webhooks[5].clientConfig.service.path
+          value: /validate/nvidia.com/v1beta2/dynamographdeploymentcandidates
+        documentIndex: 0
+      - equal:
+          path: webhooks[5].rules[0].apiVersions
+          value: [v1beta2]
+        documentIndex: 0
+      - equal:
+          path: webhooks[5].rules[0].resources
+          value: [dynamographdeploymentcandidates]
+        documentIndex: 0
+      - equal:
+          path: webhooks[5].rules[0].operations
+          value: [CREATE, UPDATE]
+        documentIndex: 0
+      - notExists:
+          path: webhooks[5].namespaceSelector
+        documentIndex: 0
       - lengthEqual:
           path: webhooks
           count: 4
         documentIndex: 1
 
-  - it: scopes Run admission to the configured namespace
+  - it: scopes Run and Candidate admission to the configured namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
       dynamo-operator.dgdrV1Beta2.enabled: true
@@ -134,6 +157,10 @@ tests:
     asserts:
       - equal:
           path: webhooks[4].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: webhooks[5].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: "true"
         documentIndex: 0
 

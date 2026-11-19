@@ -5640,21 +5640,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		expected    BackendFramework
 		expectError bool
 	}{
-		{name: "engine direct command", command: []string{"vllm-rs"}, expected: BackendFrameworkVLLM},
-		{name: "engine absolute executable", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkVLLM},
-		{name: "engine arguments are not other launches", command: []string{"vllm-rs"}, args: []string{"--component", "python3 -m dynamo.sglang"}, expected: BackendFrameworkVLLM},
-		{name: "engine args do not identify an image entrypoint", args: []string{"vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine shell wrapper is not interpreted", command: []string{"sh", "-c"}, args: []string{"exec vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine quoted shell path is not interpreted", command: []string{"sh", "-c", `exec "/usr/local/bin/vllm-rs"`}, expected: BackendFrameworkNoop},
-		{name: "engine shell statements are not interpreted", command: []string{"bash", "-ec", "set -e\ncd /app; vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine shell conjunction is not interpreted", command: []string{"sh", "-c", "cd /app && vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "exec is a literal argument", command: []string{"printf"}, args: []string{"exec", "vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine config path is not an executable", command: []string{"python3", "-m", "dynamo.sglang"}, args: []string{"--config-dir", "/etc/vllm-rs"}, expected: BackendFrameworkSGLang},
-		{name: "unresolved executable path", command: []string{"$(BIN_DIR)/vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine executable suffix differs", command: []string{"vllm-rs-helper"}, expected: BackendFrameworkNoop},
-		{name: "engine SGLang remains explicit", command: []string{"dynamo-sglang-sidecar"}, expected: BackendFrameworkNoop},
-		{name: "engine TRTLLM remains explicit", command: []string{"dynamo-trtllm-sidecar"}, expected: BackendFrameworkNoop},
-		{name: "runtime executable is not an engine", command: []string{"dynamo-vllm-sidecar"}, expected: BackendFrameworkNoop},
+		{name: "native engine command is not detected", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkNoop},
 		{
 			name:     "detect VLLM from args",
 			command:  []string{"/bin/sh", "-c"},
@@ -11579,7 +11565,9 @@ func TestPCSNameForDGD(t *testing.T) {
 			},
 			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
 			// 7 < minPCSNameLength(8), so clamped to 8
-			wantLen: 8,
+			// The prefix "my-" ends in a hyphen and must be kept: this name is
+			// valid, and trimming it would rename existing PodCliqueSets.
+			want: "my--4793",
 		},
 		{
 			name:       "empty components - no truncation needed",
@@ -11587,15 +11575,45 @@ func TestPCSNameForDGD(t *testing.T) {
 			components: nil,
 			want:       "my-dgd",
 		},
+		{
+			name:    "dotted name cut right after a dot drops the dot before the hash",
+			dgdName: "qwen3-0-6b-vllm-production-east.cluster",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				singleNodeComponent("Frontend"),
+				singleNodeComponent("decode"),
+			},
+			// Frontend budget=8, pcsBudget=45-8=37; prefix name[:32] ends in ".".
+			// Without trimming the result is "...east.-82e3", an invalid subdomain.
+			want: "qwen3-0-6b-vllm-production-east-82e3",
+		},
+		{
+			name:    "dotted name cut right after a dot at the minimum budget",
+			dgdName: "ab.my-deployment-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				multinodeComponent("VllmPrefillWorker"),
+			},
+			// pcsBudget clamped to 8, so the prefix is name[:3] = "ab.".
+			want: "ab-a280",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Fixtures must be names the API server admits for a custom resource.
+			if errs := validation.IsDNS1123Subdomain(tt.dgdName); len(errs) > 0 {
+				t.Fatalf("fixture dgdName %q is not a DNS-1123 subdomain: %v", tt.dgdName, errs)
+			}
+
 			dgd := &v1beta1.DynamoGraphDeployment{
 				Name: tt.dgdName,
 				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: tt.components},
 			}
 			got := PCSNameForDGD(dgd, nil)
+
+			// The PodCliqueSet name must itself be a valid object name.
+			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
+				t.Errorf("PCSNameForDGD() = %q is not a DNS-1123 subdomain: %v", got, errs)
+			}
 
 			if tt.want != "" {
 				if got != tt.want {

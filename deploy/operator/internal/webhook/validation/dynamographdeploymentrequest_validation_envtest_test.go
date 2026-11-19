@@ -128,6 +128,59 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			discovered: discoveredH100,
 		},
 		{
+			name: "v1beta2 accepts explicit rerun intent",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["rerun"] = map[string]any{"reason": "repeat after catalog refresh"}
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+		},
+		{
+			name: "v1beta2 accepts a partial beta DGD override",
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}}
+			}),
+		},
+		{
+			name: "v1beta2 rejects alpha overrides and incorrect kind independently",
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"ConfigMap","spec":{}}`)}}
+			}),
+			wantWebhook: []string{
+				`spec.overrides.dgd.apiVersion: Unsupported value: "nvidia.com/v1alpha1": supported values: "nvidia.com/v1beta1"`,
+				`spec.overrides.dgd.kind: Unsupported value: "ConfigMap": supported values: "DynamoGraphDeployment"`,
+			},
+		},
+		{
+			name: "v1beta2 rejects a DGD status override",
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","status":{}}`)}}
+			}),
+			wantWebhook: []string{`spec.overrides.dgd.status: Forbidden: DGD status cannot be overridden`},
+		},
+		{
+			name:       "v1beta2 update rejects an alpha override",
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{}}`)}}
+			}),
+			discovered:  discoveredH100,
+			wantWebhook: []string{`spec.overrides.dgd.apiVersion: Unsupported value: "nvidia.com/v1alpha1": supported values: "nvidia.com/v1beta1"`},
+		},
+		{
+			name:       "v1beta2 update accepts a beta override",
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}}
+			}),
+			discovered: discoveredH100,
+		},
+		{
 			name: "v1beta1 empty native representation is rejected by envelope validation",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Model = ""
@@ -784,22 +837,21 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta2 pareto objective is reserved until Candidate publication supports it",
+			name: "v1beta2 pareto objective with two metrics is accepted",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Pareto", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
 			}),
-			gpuDiscovery:  true,
-			discovered:    discoveredH200,
-			wantSchemaErr: `spec.objective.mode: Unsupported value: "Pareto": supported values: "Optimize"`,
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
 		},
 		{
-			name: "v1beta2 optimize rejects the reserved Pareto metrics field",
+			name: "v1beta2 optimize rejects the Pareto metrics field",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Optimize", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
 			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
-			wantCELErr:   `spec.objective: Invalid value: metrics is reserved for the future Pareto implementation`,
+			wantCELErr:   `spec.objective: Invalid value: Optimize mode uses metric, not metrics`,
 		},
 		{
 			name: "v1beta2 duplicate backends are rejected on create",
@@ -816,6 +868,15 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec: Invalid value: exactly one of native v1beta2 fields or v1beta1 must be specified`,
+		},
+		{
+			name: "v1beta2 empty rerun reason is rejected by the schema",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["rerun"] = map[string]any{"reason": ""}
+			}),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.rerun.reason: Invalid value: "": spec.rerun.reason in body should be at least 1 chars long`,
 		},
 		{
 			name: "v1beta2 empty model name is rejected by the schema",
