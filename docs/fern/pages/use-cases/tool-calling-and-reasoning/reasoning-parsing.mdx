@@ -19,7 +19,7 @@ For reasoning followed by a guided answer, use vLLM or SGLang workers that publi
 
 The initial explicit gates cover stock vLLM `step3` and `deepseek_r1`, plus SGLang's Qwen3 and DeepSeek-R1 detector families. vLLM's `qwen3` engine adapter also recognizes implicit boundaries and is unavailable for this path. For Qwen3-0.6B on vLLM, pair the engine's `--reasoning-parser deepseek_r1` with `--dyn-reasoning-parser qwen3`. On SGLang, use `qwen3` for both. Initialize the engine tokenizer on either worker to publish an explicit gate. Leave `--skip-tokenizer-init` unset.
 
-When a guided answer requires an active reasoning gate, setting `continue_final_message: true` returns an invalid-argument error. Start a new assistant turn or disable thinking for the continuation if the model supports it.
+When a guided answer requires an active reasoning gate, setting `continue_final_message: true` returns an invalid-argument error. Start a new assistant turn. If you disable thinking for a continuation, the assistant prefill must leave reasoning closed. A trailing reasoning opener can keep reasoning open even with thinking disabled.
 
 Upgrade workers before the frontend. Dynamo requires matching capabilities across the workers in a routing group for projected guided answers, including requests with thinking disabled, and for native JSON that requires a reasoning gate. If the engine gates its grammar, requests with thinking disabled still require verified request-local controls to start the answer immediately.
 

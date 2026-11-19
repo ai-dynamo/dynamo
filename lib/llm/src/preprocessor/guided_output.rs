@@ -245,7 +245,7 @@ impl OpenAIPreprocessor {
         // A continued assistant prompt does not establish the engine gate's state.
         if reasoning && request.get_continue_final_message() == Some(true) {
             return Err(invalid_argument_error(
-                "continue_final_message cannot be used with a guided answer that requires an active reasoning gate. Start a new assistant turn or disable thinking if the model supports it.",
+                "continue_final_message cannot be used with a guided answer that requires an active reasoning gate. Start a new assistant turn.",
             ));
         }
         common.require_reasoning = reasoning;
@@ -516,10 +516,22 @@ mod tests {
 
     #[tokio::test]
     async fn guided_output_rejects_ambiguous_gated_continuations() {
-        for (capability, thinking, expected_error) in [
-            (Some(gate()), true, Some("continue_final_message")),
-            (Some(gate()), false, None),
-            (None, true, Some("cannot preserve")),
+        let closed_reasoning = "<think>done</think>partial";
+        for (capability, thinking, assistant, expected_error) in [
+            (
+                Some(gate()),
+                false,
+                "<think>done</think>partial <think>",
+                Some("Start a new assistant turn."),
+            ),
+            (
+                Some(gate()),
+                true,
+                closed_reasoning,
+                Some("continue_final_message"),
+            ),
+            (Some(gate()), false, closed_reasoning, None),
+            (None, true, closed_reasoning, Some("cannot preserve")),
         ] {
             let processor = processor(capability);
             for mut fields in [
@@ -532,7 +544,7 @@ mod tests {
             ] {
                 fields["messages"] = json!([
                     {"role":"user","content":"Answer using the supplied constraint."},
-                    {"role":"assistant","content":"<think>done</think>partial"}
+                    {"role":"assistant","content":assistant}
                 ]);
                 fields["continue_final_message"] = json!(true);
                 fields["add_generation_prompt"] = json!(false);
