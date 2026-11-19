@@ -217,7 +217,6 @@ class GMSStorageClient:
         input_dir: str,
         *,
         max_workers: int = 4,
-        clear_existing: bool = True,
         transfer_backend: Optional[str] = None,
     ) -> Dict[str, str]:
         backend_name = transfer_backend or self._transfer_backend
@@ -243,8 +242,7 @@ class GMSStorageClient:
             session = backend.start_restore(sources)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
-                if clear_existing:
-                    logger.info("RW connect cleared any previously committed GMS state")
+                logger.info("RW connect cleared any previously committed GMS state")
 
                 id_map, targets = self._allocate_restore_targets(mm, manifest)
                 session.restore(targets)

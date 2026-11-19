@@ -40,10 +40,10 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.13.18-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.10
+  planner_runtime_image_tag: 3.13-v4.2.1
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@c718fc95
+  planner_baseline_sbom: python@794a5902
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -63,8 +63,8 @@ dynamo:
   uv_version: "0.13.5"
   go_version: "1.27.3"
 
-  nats_version: v2.14.8
-  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
+  nats_version: v2.14.9
+  nats_commit: 9ece5884153a3e39a3904d53210b9b8b26dd7364
   etcd_version: v3.5.35
   etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
@@ -150,7 +150,6 @@ vllm:
     nixl_ucx_ref: v1.23.0-rc1
   vllm_omni_ref: "v0.33.0rc1"
   nixl_ref: v1.5.0
-  max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
@@ -221,6 +220,6 @@ triton:
     # The wheels load CUDA dynamically, so they run on the 13.4 runtime image regardless.
     # Matches trtllm's base_image_tag so Triton reuses the trtllm BuildKit pool cache (route_buildkit.sh); if it diverges, route Triton back to general.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 26.09-py3
+    runtime_image_tag: 26.11-py3
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
