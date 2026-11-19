@@ -7,10 +7,7 @@ use std::sync::LazyLock;
 
 use ::http::StatusCode;
 
-use crate::DynamoError;
-
-/// Environment variable naming the overload status. `dynamo-runtime` registers the same name as `config::environment_names::llm::DYN_HTTP_OVERLOAD_STATUS_CODE`; this crate sits below the runtime and cannot import it.
-pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+use crate::{DYN_HTTP_OVERLOAD_STATUS_CODE, DynamoError};
 
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
     let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
