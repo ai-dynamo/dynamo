@@ -45,8 +45,7 @@ const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 static OTLP_EXPORT_OVERRIDES: AtomicUsize = AtomicUsize::new(0);
 
-/// OTLP-export gate. When the runtime isn't exporting traces (the operator
-/// hasn't set `OTEL_EXPORT_ENABLED=1`), the per-chunk ttft capture and
+/// OTLP-export gate. When the runtime isn't exporting traces, the per-chunk ttft capture and
 /// terminal attribute writes are dead work — the span has nowhere to go but
 /// the local `tracing` event stream, which doesn't read these fields. The
 /// span itself still gets created so log events stay correlated with the
@@ -59,7 +58,7 @@ fn is_otlp_export_enabled() -> bool {
     if OTLP_EXPORT_OVERRIDES.load(Ordering::Relaxed) > 0 {
         return true;
     }
-    dynamo_runtime::config::env_is_truthy("OTEL_EXPORT_ENABLED")
+    dynamo_runtime::logging::otlp_traces_export_enabled()
 }
 
 /// On drop, marks the `engine.generate` span as cancelled unless

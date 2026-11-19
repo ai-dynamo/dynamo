@@ -43,7 +43,8 @@ fn warn_bridge_missing_once(method: &str) {
         tracing::warn!(
             method,
             "telemetry call is a no-op: OTel bridge layer not installed \
-             (enable OTEL_EXPORT_ENABLED=1, DYN_LOGGING_CONSOLE_FORMAT=jsonl, \
+             (enable OTEL_EXPORT_ENABLED=1, OTEL_TRACES_EXPORTER=otlp, \
+             OTEL_LOGS_EXPORTER=otlp, DYN_LOGGING_CONSOLE_FORMAT=jsonl, \
              or the legacy DYN_LOGGING_JSONL=1 switch). \
              Engine telemetry attributes / events / child spans are NOT \
              being recorded. Further no-ops in this process are silent."
