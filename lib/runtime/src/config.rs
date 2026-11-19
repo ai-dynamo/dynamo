@@ -665,6 +665,17 @@ mod tests {
     /// DYN_SYSTEM_PORT takes the full TCP port range, plus -1 (disabled) and 0 (random).
     #[test]
     fn test_from_settings_parses_dyn_system_port() {
+        // Invalid values would make concurrent runtime construction fail, so run in a child.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_from_settings_parses_dyn_system_port"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         const PORT: &str = "DYN_SYSTEM_PORT";
 
         for (value, expected) in [
