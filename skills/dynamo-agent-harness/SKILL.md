@@ -37,7 +37,7 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 Default to `verify`. Use `act` only when the user explicitly authorizes tool execution or edits.
 
 ```bash
-.agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
+skills/dynamo-agent-harness/scripts/drive_harness.py \
   --harness codex \
   --base-url http://127.0.0.1:8000 \
   --model zai-org/GLM-4.7-Flash \

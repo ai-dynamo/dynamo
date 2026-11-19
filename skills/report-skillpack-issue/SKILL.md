@@ -1,6 +1,6 @@
 ---
 name: report-skillpack-issue
-description: Reports a defect in the optimization skillpack itself (the skills under .agents/skills/, the documents under agent-docs/, the role contracts under agents/, and the repository AGENTS.md files) as a GitHub issue on ai-dynamo/dynamo, using the repository's agent-reported issue conventions. Use when a pack rule contradicts another pack rule, a cross-reference points at a file or section that does not exist, an instruction cannot be executed as written, a factual claim about a tool or flag is wrong, or a rule repeatedly fights the observed environment. Do not use for bugs in Dynamo itself, for engagement-specific problems, or to request new features.
+description: Reports a defect in the optimization skillpack itself (the skills under skills/, the documents under agent-docs/, the role contracts under agents/, and the repository AGENTS.md files) as a GitHub issue on ai-dynamo/dynamo, using the repository's agent-reported issue conventions. Use when a pack rule contradicts another pack rule, a cross-reference points at a file or section that does not exist, an instruction cannot be executed as written, a factual claim about a tool or flag is wrong, or a rule repeatedly fights the observed environment. Do not use for bugs in Dynamo itself, for engagement-specific problems, or to request new features.
 license: Apache-2.0
 user-invocable: true
 metadata:

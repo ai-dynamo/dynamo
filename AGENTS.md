@@ -19,7 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 | `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate, and metrics, logs, and traces); read the matching one before writing that kind of code |
-| `.agents/skills/` | Agent skills (see [Skills](#skills)) |
+| `skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
 ## Ecosystem
@@ -36,7 +36,7 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 
 ## Skills
 
-Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
+Skills live canonically in `skills/`; `.agents/skills/` and `.claude/skills/` are symlinks
 to it — edit only the canonical copy.
 
 **Build, debug, and measure:**

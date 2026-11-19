@@ -637,6 +637,10 @@ shared:
   owners:
   - process
   - agents
+- glob: skills/
+  owners:
+  - process
+  - agents
 - glob: .codex/
   owners:
   - process
