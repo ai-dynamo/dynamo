@@ -791,7 +791,7 @@ async def test_uuid_only_image_slots_preserve_batch_alignment(
 
 
 async def test_uuid_only_image_slots_require_opt_in(loader: ImageLoader) -> None:
-    with pytest.raises(ValueError, match="preserve_uuid_slots=True"):
+    with pytest.raises(RuntimeError, match="preserve_uuid_slots=True"):
         await loader.load_image_batch([{"UuidOnly": "cached-image"}])
 
 

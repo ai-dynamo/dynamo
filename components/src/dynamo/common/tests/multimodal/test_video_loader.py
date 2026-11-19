@@ -152,7 +152,7 @@ async def test_load_video_batch_uses_url_loader():
 async def test_load_video_batch_rejects_decoded_variant_without_frontend_decoding():
     loader = VideoLoader(enable_frontend_decoding=False)
 
-    with pytest.raises(ValueError, match="enable_frontend_decoding=False"):
+    with pytest.raises(RuntimeError, match="enable_frontend_decoding=False"):
         await loader.load_video_batch([{"Decoded": {"shape": [1, 2, 2, 3]}}])
 
 
@@ -161,7 +161,7 @@ async def test_load_video_batch_rejects_later_malformed_item_before_loading():
     loader = VideoLoader()
     loader.load_video = AsyncMock()  # type: ignore[method-assign]
 
-    with pytest.raises(ValueError, match="index 1"):
+    with pytest.raises(RuntimeError, match="index 1"):
         await loader.load_video_batch([{"Url": "https://example.com/one.mp4"}, {}])
 
     loader.load_video.assert_not_called()
