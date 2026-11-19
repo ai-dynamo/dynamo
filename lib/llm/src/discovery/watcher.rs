@@ -2175,10 +2175,10 @@ mod tests {
             .await
             .unwrap();
         for difference in [
-            "source-path",
             "explicit-default",
             "overridden-policy",
             "needs",
+            "kv-block-size",
         ] {
             let endpoint = drt
                 .namespace(difference)
@@ -2194,10 +2194,6 @@ mod tests {
             incumbent.worker_type = Some(WorkerType::Aggregated);
             let mut newcomer = incumbent.clone();
             match difference {
-                "source-path" => {
-                    incumbent.source_path = Some("/mounted/model".to_string());
-                    newcomer.source_path = Some("/streamer/cache/model".to_string());
-                }
                 "explicit-default" => newcomer.router_config = Some(RouterConfig::default()),
                 "overridden-policy" => {
                     incumbent.router_config = Some(RouterConfig::default());
@@ -2207,6 +2203,10 @@ mod tests {
                     });
                 }
                 "needs" => newcomer.needs = vec![vec![WorkerType::Encode]],
+                "kv-block-size" => {
+                    incumbent.kv_cache_block_size = 16;
+                    newcomer.kv_cache_block_size = 32;
+                }
                 _ => unreachable!(),
             }
             let manager = Arc::new(ModelManager::new());
@@ -2246,7 +2246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frontends_keep_their_locally_first_configuration() {
+    async fn cards_with_different_source_paths_are_both_admitted() {
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
@@ -2258,21 +2258,28 @@ mod tests {
         let mut second = first.clone();
         first.source_path = Some("/model/one".to_string());
         second.source_path = Some("/model/two".to_string());
-        for (incumbent_id, incumbent, newcomer_id, newcomer) in
+        assert_eq!(first.mdcsum(), second.mdcsum());
+        for (first_id, first_card, second_id, second_card) in
             [(1, &first, 2, &second), (2, &second, 1, &first)]
         {
             let manager = Arc::new(ModelManager::new());
             let (events, task) =
                 watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
-            apply_discovery_event(&events, discovered_card("dgd-v1", incumbent_id, incumbent))
-                .await;
+            apply_discovery_event(&events, discovered_card("dgd-v1", first_id, first_card)).await;
             wait_for_model(&manager, "local-first", |_| true).await;
-            apply_discovery_event(&events, discovered_card("dgd-v1", newcomer_id, newcomer)).await;
-            assert_eq!(manager.get_model_cards().len(), 1);
+            apply_discovery_event(&events, discovered_card("dgd-v1", second_id, second_card)).await;
+
+            let cards = manager.get_model_cards();
+            assert_eq!(cards.len(), 2);
+            let source_paths: HashSet<_> = cards
+                .into_iter()
+                .map(|card| card.source_path.unwrap())
+                .collect();
             assert_eq!(
-                manager.get_model_cards()[0].source_path,
-                incumbent.source_path
+                source_paths,
+                HashSet::from(["/model/one".to_string(), "/model/two".to_string()])
             );
+
             drop(events);
             task.await.unwrap();
         }
@@ -2288,7 +2295,7 @@ mod tests {
         let manager = Arc::new(ModelManager::new());
         let (events, task) =
             watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
-        for namespace in ["dgd-v1", "dgd-v2"] {
+        for (namespace, kv_cache_block_size) in [("dgd-v1", 16), ("dgd-v2", 32)] {
             let endpoint = drt
                 .namespace(namespace)
                 .unwrap()
@@ -2301,6 +2308,7 @@ mod tests {
             card.model_type = ModelType::Chat;
             card.worker_type = Some(WorkerType::Aggregated);
             card.source_path = Some(format!("/models/{namespace}"));
+            card.kv_cache_block_size = kv_cache_block_size;
             apply_discovery_event(
                 &events,
                 discovered_card(namespace, drt.discovery().instance_id(), &card),
@@ -2314,7 +2322,9 @@ mod tests {
         assert_eq!(model.worker_set_count(), 2);
         assert!(model.is_workers_ready("dgd-v1"));
         assert!(model.is_workers_ready("dgd-v2"));
-        assert_eq!(manager.get_model_cards().len(), 2);
+        let cards = manager.get_model_cards();
+        assert_eq!(cards.len(), 2);
+        assert_ne!(cards[0].mdcsum(), cards[1].mdcsum());
         drop(events);
         task.await.unwrap();
         runtime.shutdown();
