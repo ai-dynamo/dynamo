@@ -364,6 +364,76 @@ async fn asr_committed_turns_remain_ordered_when_next_input_arrives() {
 }
 
 #[tokio::test]
+async fn asr_clear_ack_waits_for_previous_committed_turn() {
+    let mut server = Server::start().await;
+    let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
+    let mut session = Session::start(&adapter).await;
+    session.send(append());
+    let first = within(server.asr.recv()).await.unwrap();
+    session.send(commit());
+    assert_eq!(session.next().await["type"], "input_audio_buffer.committed");
+    session.send(append());
+    session.send(json!({"type": "input_audio_buffer.clear"}));
+    session.send(session_update());
+    assert_eq!(session.next().await["type"], "session.updated");
+
+    session.send(append());
+    session.send(commit());
+    assert!(server.asr.try_recv().is_err());
+    first
+        .responses
+        .send(Ok(transcript("first", true)))
+        .await
+        .unwrap();
+    drop(first.responses);
+    assert_eq!(session.next().await["delta"], "first");
+    assert_eq!(
+        session.next().await["type"],
+        "conversation.item.input_audio_transcription.completed"
+    );
+    assert_eq!(session.next().await["type"], "input_audio_buffer.cleared");
+
+    let next = within(server.asr.recv()).await.unwrap();
+    next.responses
+        .send(Ok(transcript("next", true)))
+        .await
+        .unwrap();
+    drop(next.responses);
+    assert_eq!(session.next().await["type"], "input_audio_buffer.committed");
+    assert_eq!(session.next().await["delta"], "next");
+    assert_eq!(session.next().await["transcript"], "next");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn asr_turn_admission_preserves_input_order() {
+    for attempt in 0..128 {
+        let mut server = Server::start().await;
+        let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
+        let session = Session::start(&adapter).await;
+        session.send(append());
+        session.send(commit());
+        session.send(json!({
+            "type": "input_audio_buffer.append",
+            "audio": STANDARD.encode([3, 0, 4, 0]),
+        }));
+        let mut call = within(server.asr.recv()).await.unwrap();
+        let _config = within(call.request.get_mut().message())
+            .await
+            .unwrap()
+            .unwrap();
+        let audio = within(call.request.get_mut().message())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audio.streaming_request,
+            Some(StreamingRequest::AudioContent(vec![1, 0, 2, 0])),
+            "later turn admitted first on attempt {attempt}",
+        );
+    }
+}
+
+#[tokio::test]
 async fn asr_validates_session_and_audio_without_breaking_connection() {
     let server = Server::start().await;
     let adapter = AsrAdapter::new(server.asr_config(), server.connection().await);
@@ -495,12 +565,46 @@ async fn tts_preserves_pcm_chunks_and_config() {
 }
 
 #[tokio::test]
-async fn tts_requires_explicit_pcm_format_before_rpc() {
+async fn tts_defaults_to_pcm_when_format_is_omitted_or_null() {
     let mut server = Server::start().await;
     let engine = TtsEngine::new(server.tts_config(), server.connection().await);
     for request in [
         json!({"input": "Hello"}),
         json!({"input": "Hello", "response_format": null}),
+    ] {
+        let stream = engine
+            .generate(request, GenerateContext::new(mock_context(), None))
+            .await
+            .unwrap();
+        let output = tokio::spawn(stream.collect::<Vec<_>>());
+        let mut call = within(server.tts.recv()).await.unwrap();
+        let request = within(call.request.get_mut().message())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.encoding, AudioEncoding::LinearPcm as i32);
+        call.responses
+            .send(Ok(SynthesizeSpeechResponse {
+                audio: vec![1, 0, 2, 0],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        drop(call.responses);
+        let output = within(output).await.unwrap();
+        assert_eq!(output.len(), 1);
+        let response = output[0].as_ref().unwrap();
+        assert_eq!(response["data"][0]["output_format"], "pcm");
+        assert_eq!(response["data"][0]["b64_json"], "AQACAA==");
+    }
+}
+
+#[tokio::test]
+async fn tts_rejects_non_pcm_format_before_rpc() {
+    let mut server = Server::start().await;
+    let engine = TtsEngine::new(server.tts_config(), server.connection().await);
+    for request in [
+        json!({"input": "Hello", "response_format": "mp3"}),
         json!({"input": "Hello", "response_format": "wav"}),
     ] {
         let Err(error) = engine

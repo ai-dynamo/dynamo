@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
-use futures::{StreamExt, stream::BoxStream};
+use futures::{StreamExt, future::Either, stream::BoxStream};
 use serde_json::Value;
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -16,9 +16,12 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use super::{AsrAdapter, turn, validation};
 use crate::events;
 
-struct TurnOutput {
-    events: mpsc::Receiver<Value>,
-    cancelled: CancellationToken,
+enum Output {
+    Turn {
+        events: mpsc::Receiver<Value>,
+        cancelled: CancellationToken,
+    },
+    Cleared,
 }
 
 struct OpenTurn {
@@ -42,10 +45,10 @@ impl OpenTurn {
 struct Session {
     adapter: AsrAdapter,
     control: mpsc::Sender<Value>,
-    output: mpsc::Sender<TurnOutput>,
+    output: mpsc::Sender<Output>,
     active: Option<OpenTurn>,
     turns: JoinSet<()>,
-    engine_slot: Arc<Semaphore>,
+    previous: Option<CancellationToken>,
 }
 
 impl Session {
@@ -74,27 +77,28 @@ impl Session {
             let finished = CancellationToken::new();
             let id = events::id("item");
             self.output
-                .send(TurnOutput {
+                .send(Output::Turn {
                     events: event_rx,
                     cancelled: cancelled.clone(),
                 })
                 .await
                 .ok()?;
             let adapter = self.adapter.clone();
-            let engine_slot = self.engine_slot.clone();
+            let previous = self.previous.replace(finished.clone());
             let task_cancel = cancelled.clone();
             let done = finished.clone();
             let item_id = id.clone();
             let task_output = event_tx.clone();
             self.turns.spawn(async move {
                 let _finished = done.drop_guard();
+                // Cancelled queued turns still preserve their predecessor's place.
+                if let Some(previous) = previous {
+                    previous.cancelled().await;
+                }
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {},
-                    _ = async {
-                        let Ok(_permit) = engine_slot.acquire().await else { return };
-                        turn::run(&adapter, &item_id, audio_rx, close_rx, task_output).await;
-                    } => {},
+                    _ = turn::run(&adapter, &item_id, audio_rx, close_rx, task_output) => {},
                 }
             });
             self.active = Some(OpenTurn {
@@ -176,7 +180,7 @@ impl Session {
             }
             Some("input_audio_buffer.clear") => {
                 self.cancel_active();
-                self.emit(events::cleared()).await;
+                let _ = self.output.send(Output::Cleared).await;
             }
             _ => {
                 self.emit(events::invalid(
@@ -251,7 +255,7 @@ pub(super) fn serve(
         let shutdown = adapter.shutdown.clone();
         let session = Session {
             adapter, control: control_tx, output: turn_tx, active: None, turns: JoinSet::new(),
-            engine_slot: Arc::new(Semaphore::new(1)),
+            previous: None,
         };
         // Dropping the response stream aborts the input pump, whose JoinSet
         // then aborts every turn. No detached tasks or RPCs outlive a session.
@@ -273,12 +277,15 @@ pub(super) fn serve(
             event = control_rx.recv() => event,
         };
         if let Some(event) = first { yield event; }
-        // Keep turns ordered, but drain control replies concurrently so they
+        // Keep turns and clear acknowledgments ordered, but drain control replies so they
         // cannot block the input pump from reaching commit or clear.
-        let turns = ReceiverStream::new(turn_rx).flat_map(|turn| {
-            ReceiverStream::new(turn.events).take_until(turn.cancelled.cancelled_owned())
+        let ordered = ReceiverStream::new(turn_rx).flat_map(|output| match output {
+            Output::Turn { events, cancelled } => Either::Left(
+                ReceiverStream::new(events).take_until(cancelled.cancelled_owned())
+            ),
+            Output::Cleared => Either::Right(futures::stream::once(async { events::cleared() })),
         });
-        let mut output = futures::stream::select(ReceiverStream::new(control_rx), turns).boxed();
+        let mut output = futures::stream::select(ReceiverStream::new(control_rx), ordered).boxed();
         loop {
             let event = tokio::select! {
                 biased;

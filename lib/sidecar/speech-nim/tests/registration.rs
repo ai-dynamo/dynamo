@@ -35,6 +35,26 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 #[tokio::test]
 async fn speech_workers_register_without_assets_and_serve_over_dynamo_tcp() {
+    if std::env::var_os("SPEECH_NIM_REGISTRATION_TEST_CHILD").is_none() {
+        let status = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "speech_workers_register_without_assets_and_serve_over_dynamo_tcp",
+                ])
+                .env("SPEECH_NIM_REGISTRATION_TEST_CHILD", "1")
+                .env("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "5")
+                .env("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "5")
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(status.success());
+        return;
+    }
     let mut server = Server::start().await;
     let runtime = Runtime::from_current().unwrap();
     let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())

@@ -46,7 +46,11 @@ impl TtsEngine {
             .is_some_and(|m| m != self.config.model_name)
         {
             Some(format!("model must be '{}'", self.config.model_name))
-        } else if request.response_format.as_deref() != Some("pcm") {
+        } else if request
+            .response_format
+            .as_deref()
+            .is_some_and(|format| format != "pcm")
+        {
             Some("Speech NIM TTS requires response_format='pcm'".into())
         } else if request
             .data_source
