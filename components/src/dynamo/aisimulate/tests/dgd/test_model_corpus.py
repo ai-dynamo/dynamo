@@ -4,9 +4,8 @@
 from pathlib import Path
 
 import pytest
-
-from dynamo.aisimulate.tests.dgd.comparison import run_cases
-from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden, repository_root
+from comparison import run_cases
+from golden import assert_yaml_golden, repository_root
 
 pytestmark = [
     pytest.mark.integration,

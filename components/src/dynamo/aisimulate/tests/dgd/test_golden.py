@@ -4,8 +4,7 @@
 from pathlib import Path
 
 import pytest
-
-from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden, repository_root
+from golden import assert_yaml_golden, repository_root
 
 pytestmark = [
     pytest.mark.unit,
