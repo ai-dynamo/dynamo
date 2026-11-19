@@ -537,9 +537,12 @@ class ImageLoader:
 
         if scheme == "data":
             # Inline images repeat across the turns of a conversation, so key
-            # them by content and skip base64 and image decoding on a hit.
+            # them by content and skip decoding on a hit. The key also includes
+            # the byte limit at insert time, so a new limit checks them again.
+            max_bytes = self._max_bytes()
+            digest = hashlib.sha256(normalized_url.encode()).hexdigest()
             key = scope_image_cache_key(
-                f"data:sha256:{hashlib.sha256(normalized_url.encode()).hexdigest()}",
+                f"data:{max_bytes}:sha256:{digest}",
                 cache_scope,
                 session_scoped_cache=self._session_scoped_cache,
             )
@@ -552,9 +555,7 @@ class ImageLoader:
                     if not normalized_url.partition(":")[2].startswith("image/"):
                         raise ValueError("Data URL must be an image type")
 
-                    image_bytes = decode_data_uri(
-                        normalized_url, max_bytes=self._max_bytes()
-                    )
+                    image_bytes = decode_data_uri(normalized_url, max_bytes=max_bytes)
                     image_data = BytesIO(image_bytes)
                 image = await self._open_image(image_data, max_pixels, self._to_rgb)
             except Image.UnidentifiedImageError as e:

@@ -977,6 +977,13 @@ fn content_parts_follow_the_chat_media_rules() {
         ),
         Ok(())
     );
+    assert_eq!(
+        validate_content_parts(
+            json!([]),
+            json!({"features": {"mm_hashes": {}}, "return_token_ids": null})
+        ),
+        Ok(())
+    );
 
     for (content_parts, extra, expected) in [
         (

@@ -74,8 +74,8 @@ pub struct GenerateRequest {
 
     /// Return the prompt the engine ran, with multimodal placeholders
     /// expanded, and the placeholder ranges within it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub return_token_ids: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_token_ids: Option<bool>,
 
     /// Future top-level fields, including Python-frontend-only fields such as
     /// `features`, are retained and forwarded to the worker.
@@ -137,7 +137,7 @@ impl GenerateRequest {
         GenerateResponseOptions {
             include_logprobs: self.sampling_params.logprobs().is_some(),
             include_prompt_logprobs: self.sampling_params.prompt_logprobs().is_some(),
-            include_prompt_token_ids: self.return_token_ids,
+            include_prompt_token_ids: self.return_token_ids.unwrap_or(false),
         }
     }
 
@@ -197,10 +197,12 @@ impl GenerateRequest {
         }
 
         if let Some(content_parts) = &self.content_parts {
-            if self
-                .passthrough
-                .get("features")
-                .is_some_and(|f| !f.is_null())
+            // As in vLLM, an empty list does not conflict with features.
+            if !content_parts.is_empty()
+                && self
+                    .passthrough
+                    .get("features")
+                    .is_some_and(|f| !f.is_null())
             {
                 return Err("content_parts and features are mutually exclusive.".to_string());
             }

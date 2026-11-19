@@ -3914,13 +3914,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     custom_data=custom_data,
                 )
 
-        return_token_ids = (
-            engine_generate_input is not None and engine_generate_input.return_token_ids
-        )
-        if return_token_ids and prompt.get("multi_modal_data"):
-            # Render as vLLM's Generate API does, to report the placeholder ranges.
-            (prompt,) = await self.engine_client.renderer.render_cmpl_async([prompt])
-
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request
@@ -4067,6 +4060,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     raise InvalidArgument(str(exc)) from None
                 raise
+
+        return_token_ids = (
+            engine_generate_input is not None and engine_generate_input.return_token_ids
+        )
+        if return_token_ids and prompt.get("multi_modal_data"):
+            # Expand the images to return their token positions in the prompt.
+            # This caches the images, so only do it once all checks passed.
+            (prompt,) = await self.engine_client.renderer.render_cmpl_async([prompt])
 
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()

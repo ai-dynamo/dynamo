@@ -1635,7 +1635,7 @@ async def test_load_image_failure_keeps_signed_url_out(
 
 async def test_repeated_data_url_is_decoded_once() -> None:
     """Screenshots resent on every turn reuse the first decode."""
-    loader = ImageLoader()
+    loader = ImageLoader(cache_size=4, session_scoped_cache=False)
     reference = f"data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"
 
     first = await loader.load_image(reference)
