@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -779,8 +780,8 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 	}
 }
 
-func TestMaxClusterIDLengthIsTheSchemas(t *testing.T) {
-	t.Log("Read clusterId's MaxLength from the generated CRD")
+func TestClusterIDSchemaIsCheckClusterID(t *testing.T) {
+	t.Log("Read clusterId's schema from the generated CRD")
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "bases", "nvidia.com_dynamopoolrelays.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -789,9 +790,17 @@ func TestMaxClusterIDLengthIsTheSchemas(t *testing.T) {
 	if err := yaml.Unmarshal(data, crd); err != nil {
 		t.Fatal(err)
 	}
-	clusterID := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["clusterId"]
-	if clusterID.MaxLength == nil || *clusterID.MaxLength != configvalidation.MaxClusterIDLength {
-		t.Fatalf("clusterId's MaxLength is %v, but MaxClusterIDLength is %d", clusterID.MaxLength, configvalidation.MaxClusterIDLength)
+	schema := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["clusterId"]
+	if schema.MaxLength == nil || *schema.MaxLength != configvalidation.MaxClusterIDLength {
+		t.Fatalf("clusterId's MaxLength is %v, but MaxClusterIDLength is %d", schema.MaxLength, configvalidation.MaxClusterIDLength)
+	}
+
+	t.Log("The schema's pattern accepts exactly what CheckClusterID accepts")
+	pattern := regexp.MustCompile(schema.Pattern)
+	for _, value := range []string{"aws-east", "a", "us east", " east", "east\u00a0", "east\x1f", "aws/east", "ea\tst", "ea\u0085st"} {
+		if accepted := configvalidation.CheckClusterID(value) == nil; pattern.MatchString(value) != accepted {
+			t.Errorf("for %q, the pattern says %v but CheckClusterID says %v", value, !accepted, accepted)
+		}
 	}
 }
 

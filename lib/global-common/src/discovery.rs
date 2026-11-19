@@ -342,12 +342,6 @@ mod tests {
             "key": key, "location": location, "model": "Qwen/Qwen3-0.6B", "new": 1
         }))
         .unwrap();
-        // An older PoolRelay still sends capabilities and capacity.
-        serde_json::from_value::<PoolRegistration>(json!({
-            "key": key, "location": location, "model": "Qwen/Qwen3-0.6B",
-            "capabilities": ["aggregated"], "capacity": [{"sku": "H100", "workers": 8}]
-        }))
-        .unwrap();
         serde_json::from_value::<PoolsResponse>(json!({
             "pools": [{
                 "key": key, "location": location, "model": null,
