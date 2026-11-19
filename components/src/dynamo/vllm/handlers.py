@@ -831,6 +831,25 @@ def _update_kv_transfer_params(
     sampling_params.extra_args = extra_args
 
 
+def _validate_disagg_parallel_sampling(
+    sampling_params: SamplingParams,
+    *,
+    enabled: bool,
+) -> None:
+    """Reject n > 1 on the disaggregated path.
+
+    The KV handoff to decode can only carry one child's blocks; every other
+    child's prefill KV is never pulled and silently recomputed on decode
+    (issue #14018). Fail here instead of serving those degraded choices.
+    """
+    if not enabled or sampling_params.n == 1:
+        return
+    raise InvalidArgument(
+        "vLLM disaggregated serving supports only n=1. "
+        "Use aggregated serving or send separate n=1 requests.",
+    )
+
+
 @functools.cache
 def _vllm_kv_hints_types() -> tuple[type[Any], type[Any]] | None:
     """Load vLLM's first-class KV hint types when the API is available."""
@@ -3927,6 +3946,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         )
 
+        _validate_disagg_parallel_sampling(sampling_params, enabled=is_decode_only)
+
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)
             logger.debug(
@@ -4382,6 +4403,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
+
+        _validate_disagg_parallel_sampling(sampling_params, enabled=not is_local_probe)
 
         kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 
