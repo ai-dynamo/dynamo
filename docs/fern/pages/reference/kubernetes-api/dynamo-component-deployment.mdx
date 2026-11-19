@@ -49,6 +49,8 @@ Other writes receive the checks even when the DCD has a DGD owner reference. The
 checks the parent graph; see [DGD name limits](dynamo-graph-deployment.mdx#name-limits).
 On update, admission reports only a problem the old DCD did not have, such as a digit-leading
 name when Kubernetes discovery is turned on, so existing DCDs stay updatable and deletable.
+Removing a DGD owner rechecks names that were exempt, including an enabled legacy `v1alpha1`
+Ingress backend preserved during conversion to `v1beta1`.
 
 ## Spec reference
 

@@ -43,8 +43,6 @@ func TestSetupRequiresRuntimeConfiguration(t *testing.T) {
 	}
 }
 
-// TestSetupDiscoveryDefault verifies the configuration passed to both registered
-// handlers. Resource admission semantics remain covered by their admission tables.
 func TestSetupDiscoveryDefault(t *testing.T) {
 	for _, backend := range []configv1alpha1.DiscoveryBackend{
 		configv1alpha1.DiscoveryBackendEtcd,

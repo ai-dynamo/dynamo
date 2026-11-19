@@ -71,6 +71,15 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD),
 	}
 
+	t.Log("Prepare owned alpha Ingress fixtures for both served API versions")
+	alphaIngressChild := alphaOwnedDCDWithIngressForAdmission("worker.example.com")
+	alphaIngressStandalone := alphaIngressChild.DeepCopy()
+	alphaIngressStandalone.OwnerReferences = nil
+	betaIngressChild := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, alphaIngressChild.ConvertTo(betaIngressChild))
+	betaIngressStandalone := betaIngressChild.DeepCopy()
+	betaIngressStandalone.OwnerReferences = nil
+
 	type dcdAdmissionTestCase struct {
 		name               string
 		deployment         runtime.Object
@@ -147,6 +156,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{name: "operator child naming exemption still checks the alpha Ingress host", username: admissionOperatorPrincipal,
 			deployment:      alphaOwnedDCDWithIngressForAdmission(""),
 			wantWebhookErrs: []string{"spec.ingress.host: Required value: is required when ingress is enabled"}},
+		{name: "removing a DGD owner rejects an unchecked alpha Ingress backend", username: admissionOperatorPrincipal,
+			oldDeployment:   alphaIngressChild,
+			deployment:      alphaIngressStandalone,
+			wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "removing a DGD owner rejects an unchecked preserved alpha Ingress backend", username: admissionOperatorPrincipal,
+			oldDeployment:   betaIngressChild,
+			deployment:      betaIngressStandalone,
+			wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
 		{name: "enabling alpha ingress rejects a digit-leading backend Service name", oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 			dcd.Name = "7b"
 			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}

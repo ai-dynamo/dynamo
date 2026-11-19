@@ -41,7 +41,8 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 	}
 	var oldIngress *nvidiacomv1alpha1.IngressSpec
 	var oldName string
-	if oldDCD != nil {
+	// Names skipped under a DGD owner cannot be grandfathered after ownership changes.
+	if oldDCD != nil && controlledByDynamoGraphDeployment(oldDCD) == controlledByDynamoGraphDeployment(dcd) {
 		oldIngress = oldDCD.Spec.Ingress
 		oldName = oldDCD.Name
 	}
