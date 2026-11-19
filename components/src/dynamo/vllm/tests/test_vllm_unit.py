@@ -31,7 +31,6 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.handlers import build_sampling_params_openai
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -2479,6 +2478,8 @@ class TestRealtimeWorkerFlag:
 def test_build_sampling_params_openai_stop(
     stop, expected_stop, expected_stop_token_ids
 ):
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
     request = {
         "model": "test-model",
         "messages": [{"role": "user", "content": "hi"}],
