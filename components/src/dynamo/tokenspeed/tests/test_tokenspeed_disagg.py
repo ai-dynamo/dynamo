@@ -231,6 +231,8 @@ def native(monkeypatch):
     monkeypatch.setattr(llm_engine, "_stop_launcher", fake.stop_launcher)
     # A lost engine stops the worker with SIGTERM; never signal the test run.
     monkeypatch.setattr(llm_engine.os, "kill", Mock())
+    # start() changes process-wide collector settings; never change the test run's.
+    monkeypatch.setattr(llm_engine, "_tune_gc", lambda: None)
     yield fake
     fake.release()
 

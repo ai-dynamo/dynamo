@@ -14,6 +14,7 @@ chunks back to its ``generate()`` call.
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib
 import ipaddress
 import json
@@ -213,6 +214,7 @@ class TokenspeedLLMEngine(LLMEngine):
             len(engines),
             self._model_max_len,
         )
+        _tune_gc()
 
         return EngineConfig(
             model=self.server_args.model,
@@ -885,6 +887,19 @@ def _stop_launcher(process: subprocess.Popen) -> None:
     except ProcessLookupError:
         pass
     process.wait()
+
+
+def _tune_gc() -> None:
+    """Take the start-up heap out of the cyclic collector's reach.
+
+    Every collection holds the GIL, so it stalls every stream. A full
+    collection walks all tracked objects: ``gc.freeze()`` takes the several
+    hundred thousand that imports and engine start-up leave alive out of its
+    reach.
+    """
+    gc.collect()
+    gc.freeze()
+    logger.info("GC: froze %d start-up objects", gc.get_freeze_count())
 
 
 def _tokenspeed_engine_module() -> Any:
