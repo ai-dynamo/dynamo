@@ -10,7 +10,7 @@ use dynamo_runtime::{
     discovery::EventTransportKind,
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
     engine::{AsyncEngine, AsyncEngineContextProvider},
-    pipeline::{Error, ResponseStream, context::Controller, network::Ingress},
+    pipeline::{Error, ResponseStream, network::Ingress},
     storage::kv,
 };
 use futures::{FutureExt, stream};
