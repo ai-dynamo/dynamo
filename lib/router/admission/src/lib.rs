@@ -26,7 +26,7 @@ mod queue;
 
 pub use classifier::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyFuture, ClassifyRequest, NoWorkers, RequestClassifier, RequestClassifierContext,
+    ClassifyFuture, ClassifyRequest, RequestClassifier, RequestClassifierContext,
     RequestClassifierRuntime, RequestLifecycle, RequestProgress, RequestProgressUpdater,
     WorkerCacheView, WorkerLoadView, WorkerView,
 };
