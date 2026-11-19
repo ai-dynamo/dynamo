@@ -19,12 +19,14 @@ package aisimulate
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // defaultedSpec is a model-only Request after structural and admission defaults:
@@ -507,9 +509,9 @@ func TestInputOverridesNullSentinelValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Expand object-field markers and retain native nulls and ordinary data")
 			spec := withInputOverrides(defaultedSpec(), tc.raw)
-			got, err := InputOverrides(&spec.NativeSearchInput)
-			if err != nil {
-				t.Fatal(err)
+			got, errs := InputOverrides(&spec.NativeSearchInput, field.NewPath("spec", "aisim", "inputOverrides"))
+			if len(errs) != 0 {
+				t.Fatal(errs)
 			}
 			if encoded := encode(t, got); encoded != tc.want {
 				t.Fatalf("input overrides = %s, want %s", encoded, tc.want)
@@ -520,33 +522,43 @@ func TestInputOverridesNullSentinelValues(t *testing.T) {
 
 func TestInputOverridesRejectsInvalidNullSentinels(t *testing.T) {
 	const malformed = "$null must be the boolean true and the only object field"
+	path := field.NewPath("spec", "aisim", "inputOverrides")
 	for _, tc := range []struct {
-		name    string
-		raw     string
-		path    string
-		message string
+		name string
+		raw  string
+		want field.ErrorList
 	}{
-		{name: "false", raw: `{"value":{"$null":false}}`, path: `["value"]`, message: malformed},
-		{name: "number", raw: `{"value":{"$null":1}}`, path: `["value"]`, message: malformed},
-		{name: "string", raw: `{"value":{"$null":"true"}}`, path: `["value"]`, message: malformed},
-		{name: "null", raw: `{"value":{"$null":null}}`, path: `["value"]`, message: malformed},
-		{name: "object", raw: `{"value":{"$null":{}}}`, path: `["value"]`, message: malformed},
-		{name: "list", raw: `{"value":{"$null":[]}}`, path: `["value"]`, message: malformed},
-		{name: "extra keys", raw: `{"value":{"$null":true,"other":1}}`, path: `["value"]`, message: malformed},
-		{name: "root", raw: `{"$null":true}`, message: "$null is not allowed at the document root"},
-		{name: "array element", raw: `{"values":[{"$null":true}]}`, path: `["values"][0]`, message: "$null is not allowed inside arrays"},
-		{name: "object inside array", raw: `{"values":[{"nested":{"$null":true}}]}`, path: `["values"][0]["nested"]`, message: "$null is not allowed inside arrays"},
-		{name: "nested array", raw: `{"values":[[{"$null":true}]]}`, path: `["values"][0][0]`, message: "$null is not allowed inside arrays"},
-		{name: "path preserves map keys", raw: `{"a.b":{"c/d":{"$null":false}}}`, path: `["a.b"]["c/d"]`, message: malformed},
-		{name: "first error is deterministic", raw: `{"z":{"$null":false},"a":{"$null":"true"}}`, path: `["a"]`, message: malformed},
+		{name: "false", raw: `{"value":{"$null":false}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "number", raw: `{"value":{"$null":1}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "string", raw: `{"value":{"$null":"true"}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "null", raw: `{"value":{"$null":null}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "object", raw: `{"value":{"$null":{}}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "list", raw: `{"value":{"$null":[]}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "extra keys", raw: `{"value":{"$null":true,"other":1}}`, want: field.ErrorList{field.Invalid(path.Key("value"), "<redacted>", malformed)}},
+		{name: "root", raw: `{"$null":true}`, want: field.ErrorList{field.Forbidden(path, "$null is not allowed at the document root")}},
+		{name: "array element", raw: `{"values":[{"$null":true}]}`, want: field.ErrorList{field.Forbidden(path.Key("values").Index(0), "$null is not allowed inside arrays")}},
+		{name: "object inside array", raw: `{"values":[{"nested":{"$null":true}}]}`, want: field.ErrorList{field.Forbidden(path.Key("values").Index(0).Key("nested"), "$null is not allowed inside arrays")}},
+		{name: "nested array", raw: `{"values":[[{"$null":true}]]}`, want: field.ErrorList{field.Forbidden(path.Key("values").Index(0).Index(0), "$null is not allowed inside arrays")}},
+		{name: "path preserves map keys", raw: `{"a.b":{"c/d":{"$null":false}}}`, want: field.ErrorList{field.Invalid(path.Key("a.b").Key("c/d"), "<redacted>", malformed)}},
+		{name: "all errors are deterministic", raw: `{"z":{"$null":false},"a":{"$null":"true"}}`, want: field.ErrorList{
+			field.Invalid(path.Key("a"), "<redacted>", malformed),
+			field.Invalid(path.Key("z"), "<redacted>", malformed),
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Reject a reserved directive before merging, even in otherwise opaque input")
+			t.Log("Report typed grammar errors without changing the source document")
 			spec := withInputOverrides(defaultedSpec(), tc.raw)
-			_, err := Lower(&spec.NativeSearchInput)
-			want := "spec.aisim.inputOverrides" + tc.path + ": " + tc.message
-			if err == nil || err.Error() != want {
-				t.Fatalf("Lower error = %v, want %s", err, want)
+			_, errs := InputOverrides(&spec.NativeSearchInput, path)
+			if !reflect.DeepEqual(errs, tc.want) {
+				t.Fatalf("InputOverrides errors = %#v, want %#v", errs, tc.want)
+			}
+			if string(spec.AISim.InputOverrides.Raw) != tc.raw {
+				t.Fatal("normalization changed the source document")
+			}
+
+			t.Log("Lowering must not return a consumable input when normalization fails")
+			if input, err := Lower(&spec.NativeSearchInput); input != nil || err == nil {
+				t.Fatalf("Lower = (%v, %v), want nil input and an error", input, err)
 			}
 		})
 	}

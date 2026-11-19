@@ -28,6 +28,7 @@ import (
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // Lower returns the effective public recommendation input: the typed underlay and derived defaults, merged
@@ -41,9 +42,9 @@ func Lower(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 // static underlay beneath the typed API fields and derived defaults. InputOverrides remains the
 // final merge patch, so it may override or delete fields from either underlay.
 func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[string]any) (map[string]any, error) {
-	overrides, err := InputOverrides(spec)
-	if err != nil {
-		return nil, err
+	overrides, overrideErrs := InputOverrides(spec, field.NewPath("spec", "aisim", "inputOverrides"))
+	if len(overrideErrs) != 0 {
+		return nil, overrideErrs.ToAggregate()
 	}
 	typedUnderlay, err := Underlay(spec)
 	if err != nil {
@@ -71,8 +72,10 @@ func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[strin
 
 // InputOverrides returns spec.aisim.inputOverrides as a JSON object, expanding exact
 // {"$null":true} object-field values outside arrays to native nulls. Other uses of $null
-// return an error. An absent or native-null document returns nil.
-func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
+// return typed errors at fldPath. An absent or native-null document returns nil.
+// Invalid objects are retained so admission can report independent errors; callers must not
+// merge the result when errors are present. spec and fldPath must not be nil.
+func InputOverrides(spec *v1beta2.NativeSearchInput, fldPath *field.Path) (map[string]any, field.ErrorList) {
 	if spec.AISim == nil || spec.AISim.InputOverrides == nil {
 		return nil, nil
 	}
@@ -80,7 +83,7 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	if len(raw) == 0 && spec.AISim.InputOverrides.Object != nil {
 		var err error
 		if raw, err = json.Marshal(spec.AISim.InputOverrides.Object); err != nil {
-			return nil, fmt.Errorf("spec.aisim.inputOverrides: %w", err)
+			return nil, field.ErrorList{field.Invalid(fldPath, "<redacted>", err.Error())}
 		}
 	}
 	if len(raw) == 0 {
@@ -90,63 +93,61 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("spec.aisim.inputOverrides: %w", err)
+		return nil, field.ErrorList{field.Invalid(fldPath, "<redacted>", err.Error())}
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("spec.aisim.inputOverrides: trailing JSON value")
+		return nil, field.ErrorList{field.Invalid(fldPath, "<redacted>", "trailing JSON value")}
 	}
 	switch typed := value.(type) {
 	case nil:
 		return nil, nil
 	case map[string]any:
-		if _, err := expandNullSentinels(typed, "", false); err != nil {
-			return nil, err
-		}
-		return typed, nil
+		_, allErrs := expandNullSentinels(typed, fldPath, true, false)
+		return typed, allErrs
 	default:
-		return nil, fmt.Errorf("spec.aisim.inputOverrides: must be a JSON object, got %T", value)
+		return nil, field.ErrorList{field.Invalid(fldPath, "<redacted>", fmt.Sprintf("must be a JSON object, got %T", value))}
 	}
 }
 
 // expandNullSentinels validates and expands object-field deletion markers in decoded JSON.
-// path is empty at the document root; inArray stays true below any array. Native null is nil.
-// It mutates the decoded maps and slices, never the spec.
-func expandNullSentinels(value any, path string, inArray bool) (any, error) {
+// atRoot identifies the document root; inArray stays true below any array. Native null is nil.
+// It mutates the decoded maps and slices, never the spec. fldPath must not be nil.
+func expandNullSentinels(value any, fldPath *field.Path, atRoot, inArray bool) (any, field.ErrorList) {
+	allErrs := field.ErrorList{}
 	switch typed := value.(type) {
 	case map[string]any:
 		// A reserved directive must be an exact marker outside the root and arrays.
 		if marker, found := typed["$null"]; found {
-			if path == "" {
-				return nil, fmt.Errorf("spec.aisim.inputOverrides: $null is not allowed at the document root")
+			switch {
+			case atRoot:
+				allErrs = append(allErrs, field.Forbidden(fldPath, "$null is not allowed at the document root"))
+			case inArray:
+				allErrs = append(allErrs, field.Forbidden(fldPath, "$null is not allowed inside arrays"))
+			case len(typed) != 1 || marker != true:
+				allErrs = append(allErrs, field.Invalid(fldPath, "<redacted>", "$null must be the boolean true and the only object field"))
+			default:
+				return nil, nil
 			}
-			if inArray {
-				return nil, fmt.Errorf("spec.aisim.inputOverrides%s: $null is not allowed inside arrays", path)
-			}
-			if len(typed) != 1 || marker != true {
-				return nil, fmt.Errorf("spec.aisim.inputOverrides%s: $null must be the boolean true and the only object field", path)
-			}
-			return nil, nil
 		}
 
 		// Visit keys in a stable order so multiple invalid directives report deterministically.
 		for _, key := range slices.Sorted(maps.Keys(typed)) {
-			expanded, err := expandNullSentinels(typed[key], fmt.Sprintf("%s[%q]", path, key), inArray)
-			if err != nil {
-				return nil, err
+			if key == "$null" {
+				continue
 			}
+			expanded, errs := expandNullSentinels(typed[key], fldPath.Key(key), false, inArray)
+			allErrs = append(allErrs, errs...)
 			typed[key] = expanded
 		}
 	case []any:
 		// Reject directives anywhere below an array while preserving native array values.
 		for i, member := range typed {
-			expanded, err := expandNullSentinels(member, fmt.Sprintf("%s[%d]", path, i), true)
-			if err != nil {
-				return nil, err
-			}
+			expanded, errs := expandNullSentinels(member, fldPath.Index(i), false, true)
+			allErrs = append(allErrs, errs...)
 			typed[i] = expanded
 		}
 	}
-	return value, nil
+	return value, allErrs
 }
 
 // Underlay translates the typed spec into the public CoreRecommendationConfig input consumed by
