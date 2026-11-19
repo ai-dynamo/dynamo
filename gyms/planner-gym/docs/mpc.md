@@ -42,7 +42,8 @@ linear trends. Token lengths and cache-hit rates use smoothed observations.
 A pending replica costs GPUs immediately but contributes service capacity only
 after its cold-start delay. A replica still starting after that delay is late:
 the plan expects it at the next control interval and does not count it in the
-current one. Candidate plans cover the cold-start delay plus `horizon`
+current one. While no replica of a pool is ready, the plan gives that pool no
+serving capacity. Candidate plans cover the cold-start delay plus `horizon`
 control intervals. The controller maximizes an approximation of good requests
 per GPU-second using a Dinkelbach objective: predicted good requests minus
 `rho * GPU-seconds`, with `rho` tracking measured recent efficiency. Both TTFT

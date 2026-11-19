@@ -544,7 +544,7 @@ class _PoolBook:
             n = base + sum(c for r, c in orders if r <= t_k)
             if new and k >= self._lag_steps:
                 n += new
-            out.append(max(1, n))
+            out.append(max(0, n))  # zero while nothing in the pool is ready
         return out
 
 
@@ -816,7 +816,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
             n = base + sum(c for r, c in orders if r <= t_k)
             if new and k >= self._lag_steps:
                 n += new
-            schedule.append(max(1, n))
+            schedule.append(max(0, n))  # zero while no worker is ready
         return schedule
 
     # ---- plant model helpers --------------------------------------------- #
@@ -899,6 +899,8 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
             ttft = max(step[1], step[4])
             rps = forecast_hi[min(k, len(forecast_hi) - 1)]
             n_active = schedule[k]
+            if n_active < 1:
+                return False
             if rps > self._downsize_utilisation * n_active * self._mu(rps, n_active):
                 return False
             if ttft >= self._slo_ttft * 0.5:
@@ -968,7 +970,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
     def _update_rho(self, observed_rps: float, queue_depth: int) -> None:
         """Measured goodput/GPU-second; use the model until completions arrive."""
         dt = self._poll_interval_s
-        ready = max(1, self._ready)
+        ready = self._ready  # zero ready workers complete nothing
         mu = ready * self._mu(observed_rps, ready)
         saturated = queue_depth > 0 or observed_rps >= mu
         ttft = queue_depth / max(1e-6, mu) * 1000.0 + self._prefill_ms()
@@ -1255,7 +1257,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
             itl = (
                 2.0 * self._slo_itl
                 if decode_saturated
-                else self._decode_itl_ms(rps / sched_d[k])
+                else self._decode_itl_ms(rps / max(1, sched_d[k]))
             )
             queue = max(0.0, queue + (rps - cap) * dt)
             plan.append((queue, ttft, served, itl))
@@ -1296,6 +1298,8 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
             self._plan_disagg(forecast_hi, queue_depth, n_p, n_d)
         ):
             rps = forecast_hi[min(k, len(forecast_hi) - 1)]
+            if sched_p[k] < 1 or sched_d[k] < 1:
+                return False
             if rps > self._downsize_utilisation * sched_p[k] * mu_p:
                 return False
             if rps > self._downsize_utilisation * sched_d[k] * mu_d:
@@ -1309,8 +1313,9 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
 
     def _update_rho_disagg(self, observed_rps: float, queue_depth: int) -> None:
         dt = self._poll_interval_s
-        cap_p = max(1, self._book_p.ready) * self._mu_prefill()
-        cap_d = max(1, self._book_d.ready) * self._mu_decode()
+        # A pool with no ready worker has no capacity.
+        cap_p = self._book_p.ready * self._mu_prefill()
+        cap_d = self._book_d.ready * self._mu_decode()
         cap = min(cap_p, cap_d)
         ttft = (
             queue_depth / max(1e-6, cap) * 1000.0

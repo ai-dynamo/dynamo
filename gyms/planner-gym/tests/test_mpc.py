@@ -469,6 +469,43 @@ def test_late_worker_rule_applies_to_each_disaggregated_pool():
     assert book.schedule(3)[:3] == [2, 3, 3]
 
 
+def test_plan_serves_nothing_while_no_worker_is_ready():
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc._isl_now, mpc._osl_ema = 500.0, 40.0
+    mpc._reconcile_orders(0.0, ready=0, expected=1)  # the only worker is starting
+    assert mpc.pending_orders == 1
+    schedule = mpc._active_schedule(1)
+    assert schedule[:6] == [0] * 6 and schedule[6:] == [1] * 5
+    plan = mpc._queue_plan([2.0] * mpc._plan_steps, 0, 1)
+    # Nothing completes before the worker is due; arrivals accumulate.
+    assert [step[2] for step in plan[:6]] == [0] * 6
+    assert plan[5][0] == pytest.approx(2.0 * 30.0)
+    assert plan[6][2] > 0
+    assert not mpc._downsize_feasible([0.0] * mpc._plan_steps, 0, 1)
+    # The model-based efficiency estimate sees no completions either.
+    mpc._update_rho(2.0, 0)
+    assert mpc._good_ema == 0
+
+
+def test_disaggregated_plan_serves_nothing_while_a_pool_has_no_ready_worker():
+    mpc = _mpc(
+        _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
+        mode="disagg",
+        cold_start_s=30.0,
+    )
+    mpc._isl_now, mpc._osl_ema = 500.0, 40.0
+    mpc._book_p.reconcile(0.0, 1, 1)
+    mpc._book_d.reconcile(0.0, 0, 1)  # the only decode worker is starting
+    assert mpc._book_d.schedule(1)[:7] == [0] * 6 + [1]
+    steps = mpc._plan_steps
+    plan = mpc._plan_disagg([2.0] * steps, 0, 1, 1)
+    assert [step[2] for step in plan[:6]] == [0] * 6
+    assert plan[6][2] > 0
+    assert not mpc._feasible_disagg([0.0] * steps, 0, 1, 1)
+    mpc._update_rho_disagg(2.0, 0)
+    assert mpc._good_ema == 0
+
+
 def test_queue_spike_floor_does_not_wind_up_while_orders_are_in_flight():
     """Pending workers must not cause a new replica order every tick.
 
