@@ -150,7 +150,7 @@ sequence.
 
 The frontend sends custom content only to workers that advertise
 `custom_json_v1` and returns 400 when none does. Custom P/D, encoder
-disaggregation, speculative prefill, custom caching/KVBM, SGLang, TensorRT-LLM,
+disaggregation, speculative prefill, custom caching, SGLang, TensorRT-LLM,
 and native vLLM sidecars are unsupported. Extending these paths requires a
 separate qualification of plugin payload identity and lifecycle.
 
