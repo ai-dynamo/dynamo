@@ -245,7 +245,8 @@ vllm_omni_configs = {
             ),
         ],
     ),
-    # vLLM defaults to FlashInfer only on B200/GB200, which CI does not have.
+    # vLLM defaults to FlashInfer only on SM100 (B200/GB200). CI's Blackwell
+    # runners are SM120 and default to FlashAttention, so force it here.
     "omni_audio_flashinfer": VLLMOmniConfig(
         name="omni_audio_flashinfer",
         directory=vllm_dir,
@@ -267,6 +268,8 @@ vllm_omni_configs = {
                 repeat_count=1,
                 expected_response=[],
                 expected_log=[r"Warming up FlashInfer attention"],
+                min_duration_s=1.0,
+                min_rms=0.01,
             ),
         ],
     ),

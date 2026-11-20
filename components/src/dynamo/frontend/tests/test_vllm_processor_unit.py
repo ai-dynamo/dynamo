@@ -7,7 +7,6 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
-import importlib.util
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -30,6 +29,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
 from dynamo._core import _raise_routed_http_error
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -51,23 +51,6 @@ from dynamo.llm.exceptions import (
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
 # stub list does not cover those submodules).
 
-HAS_QWEN3_TOOL_PARSER = (
-    importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
-    or importlib.util.find_spec("vllm.tool_parsers.qwen3coder_tool_parser") is not None
-)
-
-
-def _resolve_qwen3_tool_parser_class():
-    try:
-        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
-
-        return Qwen3EngineToolParser
-    except ImportError:
-        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
-
-        return Qwen3CoderToolParser
-
-
 # Needs vllm packages, but never touches a GPU.
 pytestmark = [
     pytest.mark.unit,
@@ -82,10 +65,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
-    pytest.mark.skipif(
-        not HAS_QWEN3_TOOL_PARSER,
-        reason="requires vllm qwen3 tool parser",
-    ),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -121,6 +100,7 @@ class TestDynamoJsonToolCallFallback:
         stream_response,
         parallel_tool_calls=None,
         tool_parameters=None,
+        tool_catalog_names=None,
     ):
         request = json.loads(json.dumps(TOOL_REQUEST))
         request["tool_choice"] = tool_choice
@@ -143,7 +123,49 @@ class TestDynamoJsonToolCallFallback:
             chat_template_kwargs={},
             stream_response=stream_response,
             uses_dynamo_json_tool_call_fallback=True,
+            tool_catalog_names=tool_catalog_names,
         )
+
+    @pytest.mark.parametrize("stream_response", [False, True])
+    @pytest.mark.parametrize("name", ["get_weather", "other_tool"])
+    def test_fallback_keeps_declared_calls_for_http_allowlist(
+        self, tokenizer, stream_response, name
+    ):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=stream_response,
+            tool_catalog_names=frozenset({"get_weather", "other_tool"}),
+        )
+        text = json.dumps([{"name": name, "parameters": {}}])
+        if stream_response:
+            assert (
+                post.process_output(
+                    SimpleNamespace(
+                        index=0,
+                        text=text[:12],
+                        token_ids=[],
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                )
+                is None
+            )
+            text = text[12:]
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        assert choice["delta"]["tool_calls"][0]["function"]["name"] == name
 
     def test_streaming_required_choice_converts_json_to_tool_calls(self, tokenizer):
         post = self._post_processor(
@@ -2795,18 +2817,33 @@ class TestRoutedEnginePath:
         assert routed_engine.yielded == 1
 
     @pytest.mark.asyncio
-    async def test_worker_unavailable_is_raised_not_enveloped(
-        self, vllm_processor_module
+    @pytest.mark.parametrize(
+        "status,from_stream", [(None, False), (403, False), (404, True), (503, True)]
+    )
+    async def test_routed_error_is_raised_not_enveloped(
+        self, vllm_processor_module, status, from_stream
     ):
-        rejection = WorkerUnavailable("prefill routing is still activating")
+        if status is None:
+            rejection = WorkerUnavailable("prefill routing is still activating")
+        else:
+            message = IMAGE_FETCH_ERROR_MESSAGES.get(status, "worker unavailable")
+            with pytest.raises(RoutedEngineError) as backend:
+                _raise_routed_http_error(status, message)
+            rejection = backend.value
 
         class _RejectingRoutedEngine(_FakeRoutedEngine):
             async def generate(self, preprocessed, **kwargs):
-                raise rejection
+                if not from_stream:
+                    raise rejection
+
+                async def stream():
+                    raise rejection
+                    yield  # pragma: no cover
+
+                return stream()
 
         processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
-
-        with pytest.raises(WorkerUnavailable) as caught:
+        with pytest.raises(type(rejection)) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 
@@ -3642,10 +3679,12 @@ class TestSchemaAwareToolParser:
             "</function></tool_call>"
         )
 
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=_resolve_qwen3_tool_parser_class(),
+            tool_parser_class=Qwen3EngineToolParser,
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 
@@ -4659,23 +4698,6 @@ class TestToolCallGuidedDecoding:
             "tool_choice": "auto",
             "reasoning": False,
         }
-
-    def test_missing_registry_uses_parser_method(self, tokenizer, monkeypatch):
-        class CompatibleParser(_FakeStructuralTagParser):
-            structural_tag_model = "qwen_3_coder"
-
-        parser = CompatibleParser()
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
-
-        guided = build_tool_call_guided_decoding(
-            self._request(tokenizer),
-            parser,
-            structural_tag_mode="on",
-            structural_tag_scope="always",
-        )
-
-        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
-        assert len(parser.requests) == 1
 
     # Parser-created grammar must survive preprocessing as guided decoding.
     @pytest.mark.asyncio
@@ -6229,7 +6251,6 @@ class TestToolCallGrammarReasoningStart:
     async def _reasoning_requested(
         self,
         tokenizer,
-        monkeypatch,
         *,
         prompt_text,
         reasoning_parser_class,
@@ -6244,7 +6265,6 @@ class TestToolCallGrammarReasoningStart:
             parsers.append(parser)
             return parser
 
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
         request = {**TOOL_REQUEST, "tool_choice": "auto"}
         if chat_template_kwargs is not None:
             request["chat_template_kwargs"] = chat_template_kwargs
@@ -6297,7 +6317,6 @@ class TestToolCallGrammarReasoningStart:
     async def test_reasoning_start(
         self,
         tokenizer,
-        monkeypatch,
         prompt_text,
         parser_start,
         excludes_reasoning,
@@ -6305,7 +6324,6 @@ class TestToolCallGrammarReasoningStart:
     ):
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text=prompt_text,
             reasoning_parser_class=_prompt_reasoning_parser(parser_start),
             structural_tag_excludes_reasoning=excludes_reasoning,
@@ -6323,14 +6341,13 @@ class TestToolCallGrammarReasoningStart:
     )
     @pytest.mark.asyncio
     async def test_glm_prompt_state_overrides_false_thinking_flag(
-        self, tokenizer, monkeypatch, prompt_text, parser_name, expected
+        self, tokenizer, prompt_text, parser_name, expected
     ):
         """Only GLM prompt markers override a false flag when tool guidance starts."""
         from vllm.reasoning import ReasoningParserManager
 
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text=prompt_text,
             reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(
                 parser_name
@@ -6340,12 +6357,9 @@ class TestToolCallGrammarReasoningStart:
         assert reasoning == [expected]
 
     @pytest.mark.asyncio
-    async def test_no_reasoning_parser_keeps_post_reasoning_tag(
-        self, tokenizer, monkeypatch
-    ):
+    async def test_no_reasoning_parser_keeps_post_reasoning_tag(self, tokenizer):
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text="<|im_start|>assistant\n<think>",
             reasoning_parser_class=None,
         )
