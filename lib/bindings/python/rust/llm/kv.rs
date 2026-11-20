@@ -220,6 +220,11 @@ struct KvIndexerCli {
     #[arg(long)]
     engine_owned_mm_identity: bool,
 
+    /// Initial workers registered via --workers send one remove per block however
+    /// many times they stored it (SGLang), so repeated stores are not counted
+    #[arg(long)]
+    idempotent_stores: bool,
+
     /// Legacy compatibility input; accepted but ignored
     #[arg(long = "tenant-id", default_value = "default", hide = true)]
     _tenant_id: String,
@@ -270,6 +275,7 @@ where
             model_name: cli.model_name,
             routing_group: cli.routing_group,
             engine_owned_mm_identity: cli.engine_owned_mm_identity,
+            idempotent_stores: cli.idempotent_stores,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
