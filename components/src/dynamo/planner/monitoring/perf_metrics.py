@@ -81,7 +81,7 @@ async def fetch_pre_deployment_metrics(
                 return fpms
         except ImportError as e:
             logger.error(
-                "aic_interpolation is set but aisimulate is not installed "
+                "aic_interpolation is set but aisim is not installed "
                 "in the planner image: %s",
                 e,
             )
@@ -283,7 +283,11 @@ def _convert_prefill_profiling(profile_results_dir: str) -> list[ForwardPassMetr
     return fpms
 
 
-def _convert_decode_profiling(profile_results_dir: str) -> list[ForwardPassMetrics]:
+def _read_decode_profiling(
+    profile_results_dir: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Return the decode points as KV usage, context length and ITL in ms, then
+    the KV capacity of the profiled engine in tokens."""
     npz_path = os.path.join(
         profile_results_dir, "selected_decode_interpolation", "raw_data.npz"
     )
@@ -311,7 +315,13 @@ def _convert_decode_profiling(profile_results_dir: str) -> list[ForwardPassMetri
         raise FileNotFoundError(
             f"Decode profiling data not found at {npz_path} or {json_path}"
         )
+    return x_kv_usage, y_context_length, z_itl, max_kv_tokens
 
+
+def _convert_decode_profiling(profile_results_dir: str) -> list[ForwardPassMetrics]:
+    x_kv_usage, y_context_length, z_itl, max_kv_tokens = _read_decode_profiling(
+        profile_results_dir
+    )
     fpms = []
     for kv_usage, ctx_len, itl_ms in zip(x_kv_usage, y_context_length, z_itl):
         sum_decode_kv = int(round(float(kv_usage) * max_kv_tokens))

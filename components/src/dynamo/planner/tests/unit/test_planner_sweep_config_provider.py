@@ -13,20 +13,13 @@ from dataclasses import replace
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
-    CandidateContext,
-    InfeasibleCandidate,
-    SweepContext,
-)
-from aisimulate.sweeper.replay import BackendDeploymentSpec
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import CandidateContext, InfeasibleCandidate, SweepContext
+from aisim.sweeper.replay import BackendDeploymentSpec
 
 import dynamo.planner.simulation.provider as planner_provider_module
 from dynamo.planner.config.planner_config import PlannerConfig

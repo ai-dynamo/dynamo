@@ -164,20 +164,9 @@ pub struct PositionalIndexer {
     jump_size: usize,
 
     search_mode: SearchMode,
-    lifecycle: super::HashLifecycle,
 }
 
 impl PositionalIndexer {
-    pub fn new_with_delegate(
-        jump_size: usize,
-        search_mode: SearchMode,
-        delegate: Arc<dyn super::KvIndexerDelegate>,
-    ) -> Self {
-        let mut backend = Self::new_with_mode(jump_size, search_mode);
-        backend.lifecycle = super::HashLifecycle::new(delegate);
-        backend
-    }
-
     /// Create a new PositionalIndexer.
     ///
     /// The search mode defaults to whatever [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`] selects
@@ -203,7 +192,6 @@ impl PositionalIndexer {
             index: DashMap::with_hasher(FxBuildHasher),
             jump_size,
             search_mode,
-            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -438,7 +426,6 @@ impl PositionalIndexer {
                 }
             }
 
-            self.lifecycle.insert(worker, seq_hash);
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             match worker_blocks_entry.insert(seq_hash, (position, local_hash)) {
                 Some(existing) if existing == (position, local_hash) => {}
@@ -479,6 +466,9 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
+        // A missing hash skips only itself, as in the other indexers: returning early
+        // would leave every later block of the batch indexed for this worker.
+        let mut result = Ok(());
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
@@ -489,16 +479,16 @@ impl PositionalIndexer {
                     "Failed to find block to remove; skipping remove operation"
                 );
 
-                return Err(KvCacheEventError::BlockNotFound);
+                result = Err(KvCacheEventError::BlockNotFound);
+                continue;
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
-            self.lifecycle.remove(worker, *seq_hash);
         }
 
-        Ok(())
+        result
     }
 
     fn remove_worker_dp_rank_impl(
@@ -513,7 +503,6 @@ impl PositionalIndexer {
                 if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                     let _ = entry.remove(*seq_hash, key);
                 }
-                self.lifecycle.remove(key, *seq_hash);
             }
         }
     }
@@ -535,7 +524,6 @@ impl PositionalIndexer {
                     if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                         let _ = entry.remove(*seq_hash, worker);
                     }
-                    self.lifecycle.remove(worker, *seq_hash);
                 }
             }
         }

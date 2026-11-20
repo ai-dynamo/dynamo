@@ -178,8 +178,7 @@ def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
     ``MultiConnector.request_finished`` — "Only one connector can produce KV
     transfer params"), so we pick the single PD-capable sub-connector and
     delegate to its protocol. Non-PD sub-connectors (e.g. MooncakeStore in
-    ``load_async`` mode, or KVBM's DynamoConnector) ride along as save-only
-    side effects inside vLLM.
+    ``load_async`` mode) ride along as save-only side effects inside vLLM.
     """
     kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
     name = getattr(kv_cfg, "kv_connector", None) if kv_cfg is not None else None

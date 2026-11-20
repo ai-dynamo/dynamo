@@ -277,8 +277,15 @@ impl SystemHealth {
         true
     }
 
-    /// Returns the overall health status and endpoint health statuses
-    /// System health is determined by ALL endpoints that have registered health checks
+    /// Returns the overall health status and endpoint health statuses.
+    /// Overall health is decided in this order:
+    /// 1. Any readiness hold makes the process not ready.
+    /// 2. A nonempty `use_endpoint_health_status` list is ready only when every listed
+    ///    endpoint is ready; a listed endpoint is ready only once it has registered, or when
+    ///    it was seeded ready from the starting status.
+    /// 3. Otherwise, registered health check targets must all be ready.
+    /// 4. Otherwise, with canaries enabled and endpoints known, all known endpoints must be ready.
+    /// 5. Otherwise, the process-wide system health status decides.
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
         let health_check_targets = self.health_check_targets.read().unwrap();
         let endpoint_health = self.endpoint_health.read().unwrap();

@@ -19,7 +19,6 @@ try:
 except ImportError:
     pytest.skip("requires the vLLM structural-tag registry", allow_module_level=True)
 
-import dynamo.frontend.prepost as prepost_module
 from dynamo.frontend.prepost import build_tool_call_guided_decoding
 
 pytestmark = [
@@ -111,12 +110,9 @@ def tool_grammar_compiler():
 )
 @pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
 @pytest.mark.parametrize("parallel", [True, False])
-@pytest.mark.parametrize(
-    "parser_path", ["registry", "typed_hook", "dict_hook", "typed_hook_without_limiter"]
-)
+@pytest.mark.parametrize("parser_path", ["registry", "typed_hook", "dict_hook"])
 def test_dynamo_structural_tag_limits_call_count(
     tool_grammar_compiler,
-    monkeypatch,
     parser_path,
     model_format,
     call,
@@ -151,8 +147,6 @@ def test_dynamo_structural_tag_limits_call_count(
         ),
         parallel_tool_calls=parallel,
     )
-    if parser_path == "typed_hook_without_limiter":
-        monkeypatch.setattr(prepost_module, "limit_to_single_tool_call", None)
     parser = SimpleNamespace(structural_tag_model=model_format)
     if parser_path != "registry":
 
@@ -166,7 +160,6 @@ def test_dynamo_structural_tag_limits_call_count(
             return tag.model_dump() if parser_path == "dict_hook" else tag
 
         parser = SimpleNamespace(get_structural_tag=get_structural_tag)
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
     guided = build_tool_call_guided_decoding(
         request,
         parser,

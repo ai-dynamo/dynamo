@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
 use dynamo_kv_events::placement::{Placement, PlacementEvent};
+use dynamo_kv_events::residency::ResidencyDomain;
+use dynamo_kv_events::zmq_wire::{EventDedupFilter, EventDedupPolicy};
 use dynamo_kv_indexer::host::LocalKvIndexer;
 
-use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::emit;
 
 /// Pure accumulator for adjacent compatible placement mutations.
@@ -114,14 +115,23 @@ pub(super) struct BatchingState {
     coalescer: PlacementEventCoalescer<Placement>,
     pub(super) next_publish_id: u64,
     pub(super) last_flush_time: Instant,
+    worker_dedup_policy: EventDedupPolicy,
 }
 
 impl BatchingState {
-    pub(super) fn new(max_batch_blocks: usize) -> Self {
+    pub(super) fn new(max_batch_blocks: usize, worker_dedup_policy: EventDedupPolicy) -> Self {
         Self {
             coalescer: PlacementEventCoalescer::new(max_batch_blocks),
             next_publish_id: 1,
             last_flush_time: Instant::now(),
+            worker_dedup_policy,
+        }
+    }
+
+    pub(super) fn dedup_policy(&self, domain: ResidencyDomain) -> EventDedupPolicy {
+        match domain {
+            ResidencyDomain::Worker => self.worker_dedup_policy,
+            ResidencyDomain::CacheOwner => EventDedupPolicy::RefCounted,
         }
     }
 
@@ -191,29 +201,20 @@ impl BatchingState {
     ) {
         let tier = placement_event.placement.tier;
         let domain = placement_event.placement.residency_domain;
+        let policy = self.dedup_policy(domain);
         let session_id = placement_event.session_id;
         let mut event = placement_event.event;
         event.data = match event.data {
             KvCacheEventData::Removed(data) => {
-                let Some(filtered) = dedup.filter_remove_in_domain(
-                    event.dp_rank,
-                    tier,
-                    domain,
-                    EventDedupPolicy::RefCounted,
-                    data,
-                ) else {
+                let Some(filtered) =
+                    dedup.filter_remove_in_domain(event.dp_rank, tier, domain, policy, data)
+                else {
                     return;
                 };
                 KvCacheEventData::Removed(filtered)
             }
             KvCacheEventData::Stored(data) => {
-                dedup.track_store_in_domain(
-                    event.dp_rank,
-                    tier,
-                    domain,
-                    EventDedupPolicy::RefCounted,
-                    &data,
-                );
+                dedup.track_store_in_domain(event.dp_rank, tier, domain, policy, &data);
                 KvCacheEventData::Stored(data)
             }
             KvCacheEventData::Cleared => {
