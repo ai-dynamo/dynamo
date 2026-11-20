@@ -15,7 +15,7 @@ use dynamo_scheduler::host::{CatalogReconciler, WorkerCatalogSource, WorkerReque
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::pod_discovery::{PodDiscovery, RawWorker};
 use crate::selector::Selector;
 
@@ -25,6 +25,9 @@ pub struct RegistrationDefaults {
     pub block_size: u32,
     pub total_kv_blocks: Option<u64>,
     pub max_num_batched_tokens: Option<u64>,
+    /// The pods send one remove per block however many times they stored it, as SGLang
+    /// does, so the listener must not count their repeated stores.
+    pub idempotent_stores: bool,
 }
 
 impl RegistrationDefaults {
@@ -34,6 +37,8 @@ impl RegistrationDefaults {
             block_size: cfg.block_size,
             total_kv_blocks: cfg.total_kv_blocks,
             max_num_batched_tokens: cfg.max_num_batched_tokens,
+            // The SGLang renderer serves SGLang pods, which send one remove per block.
+            idempotent_stores: cfg.renderer_protocol == RendererProtocol::SglangRenderer,
         }
     }
 }
@@ -119,6 +124,7 @@ fn worker_request(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerReques
         replay_endpoint: w.replay_endpoint,
         total_kv_blocks: defaults.total_kv_blocks,
         max_num_batched_tokens: defaults.max_num_batched_tokens,
+        idempotent_stores: Some(defaults.idempotent_stores),
         ..Default::default()
     }
 }
@@ -129,7 +135,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::epp_standalone_config::RendererProtocol;
 
     fn config() -> EppStandaloneConfig {
         EppStandaloneConfig {
@@ -160,6 +165,7 @@ mod tests {
             block_size: 16,
             total_kv_blocks: Some(1000),
             max_num_batched_tokens: None,
+            idempotent_stores: false,
         }
     }
 
@@ -190,6 +196,29 @@ mod tests {
             "tcp://10.0.0.1:5557"
         );
         assert_eq!(request.total_kv_blocks, Some(1000));
+    }
+
+    #[test]
+    fn only_sglang_renderer_pods_skip_block_refcounts() {
+        for (renderer_protocol, idempotent_stores) in [
+            (RendererProtocol::VllmRender, false),
+            (RendererProtocol::SglangRenderer, true),
+            (RendererProtocol::TrtllmRender, false),
+        ] {
+            let cfg = EppStandaloneConfig {
+                renderer_protocol,
+                ..config()
+            };
+            let request = worker_request(
+                worker(7, "10.0.0.1"),
+                &RegistrationDefaults::from_config(&cfg),
+            );
+            assert_eq!(
+                request.idempotent_stores.unwrap_or(false),
+                idempotent_stores,
+                "{renderer_protocol:?}"
+            );
+        }
     }
 
     #[tokio::test]
