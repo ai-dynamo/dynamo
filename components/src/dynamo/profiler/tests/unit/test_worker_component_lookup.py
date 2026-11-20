@@ -61,7 +61,6 @@ class LookupCase(NamedTuple):
 
 
 LOOKUP_CASES = (
-    # Both lookups agree.
     pytest.param(
         LookupCase(DISAGG, PREFILL, planner="p", profiler="p"), id="typed-prefill"
     ),
@@ -78,7 +77,6 @@ LOOKUP_CASES = (
         ),
         id="type-beats-generic-worker",
     ),
-    # 1. A role typed twice: the planner rejects the spec, the profiler takes the first.
     pytest.param(
         LookupCase(
             DUPLICATE_PREFILL,
@@ -88,13 +86,10 @@ LOOKUP_CASES = (
         ),
         id="duplicate-type",
     ),
-    # 2. A sole generic worker is decode-only for the planner, both roles for the profiler.
     pytest.param(
         LookupCase(AGG, PREFILL, planner=SubComponentNotFoundError, profiler="w"),
         id="sole-generic-worker-prefill",
     ),
-    # 3. Two generic workers: the planner cannot choose between them, the
-    #    profiler falls through to the backend default.
     pytest.param(
         LookupCase(
             TWO_GENERIC_WORKERS,
@@ -104,9 +99,6 @@ LOOKUP_CASES = (
         ),
         id="two-generic-workers",
     ),
-    # 4. Name fallback: the planner takes the name its caller passes when the
-    #    spec has it as an untyped or generic-worker component; the profiler
-    #    returns the backend default without looking it up in the spec.
     pytest.param(
         LookupCase(
             UNTYPED,
@@ -127,7 +119,6 @@ LOOKUP_CASES = (
         ),
         id="named-component-has-another-type",
     ),
-    # 5. Nothing matches: the planner raises, the profiler returns the default name.
     pytest.param(
         LookupCase(
             NO_WORKER,
@@ -198,7 +189,7 @@ def test_duplicate_error_names_components_in_spec_order():
 
 
 def test_profiler_reads_the_backend_only_for_the_default_name():
-    """5. An unknown backend fails the default-name fallback and nothing before it."""
+    """An unknown backend fails the default-name fallback and nothing before it."""
     unknown = "no-such-backend"
 
     typed = get_component_name_by_type(
@@ -216,7 +207,7 @@ def test_profiler_reads_the_backend_only_for_the_default_name():
 
 
 def test_profiler_default_name_missing_from_the_config_fails_the_component_fetch():
-    """5. The name lookup does not raise; ``get_worker_component_from_config`` does."""
+    """The name lookup does not raise; ``get_worker_component_from_config`` does."""
     config = Config.model_validate(_dgd(TWO_GENERIC_WORKERS))
 
     with pytest.raises(ValueError, match="Missing worker component"):
@@ -224,7 +215,7 @@ def test_profiler_default_name_missing_from_the_config_fails_the_component_fetch
 
 
 def test_planner_returns_a_service_and_the_profiler_a_name():
-    """6. The planner result wraps the component spec; the profiler result is the name."""
+    """The planner result wraps the component spec; the profiler result is the name."""
     deployment = _dgd(DISAGG)
 
     service = get_component_from_type_or_name(deployment, DECODE)
