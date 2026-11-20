@@ -154,7 +154,7 @@ async def test_shutdown_without_artifact_config_does_not_touch_runtime(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_keeps_artifact_runtime_open_for_accepted_work(
+async def test_artifact_shutdown_waits_for_accepted_work_and_survives_transport_failure(
     monkeypatch, tmp_path, vllm_main
 ) -> None:
     monkeypatch.setenv("DYNAMO_ARTIFACT_CONFIG", str(tmp_path / "artifact.json"))
@@ -179,6 +179,9 @@ async def test_shutdown_keeps_artifact_runtime_open_for_accepted_work(
     lifecycle, _ = _patch_worker_startup(
         vllm_main, monkeypatch, tmp_path, factory_create=serve_accepted_request
     )
+    teardown_error = RuntimeError("lease revocation failed")
+    runtime, _ = vllm_main.create_runtime.return_value
+    runtime.shutdown_and_wait.side_effect = teardown_error
     worker = asyncio.create_task(vllm_main.worker([]))
     try:
         await accepted.wait()
@@ -190,8 +193,12 @@ async def test_shutdown_keeps_artifact_runtime_open_for_accepted_work(
         close_artifact_runtime.assert_not_awaited()
     finally:
         finished.set()
-        await worker
+        with pytest.raises(
+            RuntimeError, match="worker shutdown did not complete"
+        ) as exc:
+            await worker
 
+    assert exc.value.__cause__ is teardown_error
     lifecycle.close.assert_awaited_once_with()
     close_artifact_runtime.assert_awaited_once_with()
 
