@@ -29,7 +29,8 @@ use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     entrypoint::RouterConfig,
     kv_router::{
-        RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource,
+        RolePolicy, RouterLoadSource, RoutingHost, RoutingLoadContext, RoutingPolicy,
+        SelectionPolicySource,
         role_routing::{self, DecodeRouting},
     },
     model_card::ModelDeploymentCard,
@@ -356,63 +357,51 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
-        let router = if prefill_router_mode.is_kv_routing() {
-            // Create KV chooser using the endpoint (this is a prefill router)
-            let kv_chooser = context
-                .model_manager
-                .kv_chooser_for_with_policy_and_client(
-                    client.clone(),
-                    prefill_block_size,
-                    context.selection_policy.clone(),
-                    routing.kv_router_config,
-                    context.prefill_load_estimator.clone(),
-                    Some(crate::worker_type::WorkerType::Prefill),
-                    WORKER_TYPE_PREFILL,
-                    Some(context.model_name.clone()),
-                    advertisement.is_eagle,
-                    load_context.scheduler_load_sender(),
-                    load_context.cancellation_token(),
-                )
-                .await?;
-
-            let affinity = create_affinity_coordinator(
-                routing.session_affinity_ttl,
-                routing.session_affinity_mode,
-                client.clone(),
-            )
-            .await?;
-
-            Arc::new(
-                RoutingHost::builder(client, RouterMode::KV)
-                    .kv_router(kv_chooser)
-                    .load_context(load_context.clone())
-                    .affinity_coordinator(affinity)
-                    .build()
-                    .await?,
-            )
-        } else {
-            crate::kv_router::check_hint_policies_route_on_kv_path(
-                prefill_router_mode,
-                &routing.kv_router_config.unwrap_or_default(),
-                &[crate::worker_type::WorkerType::Prefill],
-            )?;
-            let affinity = create_affinity_coordinator(
-                routing.session_affinity_ttl,
-                routing.session_affinity_mode,
-                client.clone(),
-            )
-            .await?;
-
+        let policy = match role_routing::role_policy(prefill_router_mode)? {
+            RolePolicy::Kv => {
+                // Create KV chooser using the endpoint (this is a prefill router)
+                let kv_chooser = context
+                    .model_manager
+                    .kv_chooser_for_with_policy_and_client(
+                        client.clone(),
+                        prefill_block_size,
+                        context.selection_policy.clone(),
+                        routing.kv_router_config,
+                        context.prefill_load_estimator.clone(),
+                        Some(crate::worker_type::WorkerType::Prefill),
+                        WORKER_TYPE_PREFILL,
+                        Some(context.model_name.clone()),
+                        advertisement.is_eagle,
+                        load_context.scheduler_load_sender(),
+                        load_context.cancellation_token(),
+                    )
+                    .await?;
+                RoutingPolicy::Kv(kv_chooser)
+            }
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
-            Arc::new(
-                RoutingHost::builder(client, prefill_router_mode)
-                    .load_context(load_context.clone())
-                    .affinity_coordinator(affinity)
-                    .build()
-                    .await?,
-            )
+            RolePolicy::Ready(policy) => {
+                crate::kv_router::check_hint_policies_route_on_kv_path(
+                    prefill_router_mode,
+                    &routing.kv_router_config.unwrap_or_default(),
+                    &[crate::worker_type::WorkerType::Prefill],
+                )?;
+                policy
+            }
         };
+        let affinity = create_affinity_coordinator(
+            routing.session_affinity_ttl,
+            routing.session_affinity_mode,
+            client.clone(),
+        )
+        .await?;
+        let router = Arc::new(
+            RoutingHost::builder(client, policy)
+                .load_context(load_context.clone())
+                .affinity_coordinator(affinity)
+                .build()
+                .await?,
+        );
 
         Ok(PrefillBinding {
             target_id,

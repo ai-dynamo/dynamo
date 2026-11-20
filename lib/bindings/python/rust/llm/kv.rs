@@ -62,7 +62,7 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
-use llm_rs::kv_router::RoutingHost;
+use llm_rs::kv_router::{RoutingHost, RoutingPolicy};
 type RsRoutingHost = RoutingHost;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
@@ -2500,9 +2500,8 @@ impl KvRouter {
                     .map_err(to_pyerr)?;
                 let routing_host = RsRoutingHost::builder(
                     managed_router.load_context().client().clone(),
-                    rs::pipeline::network::egress::push_router::RouterMode::KV,
+                    RoutingPolicy::Kv(kv_router),
                 )
-                .kv_router(kv_router)
                 .load_context(managed_router.load_context().clone())
                 .affinity_coordinator(affinity)
                 .build()
