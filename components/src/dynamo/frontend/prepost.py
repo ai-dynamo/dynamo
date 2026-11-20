@@ -275,7 +275,7 @@ def _request_for_vllm_structural_tag(
 
 
 def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
-    """Limit serialized tags from older vLLM hooks without the typed helper.
+    """Limit serialized tags from out-of-tree parser hooks that return a dict.
 
     Only format children are visited, so argument schemas are left unchanged.
     These three list formats repeat tool calls in vLLM's registered tags.
@@ -342,7 +342,7 @@ def build_tool_call_guided_decoding(
                     **structural_tag_kwargs,
                 )
                 if structural_tag_model is not None
-                # Older parser hooks may not take ``reasoning``; keep their
+                # Out-of-tree parser hooks may not take ``reasoning``; keep their
                 # call unchanged unless the reasoning prefix is needed.
                 else tool_parser.get_structural_tag(request_for_tag, reasoning=True)
                 if starts_in_reasoning
