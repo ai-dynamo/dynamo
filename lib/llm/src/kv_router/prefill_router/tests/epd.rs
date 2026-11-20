@@ -157,9 +157,12 @@ impl dynamo_kv_router::plugins::request_classifier::RequestClassifier for Counti
         &mut self,
         request: dynamo_kv_router::plugins::request_classifier::ClassifyRequest,
         _: &dyn dynamo_kv_router::plugins::request_classifier::WorkerView,
-    ) -> dynamo_kv_router::plugins::request_classifier::ClassifyFuture {
+    ) -> Result<
+        dynamo_kv_router::plugins::request_classifier::ClassifyRequest,
+        Box<dynamo_kv_router::plugins::request_classifier::ClassifierError>,
+    > {
         self.classifications.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async move { Ok(request) })
+        Ok(request)
     }
     async fn on_event(
         &mut self,
