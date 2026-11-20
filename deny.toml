@@ -71,7 +71,8 @@ deny = [
 
     # Media-codec allowlist for Rust crates. It is the counterpart of
     # container/compliance/policy/codec_policy.yaml, which gates the image
-    # files. Keep the two lists in sync.
+    # files. Its deny_components list repeats these crate names, and
+    # container/compliance/tests/test_scan_codecs.py keeps the two in sync.
     # AAC
     { crate = "symphonia-codec-aac", reason = "AAC decoder, outside the media-codec allowlist" },
     { crate = "fdk-aac", reason = "AAC codec (libfdk-aac), outside the media-codec allowlist" },
