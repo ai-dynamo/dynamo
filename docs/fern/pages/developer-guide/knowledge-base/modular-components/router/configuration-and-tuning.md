@@ -114,6 +114,9 @@ link no catalog and reject a configured policy type at startup.
 | Policy type | Behavior |
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `round-robin` | One shared rotation over the eligible workers. |
+| `random` | A uniform random eligible worker. |
+| `least-loaded` | The eligible worker with the fewest active requests, ties broken at random. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
@@ -143,8 +146,12 @@ default parameters. To tune a policy, write a mapping with `type` and `parameter
 > selected it.
 
 ```bash
-python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
+python3 -m dynamo.frontend --router-policy-config worker-selection.yaml
 ```
+
+The file selects each role's policy, so the frontend takes no `--router-mode`. The frontend
+rejects a policy file passed with any `--router-mode` other than `kv`; `--router-mode kv` may
+still accompany one.
 
 #### Configure the Default Policy
 

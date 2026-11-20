@@ -66,6 +66,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterConfigBase,
     add_worker_router_arguments,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import ArgEnv
 from dynamo.frontend.frontend_args import build_frontend_parser
@@ -717,7 +718,9 @@ def _parse(
         )
 
     view = _RouterView.from_cli_args(namespace)
-    # FrontendConfig.validate: the load-aware preset implies KV routing.
+    # FrontendConfig.validate: an omitted --router-mode is round-robin, and the
+    # load-aware preset implies KV routing.
+    view.router_mode = resolve_router_mode(view.router_mode, None)
     if view.load_aware:
         view.router_mode = "kv"
     if view.router_policy_config is not None:
