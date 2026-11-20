@@ -8,6 +8,7 @@ package dynamo
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -29,7 +30,7 @@ type podEnvironment struct {
 // DCDUsesOrderedEnvironment follows the origin selected by the workload renderer.
 // dcd must not be nil. Any semantic role consumes the shared root env list.
 func DCDUsesOrderedEnvironment(dcd *v1beta1.DynamoComponentDeployment) bool {
-	if dcd.GetParentGraphDeploymentName() == "" {
+	if dcd.GetGraphDeploymentController() == nil {
 		return compatibility.OrderedEnvironmentVariables.Enabled(dcd.Annotations)
 	}
 	for _, template := range ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
@@ -47,9 +48,20 @@ func newPodEnvironment(annotations map[string]string, general []corev1.EnvVar) *
 	return &podEnvironment{general: general, containers: make(semanticenv.ContainerLayers)}
 }
 
-// rewriteFrontendGeneralEnvironment updates an active graph-level deployment
-// config without moving it to another source or mutating general. component
-// must not be nil; nil general means there are no graph-level bindings.
+// ResolveEnvironmentValue reads a staged general/container binding without
+// assuming unavailable operator or runtime values. The bool reports whether a
+// binding is declared, independently of whether its value is known. Inputs may
+// be nil and are never mutated; callers select this lookup only for new origins.
+func ResolveEnvironmentValue(general, authored []corev1.EnvVar, name string) (semanticenv.Value, bool) {
+	return semanticenv.Lookup(name,
+		semanticenv.Layer{Source: "spec.env", Env: general},
+		semanticenv.Layer{Source: "podTemplate.env", Env: authored},
+	)
+}
+
+// rewriteFrontendGeneralEnvironment rewrites an active graph-level config in
+// its original source. component must not be nil; general may be nil. Neither
+// the component nor its input environment is mutated.
 func rewriteFrontendGeneralEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentName string, general []corev1.EnvVar) ([]corev1.EnvVar, error) {
 	if component.ComponentType != v1beta1.ComponentTypeFrontend {
 		return general, nil
@@ -57,32 +69,45 @@ func rewriteFrontendGeneralEnvironment(component *v1beta1.DynamoComponentDeploym
 
 	// A fully shadowed graph config is not a frontend input, including invalid values.
 	templates := ComponentPodTemplates(component)
-	active := len(templates) == 0
+	if len(templates) == 0 {
+		updated, _, err := rewriteFrontendDeploymentConfig(general, nil, componentName)
+		return updated, err
+	}
 	for _, template := range templates {
 		main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: template})
-		if main == nil || findEnvVar(main.Env, commonconsts.DynamoDeploymentConfigEnvVar) == nil {
-			active = true
-			break
+		var authored []corev1.EnvVar
+		if main != nil {
+			authored = main.Env
 		}
-	}
-	if !active {
-		return general, nil
-	}
-
-	// Preserve the selected binding's list position, including same-list duplicates.
-	for i := len(general) - 1; i >= 0; i-- {
-		if general[i].Name != commonconsts.DynamoDeploymentConfigEnvVar {
-			continue
+		if findEnvVar(authored, commonconsts.DynamoDeploymentConfigEnvVar) == nil {
+			updated, _, err := rewriteFrontendDeploymentConfig(general, authored, componentName)
+			return updated, err
 		}
-		config, err := updateDynDeploymentConfigBytes([]byte(general[i].Value), componentName, commonconsts.DynamoServicePort)
-		if err != nil {
-			return nil, fmt.Errorf("rewrite frontend deployment config in spec.env[%d]: %w", i, err)
-		}
-		result := slices.Clone(general)
-		result[i] = corev1.EnvVar{Name: general[i].Name, Value: string(config)}
-		return result, nil
 	}
 	return general, nil
+}
+
+func rewriteFrontendDeploymentConfig(general, authored []corev1.EnvVar, componentName string) ([]corev1.EnvVar, []corev1.EnvVar, error) {
+	// Unknown inputs remain the user's runtime binding, never an empty JSON value.
+	value, exists := ResolveEnvironmentValue(general, authored, commonconsts.DynamoDeploymentConfigEnvVar)
+	if !exists || !value.Known {
+		return general, authored, nil
+	}
+	config, err := updateDynDeploymentConfigBytes([]byte(value.Value), componentName, commonconsts.DynamoServicePort)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rewrite frontend deployment config: %w", err)
+	}
+
+	// Keep the winner in its source, escaping the resolved JSON against a second expansion.
+	binding := corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: strings.ReplaceAll(string(config), "$", "$$")}
+	if findEnvVar(authored, commonconsts.DynamoDeploymentConfigEnvVar) != nil {
+		authored = slices.Clone(authored)
+		*findEnvVar(authored, commonconsts.DynamoDeploymentConfigEnvVar) = binding
+	} else {
+		general = slices.Clone(general)
+		*findEnvVar(general, commonconsts.DynamoDeploymentConfigEnvVar) = binding
+	}
+	return general, authored, nil
 }
 
 func (p *podEnvironment) register(name, source string, defaults, general, authored []corev1.EnvVar) {
@@ -219,19 +244,45 @@ func (p *podEnvironment) capture(pod *corev1.PodSpec) semanticenv.ContainerLayer
 	return p.containers
 }
 
+// combinedRuntimeEngineContainerNames identifies containers created by the
+// component's runtime transformation, never by position in a selected capture Pod.
+// component must not be nil. Native engines and non-workers receive no policy.
+func combinedRuntimeEngineContainerNames(component *v1beta1.DynamoComponentDeploymentSharedSpec, nativeSidecar bool) []string {
+	if nativeSidecar || !IsWorkerComponent(string(component.ComponentType)) {
+		return nil
+	}
+	if IsIntraPodFailoverEnabled(component) {
+		return IntraPodFailoverEngineContainerNames()
+	}
+	return []string{commonconsts.MainContainerName}
+}
+
 // FinalizePodSpec composes env sources before consumers inspect runtime values.
-// pod must be non-nil with its main or selected capture container first. Nil
-// layers retain legacy rendering and its earlier backend mutation timing.
-// nativeSidecar is the component-wide mode, including compute-only worker roles.
-func FinalizePodSpec(pod *corev1.PodSpec, layers semanticenv.ContainerLayers, backend BackendFramework, nativeSidecar bool, containerGPUs ContainerGPUCount) error {
+// pod must be non-nil. Nil layers retain legacy rendering and its earlier backend
+// timing. engineContainerNames explicitly selects combined Dynamo engine containers;
+// nil selects none. Missing names, such as main in a helper capture, are skipped.
+func FinalizePodSpec(pod *corev1.PodSpec, layers semanticenv.ContainerLayers, backend BackendFramework, engineContainerNames []string, containerGPUs ContainerGPUCount) error {
 	if err := layers.Apply(pod); err != nil {
 		return err
 	}
-	if layers == nil || backend != BackendFrameworkSGLang || nativeSidecar {
+	if layers == nil || backend != BackendFrameworkSGLang {
 		return nil
 	}
 
-	// Only the combined runtime's main container owns generated exporter ports.
-	container := &pod.Containers[0]
-	return reserveNixlExporterPorts(container, containerGPUs, semanticenv.Replay(container.Env))
+	// Validate actual engines even when failover deliberately removed scrape ports.
+	for i := range pod.Containers {
+		container := &pod.Containers[i]
+		if !slices.Contains(engineContainerNames, container.Name) {
+			continue
+		}
+		resolved := semanticenv.Replay(container.Env)
+		if findContainerPort(container, commonconsts.DynamoNixlPortName) == nil {
+			if _, err := resolveNixlExporterPortRange(container.Env, containerGPUs, resolved, commonconsts.DynamoNixlPort); err != nil {
+				return err
+			}
+		} else if err := reserveNixlExporterPorts(container, containerGPUs, resolved); err != nil {
+			return err
+		}
+	}
+	return nil
 }

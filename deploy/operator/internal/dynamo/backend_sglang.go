@@ -94,20 +94,51 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if basePort == nil {
 		return nil
 	}
+	ports, err := resolveNixlExporterPortRange(container.Env, containerGPUCount, resolved, basePort.ContainerPort)
+	if err != nil || ports == nil {
+		return err
+	}
 
+	// Rank ports authored against another base must move too: otherwise Prometheus
+	// scrapes stale ports that no rank binds. Appending invalidates basePort.
+	basePort.ContainerPort = ports.base
+	for rank := int64(1); rank < ports.ranks; rank++ {
+		name := fmt.Sprintf("%s-%d", commonconsts.DynamoNixlPortName, rank)
+		rankPort := ports.base + int32(rank)
+		if declared := findContainerPort(container, name); declared != nil {
+			declared.ContainerPort = rankPort
+			continue
+		}
+		container.Ports = append(container.Ports, corev1.ContainerPort{
+			Protocol:      corev1.ProtocolTCP,
+			Name:          name,
+			ContainerPort: rankPort,
+		})
+	}
+	return nil
+}
+
+type nixlExporterPortRange struct {
+	base  int32
+	ranks int64
+}
+
+// resolveNixlExporterPortRange validates engine inputs independently of optional
+// Kubernetes scrape-port declarations. Nil means no static range can be selected.
+func resolveNixlExporterPortRange(env []corev1.EnvVar, containerGPUCount ContainerGPUCount, resolved map[string]semanticenv.Value, basePort int32) (*nixlExporterPortRange, error) {
 	// Preserve raw lookup semantics for old origins, without expanding or rewriting env.
 	ordered := resolved != nil
 	if !ordered {
 		resolved = make(map[string]semanticenv.Value, 3)
 		for _, name := range []string{"NIXL_TELEMETRY_ENABLE", "NIXL_TELEMETRY_EXPORTER", "NIXL_TELEMETRY_PROMETHEUS_PORT"} {
-			if value := findEnvVar(container.Env, name); value != nil {
+			if value := findEnvVar(env, name); value != nil {
 				resolved[name] = semanticenv.Value{Value: value.Value, Known: value.ValueFrom == nil}
 			}
 		}
 	}
 	enabled, exists := resolved["NIXL_TELEMETRY_ENABLE"]
 	if !exists {
-		return nil
+		return nil, nil
 	}
 
 	// For unresolved runtime inputs, reserve the range rather than
@@ -127,11 +158,11 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 		switch strings.ToLower(enabled.Value) {
 		case "y":
 		case "1", "yes", "on", "true", "enable":
-			return nil
+			return nil, nil
 		case "n", "0", "no", "off", "false", "disable":
-			return nil
+			return nil, nil
 		default:
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"NIXL_TELEMETRY_ENABLE is set to %q, which is not a boolean value recognized by NIXL",
 				enabled.Value)
 		}
@@ -144,13 +175,13 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// code cannot rule out.
 	exporter, exists := resolved["NIXL_TELEMETRY_EXPORTER"]
 	if !exists {
-		return nil
+		return nil, nil
 	}
 	if !exporter.Known {
 		prometheusOn = false
 		sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
 	} else if exporter.Value != "prometheus" {
-		return nil
+		return nil, nil
 	}
 
 	// Rank i binds NIXL_TELEMETRY_PROMETHEUS_PORT+i, so a literal override moves
@@ -160,9 +191,9 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 		// An unknown runtime base is allowed, but cannot determine static scrape ports.
 		if !override.Known {
 			if ordered {
-				return nil
+				return nil, nil
 			}
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"NIXL_TELEMETRY_PROMETHEUS_PORT is set through valueFrom, so the operator cannot declare the exporter "+
 					"range as %s container ports and Prometheus would scrape a range no rank binds. Set "+
 					"NIXL_TELEMETRY_PROMETHEUS_PORT to a literal port, or set NIXL_TELEMETRY_ENABLE=n",
@@ -173,19 +204,19 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 			// Reject a setting that cannot name the fixed range declared below. NIXL
 			// throws on malformed and out-of-range values; it accepts zero as an
 			// ephemeral port, but the operator cannot declare or scrape that port.
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"NIXL_TELEMETRY_PROMETHEUS_PORT is the base of the NIXL exporter range and %w, so the operator "+
 					"cannot declare the range it names and Prometheus would scrape ports no rank binds. Set "+
 					"NIXL_TELEMETRY_PROMETHEUS_PORT to a port between 1 and %d, or set NIXL_TELEMETRY_ENABLE=n",
 				err, maxTCPPort)
 		}
-		basePort.ContainerPort = overridden
+		basePort = overridden
 	}
 
 	// Resolve the rank count only when the base is known.
 	containerGPUs, err := containerGPUCount()
 	if err != nil {
-		return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		return nil, fmt.Errorf("failed to resolve container GPUs: %w", err)
 	}
 
 	// Every co-located rank needs a port of its own, and the runtime refuses a
@@ -196,7 +227,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	colocatedRanks := containerGPUs
 	if colocatedRanks > int64(commonconsts.DynamoMaxNixlPorts) {
 		if prometheusOn {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"%d co-located GPUs each need a NIXL exporter port, but only %d consecutive ports are declared and scraped, "+
 					"so the ranks past the %dth would fail to start. Run at most %d ranks per container, "+
 					"or set NIXL_TELEMETRY_ENABLE=n",
@@ -218,36 +249,16 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 		colocatedRanks = int64(commonconsts.DynamoMaxNixlPorts)
 	}
 
-	if last := int64(basePort.ContainerPort) + colocatedRanks - 1; last > maxTCPPort {
+	if last := int64(basePort) + colocatedRanks - 1; last > maxTCPPort {
 		if ordered && !prometheusOn {
-			colocatedRanks = int64(maxTCPPort-basePort.ContainerPort) + 1
+			colocatedRanks = int64(maxTCPPort-basePort) + 1
 		} else {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"NIXL_TELEMETRY_PROMETHEUS_PORT=%d with %d co-located ranks needs ports %d-%d, which exceeds the maximum port %d",
-				basePort.ContainerPort, colocatedRanks, basePort.ContainerPort, last, maxTCPPort)
+				basePort, colocatedRanks, basePort, last, maxTCPPort)
 		}
 	}
-
-	// A rank port already on the pod template was written against whatever base
-	// was in effect then, so realign it rather than keep it: the PodMonitor
-	// scrapes these by name, and a stale number sends it to a port the rank
-	// never binds. Read the base once, because appending invalidates basePort.
-	base := basePort.ContainerPort
-	for rank := int64(1); rank < colocatedRanks; rank++ {
-		name := fmt.Sprintf("%s-%d", commonconsts.DynamoNixlPortName, rank)
-		rankPort := base + int32(rank)
-		if declared := findContainerPort(container, name); declared != nil {
-			declared.ContainerPort = rankPort
-			continue
-		}
-		container.Ports = append(container.Ports, corev1.ContainerPort{
-			Protocol:      corev1.ProtocolTCP,
-			Name:          name,
-			ContainerPort: rankPort,
-		})
-	}
-
-	return nil
+	return &nixlExporterPortRange{base: basePort, ranks: colocatedRanks}, nil
 }
 
 // nixlPrometheusPort parses a known NIXL value and requires a fixed nonzero port.

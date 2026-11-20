@@ -651,14 +651,25 @@ func applyDynDeploymentConfigToComponent(
 	var configuredWorkers *int32
 	for templateIndex, podTemplate := range ComponentPodTemplates(component) {
 		main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplate})
-		if main == nil {
+		ordered := compatibility.OrderedEnvironmentVariables.Enabled(podTemplate.Annotations)
+		if main == nil && !ordered {
 			continue
 		}
-		rawConfig := getDynamoDeploymentConfig(main)
-		if compatibility.OrderedEnvironmentVariables.Enabled(podTemplate.Annotations) {
-			if config := findEnvVar(slices.Concat(generalEnvironment, main.Env), commonconsts.DynamoDeploymentConfigEnvVar); config != nil {
-				rawConfig = []byte(config.Value)
+
+		// Semantic graph defaults are separate even when no main was authored.
+		var rawConfig []byte
+		if ordered {
+			var authored []corev1.EnvVar
+			if main != nil {
+				authored = main.Env
 			}
+			value, exists := ResolveEnvironmentValue(generalEnvironment, authored, commonconsts.DynamoDeploymentConfigEnvVar)
+			if !exists || !value.Known {
+				continue
+			}
+			rawConfig = []byte(value.Value)
+		} else {
+			rawConfig = getDynamoDeploymentConfig(main)
 		}
 		if rawConfig == nil {
 			continue
@@ -668,7 +679,9 @@ func applyDynDeploymentConfigToComponent(
 			if err != nil {
 				return err
 			}
-			setDynamoDeploymentConfig(main, updatedConfig, podTemplate.Annotations)
+			if main != nil {
+				setDynamoDeploymentConfig(main, updatedConfig, podTemplate.Annotations)
+			}
 			rawConfig = updatedConfig
 		}
 		config, err := ParseDynDeploymentConfig(rawConfig)
@@ -685,8 +698,13 @@ func applyDynDeploymentConfigToComponent(
 			}
 			configuredWorkers = new(*workers)
 		}
-		if err := applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources); err != nil {
-			return fmt.Errorf("apply deployment config resources to pod template %d: %w", templateIndex, err)
+		if main == nil && serviceConfig.ServiceArgs.Resources != nil {
+			main = ensureMainContainer(podTemplate)
+		}
+		if main != nil {
+			if err := applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources); err != nil {
+				return fmt.Errorf("apply deployment config resources to pod template %d: %w", templateIndex, err)
+			}
 		}
 	}
 	if component.Replicas == nil && configuredWorkers != nil {
@@ -722,7 +740,7 @@ func getDynamoDeploymentConfig(container *corev1.Container) []byte {
 func setDynamoDeploymentConfig(container *corev1.Container, config []byte, annotations map[string]string) {
 	// Rewrite an authored binding in place; graph bindings stay in their general source.
 	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
-		binding := corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: string(config)}
+		binding := corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: strings.ReplaceAll(string(config), "$", "$$")}
 		if current := findEnvVar(container.Env, binding.Name); current != nil {
 			*current = binding
 		}
@@ -744,10 +762,16 @@ func updateDynDeploymentConfigBytes(rawConfig []byte, serviceName string, newPor
 		return nil, err
 	}
 	if frontend, ok := config[serviceName]; ok {
+		if frontend == nil {
+			return nil, fmt.Errorf("deployment config service %q must be an object", serviceName)
+		}
 		frontend["port"] = newPort
 	} else {
 		for name, frontend := range config {
 			if strings.EqualFold(name, commonconsts.ComponentTypeFrontend) {
+				if frontend == nil {
+					return nil, fmt.Errorf("deployment config service %q must be an object", name)
+				}
 				frontend["port"] = newPort
 				break
 			}
@@ -1752,7 +1776,7 @@ func GenerateBasePodSpec(
 	if err != nil {
 		return nil, err
 	}
-	if err := FinalizePodSpec(pod, environment.capture(pod), backendFramework, nativeSidecar, containerGPUs); err != nil {
+	if err := FinalizePodSpec(pod, environment.capture(pod), backendFramework, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
 		return nil, err
 	}
 	return pod, nil
@@ -1932,10 +1956,12 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		}
 	}
 	if environment != nil {
-		// Rewrite graph-derived frontend values without changing their source layer.
-		environment.general, err = rewriteFrontendGeneralEnvironment(component, serviceName, environment.general)
-		if err != nil {
-			return nil, err
+		// Rewrite the winning frontend binding without changing its source layer.
+		if component.ComponentType == v1beta1.ComponentTypeFrontend {
+			environment.general, authoredEnvironment, err = rewriteFrontendDeploymentConfig(environment.general, authoredEnvironment, serviceName)
+			if err != nil {
+				return nil, err
+			}
 		}
 		environment.register(container.Name, templateSource+".spec.containers[name=main].env", baseEnvironment, environment.general, authoredEnvironment)
 		container.Env = environment.staged(container.Name)
@@ -2457,7 +2483,7 @@ func GeneratePodSpecForComponent(
 	if err != nil {
 		return nil, err
 	}
-	if err := FinalizePodSpec(pod, layers, backendFramework, GetComponentDynamoSidecar(component) != nil, containerGPUs); err != nil {
+	if err := FinalizePodSpec(pod, layers, backendFramework, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
 		return nil, err
 	}
 	return pod, nil
@@ -2609,8 +2635,8 @@ func applyDGDTemplateDefaults(
 }
 
 // EffectiveDGDComponentTemplates applies graph defaults for input consumers and
-// leaves the stored DGD unchanged. Semantic environments are staged, not rendered:
-// final operator bindings are only available in the Pod rendering entrypoints.
+// leaves the stored DGD unchanged. Semantic general/container source lists remain
+// separate: final operator bindings are only available in Pod rendering.
 func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) ([]*corev1.PodTemplateSpec, error) {
 	var alpha v1alpha1.DynamoGraphDeployment
 	if err := alpha.ConvertFrom(dgd); err != nil {
@@ -2619,20 +2645,9 @@ func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, componen
 	effective := component.DeepCopy()
 	applyDGDTemplateDefaults(effective, dgd, nil, GetComponentDynamoSidecar(effective) != nil)
 	if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
-		for _, template := range ComponentPodTemplates(effective) {
-			for _, group := range []struct {
-				name       string
-				containers []corev1.Container
-			}{{commonconsts.MainContainerName, template.Spec.Containers}, {commonconsts.RuntimeContainerName, template.Spec.InitContainers}} {
-				for i := range group.containers {
-					container := &group.containers[i]
-					if container.Name != group.name {
-						continue
-					}
-					// A final owned binding may replace an apparent cycle in these inputs.
-					container.Env = slices.Concat(dgd.Spec.Env, container.Env)
-				}
-			}
+		// Runtime defaults exist even when the author omitted the main container.
+		for _, template := range EnsureComponentPodTemplates(effective) {
+			ensureMainContainer(template)
 		}
 	}
 	return ComponentPodTemplates(effective), nil
@@ -3420,7 +3435,7 @@ func generatePodSpecForRole(
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
 		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount), environment)
-		if err := FinalizePodSpec(gmsPodSpec, environment.capture(gmsPodSpec), BackendFrameworkNoop, false, containerGPUs); err != nil {
+		if err := FinalizePodSpec(gmsPodSpec, environment.capture(gmsPodSpec), BackendFrameworkNoop, nil, containerGPUs); err != nil {
 			return nil, err
 		}
 		return gmsPodSpec, nil
@@ -3445,7 +3460,7 @@ func generatePodSpecForRole(
 	if isInterPodGMS {
 		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), environment)
 	}
-	if err := FinalizePodSpec(podSpec, environment.capture(podSpec), backendFramework, nativeSidecar, containerGPUs); err != nil {
+	if err := FinalizePodSpec(podSpec, environment.capture(podSpec), backendFramework, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
 		return nil, err
 	}
 

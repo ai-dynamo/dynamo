@@ -181,6 +181,7 @@ func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
 		"vllm",
 		"IntraPod",
 		"gpu.nvidia.com/h100",
+		false,
 	)
 	require.NoError(t, err)
 
@@ -210,9 +211,9 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 	})
 
 	t.Log("When their snapshot compatibility hashes are computed")
-	firstHash, err := ComputeSnapshotCompatibilityHash(&first, "main", "vllm", "disabled", "")
+	firstHash, err := ComputeSnapshotCompatibilityHash(&first, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
-	secondHash, err := ComputeSnapshotCompatibilityHash(&second, "main", "vllm", "disabled", "")
+	secondHash, err := ComputeSnapshotCompatibilityHash(&second, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
 	t.Log("Then graph, Pod, worker-generation, served-name, and helper-sidecar identity do not make the artifact incompatible")
@@ -222,7 +223,7 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 
 func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testing.T) {
 	base := snapshotCompatibilityTestPodTemplate("capture-dgd", "capture-ns", "worker-a")
-	baseHash, err := ComputeSnapshotCompatibilityHash(&base, "main", "vllm", "disabled", "")
+	baseHash, err := ComputeSnapshotCompatibilityHash(&base, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -330,7 +331,7 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			changed := base.DeepCopy()
 			test.mutate(changed)
-			changedHash, err := ComputeSnapshotCompatibilityHash(changed, "main", test.backend, test.gmsMode, "")
+			changedHash, err := ComputeSnapshotCompatibilityHash(changed, "main", test.backend, test.gmsMode, "", false)
 			require.NoError(t, err)
 			assert.NotEqual(t, baseHash, changedHash)
 		})
@@ -345,6 +346,7 @@ func TestComputeSnapshotCompatibilityHashRejectsGMSDeviceClassChanges(t *testing
 		"vllm",
 		"IntraPod",
 		"gpu.nvidia.com",
+		false,
 	)
 	require.NoError(t, err)
 	h100ClassHash, err := ComputeSnapshotCompatibilityHash(
@@ -353,6 +355,7 @@ func TestComputeSnapshotCompatibilityHashRejectsGMSDeviceClassChanges(t *testing
 		"vllm",
 		"IntraPod",
 		"gpu.nvidia.com/h100",
+		false,
 	)
 	require.NoError(t, err)
 
@@ -370,9 +373,9 @@ func TestComputeSnapshotCompatibilityHashPreservesEnvironmentOrder(t *testing.T)
 	reordered.Spec.Containers[0].Env[0], reordered.Spec.Containers[0].Env[1] =
 		reordered.Spec.Containers[0].Env[1], reordered.Spec.Containers[0].Env[0]
 
-	orderedHash, err := ComputeSnapshotCompatibilityHash(&ordered, "main", "vllm", "disabled", "")
+	orderedHash, err := ComputeSnapshotCompatibilityHash(&ordered, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
-	reorderedHash, err := ComputeSnapshotCompatibilityHash(reordered, "main", "vllm", "disabled", "")
+	reorderedHash, err := ComputeSnapshotCompatibilityHash(reordered, "main", "vllm", "disabled", "", false)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, orderedHash, reorderedHash,

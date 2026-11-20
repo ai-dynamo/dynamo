@@ -858,7 +858,7 @@ func TestBuildFailoverPod_SemanticEnvironment(t *testing.T) {
 				collector.register(podSpec.Containers[0].Name, "container.env", defaults, nil, user)
 			}
 			require.NoError(t, buildColdStartFailoverPod(&podSpec, 2, BackendFrameworkVLLM, collector))
-			require.NoError(t, FinalizePodSpec(&podSpec, collector.capture(&podSpec), BackendFrameworkVLLM, false, staticContainerGPUCount(1)))
+			require.NoError(t, FinalizePodSpec(&podSpec, collector.capture(&podSpec), BackendFrameworkVLLM, IntraPodFailoverEngineContainerNames(), staticContainerGPUCount(1)))
 
 			t.Log("Verify the selected ordering and both generated engine values")
 			for i := range 2 {
@@ -888,7 +888,7 @@ func TestAugmentEngineForGMS_SemanticEnvironment(t *testing.T) {
 	collector := newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}, nil)
 	collector.register("engine", "container.env", podSpec.Containers[0].Env[:1], nil, podSpec.Containers[0].Env[1:])
 	augmentEngineForGMS(podSpec, 0, false, collector)
-	require.NoError(t, FinalizePodSpec(podSpec, collector.capture(podSpec), BackendFrameworkVLLM, false, staticContainerGPUCount(1)))
+	require.NoError(t, FinalizePodSpec(podSpec, collector.capture(podSpec), BackendFrameworkVLLM, []string{"engine"}, staticContainerGPUCount(1)))
 
 	t.Log("Verify the user reference follows the generated rank and socket variables")
 	environment := podSpec.Containers[0].Env

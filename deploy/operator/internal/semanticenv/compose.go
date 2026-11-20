@@ -107,7 +107,7 @@ func Compose(layers ...Layer) ([]corev1.EnvVar, error) {
 
 	// Only cross-layer references add ordering beyond the authored list order.
 	for i := range entries {
-		for _, name := range references(entries[i].env.Value) {
+		for _, name := range References(entries[i].env.Value) {
 			if source, exists := definitions[name]; exists && entries[source].layer != entries[i].layer {
 				addEdge(entries, source, i)
 			}
@@ -144,7 +144,9 @@ func addEdge(entries []entry, from, to int) {
 	entries[to].indegree++
 }
 
-func references(value string) []string {
+// References returns unescaped Kubernetes $(NAME) references in encounter order.
+// It does not expand values or interpret shell variable syntax.
+func References(value string) []string {
 	// Kubernetes consumes escaped dollar pairs before recognizing $(NAME).
 	var names []string
 	expand(value, len(value), func(name string) string {

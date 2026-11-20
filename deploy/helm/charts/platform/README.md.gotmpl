@@ -214,12 +214,23 @@ remain allowed. For DCDs, retaining an unchanged duplicate list also requires th
 already used semantic ordering. The root OpenAPI list schema is unchanged so it does not reject
 unchanged legacy duplicates before webhook ratcheting runs.
 
+New or changed root entries must not combine a non-empty `value` with `valueFrom`. Alpha
+component `envs` lists also require unique names and valid value/source combinations on create
+or list changes; an unchanged existing list may be retained. Cross-layer overrides remain valid.
+
 **Existing deployments:** DGDs created by an operator older than 1.8.0, or without the origin
 annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not
 reorder their rendered environment lists or roll their workloads for this change. Deleting and
 recreating a DGD under 1.8.0 or later opts it into the new behavior and causes workload downtime.
 To preserve availability, create a new DGD under a different name and migrate traffic before
 deleting the old DGD.
+
+**Before downgrading to 1.7:** Standalone DCD root `spec.env` is new in 1.8 in both served API
+versions; 1.7 cannot retain this field. While 1.8 is still running, move required defaults into
+each consuming `main` and `runtime` container's `env`, including role templates, preserving
+container-specific overrides. Remove root `spec.env` and verify the resulting workloads before
+downgrading. Also remove dependencies on the new ordering contract: 1.7 sorts and de-duplicates
+environment lists. Do not edit graph-generated child DCDs; configure their parent DGD instead.
 
 ### v1.7.0
 

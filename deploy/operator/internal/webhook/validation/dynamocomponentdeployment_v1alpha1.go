@@ -19,12 +19,15 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // validateDynamoComponentDeploymentV1alpha1 validates dcd. dcd must not be nil.
+// oldEnv is nil on create, otherwise it is the previous source-version envs list.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
 	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
+	oldEnv []corev1.EnvVar,
 ) field.ErrorList {
 	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -34,18 +37,22 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 		&dcd.Spec,
 		field.NewPath("spec"),
 		dcd.GetDynamoNamespace(),
+		oldEnv,
 	)
 }
 
 // validateDynamoComponentDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.
+// oldEnv is nil on create, otherwise it is the previous source-version envs list.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
 	dynamoNamespace string,
+	oldEnv []corev1.EnvVar,
 ) field.ErrorList {
 	return v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoNamespace,
+		oldEnv,
 	)
 }

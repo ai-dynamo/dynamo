@@ -24,32 +24,36 @@ import (
 )
 
 // validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil.
-// oldEnv is nil on create, otherwise it is the natively converted old root list.
+// oldDGD is nil on create, otherwise it is the previous source-version object.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	oldEnv []corev1.EnvVar,
+	oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
+	}
+	var oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec
+	if oldDGD != nil {
+		oldSpec = &oldDGD.Spec
 	}
 	return v.validateDynamoGraphDeploymentSpecV1alpha1(
 		&dgd.Spec,
 		field.NewPath("spec"),
 		dgd.Name,
 		dgd.Namespace,
-		oldEnv,
+		oldSpec,
 	)
 }
 
 // validateDynamoGraphDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.
-// oldEnv is nil on create, otherwise it is the natively converted old root list.
+// oldSpec is nil on create, otherwise it contains the previous source-version lists.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
 	dgdName string,
 	dgdNamespace string,
-	oldEnv []corev1.EnvVar,
+	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pvcsPath := fldPath.Child("pvcs")
@@ -62,13 +66,22 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 		service := spec.Services[serviceName]
 		servicePath := servicesPath.Key(serviceName)
 		dynamoNamespace := nvidiacomv1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, dgdNamespace, dgdName)
+		var oldEnv []corev1.EnvVar
+		if oldSpec != nil && oldSpec.Services[serviceName] != nil {
+			oldEnv = oldSpec.Services[serviceName].Envs
+		}
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
 			service,
 			servicePath,
 			dynamoNamespace,
+			oldEnv,
 		)...)
 	}
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		var oldEnv []corev1.EnvVar
+		if oldSpec != nil {
+			oldEnv = oldSpec.Envs
+		}
 		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"))...)
 		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntimeV1Alpha1(spec, fldPath)...)
 	}

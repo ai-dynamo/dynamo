@@ -17,22 +17,25 @@ import (
 )
 
 type environmentAdmissionCase struct {
-	name       string
-	env        []corev1.EnvVar
-	oldEnv     []corev1.EnvVar
-	update     bool
-	duplicates []int
+	name               string
+	env                []corev1.EnvVar
+	oldEnv             []corev1.EnvVar
+	update             bool
+	duplicates         []int
+	conflictingSources []int
 }
 
 // environmentAdmissionCases shares the root-list contract, not resource fixtures.
 func environmentAdmissionCases() []environmentAdmissionCase {
 	duplicate := []corev1.EnvVar{{Name: "A", Value: "first"}, {Name: "A", Value: "do-not-leak-this-value"}}
 	unique := []corev1.EnvVar{{Name: "A", Value: "first"}}
+	conflict := []corev1.EnvVar{{Name: "PORT", Value: "do-not-leak-this-value", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "settings", Key: "port"}}}}
 	return []environmentAdmissionCase{
 		{name: "cross-layer override", env: unique},
 		{name: "case-sensitive names", env: []corev1.EnvVar{{Name: "A", Value: "first"}, {Name: "a", Value: "second"}}},
 		{name: "reject duplicate create", env: duplicate, duplicates: []int{1}},
 		{name: "aggregate duplicate names", env: []corev1.EnvVar{{Name: "A"}, {Name: "A"}, {Name: "B"}, {Name: "B"}}, duplicates: []int{1, 3}},
+		{name: "reject order-dependent repeated name", env: []corev1.EnvVar{{Name: "X", Value: "first"}, {Name: "Y", Value: "$(X)"}, {Name: "X", Value: "last"}}, duplicates: []int{2}},
 		{name: "unrelated update ratchets unchanged list", oldEnv: duplicate, env: duplicate, update: true},
 		{name: "reject duplicate introduction", oldEnv: unique, env: duplicate, update: true, duplicates: []int{1}},
 		{name: "changed value revalidates whole list", oldEnv: duplicate, env: []corev1.EnvVar{{Name: "A", Value: "changed"}, duplicate[1]}, update: true, duplicates: []int{1}},
@@ -41,6 +44,11 @@ func environmentAdmissionCases() []environmentAdmissionCase {
 		{name: "new member revalidates whole list", oldEnv: duplicate, env: []corev1.EnvVar{duplicate[0], duplicate[1], {Name: "B"}}, update: true, duplicates: []int{1}},
 		{name: "repair duplicate list", oldEnv: duplicate, env: unique, update: true},
 		{name: "remove duplicate list", oldEnv: duplicate, update: true},
+		{name: "reject value plus source create", env: conflict, conflictingSources: []int{0}},
+		{name: "ratchet unchanged value plus source", env: conflict, oldEnv: conflict, update: true},
+		{name: "reject value plus source introduction", env: conflict, oldEnv: unique, update: true, conflictingSources: []int{0}},
+		{name: "repair value plus source", env: unique, oldEnv: conflict, update: true},
+		{name: "empty value with source is valid", env: []corev1.EnvVar{{Name: "PORT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "settings", Key: "port"}}}}},
 	}
 }
 
@@ -74,8 +82,33 @@ func environmentDGDAdmissionCases(t *testing.T) []dgdAdmissionTestCase {
 			for _, index := range envCase.duplicates {
 				entry.wantWebhookErrs = append(entry.wantWebhookErrs, field.Duplicate(envPath.Index(index).Child("name"), envCase.env[index].Name).Error())
 			}
+			for _, index := range envCase.conflictingSources {
+				entry.wantWebhookErrs = append(entry.wantWebhookErrs, field.Forbidden(envPath.Index(index).Child("valueFrom"), "may not be specified when value is non-empty").Error())
+			}
 			tests = append(tests, entry)
 		}
+	}
+
+	// Alpha service envs has no source-schema map-list validation before conversion.
+	for _, envCase := range environmentAdmissionCases() {
+		updated := alphaDGDForAdmission(nil)
+		updated.Spec.Envs = []corev1.EnvVar{{Name: "GENERAL", Value: "default"}}
+		updated.Spec.Services["worker"].Envs = envCase.env
+		old := updated.DeepCopy()
+		old.Spec.Services["worker"].Envs = envCase.oldEnv
+		updated.Labels = map[string]string{"example.com/unrelated": "edit"}
+		entry := dgdAdmissionTestCase{name: "alpha service envs " + envCase.name, deployment: updated, seedWithoutWebhook: envCase.update}
+		if envCase.update {
+			entry.oldDeployment = old
+		}
+		envPath := field.NewPath("spec", "services").Key("worker").Child("envs")
+		for _, index := range envCase.duplicates {
+			entry.wantWebhookErrs = append(entry.wantWebhookErrs, field.Duplicate(envPath.Index(index).Child("name"), envCase.env[index].Name).Error())
+		}
+		for _, index := range envCase.conflictingSources {
+			entry.wantWebhookErrs = append(entry.wantWebhookErrs, field.Forbidden(envPath.Index(index).Child("valueFrom"), "may not be specified when value is non-empty").Error())
+		}
+		tests = append(tests, entry)
 	}
 	return tests
 }
@@ -110,15 +143,19 @@ func environmentDCDAdmissionCases(t *testing.T) []dcdAdmissionTestCase {
 			for _, index := range envCase.duplicates {
 				entry.wantWebhookErrs = append(entry.wantWebhookErrs, field.Duplicate(field.NewPath("spec", "env").Index(index).Child("name"), envCase.env[index].Name).Error())
 			}
+			for _, index := range envCase.conflictingSources {
+				entry.wantWebhookErrs = append(entry.wantWebhookErrs, field.Forbidden(field.NewPath("spec", "env").Index(index).Child("valueFrom"), "may not be specified when value is non-empty").Error())
+			}
 			tests = append(tests, entry)
 		}
 	}
 
 	for _, alpha := range []bool{false, true} {
 		for _, origin := range []struct {
-			name, object, template string
-			child, mixedRoles      bool
-			activate, reject       bool
+			name, object, template  string
+			child, mixedRoles       bool
+			nonControlling, foreign bool
+			activate, reject        bool
 		}{
 			{name: "standalone current ignores legacy template", object: "1.8.0", template: "1.7.0", reject: true},
 			{name: "standalone legacy ignores semantic template", object: "1.7.0", template: "1.8.0"},
@@ -130,6 +167,10 @@ func environmentDCDAdmissionCases(t *testing.T) []dcdAdmissionTestCase {
 			{name: "child current ignores legacy object", object: "1.7.0", template: "1.8.0", child: true, reject: true},
 			{name: "child mixed roles select semantic contract", object: "1.7.0", template: "1.7.0", child: true, mixedRoles: true, reject: true},
 			{name: "child activation revalidates unchanged duplicate list", object: "1.7.0", template: "1.8.0", child: true, activate: true, reject: true},
+			{name: "non-controlling DGD does not replace standalone origin", object: "1.8.0", template: "1.7.0", child: true, nonControlling: true, reject: true},
+			{name: "foreign controlling DGD does not replace standalone origin", object: "1.8.0", template: "1.7.0", child: true, foreign: true, reject: true},
+			{name: "non-controlling DGD does not enable template origin", object: "1.7.0", template: "1.8.0", child: true, nonControlling: true},
+			{name: "foreign controlling DGD does not enable template origin", object: "1.7.0", template: "1.8.0", child: true, foreign: true},
 		} {
 			updated := betaDCDForAdmission(nil)
 			updated.Annotations = map[string]string{}
@@ -142,6 +183,12 @@ func environmentDCDAdmissionCases(t *testing.T) []dcdAdmissionTestCase {
 			}
 			if origin.child {
 				updated.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+				if origin.nonControlling {
+					updated.OwnerReferences[0].Controller = new(false)
+				}
+				if origin.foreign {
+					updated.OwnerReferences[0].APIVersion = "example.com/v1"
+				}
 			}
 			if origin.mixedRoles {
 				setBetaExplicitMultinodeRoleTemplates(&updated.Spec.DynamoComponentDeploymentSharedSpec, 2)

@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 
@@ -481,6 +482,20 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 		}
 	}
 	return ""
+}
+
+// GetGraphDeploymentController returns the controlling nvidia.com DGD owner,
+// or nil for standalone components and references to other API groups or kinds.
+func (s *DynamoComponentDeployment) GetGraphDeploymentController() *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(s)
+	if owner == nil || owner.Kind != DynamoGraphDeploymentGVK.Kind {
+		return nil
+	}
+	groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
+	if err != nil || groupVersion.Group != GroupVersion.Group {
+		return nil
+	}
+	return owner
 }
 
 // GetParentGraphDeploymentNamespace returns the namespace of the owning DGD,

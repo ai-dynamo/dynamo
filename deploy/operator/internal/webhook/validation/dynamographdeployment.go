@@ -105,12 +105,15 @@ func (v *DynamoGraphDeploymentValidator) validate(
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
 
-	// Root env maps natively to alpha envs, including its full ordered old value.
-	var oldEnv []corev1.EnvVar
-	if oldDeployment != nil {
-		oldEnv = oldDeployment.Spec.Env
+	// Alpha source lists retain their complete ordered old values for ratcheting.
+	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
+	if oldDeployment != nil && validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldEnv)...)
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }

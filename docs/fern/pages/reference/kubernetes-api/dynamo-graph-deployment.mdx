@@ -176,6 +176,9 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
   Admission requires unique names within this root list, regardless of origin. An existing
   duplicate list can remain unchanged on update; changing any value, source, position, or member
   requires unique names throughout. Names in different layers may still override one another.
+  New or changed entries must not combine a non-empty `value` with `valueFrom`. Alpha component
+  `spec.services.<name>.envs` lists follow the same uniqueness and value/source rules, with
+  unchanged-list ratcheting.
   The alpha root field is `spec.envs`. This webhook rule leaves the root list's OpenAPI merge
   semantics unchanged so existing duplicate lists can be ratcheted.
   See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).

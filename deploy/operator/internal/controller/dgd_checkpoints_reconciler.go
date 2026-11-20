@@ -240,6 +240,7 @@ func (r *dgdCheckpointsReconciler) snapshotCompatibilityHashForComponent(
 		string(backendFramework),
 		gmsMode,
 		gmsDeviceClassName,
+		compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations),
 	)
 }
 
@@ -316,6 +317,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		string(backendFramework),
 		gmsMode,
 		gmsDeviceClassName,
+		compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations),
 	)
 	if err != nil {
 		return nil, err
@@ -1158,7 +1160,12 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 			environment.Bind(container, "operator.gpuMemoryService", gms.ClientEnvironment(true))
 		}
 	}
-	if err := dynamo.FinalizePodSpec(&podTemplate.Spec, environment, backendFramework, dynamo.GetComponentDynamoSidecar(componentForJob) != nil, func() (int64, error) { return 0, nil }); err != nil {
+	// Selecting a helper capture does not transfer the main engine's port policy.
+	var engineContainers []string
+	if targetContainerName == consts.MainContainerName && dynamo.GetComponentDynamoSidecar(componentForJob) == nil {
+		engineContainers = []string{consts.MainContainerName}
+	}
+	if err := dynamo.FinalizePodSpec(&podTemplate.Spec, environment, backendFramework, engineContainers, func() (int64, error) { return 0, nil }); err != nil {
 		return corev1.PodTemplateSpec{}, err
 	}
 	return podTemplate, nil

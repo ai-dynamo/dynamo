@@ -349,7 +349,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
 
 	// Standalone defaults use immutable DCD origin; graph children keep their inherited origin.
-	if dcd.GetParentGraphDeploymentName() == "" {
+	if dcd.GetGraphDeploymentController() == nil {
 		origin, exists := dcd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]
 		for _, template := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
 			delete(template.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)

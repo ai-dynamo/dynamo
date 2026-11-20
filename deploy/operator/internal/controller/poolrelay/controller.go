@@ -208,33 +208,41 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 			if runtime != nil {
 				hasBackend, hasMode := false, false
 
-				// New origins inspect effective definitions; old origins retain their original reader.
-				ordered := compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)
-				environment := runtime.Env
-				if ordered {
-					environment = slices.Clone(environment)
-					slices.Reverse(environment)
-				}
-				for _, item := range environment {
-					switch item.Name {
-					case commonconsts.DynamoDiscoveryBackendEnvVar:
-						if ordered && hasBackend {
-							continue
-						}
-						hasBackend = true
-						if item.ValueFrom != nil {
+				// Resolve known semantic aliases; runtime inputs remain unsupported.
+				if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
+					backend, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, commonconsts.DynamoDiscoveryBackendEnvVar)
+					hasBackend = exists
+					if exists {
+						if !backend.Known {
 							return false, nil
 						}
-						discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
-					case "DYN_KUBE_DISCOVERY_MODE":
-						if ordered && hasMode {
-							continue
-						}
-						hasMode = true
-						if item.ValueFrom != nil {
+						discovery.Backend = configv1alpha1.DiscoveryBackend(backend.Value)
+					}
+					mode, exists := dynamo.ResolveEnvironmentValue(dgd.Spec.Env, runtime.Env, "DYN_KUBE_DISCOVERY_MODE")
+					hasMode = exists
+					if exists {
+						if !mode.Known {
 							return false, nil
 						}
-						discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
+						discovery.Mode = configv1alpha1.KubeDiscoveryMode(mode.Value)
+					}
+				} else {
+					// Preserve the legacy raw reader and its duplicate handling.
+					for _, item := range runtime.Env {
+						switch item.Name {
+						case commonconsts.DynamoDiscoveryBackendEnvVar:
+							hasBackend = true
+							if item.ValueFrom != nil {
+								return false, nil
+							}
+							discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
+						case "DYN_KUBE_DISCOVERY_MODE":
+							hasMode = true
+							if item.ValueFrom != nil {
+								return false, nil
+							}
+							discovery.Mode = configv1alpha1.KubeDiscoveryMode(item.Value)
+						}
 					}
 				}
 				// Explicit env values override envFrom; missing keys could still come from it.

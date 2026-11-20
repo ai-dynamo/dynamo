@@ -51,12 +51,14 @@ func TestSnapshotEnvironmentRetainsFourSourceLayers(t *testing.T) {
 func TestSnapshotSGLangLookupUsesFinalJobEnvironment(t *testing.T) {
 	for _, targetName := range []string{"main", "writer"} {
 		for _, test := range []struct {
-			name string
-			base corev1.EnvVar
-			port int32
+			name      string
+			base      corev1.EnvVar
+			port      int32
+			wantError string
 		}{
 			{name: "known job override", base: corev1.EnvVar{Name: "BASE", Value: "30500"}, port: 30500},
 			{name: "opaque job override", base: corev1.EnvVar{Name: "BASE", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "settings", Key: "port"}}}, port: 19090},
+			{name: "known malformed job override", base: corev1.EnvVar{Name: "BASE", Value: "invalid"}, port: 19090, wantError: "not a number"},
 		} {
 			t.Run(targetName+"/"+test.name, func(t *testing.T) {
 				t.Log("The port reference is resolved only after the selected capture container's job override")
@@ -84,13 +86,59 @@ func TestSnapshotSGLangLookupUsesFinalJobEnvironment(t *testing.T) {
 				original := component.DeepCopy()
 				reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
 				pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkSGLang)
+				if targetName == "main" && test.wantError != "" {
+					require.ErrorContains(t, err, test.wantError)
+					require.Equal(t, original, component)
+					return
+				}
 				require.NoError(t, err)
 				require.Equal(t, targetName, pod.Spec.Containers[0].Name)
-				require.Contains(t, pod.Spec.Containers[0].Ports, corev1.ContainerPort{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: test.port})
+				port := test.port
+				if targetName != "main" {
+					t.Log("A selected helper keeps its own scrape port and is not validated as the engine")
+					port = 19090
+				}
+				require.Contains(t, pod.Spec.Containers[0].Ports, corev1.ContainerPort{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: port})
 				require.Contains(t, pod.Spec.Containers[0].Env, corev1.EnvVar{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "$(BASE)"})
 				require.Equal(t, original, component)
 			})
 		}
+	}
+}
+
+func TestSnapshotCompatibilityEnvironmentUsesAuthoritativeOrigin(t *testing.T) {
+	for _, origin := range []string{"", "1.7.0", "1.8.0"} {
+		t.Run(origin, func(t *testing.T) {
+			t.Log("An alias around a restore-time binding is part of new-origin process identity")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "engine:1.8.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+						Env: []corev1.EnvVar{{Name: "DYN_SERVED_MODEL_NAME", Value: "model-a"}, {Name: "MODEL_ID", Value: "$(DYN_SERVED_MODEL_NAME)"}},
+					}}}},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}},
+			}
+			if origin == "1.8.0" {
+				component.PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = "1.7.0"
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+				Spec:        v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm"},
+			}
+			reordered := component.DeepCopy()
+			reordered.PodTemplate.Spec.Containers[0].Env[0], reordered.PodTemplate.Spec.Containers[0].Env[1] =
+				reordered.PodTemplate.Spec.Containers[0].Env[1], reordered.PodTemplate.Spec.Containers[0].Env[0]
+			reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
+			beforeHash, err := reconciler.snapshotCompatibilityHashForComponent(dgd, "worker", component)
+			require.NoError(t, err)
+			afterHash, err := reconciler.snapshotCompatibilityHashForComponent(dgd, "worker", reordered)
+			require.NoError(t, err)
+			if origin == "1.8.0" {
+				require.NotEqual(t, beforeHash, afterHash)
+			} else {
+				require.Equal(t, beforeHash, afterHash)
+			}
+		})
 	}
 }
 

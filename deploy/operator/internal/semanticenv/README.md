@@ -63,4 +63,13 @@ The caller controls precedence for operator-owned bindings by supplying their
 layer after overridable defaults and authored values. Runtime providers must
 place externally injected definitions before entries that reference them.
 
+`Lookup(name, layers...)` observes one binding from the supplied sources before
+final composition. It composes and replays only that binding's effective,
+transitive dependencies, so an unrelated unfinished feature binding does not
+make a known alias unreadable. Its presence result is separate from `Value.Known`:
+runtime inputs and conflicts among the selected dependencies remain unknown.
+Lookup does not supply later operator bindings or validate the complete environment;
+callers must still run final `Compose` after all sources and owned bindings exist.
+`Replay` evaluates an already-composed list in order; neither API reads runtime inputs.
+
 Contract: [DEP #18214](https://github.com/ai-dynamo/dynamo/issues/18214).

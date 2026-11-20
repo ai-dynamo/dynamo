@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -518,6 +519,54 @@ func TestDiscoveryModeFollowsPodTemplatePrecedence(t *testing.T) {
 	dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers[0].Env[0].Value = "pod"
 	if supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes); err != nil || !supported {
 		t.Fatalf("pod-mode role runtimes were rejected: supported=%t err=%v", supported, err)
+	}
+}
+
+func TestDiscoveryResolvesSemanticEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		general  []corev1.EnvVar
+		authored []corev1.EnvVar
+		want     bool
+		wantOld  bool
+	}{
+		{name: "cross layer mode", general: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "$(MODE)"}}, authored: []corev1.EnvVar{{Name: "MODE", Value: "pod"}}, want: true},
+		{name: "cross layer backend", general: []corev1.EnvVar{{Name: "DYN_DISCOVERY_BACKEND", Value: "$(BACKEND)"}}, authored: []corev1.EnvVar{{Name: "BACKEND", Value: "kubernetes"}}, want: true},
+		{name: "same layer alias without main", general: []corev1.EnvVar{{Name: "MODE", Value: "pod"}, {Name: "DYN_KUBE_DISCOVERY_MODE", Value: "$(MODE)"}}, want: true},
+		{name: "container mode without main", general: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"}}},
+		{name: "other backend without main", general: []corev1.EnvVar{{Name: "DYN_DISCOVERY_BACKEND", Value: "etcd"}}},
+		{name: "unknown mode", general: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "$(PROVIDER_MODE)"}}},
+		{name: "opaque mode", general: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "discovery", Key: "mode"}}}}},
+		{name: "container override", general: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"}}, authored: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"}}, want: true, wantOld: true},
+		{name: "literal discovery survives unrelated pending cycle", general: []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"}, {Name: "DYNAMO_RANK", Value: "$(USER)"}}, authored: []corev1.EnvVar{{Name: "USER", Value: "$(DYNAMO_RANK)"}}, want: true, wantOld: true},
+	} {
+		for _, origin := range []string{"1.8.0", "1.7.99", ""} {
+			t.Run(tc.name+"/origin="+origin, func(t *testing.T) {
+				t.Log("Observe graph/container sources without changing authored configuration")
+				component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker}
+				if tc.authored != nil {
+					component.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Env: tc.authored}}}}
+				}
+				dgd := &v1beta1.DynamoGraphDeployment{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+					Spec: v1beta1.DynamoGraphDeploymentSpec{Env: tc.general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+				}
+				original := dgd.DeepCopy()
+				supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := tc.want
+				if origin != "1.8.0" {
+					want = tc.wantOld
+				}
+				if supported != want {
+					t.Fatalf("supported=%t, want=%t", supported, want)
+				}
+				if !reflect.DeepEqual(original, dgd) {
+					t.Fatal("discovery lookup mutated the DGD")
+				}
+			})
+		}
 	}
 }
 

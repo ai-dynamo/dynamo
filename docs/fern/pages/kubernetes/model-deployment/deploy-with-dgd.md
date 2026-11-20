@@ -602,6 +602,7 @@ the list. Names are case-sensitive. Same-named entries in different layers remai
 as `BASE` demonstrates above. Root DCD `spec.env` follows the same rule only for origins 1.8.0
 and later; older or missing origins retain their previous validation behavior.
 Entering semantic ordering also revalidates a DCD's root list even if that list is unchanged.
+New or changed root entries must not specify both a non-empty `value` and `valueFrom`.
 
 For example, this root list is rejected on create or when changed on update:
 
@@ -623,8 +624,11 @@ In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined 
 conversion. When both lists define the same name, the extra container value replaces the
 service value at its original position. Conversion also de-duplicates entries within
 `extraPodSpec.mainContainer.env`, even when `service.envs` is empty. Only `service.envs`
-retains same-list repeated names through conversion. Keep variables whose expansion depends
-on list order together in `service.envs`, and avoid redefining those names in the extra
+retains same-list repeated names through conversion, but admission rejects such repetitions on
+create or list changes because generated child resources require unique names. An unchanged
+existing service list can be retained on update. The same validation rejects a non-empty `value`
+combined with `valueFrom`. Keep order-dependent variables with unique names together in
+`service.envs`, and avoid redefining those names in the extra
 container list. For direct ordered PodTemplate configuration, use `v1beta1` with
 `podTemplate.spec.containers[*].env`.
 
