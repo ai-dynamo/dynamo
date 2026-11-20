@@ -51,6 +51,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
             "licenses": [
                 {"expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception"},
                 {"license": {"name": "Odd)License"}},
+                {"license": {"name": "MIT OR Zlib"}},
             ],
         },
         {
@@ -224,7 +225,7 @@ def test_main_dpkg_limits_base_debs_to_shipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     shipped = [Component(ecosystem="dpkg", name="zlib1g", version="1.3", spdx="Zlib")]
-    monkeypatch.setattr(dpkg, "collect_components", lambda root: shipped)
+    monkeypatch.setattr(dpkg, "collect_components", lambda root=None: shipped)
 
     text = _run_main(tmp_path, "go,dpkg")
 
@@ -235,7 +236,7 @@ def test_main_dpkg_limits_base_debs_to_shipped(
 def test_main_dpkg_without_packages_keeps_every_base_deb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(dpkg, "collect_components", lambda root: [])
+    monkeypatch.setattr(dpkg, "collect_components", lambda root=None: [])
 
     assert "## libremoved 3.0" in _run_main(tmp_path, "go,dpkg")
 

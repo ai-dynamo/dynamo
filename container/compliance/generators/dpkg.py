@@ -534,15 +534,19 @@ def generate(
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
     root: Path = Path("/"),
+    components: list[Component] | None = None,
 ) -> list[Component]:
     """Read dpkg state, write NOTICES-Apt.txt + dpkg-deps.csv.
+
+    `components` reuses an earlier collect_components(root) result.
 
     When `subtract` is provided, components matching (name, version) are
     filtered before writing — used to drop baseline-owned components.
     """
     from . import common
 
-    components = collect_components(root)
+    if components is None:
+        components = collect_components(root)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

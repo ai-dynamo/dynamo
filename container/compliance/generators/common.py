@@ -277,7 +277,8 @@ def _split_top_level_and(expr: str) -> list[str]:
     parts: list[str] = []
     depth = start = 0
     for i, ch in enumerate(expr):
-        depth += {"(": 1, ")": -1}.get(ch, 0)
+        # Clamped: a bare SBOM license name may carry a stray ")".
+        depth = max(0, depth + {"(": 1, ")": -1}.get(ch, 0))
         if depth == 0 and expr.startswith(" AND ", i):
             parts.append(expr[start:i])
             start = i + len(" AND ")
@@ -303,7 +304,8 @@ def render_base_section(sbom_path: Path, components: list[Component]) -> str:
         parts.append("\n")
         for part in _split_top_level_and(c.spdx):
             # A bare SBOM license name such as "Apache 2.0" is one identifier.
-            license_ids.update(_spdx_ids(part) if part.startswith("(") else [part])
+            is_expr = part.startswith("(") or re.search(r" (OR|WITH) ", part)
+            license_ids.update(_spdx_ids(part) if is_expr else [part])
     license_ids.discard(NOASSERTION)
     parts.append("# License texts\n\n")
     missing: list[str] = []
