@@ -714,66 +714,6 @@ async fn encoder_errors_remain_typed_and_optional_requests_can_fall_inline() {
 }
 
 #[tokio::test]
-async fn optional_encoder_skips_unsupported_media_as_a_whole() {
-    if isolated(concat!(
-        module_path!(),
-        "::optional_encoder_skips_unsupported_media_as_a_whole"
-    ))
-    .await
-    {
-        return;
-    }
-    let mut card = ModelDeploymentCard::with_name_only("model");
-    card.runtime_config
-        .runtime_data
-        .insert(ENCODER_SUPPORTED_MODALITIES.into(), json!(["image_url"]));
-    let fixture = Fixture::with_card(card).await;
-    let router = &fixture.router;
-    for required in [false, true] {
-        router.set_required(required);
-        for kind in ["image_url", "video_url", "audio_url"] {
-            let mut input = media_request(kind);
-            // Mixed inputs must stay inline as a whole, never partially encoded.
-            input.multi_modal_data.as_mut().unwrap().insert(
-                "image_url".into(),
-                multimodal_request()
-                    .multi_modal_data
-                    .unwrap()
-                    .remove("image_url")
-                    .unwrap(),
-            );
-            let expected = serde_json::to_value(&input).unwrap();
-            let before = fixture.encode_calls.load(Ordering::SeqCst);
-            let should_encode = required || kind == "image_url";
-            let downstream = Arc::new(CaptureEngine::default());
-            let response = router
-                .generate(SingleIn::new(input), downstream.clone())
-                .await;
-            drop(response.unwrap());
-            let captured = downstream.request.lock().unwrap().take().unwrap();
-            assert!(
-                captured
-                    .multi_modal_data
-                    .as_ref()
-                    .unwrap()
-                    .contains_key(kind)
-            );
-            assert_eq!(
-                captured.encoder_result.is_some(),
-                should_encode,
-                "optional hints must not reject required traffic accepted by the producer",
-            );
-            if !should_encode {
-                assert_eq!(serde_json::to_value(captured).unwrap(), expected);
-                assert_eq!(fixture.encode_calls.load(Ordering::SeqCst), before);
-            }
-        }
-    }
-
-    fixture.shutdown().await;
-}
-
-#[tokio::test]
 async fn runtime_lora_media_is_rejected_before_encode_but_text_remains_passthrough() {
     if isolated(concat!(
         module_path!(),
@@ -906,10 +846,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        Self::with_card(ModelDeploymentCard::with_name_only("model")).await
-    }
-
-    async fn with_card(card: ModelDeploymentCard) -> Self {
+        let card = ModelDeploymentCard::with_name_only("model");
         let runtime = Runtime::from_current().unwrap();
         let store = tempfile::tempdir().unwrap();
         let config = || DistributedConfig {

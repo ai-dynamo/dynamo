@@ -10,6 +10,7 @@ import pathlib
 from dataclasses import dataclass, field, replace
 
 import pytest
+import yaml
 from huggingface_hub import snapshot_download
 
 from tests.router.helper import generate_random_suffix
@@ -772,8 +773,6 @@ def _prepare_media_config(config, request, tmp_path, ports):
     }
     env = dict(config.env)
     if scenario == "audio":
-        import yaml
-
         options = yaml.safe_load(
             pathlib.Path(trtllm_sidecar_dir, "ci/whisper.yaml").read_text()
         )
