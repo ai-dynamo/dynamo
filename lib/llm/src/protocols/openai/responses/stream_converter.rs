@@ -739,14 +739,13 @@ impl ResponseStreamConverter {
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
-            let reasoning = delta.reasoning_content.as_deref().filter(|text| {
-                !text.is_empty()
-                    && self.reasoning_output_enabled
-                    && (!self.message_started || self.reasoning_replay_enabled)
-            });
+            let reasoning = delta
+                .reasoning_content
+                .as_deref()
+                .filter(|text| !text.is_empty() && self.reasoning_output_enabled);
             if reasoning.is_some() && self.message_started {
-                // Close the preceding visible item before publishing the next
-                // replay span. Scores on this choice belong to the new span.
+                // Close the visible item before publishing the next reasoning
+                // span. Scores on this choice belong to the new span.
                 let phase = self.message_phase;
                 self.resolve_unclassified_logprobs(true);
                 self.close_current_message(events);
@@ -3435,7 +3434,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_ignores_updates_after_visible_output() {
+    fn test_reasoning_text_keeps_a_separate_item_after_visible_output() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
 
         let params = ResponseParams {
@@ -3450,13 +3449,30 @@ mod tests {
 
         let _ = conv.process_chunk(&reasoning_chunk("summary"));
         let _ = conv.process_chunk(&text_chunk("answer"));
-        let late_events = conv.process_chunk(&reasoning_chunk(" must not be appended"));
-        assert!(late_events.is_empty());
+        let late_events = conv.process_chunk(&reasoning_chunk("follow-up"));
+        assert_eq!(
+            event_types(&late_events),
+            [
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.reasoning_text.delta",
+            ]
+        );
         let output = conv.completed_output();
-        let OutputItem::Reasoning(reasoning) = &output[0] else {
-            panic!("expected reasoning output");
+        let [
+            OutputItem::Reasoning(first),
+            OutputItem::Message(_),
+            OutputItem::Reasoning(last),
+        ] = output.as_slice()
+        else {
+            panic!("expected ordered reasoning, message, and reasoning");
         };
-        assert_eq!(reasoning_text(reasoning), "summary");
+        assert_eq!(reasoning_text(first), "summary");
+        assert_eq!(reasoning_text(last), "follow-up");
+        assert!(last.encrypted_content.is_none());
     }
 
     #[test]
@@ -3489,17 +3505,7 @@ mod tests {
 
     #[test]
     fn test_reasoning_text_does_not_start_after_visible_output() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
-
-        let params = ResponseParams {
-            reasoning: Some(Reasoning {
-                effort: None,
-                summary: Some(ReasoningSummary::Auto),
-                ..Default::default()
-            }),
-            ..default_params()
-        };
-        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
 
         let _ = conv.process_chunk(&text_chunk("answer"));
         let late_events = conv.process_chunk(&reasoning_chunk("out of order"));

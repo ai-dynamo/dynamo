@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
@@ -18,7 +17,7 @@ use crate::{
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
-    preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
+    preprocessor::OpenAIPreprocessor,
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
@@ -393,9 +392,8 @@ where
         card.runtime_config.reasoning_parser.as_deref(),
         tokenizer.as_ref(),
     )?;
-    let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?;
+        OpenAIPreprocessor::new_with_model_formatter(card.clone(), tokenizer.clone(), None)?;
     link_pipeline(engine, tokenizer, preprocessor)
 }
 

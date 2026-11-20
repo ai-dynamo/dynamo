@@ -72,6 +72,7 @@ class SglangPreprocessResult:
     request: dict[str, Any]
     force_reasoning: bool = False
     named_zero_arg_tool: str | None = None
+    positional_tool_history: list[dict[str, Any]] | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -787,16 +788,6 @@ def preprocess_chat_request(
         request = responses_tools_request(request, resolved_responses_template)
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
-    messages = _materialize_messages(request.get("messages", []))
-    # Materialization copied caller-owned messages. Restore Responses phases by
-    # assistant ordinal, including tool-only messages, before template rendering.
-    recipients = responses_history_recipients(request.get("responses_history_phases"))
-    for index, message in enumerate(
-        m for m in messages if m.get("role") == "assistant"
-    ):
-        if recipient := recipients.get(str(index)):
-            message["recipient"] = recipient
-
     if prompt_renderer is None:
         prompt_renderer = build_prompt_renderer(
             tokenizer,
@@ -805,6 +796,23 @@ def preprocess_chat_request(
         )
     prompt_renderer = resolve_prompt_renderer(prompt_renderer, request)
     kimi_k3_bridge = isinstance(prompt_renderer, KimiK3PromptRenderer)
+    positional_tool_history = (
+        request.get("responses_positional_tool_history") if kimi_k3_bridge else None
+    )
+    history = (
+        positional_tool_history
+        if positional_tool_history is not None
+        else request.get("messages", [])
+    )
+    messages = _materialize_messages(history)
+    # Phases use assistant ordinals because materialization may split media.
+    recipients = responses_history_recipients(request.get("responses_history_phases"))
+    for index, message in enumerate(
+        m for m in messages if m.get("role") == "assistant"
+    ):
+        if recipient := recipients.get(str(index)):
+            message["recipient"] = recipient
+
     if kimi_k3_bridge and _is_named_tool_choice(request.get("tool_choice")):
         # K3's encoder cannot express a named choice. Its Rust formatter disables
         # thinking and emits a typed ``tool-choice`` XTML system message; the
@@ -971,6 +979,7 @@ def preprocess_chat_request(
         guided_decoding=guided_decoding,
         request=request,
         force_reasoning=force_reasoning,
+        positional_tool_history=positional_tool_history,
         named_zero_arg_tool=(
             named_closed_zero_arg_tool(request)
             if guided_decoding == {"regex": r"\{\}"}

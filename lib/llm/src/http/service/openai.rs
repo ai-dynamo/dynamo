@@ -5266,22 +5266,9 @@ async fn responses(
             err_response
         })?;
 
-    use crate::protocols::openai::chat_completions::unified_parser;
-    let tool_parser = parsing_options.tool_call_parser.as_deref();
-    let reasoning_parser = parsing_options.reasoning_parser.as_deref();
-    let unified_family = unified_parser::selected_family(tool_parser, reasoning_parser);
-    let kimi_replay = unified_family == Some(unified_parser::KIMI_K3_UNIFIED_FAMILY)
-        || matches!(tool_parser, Some("kimi_k3" | "kimi-k3"));
-    if kimi_replay {
-        chat_request.normalize_kimi_replay();
-    }
-
-    // Match the Kimi/GLM Responses contract without exposing other models' private channels.
-    response_params.emit_backend_reasoning = kimi_replay
-        || unified_family == Some(unified_parser::GLM47_UNIFIED_FAMILY)
-        || matches!(tool_parser, Some("glm47"))
-        || matches!(reasoning_parser, Some("kimi_k3" | "kimi-k3" | "glm45"));
-    response_params.preserve_tool_spelling = kimi_replay;
+    response_params.emit_backend_reasoning = parsing_options.responses_emit_raw_reasoning;
+    response_params.preserve_tool_spelling =
+        parsing_options.responses_preserve_bare_tool_spelling();
 
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {

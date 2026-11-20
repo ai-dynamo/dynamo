@@ -12,8 +12,8 @@ pub mod stream_converter;
 mod template_tools;
 mod tool_names;
 pub use template_tools::ResponsesToolContext;
-pub(crate) use template_tools::effective_response_tools;
 use template_tools::*;
+pub(crate) use template_tools::{ResponsesToolHistory, effective_response_tools};
 
 pub(crate) use reasoning_replay::estimate_input_tokens;
 pub use tool_names::ToolNameMap;
@@ -1303,7 +1303,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 .collect()
         });
         let responses_tools = Some(ResponsesToolContext {
-            kimi_replay: false,
             tools: effective_tools,
             declared_tools: resp.inner.tools.clone().unwrap_or_default(),
             native: false,
@@ -1421,7 +1420,7 @@ pub struct ResponseParams {
     pub tool_names: Option<ToolNameMap>,
     /// Preserve a Kimi model's bare spelling across namespaced tool replay.
     pub preserve_tool_spelling: bool,
-    /// Retain raw backend reasoning for the Kimi/GLM Responses contract.
+    /// Expose raw reasoning by default when the selected deployment enables it.
     pub emit_backend_reasoning: bool,
     /// Opt in to writing the legacy base64 replay payload.
     pub legacy_reasoning_replay: bool,
@@ -4955,9 +4954,9 @@ mod tests {
             }))
             .unwrap();
             let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
-            chat.normalize_kimi_replay();
             chat.normalize_responses_history_phases(false);
-            chat.normalize_responses_tools(true).unwrap();
+            chat.normalize_responses_tools_for_renderer(true, ResponsesToolHistory::Positional)
+                .unwrap();
             let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
                 panic!("missing assistant");
             };
@@ -5021,8 +5020,18 @@ mod tests {
             ]);
             let replay: NvCreateResponse = serde_json::from_value(body).unwrap();
             let mut chat: NvCreateChatCompletionRequest = replay.try_into().unwrap();
-            chat.normalize_kimi_replay();
-            chat.normalize_responses_tools(true).unwrap();
+            let mut standard = chat.clone();
+            standard.normalize_responses_tools(true).unwrap();
+            let ChatCompletionRequestMessage::Assistant(assistant) = &standard.inner.messages[0]
+            else {
+                panic!("missing assistant in default renderer history");
+            };
+            assert_eq!(
+                assistant.tool_calls.as_ref().unwrap()[0].function.name,
+                "functions.exec"
+            );
+            chat.normalize_responses_tools_for_renderer(true, ResponsesToolHistory::Positional)
+                .unwrap();
             let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
                 panic!("missing assistant");
             };

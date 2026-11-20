@@ -4,9 +4,12 @@
 //! Full-HTTP integration coverage for the OpenAI Responses compatibility surface.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+use dynamo_llm::local_model::runtime_config::RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY;
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
@@ -31,6 +34,51 @@ use http_harness::{
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
+
+#[tokio::test]
+#[serial]
+async fn selected_deployment_controls_late_plaintext_reasoning() {
+    temp_env::async_with_vars(ENV, async {
+        let mut script = load_agent_fixture("text.sse").await.unwrap();
+        let terminal = &mut script[2].data.as_mut().unwrap().inner.choices[0];
+        terminal.delta.reasoning_content = Some("late reasoning".into());
+
+        for emit_raw_reasoning in [false, true] {
+            let mut card = ModelDeploymentCard::with_name_only(MODEL);
+            card.runtime_config.runtime_data.insert(
+                RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY.into(),
+                json!(emit_raw_reasoning),
+            );
+            let engine = Arc::new(scripted_chat_engine::ScriptedChatEngine::new([Ok(
+                script.clone()
+            )]));
+            let svc = HarnessService::start_with_engine_and_card(engine, card).await;
+            let response = post_responses(
+                &svc,
+                &json!({"model": MODEL, "input": "ping", "stream": true}),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body = response.text().await.unwrap();
+            let events = parse_responses_sse(&body).await.unwrap();
+            let output = events.last().unwrap().data["response"]["output"]
+                .as_array()
+                .unwrap();
+            assert_eq!(output[0]["type"], "message");
+            if emit_raw_reasoning {
+                assert_eq!(output.len(), 2);
+                assert_eq!(output[1]["type"], "reasoning");
+                assert_eq!(output[1]["content"][0]["text"], "late reasoning");
+                assert!(output[1].get("encrypted_content").is_none());
+            } else {
+                assert_eq!(output.len(), 1);
+                assert!(!body.contains("late reasoning"));
+            }
+            svc.shutdown().await;
+        }
+    })
+    .await;
+}
 
 #[tokio::test]
 #[serial]
