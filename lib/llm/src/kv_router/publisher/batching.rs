@@ -332,7 +332,19 @@ mod tests {
         let key = first.placement.clone();
         output.extend(coalescer.push(key, first).into_iter().flatten());
         let key = recurrent.placement.clone();
-        output.extend(coalescer.push(key, recurrent).into_iter().flatten());
+        let ready = coalescer
+            .push(key, recurrent)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(ready.len(), 2);
+        assert!(matches!(&ready[0].event.data, KvCacheEventData::Stored(_)));
+        assert!(matches!(
+            &ready[1].event.data,
+            KvCacheEventData::Recurrent(state) if state.sequence == 7
+        ));
+        assert!(!coalescer.has_pending());
+        output.extend(ready);
         let key = second.placement.clone();
         output.extend(coalescer.push(key, second).into_iter().flatten());
         output.extend(coalescer.flush());

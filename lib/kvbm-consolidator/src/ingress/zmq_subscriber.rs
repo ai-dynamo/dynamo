@@ -201,6 +201,11 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             tracker.handle_clear_all();
         }
 
+        // Recurrent/GDN state is carried by the router event plane. The legacy
+        // dense-KV consolidator has no recurrent state index, so it must leave
+        // these metadata events untouched.
+        RawKvEvent::RecurrentState { .. } => {}
+
         RawKvEvent::Ignored => {}
     }
 }
