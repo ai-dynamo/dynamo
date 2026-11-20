@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use async_trait::async_trait;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::error::{DynamoError, ErrorType};
+use dynamo_runtime::error::{DynamoError, ErrorType, RetryHint};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -97,11 +97,15 @@ impl RequestTracker {
         })
     }
 
-    pub fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard> {
+    pub fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard, DynamoError> {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
             if current & ACCEPTING_BIT == 0 {
-                return Err(worker_draining_error(DRAINING_MESSAGE));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::WorkerUnavailable)
+                    .retry_hint(RetryHint::Draining)
+                    .message("worker is not accepting new requests")
+                    .build());
             }
             assert!(
                 current & INFLIGHT_MASK < INFLIGHT_MASK,
@@ -141,26 +145,6 @@ impl RequestTracker {
         }
     }
 }
-
-fn worker_draining_error(message: &'static str) -> anyhow::Error {
-    draining_error(message).into()
-}
-
-/// The stop-admission rejection, typed.
-///
-/// Exposed separately from [`worker_draining_error`] because the adapter needs
-/// the concrete `DynamoError` to put in an `Annotated` item: `anyhow::Error`
-/// does not implement `std::error::Error`, and flattening to a string is the
-/// very thing that loses `WorkerDraining` on the wire.
-pub fn draining_error(message: &'static str) -> DynamoError {
-    DynamoError::builder()
-        .error_type(ErrorType::WorkerDraining)
-        .message(message)
-        .build()
-}
-
-/// The message both admission-rejection paths report.
-pub const DRAINING_MESSAGE: &str = "worker is not accepting new requests";
 
 pub struct RequestGuard {
     tracker: Arc<RequestTracker>,
@@ -522,10 +506,8 @@ mod tests {
             Ok(_) => panic!("draining worker must reject new requests"),
             Err(error) => error,
         };
-        let error = error
-            .downcast_ref::<DynamoError>()
-            .expect("drain rejection should preserve its Dynamo error type");
-        assert_eq!(error.error_type(), ErrorType::WorkerDraining);
+        assert_eq!(error.error_type(), ErrorType::WorkerUnavailable);
+        assert_eq!(error.retry_hint(), Some(RetryHint::Draining));
     }
 
     #[test]

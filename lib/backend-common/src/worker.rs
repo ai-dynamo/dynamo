@@ -541,7 +541,7 @@ impl Worker {
     /// with every stage drawing on one budget armed at the first entry:
     ///   1. unregister from discovery — routers stop selecting this worker.
     ///   2. router grace — keep serving while routers observe that.
-    ///   3. stop admission — reject new requests with `WorkerDraining`.
+    ///   3. stop admission — return worker unavailability with the draining retry hint.
     ///   4. wait for in-flight requests, bounded by the drain allowance.
     ///      On expiry, engine cleanup must cancel unfinished execution.
     ///   5. on prefill, wait for KV-transfer quiescence.
@@ -1590,32 +1590,23 @@ impl Worker {
         // endpoint also covers the RL endpoint registered further down.
         let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
 
-        let start_fut = builder.start_with_registration();
-        tokio::pin!(start_fut);
-        let primary_endpoint = tokio::select! {
-            biased;
-            result = &mut start_fut => match result {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    let shutdown_requested = shutdown.is_cancelled();
-                    self.begin_engine_route_shutdown().await;
-                    self.orchestrator_steps(&endpoint, Some(&request_tracker)).await;
-                    // A signal can fence registration while the endpoint handoff
-                    // is still finishing. That is the same clean pre-serve stop
-                    // as the cancellation arm below, not a serving failure.
-                    if shutdown_requested {
-                        return Ok(());
-                    }
-                    return Err(err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("serve: {error}"),
-                    ));
-                }
-            },
-            _ = shutdown.cancelled() => {
+        // Registration installs the request handler before publishing discovery.
+        // Let it finish or roll back before handling cancellation. The outer
+        // worker deadline still bounds an unresponsive discovery backend.
+        let primary_endpoint = match builder.start_with_registration().await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                let shutdown_requested = shutdown.is_cancelled();
                 self.begin_engine_route_shutdown().await;
-                self.orchestrator_steps(&endpoint, Some(&request_tracker)).await;
-                return Ok(());
+                self.orchestrator_steps(&endpoint, Some(&request_tracker))
+                    .await;
+                if shutdown_requested {
+                    return Ok(());
+                }
+                return Err(err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    format!("serve: {error}"),
+                ));
             }
         };
 
