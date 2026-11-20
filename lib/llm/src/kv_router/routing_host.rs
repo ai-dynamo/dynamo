@@ -17,7 +17,7 @@ use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn, async_trait,
+        ResponseStream, RouterMode, SingleIn, async_trait,
         network::egress::route_span::{
             get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
         },
@@ -57,7 +57,6 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-pub(crate) use builder::{EVERY_ROLE, check_hint_policies_route_on_kv_path, hosted_picker};
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 pub(crate) use hosted::hosted_request;
@@ -268,11 +267,74 @@ fn into_monitored_response(
     ResponseStream::new(wrapped_stream, stream_context)
 }
 
-enum RoutingPolicy {
+/// How a [`RoutingHost`] selects the worker for each request.
+///
+/// [`role_policy`](crate::kv_router::role_policy) resolves a router mode to one.
+pub enum RoutingPolicy {
+    /// KV-aware selection and booking through the role's [`KvRouter`].
     Kv(Arc<KvRouter>),
-    Hosted(HostedWorkerPicker),
+    /// A picker that needs no KV state: round-robin, random or least-loaded.
+    Hosted(HostedPolicy),
+    /// Each request names its worker.
     Direct,
+    /// Weighted by device type and multimodal embedding-cache hits.
     DeviceAwareWeighted,
+}
+
+impl RoutingPolicy {
+    /// The mode the host opens its [`PushRouter`] in.
+    pub(crate) fn transport_mode(&self) -> RouterMode {
+        match self {
+            Self::Kv(_) => RouterMode::KV,
+            Self::Hosted(hosted) => hosted.mode,
+            Self::Direct => RouterMode::Direct,
+            Self::DeviceAwareWeighted => RouterMode::DeviceAwareWeighted,
+        }
+    }
+
+    /// The hosted policy, when its picker reads no occupancy. Only such a policy runs under a
+    /// candidate policy (LoRA filtering), which picks among its candidates without occupancy.
+    pub(crate) fn hosted_without_occupancy(&self) -> Option<&HostedPolicy> {
+        match self {
+            Self::Hosted(hosted)
+                if !hosted
+                    .picker
+                    .inputs()
+                    .contains(WorkerInputs::ACTIVE_REQUESTS) =>
+            {
+                Some(hosted)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One of the hosted router modes: its picker and the mode it came from.
+pub struct HostedPolicy {
+    picker: HostedWorkerPicker,
+    /// The transport opens in this mode: it gives a picker that reads active requests its
+    /// occupancy state, and it names the policy in the transport's logs.
+    mode: RouterMode,
+}
+
+impl HostedPolicy {
+    /// The only constructor, so the picker is always the mode's own and the mode can stand
+    /// for the picker's type.
+    pub(crate) fn for_mode(mode: RouterMode) -> anyhow::Result<Self> {
+        Ok(Self {
+            picker: crate::kv_router::hosted_picker(mode)?,
+            mode,
+        })
+    }
+
+    pub(crate) fn picker(&self) -> &HostedWorkerPicker {
+        &self.picker
+    }
+
+    /// Another picker of the same type, with its own state.
+    pub(crate) fn fresh_picker(&self) -> anyhow::Result<HostedWorkerPicker> {
+        crate::kv_router::hosted_picker(self.mode)
+    }
 }
 
 struct HostedSelection {
@@ -395,7 +457,7 @@ impl RoutingHost {
     pub fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
-            RoutingPolicy::Hosted(picker) => picker.inputs(),
+            RoutingPolicy::Hosted(hosted) => hosted.picker().inputs(),
             RoutingPolicy::Direct => WorkerInputs::NONE,
             RoutingPolicy::DeviceAwareWeighted => WorkerInputs::ACTIVE_REQUESTS,
         }
@@ -431,12 +493,12 @@ impl RoutingHost {
 
     pub(crate) fn peek_next_worker(&self) -> Option<u64> {
         match &self.policy {
-            RoutingPolicy::Hosted(picker) => match &self.hosted_occupancy {
-                Some(occupancy) => occupancy.peek(&self.inner, picker),
+            RoutingPolicy::Hosted(hosted) => match &self.hosted_occupancy {
+                Some(occupancy) => occupancy.peek(&self.inner, hosted.picker()),
                 None => self
                     .inner
                     .with_selectable_worker_ids(|ids| {
-                        picker.select(
+                        hosted.picker().select(
                             ids,
                             None,
                             &HostedSelectionRequest::new(0).with_preview(true),

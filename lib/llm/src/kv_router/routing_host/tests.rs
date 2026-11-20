@@ -10,8 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
+use crate::kv_router::role_routing::{
+    check_hint_policies_route_on_kv_path, hosted_picker, non_kv_policy,
+};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
@@ -128,7 +130,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let host = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client.clone(), non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context.clone())
         .build()
         .await
@@ -164,14 +166,15 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::LeastLoaded))
         .load_context(load_context)
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Hosted(picker) = &host.policy else {
+    let RoutingPolicy::Hosted(hosted) = &host.policy else {
         unreachable!()
     };
+    let picker = hosted.picker();
     assert_eq!(host.required_worker_inputs(), WorkerInputs::ACTIVE_REQUESTS);
     assert!(host.hosted_occupancy.is_some());
     let selection = host
@@ -222,14 +225,7 @@ async fn builder_rejects_inputs_that_do_not_match_the_mode() {
         )
     };
 
-    let error = RoutingHost::builder(client.clone(), RouterMode::KV)
-        .build()
-        .await
-        .err()
-        .expect("the builder must reject these inputs");
-    assert!(error.to_string().contains("requires a KvRouter"), "{error}");
-
-    let error = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+    let error = RoutingHost::builder(client.clone(), non_kv_policy(RouterMode::RoundRobin))
         .build()
         .await
         .err()
@@ -244,7 +240,7 @@ async fn builder_rejects_inputs_that_do_not_match_the_mode() {
         crate::session_affinity::SessionAffinityMode::Soft,
     )
     .unwrap();
-    let error = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+    let error = RoutingHost::builder(client.clone(), non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context.clone())
         .affinity_coordinator(affinity)
         .lora(lora())
@@ -257,7 +253,7 @@ async fn builder_rejects_inputs_that_do_not_match_the_mode() {
         "{error}"
     );
 
-    let error = RoutingHost::builder(client, RouterMode::LeastLoaded)
+    let error = RoutingHost::builder(client, non_kv_policy(RouterMode::LeastLoaded))
         .load_context(load_context)
         .lora(lora())
         .build()
@@ -288,14 +284,15 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     let load_context = test_load_context(&client).await;
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::LeastLoaded))
         .load_context(load_context)
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Hosted(picker) = &host.policy else {
+    let RoutingPolicy::Hosted(hosted) = &host.policy else {
         unreachable!()
     };
+    let picker = hosted.picker();
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
         .select_and_reserve(&host.inner, picker, &request(), Some(1))
@@ -334,7 +331,7 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
-    let host = RoutingHost::builder(client, RouterMode::Direct)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::Direct))
         .load_context(load_context)
         .affinity_coordinator(affinity)
         .build()
@@ -556,11 +553,11 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     let policy = crate::lora_routing::LoraHostedPolicy::hosted(
         filter,
         Arc::clone(&estimator),
-        RouterMode::RoundRobin,
+        &non_kv_policy(RouterMode::RoundRobin),
         Some(runtime_configs_rx),
     )
     .unwrap();
-    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context)
         .candidate_policy(Some(policy))
         .dispatch(Arc::clone(&dispatch) as LlmDispatch)
@@ -711,7 +708,7 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     let policy = crate::lora_routing::LoraHostedPolicy::hosted(
         Arc::new(LoraFilter::new(LoraRoutingTable::new(), tracker)),
         Arc::new(LoadEstimator::new()),
-        RouterMode::RoundRobin,
+        &non_kv_policy(RouterMode::RoundRobin),
         Some(configs_rx),
     )
     .unwrap();
@@ -738,7 +735,7 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     assert_eq!(first.fallback, HashSet::from([first.worker]));
 
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context)
         .candidate_policy(Some(policy.clone()))
         .dispatch(dispatch.clone() as LlmDispatch)
@@ -868,6 +865,8 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
             crate::session_affinity::SessionAffinityMode::Hard,
         )
         .await;
+        // The transport's mode labels its logs and creates least-loaded's occupancy state.
+        assert_eq!(host.inner.router_mode(), mode);
         let session_id = format!("session-{index}");
         let affinity_id = SessionAffinityId::new(session_id.clone());
         let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
@@ -1121,7 +1120,7 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     client.override_instance_avail(vec![worker_id, fallback_worker_id]);
     client.set_overloaded_instances(&[worker_id]);
     let load_context = test_load_context(&client).await;
-    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context)
         .build()
         .await
@@ -2326,8 +2325,7 @@ async fn router_with_config_classifier_and_policy(
         })
         .transpose()
         .unwrap();
-    let mut router = RoutingHost::builder(client, RouterMode::KV)
-        .kv_router(chooser)
+    let mut router = RoutingHost::builder(client, RoutingPolicy::Kv(chooser))
         .affinity_coordinator(affinity)
         .build()
         .await
@@ -2699,8 +2697,7 @@ async fn router_with_recorded_dispatch_affinity_and_classifier(
         })
         .transpose()
         .unwrap();
-    let router = RoutingHost::builder(client, RouterMode::KV)
-        .kv_router(chooser)
+    let router = RoutingHost::builder(client, RoutingPolicy::Kv(chooser))
         .affinity_coordinator(affinity)
         .dispatch(Arc::clone(&dispatch) as LlmDispatch)
         .build()
@@ -3320,8 +3317,7 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
     .unwrap();
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
     let router = Arc::new(
-        RoutingHost::builder(client, RouterMode::KV)
-            .kv_router(Arc::new(chooser))
+        RoutingHost::builder(client, RoutingPolicy::Kv(Arc::new(chooser)))
             .dispatch(dispatch.clone() as LlmDispatch)
             .build()
             .await
@@ -4189,7 +4185,7 @@ async fn builtin_host_with_affinity(
     mode: crate::session_affinity::SessionAffinityMode,
 ) -> (RoutingHost, AffinityCoordinator) {
     let affinity = AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap();
-    let host = RoutingHost::builder(client, router_mode)
+    let host = RoutingHost::builder(client, non_kv_policy(router_mode))
         .load_context(load_context)
         .affinity_coordinator(affinity.clone())
         .dispatch(dispatch)
@@ -4710,8 +4706,7 @@ async fn two_worker_migration_harness(
     }
     let chooser = Arc::new(chooser);
     let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = Arc::new(
-        RoutingHost::builder(client.clone(), RouterMode::KV)
-            .kv_router(chooser.clone())
+        RoutingHost::builder(client.clone(), RoutingPolicy::Kv(chooser.clone()))
             .load_context(load_context)
             .dispatch(dispatch)
             .build()
@@ -5240,7 +5235,7 @@ async fn builtin_host_with_recorded_dispatch(
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
-    let host = RoutingHost::builder(client, mode)
+    let host = RoutingHost::builder(client, non_kv_policy(mode))
         .load_context(load_context)
         .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
         .build()
@@ -5544,7 +5539,7 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     endpoint.register_endpoint_instance().await.unwrap();
     let live_worker = client.wait_for_instances().await.unwrap()[0].id();
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context)
         .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
         .build()
@@ -5604,7 +5599,7 @@ async fn builtin_dispatch_stamps_elapsed_since_arrival() {
     endpoint.register_endpoint_instance().await.unwrap();
     client.wait_for_instances().await.unwrap();
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context)
         .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
         .build()
@@ -5810,7 +5805,7 @@ async fn affinity_mode_host(namespace: &str) -> (Runtime, RoutingHost) {
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
-    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, non_kv_policy(RouterMode::RoundRobin))
         .load_context(load_context)
         .affinity_coordinator(coordinator)
         .build()

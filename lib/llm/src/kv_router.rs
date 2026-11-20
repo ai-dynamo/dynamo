@@ -68,7 +68,7 @@ pub mod publisher;
 mod request_lease;
 pub(crate) mod role_routing;
 mod routing_host;
-pub(crate) use routing_host::hosted_picker;
+pub(crate) use role_routing::hosted_picker;
 pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
@@ -80,9 +80,11 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
+pub(crate) use role_routing::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
+pub use role_routing::{RolePolicy, role_policy};
 pub use routing_host::{
-    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+    HostedPolicy, KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+    RoutingPolicy,
 };
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,

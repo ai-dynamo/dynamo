@@ -930,6 +930,7 @@ mod tests {
     };
     use tokio::sync::oneshot;
 
+    use crate::kv_router::RoutingPolicy;
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
@@ -1385,8 +1386,7 @@ mod tests {
         .await
         .unwrap();
         let host = Arc::new(
-            RoutingHost::builder(client, RouterMode::KV)
-                .kv_router(Arc::new(chooser))
+            RoutingHost::builder(client, RoutingPolicy::Kv(Arc::new(chooser)))
                 .build()
                 .await
                 .unwrap(),
@@ -1551,8 +1551,7 @@ mod tests {
         .unwrap();
         let dispatch = Arc::new(RecordingDecodeDispatch::default());
         let host = Arc::new(
-            RoutingHost::builder(client, RouterMode::KV)
-                .kv_router(Arc::new(chooser))
+            RoutingHost::builder(client, RoutingPolicy::Kv(Arc::new(chooser)))
                 .dispatch(Arc::clone(&dispatch) as LlmDispatch)
                 .build()
                 .await

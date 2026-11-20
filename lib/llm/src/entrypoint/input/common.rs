@@ -14,7 +14,7 @@ use crate::{
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
-    kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
+    kv_router::{EncoderRouter, PrefillRouter, RoutingHost, RoutingLoadContext, RoutingPolicy},
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -41,8 +41,8 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, RouterMode, SegmentSource,
-        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, SegmentSource, ServiceBackend,
+        ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
@@ -101,18 +101,12 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-fn router_client(
-    client: &Client,
-    router_mode: RouterMode,
-    chooser: Option<&Arc<KvRouter>>,
-) -> anyhow::Result<Client> {
-    if router_mode == RouterMode::KV {
-        let Some(chooser) = chooser else {
-            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
-        };
-        Ok(chooser.client().clone())
-    } else {
-        Ok(client.clone())
+fn router_client(client: &Client, policy: &RoutingPolicy) -> Client {
+    match policy {
+        RoutingPolicy::Kv(chooser) => chooser.client().clone(),
+        RoutingPolicy::Hosted(_) | RoutingPolicy::Direct | RoutingPolicy::DeviceAwareWeighted => {
+            client.clone()
+        }
     }
 }
 
@@ -120,9 +114,8 @@ fn router_client(
 pub async fn build_preprocessed_routing(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
+    policy: RoutingPolicy,
     load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
@@ -131,9 +124,8 @@ pub async fn build_preprocessed_routing(
     build_preprocessed_routing_with_session_affinity_mode(
         client,
         model_manager,
-        router_mode,
+        policy,
         load_context,
-        chooser,
         prefill_chooser,
         encoder_chooser,
         enable_multimodal_cache_indexer,
@@ -147,15 +139,16 @@ pub async fn build_preprocessed_routing(
 pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
+    policy: RoutingPolicy,
     load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<PreprocessedRouting> {
+    // The LoRA rule and the prefill hop's fallback are still stated in router modes.
+    let router_mode = policy.transport_mode();
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -166,11 +159,11 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     )?;
     let runtime_lora_enabled = crate::lora::runtime::RuntimeLoraConfig::from_env()?.enabled;
     let min_initial_workers = min_initial_workers_from_env()?;
-    let router_client = router_client(client, router_mode, chooser.as_ref())?;
+    let router_client = router_client(client, &policy);
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
     let endpoint_id = router_client.endpoint.id();
-    let runtime_configs = if runtime_lora_enabled && !router_mode.is_kv_routing() {
+    let runtime_configs = if runtime_lora_enabled && !matches!(policy, RoutingPolicy::Kv(_)) {
         Some(
             model_manager
                 .get_or_create_runtime_config_watcher(&router_client.endpoint)
@@ -181,8 +174,8 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     };
 
     let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
-    let affinity = match (ttl, chooser.as_ref()) {
-        (Some(ttl), Some(chooser)) => {
+    let affinity = match (ttl, &policy) {
+        (Some(ttl), RoutingPolicy::Kv(chooser)) => {
             let affinity = chooser.affinity_coordinator(ttl, session_affinity_mode)?;
             affinity.enable_replica_sync(router_client.clone()).await?;
             Some(affinity)
@@ -191,7 +184,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     };
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
-        && matches!(router_mode, RouterMode::DeviceAwareWeighted)
+        && matches!(policy, RoutingPolicy::DeviceAwareWeighted)
     {
         try_build_cache_indexer(&router_client.endpoint).await
     } else {
@@ -212,9 +205,9 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
 
-    // LoRA-aware selection lives in the host only for the built-in modes; under
+    // LoRA-aware selection lives in the host only for the built-in policies; under
     // KV routing the KV router applies the adapter filter itself.
-    let candidate_policy = (router_mode != RouterMode::KV)
+    let candidate_policy = (!matches!(policy, RoutingPolicy::Kv(_)))
         .then(|| {
             model_manager
                 .lora_filter_for(&endpoint_id)
@@ -225,14 +218,13 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             crate::lora_routing::LoraHostedPolicy::hosted(
                 filter,
                 estimator,
-                router_mode,
+                &policy,
                 runtime_configs,
             )
         })
         .transpose()?;
     let routing_host = Arc::new(
-        RoutingHost::builder(router_client, router_mode)
-            .kv_router(chooser)
+        RoutingHost::builder(router_client, policy)
             .load_context(load_context)
             .affinity_coordinator(affinity)
             .candidate_policy(candidate_policy)
@@ -240,7 +232,8 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             .build()
             .await?,
     );
-    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+    if routing_host.kv_router_if_enabled().is_some() && prefill_router.conditional_disagg_enabled()
+    {
         prefill_router
             .set_decode_routing_host(routing_host.clone())
             .context("install conditional-disagg decode RoutingHost")?;
@@ -523,7 +516,10 @@ impl PreprocessedRouting {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_runtime::pipeline::RouterMode;
+
     use super::*;
+    use crate::kv_router::role_routing::non_kv_policy;
 
     struct UnusedEngine;
 
@@ -642,9 +638,8 @@ mod tests {
             build_preprocessed_routing(
                 &client,
                 Arc::new(ModelManager::new()),
-                RouterMode::RoundRobin,
+                non_kv_policy(RouterMode::RoundRobin),
                 load_context,
-                None,
                 None,
                 None,
                 false,

@@ -161,7 +161,8 @@ mod tests {
     use crate::{
         discovery::ModelManager,
         kv_router::prefill_router::PrefillBinding,
-        kv_router::{KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext},
+        kv_router::role_routing::non_kv_policy,
+        kv_router::{KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext, RoutingPolicy},
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
@@ -338,7 +339,7 @@ mod tests {
         .await
         .unwrap();
         let shared = Arc::new(
-            RoutingHost::builder(client, mode)
+            RoutingHost::builder(client, non_kv_policy(mode))
                 .load_context(load_context)
                 .dispatch(dispatch as crate::kv_router::LlmDispatch)
                 .build()
@@ -421,8 +422,7 @@ mod tests {
             .await
             .unwrap(),
         );
-        let router = RoutingHost::builder(client, RouterMode::KV)
-            .kv_router(chooser.clone())
+        let router = RoutingHost::builder(client, RoutingPolicy::Kv(chooser.clone()))
             .build()
             .await
             .unwrap();

@@ -7,13 +7,13 @@ use std::{
 };
 
 use dynamo_lora::policy::{LoadGuard, RequestPolicy, Stage};
-use dynamo_runtime::pipeline::{Error, RouterMode};
+use dynamo_runtime::pipeline::Error;
 use dynamo_scheduler::host::{KvSchedulerError, RoutingConstraints, SchedulingRequest};
 use dynamo_worker_selection::host::HostedWorkerPicker;
 
 use crate::{
     discovery::RuntimeConfigWatch,
-    kv_router::hosted_request,
+    kv_router::{RoutingPolicy, hosted_request},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
@@ -126,13 +126,17 @@ impl LoraHostedPolicy {
     pub(crate) fn hosted(
         filter: Arc<LoraFilter>,
         estimator: Arc<LoadEstimator>,
-        mode: RouterMode,
+        policy: &RoutingPolicy,
         runtime_configs: Option<RuntimeConfigWatch>,
     ) -> Result<Arc<dyn HostedCandidatePolicy>, Error> {
-        if !matches!(mode, RouterMode::RoundRobin | RouterMode::Random) {
-            anyhow::bail!("LoRA filtering is unsupported with {mode:?} routing");
-        }
-        let picker = crate::kv_router::hosted_picker(mode)?;
+        let Some(hosted) = policy.hosted_without_occupancy() else {
+            anyhow::bail!(
+                "LoRA filtering is unsupported with {:?} routing",
+                policy.transport_mode()
+            );
+        };
+        // A second picker: adapter requests rotate apart from the host's other requests.
+        let picker = hosted.fresh_picker()?;
         Ok(Arc::new(Self {
             filter,
             estimator,
@@ -343,7 +347,10 @@ impl KvAdmissionPolicy for LoraKvPolicy {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_runtime::pipeline::RouterMode;
+
     use super::*;
+    use crate::kv_router::role_routing::non_kv_policy;
     use crate::lora::{LoraRoutingTable, LoraStateTracker};
 
     #[test]
@@ -549,7 +556,7 @@ mod tests {
                 LoraStateTracker::new(),
             )),
             Arc::new(LoadEstimator::new()),
-            RouterMode::RoundRobin,
+            &non_kv_policy(RouterMode::RoundRobin),
             None,
         )
         .unwrap();
@@ -595,7 +602,7 @@ mod tests {
         let policy = LoraHostedPolicy::hosted(
             filter.clone(),
             Arc::new(LoadEstimator::new()),
-            RouterMode::RoundRobin,
+            &non_kv_policy(RouterMode::RoundRobin),
             Some(rx),
         )
         .unwrap();
