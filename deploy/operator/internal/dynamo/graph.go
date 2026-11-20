@@ -2799,7 +2799,7 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 
-	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName, p.operatorConfig.Orchestrators.KaiScheduler.SchedulerName)
 	injectVolcanoSchedulerIfEnabled(clique, p.runtimeConfig)
 	return clique, nil
 }

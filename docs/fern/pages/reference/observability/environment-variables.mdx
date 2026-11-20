@@ -88,6 +88,14 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   **Operator preset:** `8000` on frontend pods.
 </ParamField>
 
+<ParamField path="DYN_EXTRA_METRIC_PREFIXES" type="string">
+  Comma-separated metric-name prefixes appended to each backend worker's built-in engine-metrics allowlist (`vllm:`/`lmcache:`, `sglang:`, `trtllm_`), so metrics from custom components loaded into the engine process (e.g. a custom KV connector) are exposed on the worker's `/metrics` endpoint. Additive only: built-in prefixes are always kept. Matching is a literal prefix match — include the trailing separator. Whitespace around commas is trimmed and empty segments are ignored. Extra series carry the standard `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id` labels.
+
+  Read by the worker process at metrics-setup time, so set it on the worker, not the frontend. On vLLM it is only effective when `disable_log_stats` is false (the default).
+
+  For a walkthrough with a DGD snippet, see [Exposing Custom Component Metrics](../../developer-guide/knowledge-base/modular-components/backends/vllm/observability.md#exposing-custom-component-metrics).
+</ParamField>
+
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 

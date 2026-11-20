@@ -1128,6 +1128,15 @@ def test_dsa_dcp_module_probe_handles_older_engines(monkeypatch, probe_result):
         ("trtllm", "trtllm", 107, True, True, True),
         ("trtllm", "flashmla_kv", 107, True, True, False),
         ("flashmla_kv", "trtllm", 100, True, True, False),
+        ("prims_ts", "prims_ts", 100, False, False, False),
+        ("prims_ts", "prims_ts", 103, True, False, False),
+        ("prims_ts", "prims_ts", 100, True, True, True),
+        ("prims_ts", "prims_ts", 103, True, True, True),
+        ("prims_ts", "prims_ts", 107, True, True, True),
+        ("prims_ts", "prims_ts", 90, True, True, False),
+        ("prims_ts", "prims_ts", 120, True, True, False),
+        (None, "prims_ts", 103, True, True, True),
+        ("prims_ts", "trtllm", 100, True, True, False),
     ],
 )
 async def test_dsa_dcp_requires_supported_kernel_pair(

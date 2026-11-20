@@ -184,6 +184,7 @@ article:has(.dynamo-blog-home) > header {
   background: linear-gradient(135deg, transparent 40%, rgba(0, 0, 0, 0.35));
 }
 
+.dynamo-blog-art--retune { background: linear-gradient(145deg, #12143a, #3f46b8 52%, #080a20); }
 .dynamo-blog-art--aiperf { background: linear-gradient(145deg, #16181f, #4b5368 52%, #0b0c10); }
 .dynamo-blog-art--encoder { background: linear-gradient(145deg, #2b0a1c, #a01f5c 52%, #1a0512); }
 
@@ -612,6 +613,8 @@ article:has(.dynamo-blog-article) pre {
 }
 
 /* Date-first archive labels, inspired by editorial blog indexes. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/planner-retune"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/planner-retune"]::before { content: "NOV 2026"; }
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before { content: "SEP 18"; }
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before,
@@ -995,6 +998,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
   content: "" !important;
 }
 
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/planner-retune"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/planner-retune"] .fern-sidebar-link-title-inner::before { content: "NOV 2026"; }
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before { content: "SEP 18"; }
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before,

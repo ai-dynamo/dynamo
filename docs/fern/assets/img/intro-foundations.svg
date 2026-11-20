@@ -54,7 +54,6 @@
 
   <text x="115" y="325" class="label fill-N1">Memory</text>
   <text x="115" y="347" class="label fill-N1">Management</text>
-  <text x="115" y="370" class="sublabel fill-N1">(KVBM)</text>
 
   <text x="385" y="325" class="label fill-N1">Data</text>
   <text x="385" y="347" class="label fill-N1">Transfer</text>
