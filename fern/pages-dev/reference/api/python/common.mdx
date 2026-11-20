@@ -553,7 +553,7 @@ Disaggregation mode for LLM workers.
 from dynamo.common.constants import DisaggregationMode
 ```
 
-[`components/src/dynamo/common/constants.py#L16`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L16)
+[`components/src/dynamo/common/constants.py#L23`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L23)
 </Accordion>
 
 <Accordion id="api-dynamo-common-constants-embeddingtransfermode" title="EmbeddingTransferMode (class)">
@@ -563,7 +563,7 @@ Embedding transfer mode for LLM workers.
 from dynamo.common.constants import EmbeddingTransferMode
 ```
 
-[`components/src/dynamo/common/constants.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L25)
+[`components/src/dynamo/common/constants.py#L32`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L32)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-engineconfig" title="EngineConfig (class)">
@@ -942,7 +942,7 @@ A request-specific budget uses a cancellable private fetch on cache miss;
 it cannot join an in-flight decode with a different budget. Completed
 cache entries remain shareable and are checked against the caller's limit.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L466)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L468)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
@@ -985,7 +985,7 @@ DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L596)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L598)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
