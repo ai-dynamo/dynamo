@@ -67,9 +67,11 @@ pub type DirectEngineFactory =
 #[derive(Default)]
 pub struct DirectDispatch {
     adapters: parking_lot::RwLock<HashMap<u64, Arc<EngineAdapter>>>,
-    /// One supervisor per engine; each releases its engine on runtime shutdown.
-    /// Nothing waits for them: an engine's cleanup releases only this
-    /// process's client, not the engine, which runs elsewhere.
+    /// One supervisor per engine; on runtime shutdown each withdraws its engine
+    /// and releases it, or, if the engine is still starting, leaves it to be
+    /// released once that start returns. Nothing waits for them: an engine's
+    /// cleanup releases only this process's client, not the engine, which
+    /// runs elsewhere.
     supervisors: TaskTracker,
     /// Held while an engine's model files are fetched, so engines that start
     /// together download a model once and then read the local copy.
@@ -77,7 +79,9 @@ pub struct DirectDispatch {
 }
 
 impl DirectDispatch {
-    /// Resolves once runtime shutdown has withdrawn and cleaned up every engine.
+    /// Resolves once runtime shutdown has withdrawn every engine and released
+    /// each that was serving; an engine still starting is released later,
+    /// once its start returns.
     #[cfg(test)]
     async fn stopped(&self) {
         self.supervisors.wait().await;
