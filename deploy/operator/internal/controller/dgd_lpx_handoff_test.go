@@ -509,7 +509,7 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 
 func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	t.Log("Seed the shared child's current readiness")
-	_, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
+	_, source, kube := newLPXHandoffFixture(t, "node-local-v3-hx-specdecode")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1)),
 	}, v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -583,146 +583,137 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 // TestSpecDecodeRestartRollsTheSharedChildOnce checks that one graph restart
 // reaches the shared draft and target child once, including read retries.
 func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
-	for _, scenario := range []struct {
-		name     string
-		strategy v1beta1.RestartStrategy
-	}{
-		{"parallel", v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			t.Log("Persist a requested restart of the authored draft and target")
-			_, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
-			source.Spec.Restart = &v1beta1.Restart{ID: "pair-restart", Strategy: &scenario.strategy}
-			var childReads, pcsReads int
-			var failChildRead bool
-			observed := interceptor.NewClient(kube.(client.WithWatch), interceptor.Funcs{
-				Get: func(ctx context.Context, reader client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, pcs := obj.(*grovev1alpha1.PodCliqueSet); pcs {
-						pcsReads++
-					}
-					if _, child := obj.(*v1alpha1.LPXGraphDeployment); child {
-						childReads++
-						if failChildRead {
-							return apierrors.NewServiceUnavailable("child observation unavailable")
-						}
-					}
-					return reader.Get(ctx, key, obj, opts...)
-				},
-			})
-			program := (&DynamoGraphDeploymentReconciler{
-				Client: observed, RuntimeConfig: &commoncontroller.RuntimeConfig{},
-			}).newGroveProgram()
-			progress := func(ctx context.Context, source *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
-				return resolveCompositeGroveRestartProgress(
-					ctx, groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, inProgress, program.restartProgress, program.lpxRestartProgress,
-				)
+	t.Log("Persist a requested restart of the authored draft and target")
+	_, source, kube := newLPXHandoffFixture(t, "node-local-v3-hx-specdecode")
+	source.Spec.Restart = &v1beta1.Restart{ID: "pair-restart", Strategy: &v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}}
+	var childReads, pcsReads int
+	var failChildRead bool
+	observed := interceptor.NewClient(kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, reader client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, pcs := obj.(*grovev1alpha1.PodCliqueSet); pcs {
+				pcsReads++
 			}
-			restarter := newDGDRestartReconciler()
-			source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
-			require.NotEmpty(t, source.Status.Restart.InProgress)
-
-			t.Log("Both selected members deliver one token to the same child")
-			handoff := &dgdLPXHandoff{client: kube}
-			child, err := handoff.Reconcile(t.Context(), source)
-			require.NoError(t, err)
-			require.Equal(t, "pair-restart", child.Annotations[dynamo.LPXRestartAnnotation])
-			require.NotEmpty(t, progress(t.Context(), source, source.Status.Restart.InProgress))
-			child.Status.ObservedGeneration = child.Generation
-			child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
-				"lpx": {
-					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1},
-					Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
-				},
-				"draft": {
-					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2},
-					Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
-				},
+			if _, child := obj.(*v1alpha1.LPXGraphDeployment); child {
+				childReads++
+				if failChildRead {
+					return apierrors.NewServiceUnavailable("child observation unavailable")
+				}
 			}
-			meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
-			require.NoError(t, kube.Status().Update(t.Context(), child))
-			before := child.DeepCopy()
-
-			t.Log("One failed child observation keeps both ready members pending")
-			failChildRead, childReads = true, 0
-			require.Equal(t, []string{"draft", "lpx"}, progress(t.Context(), source, []string{"draft", "lpx"}))
-			require.Equal(t, 1, childReads)
-			failChildRead = false
-
-			t.Log("Finish each selected member without changing the shared child revision again")
-			for range 2 {
-				childReads = 0
-				require.Empty(t, progress(t.Context(), source, source.Status.Restart.InProgress))
-				require.Equal(t, min(len(source.Status.Restart.InProgress), 1), childReads)
-				source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
-				current, err := handoff.Reconcile(t.Context(), source)
-				require.NoError(t, err)
-				require.Equal(t, before, current)
-			}
-			require.Equal(t, v1beta1.RestartPhaseCompleted, source.Status.Restart.Phase)
-			require.Zero(t, pcsReads)
-
-			t.Log("Adding an ordinary worker invalidates the child's previous serving revision")
-			source.Spec.Components = append(source.Spec.Components,
-				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1))},
-				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1))},
-			)
-			requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
-			require.Equal(t, []string{"draft", "frontend", "lpx", "prefill"}, progress(t.Context(), source, requested))
-			child, err = handoff.Reconcile(t.Context(), source)
-			require.NoError(t, err)
-			child.Status.ObservedGeneration = child.Generation
-			require.NoError(t, kube.Status().Update(t.Context(), child))
-
-			t.Log("After the shared revision is observed, only the missing ordinary PCS remains pending")
-			beforeSource := source.DeepCopy()
-			childReads, pcsReads = 0, 0
-			require.Equal(t, []string{"frontend", "prefill"}, progress(t.Context(), source, requested))
-			require.Equal(t, 1, childReads)
-			require.Equal(t, 1, pcsReads)
-
-			t.Log("An unobserved ordinary PCS cannot hold back either ready LPX member")
-			groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
-			pcs := &grovev1alpha1.PodCliqueSet{
-				Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2,
-				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
-						{
-							Name:        "frontend",
-							Labels:      map[string]string{consts.KubeLabelDynamoComponent: "frontend"},
-							Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
-						},
-						{
-							Name:        "prefill",
-							Labels:      map[string]string{consts.KubeLabelDynamoComponent: "prefill"},
-							Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
-						},
-					},
-				}},
-				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1))},
-			}
-			require.NoError(t, kube.Create(t.Context(), pcs))
-			childReads, pcsReads = 0, 0
-			require.Equal(t, []string{"frontend", "prefill"}, progress(t.Context(), source, requested))
-			require.Equal(t, 1, childReads)
-			require.Equal(t, 1, pcsReads)
-
-			t.Log("A failed child read cannot hold back a ready ordinary member or reorder pending members")
-			pcs.Status.ObservedGeneration = new(pcs.Generation)
-			require.NoError(t, kube.Update(t.Context(), pcs))
-			prefill := &grovev1alpha1.PodClique{
-				Name: dynamo.GroveComponentResourceName(dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), "prefill"), Namespace: source.Namespace, Generation: 1,
-				Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
-				Status: grovev1alpha1.PodCliqueStatus{ObservedGeneration: new(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
-			}
-			require.NoError(t, kube.Create(t.Context(), prefill))
-			failChildRead, childReads, pcsReads = true, 0, 0
-			require.Equal(t, []string{"draft", "frontend", "lpx"}, progress(t.Context(), source, requested))
-			require.Equal(t, 1, childReads)
-			require.Equal(t, 1, pcsReads)
-			require.Equal(t, beforeSource, source)
-			require.Equal(t, []string{"draft", "frontend", "lpx", "prefill", "removed"}, requested)
-		})
+			return reader.Get(ctx, key, obj, opts...)
+		},
+	})
+	program := (&DynamoGraphDeploymentReconciler{
+		Client: observed, RuntimeConfig: &commoncontroller.RuntimeConfig{},
+	}).newGroveProgram()
+	progress := func(ctx context.Context, source *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
+		return resolveCompositeGroveRestartProgress(
+			ctx, groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, inProgress, program.restartProgress, program.lpxRestartProgress,
+		)
 	}
+	restarter := newDGDRestartReconciler()
+	source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
+	require.NotEmpty(t, source.Status.Restart.InProgress)
+
+	t.Log("Both selected members deliver one token to the same child")
+	handoff := &dgdLPXHandoff{client: kube}
+	child, err := handoff.Reconcile(t.Context(), source)
+	require.NoError(t, err)
+	require.Equal(t, "pair-restart", child.Annotations[dynamo.LPXRestartAnnotation])
+	require.NotEmpty(t, progress(t.Context(), source, source.Status.Restart.InProgress))
+	child.Status.ObservedGeneration = child.Generation
+	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
+		"lpx": {
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1},
+			Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+		},
+		"draft": {
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2},
+			Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+		},
+	}
+	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
+	require.NoError(t, kube.Status().Update(t.Context(), child))
+	before := child.DeepCopy()
+
+	t.Log("One failed child observation keeps both ready members pending")
+	failChildRead, childReads = true, 0
+	require.Equal(t, []string{"draft", "lpx"}, progress(t.Context(), source, []string{"draft", "lpx"}))
+	require.Equal(t, 1, childReads)
+	failChildRead = false
+
+	t.Log("Finish each selected member without changing the shared child revision again")
+	for range 2 {
+		childReads = 0
+		require.Empty(t, progress(t.Context(), source, source.Status.Restart.InProgress))
+		require.Equal(t, min(len(source.Status.Restart.InProgress), 1), childReads)
+		source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
+		current, err := handoff.Reconcile(t.Context(), source)
+		require.NoError(t, err)
+		require.Equal(t, before, current)
+	}
+	require.Equal(t, v1beta1.RestartPhaseCompleted, source.Status.Restart.Phase)
+	require.Zero(t, pcsReads)
+
+	t.Log("Adding an ordinary worker invalidates the child's previous serving revision")
+	source.Spec.Components = append(source.Spec.Components,
+		v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1))},
+		v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1))},
+	)
+	requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
+	require.Equal(t, []string{"draft", "frontend", "lpx", "prefill"}, progress(t.Context(), source, requested))
+	child, err = handoff.Reconcile(t.Context(), source)
+	require.NoError(t, err)
+	child.Status.ObservedGeneration = child.Generation
+	require.NoError(t, kube.Status().Update(t.Context(), child))
+
+	t.Log("After the shared revision is observed, only the missing ordinary PCS remains pending")
+	beforeSource := source.DeepCopy()
+	childReads, pcsReads = 0, 0
+	require.Equal(t, []string{"frontend", "prefill"}, progress(t.Context(), source, requested))
+	require.Equal(t, 1, childReads)
+	require.Equal(t, 1, pcsReads)
+
+	t.Log("An unobserved ordinary PCS cannot hold back either ready LPX member")
+	groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
+	pcs := &grovev1alpha1.PodCliqueSet{
+		Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2,
+		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+				{
+					Name:        "frontend",
+					Labels:      map[string]string{consts.KubeLabelDynamoComponent: "frontend"},
+					Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
+				},
+				{
+					Name:        "prefill",
+					Labels:      map[string]string{consts.KubeLabelDynamoComponent: "prefill"},
+					Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
+				},
+			},
+		}},
+		Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1))},
+	}
+	require.NoError(t, kube.Create(t.Context(), pcs))
+	childReads, pcsReads = 0, 0
+	require.Equal(t, []string{"frontend", "prefill"}, progress(t.Context(), source, requested))
+	require.Equal(t, 1, childReads)
+	require.Equal(t, 1, pcsReads)
+
+	t.Log("A failed child read cannot hold back a ready ordinary member or reorder pending members")
+	pcs.Status.ObservedGeneration = new(pcs.Generation)
+	require.NoError(t, kube.Update(t.Context(), pcs))
+	prefill := &grovev1alpha1.PodClique{
+		Name: dynamo.GroveComponentResourceName(dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), "prefill"), Namespace: source.Namespace, Generation: 1,
+		Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{ObservedGeneration: new(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+	}
+	require.NoError(t, kube.Create(t.Context(), prefill))
+	failChildRead, childReads, pcsReads = true, 0, 0
+	require.Equal(t, []string{"draft", "frontend", "lpx"}, progress(t.Context(), source, requested))
+	require.Equal(t, 1, childReads)
+	require.Equal(t, 1, pcsReads)
+	require.Equal(t, beforeSource, source)
+	require.Equal(t, []string{"draft", "frontend", "lpx", "prefill", "removed"}, requested)
 }
 
 func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {

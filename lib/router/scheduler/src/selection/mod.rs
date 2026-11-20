@@ -22,7 +22,7 @@ pub use core::{
 pub use error::SelectionError;
 pub use ingress::KvEventIngress;
 pub use input::{PromptRequest, PromptView};
-pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
+pub use membership::{CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
 pub use types::{
     DEFAULT_MODEL_NAME, ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest,

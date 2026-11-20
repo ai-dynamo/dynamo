@@ -18,6 +18,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    chat_input::ChatInputPolicy,
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
@@ -262,6 +263,7 @@ pub struct WorkerSet {
     /// `chat_engine` came from a Python chat-engine factory, which parses its
     /// own output.
     pub(crate) chat_engine_parses_output: bool,
+    input_policy: ChatInputPolicy,
 }
 
 impl WorkerSet {
@@ -297,6 +299,7 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             chat_engine_parses_output: false,
+            input_policy: ChatInputPolicy::default(),
         }
     }
 
@@ -450,6 +453,14 @@ impl WorkerSet {
     /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
         !self.is_encode_set() && !self.has_any_serving_engine()
+    }
+
+    pub(crate) fn set_input_policy(&mut self, policy: ChatInputPolicy) {
+        self.input_policy = policy;
+    }
+
+    pub(crate) fn input_policy(&self) -> ChatInputPolicy {
+        self.input_policy.clone()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -630,6 +641,8 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             chat_engine_parses_output: self.chat_engine_parses_output,
+            // An adapter renders through the base model's chat engine and tokenizer.
+            input_policy: self.input_policy.clone(),
         };
         if self.allocator_trim.is_some() {
             view.enable_allocator_trim_on_teardown();
@@ -747,6 +760,29 @@ mod tests {
                 .and_then(|routing| routing.lora_name.clone());
             Err(anyhow::anyhow!("captured request"))
         }
+    }
+
+    #[test]
+    fn adapter_view_keeps_the_base_input_policy() {
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/data/sample-models/mock-mistral-tekken"
+            ),
+            None,
+        )
+        .unwrap();
+        let mut base = WorkerSet::new("ns1".to_string(), "abc123".to_string(), card);
+        base.set_input_policy(ChatInputPolicy::from_card(base.card()));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+        assert!(adapter.card.tokenizer.is_none());
+        assert_eq!(base.input_policy(), adapter.input_policy());
+        assert_ne!(adapter.input_policy(), ChatInputPolicy::Standard);
     }
 
     #[tokio::test]

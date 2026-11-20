@@ -29,6 +29,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    routed_dp_rank_kwargs,
     supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -845,6 +846,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sglang_request_id,
                 priority,
             )
+            if self.serving_mode == DisaggregationMode.DECODE:
+                request.pop("token_ids", None)
+                input_param.clear()
             async for output in self._process_native_generate_stream(
                 stream,
                 context,
@@ -936,13 +940,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
                 **kv_hint_kwargs(self.engine, request),
             )
+            request.pop("token_ids", None)
+            input_param.clear()
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
@@ -1039,7 +1045,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,
