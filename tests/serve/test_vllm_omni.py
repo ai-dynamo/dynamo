@@ -253,9 +253,7 @@ vllm_omni_configs = {
         script_name="agg_omni_audio.sh",
         marks=[
             pytest.mark.gpu_1,
-            # TODO: revert to pytest.mark.post_merge after pre_merge validation
-            # on this PR (see .ai/ci-guidelines.md).
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
