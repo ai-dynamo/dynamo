@@ -1016,6 +1016,7 @@ fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
         env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
         value,
         DEFAULT_STARTUP_CONNECT_TIMEOUT,
+        |message| tracing::warn!("{message}"),
     )
 }
 
@@ -1054,6 +1055,7 @@ fn keep_alive_from_values(
         env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
         timeout,
         DEFAULT_KEEPALIVE_TIMEOUT,
+        |message| tracing::warn!("{message}"),
     );
     Some((interval, timeout))
 }
@@ -1265,6 +1267,32 @@ impl KvCache {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn timeout_warnings_keep_transport_target() {
+        let warnings = crate::config::env_config::tests::capture_warnings(
+            "dynamo_runtime::transports::etcd",
+            || {
+                for value in [None, Some("45"), Some("0"), Some("invalid")] {
+                    let _ = startup_connect_timeout_from_value(value);
+                    let _ = keep_alive_from_values(None, value);
+                }
+                let _ = keep_alive_from_values(Some("0"), Some("invalid"));
+            },
+        );
+        assert_eq!(warnings.lines().count(), 4);
+        for (name, default) in [
+            (env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS, 120),
+            (env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS, 10),
+        ] {
+            assert!(warnings.contains(&format!(
+                "{name} must be >= 1; got 0. Falling back to {default}."
+            )));
+            assert!(warnings.contains(&format!(
+                "Invalid {name}='invalid' (invalid digit found in string). Falling back to {default}."
+            )));
+        }
+    }
 
     #[test]
     fn parses_startup_connect_timeout() {

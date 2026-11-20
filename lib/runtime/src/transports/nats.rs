@@ -371,6 +371,7 @@ fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
         env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
         value,
         DEFAULT_STARTUP_CONNECT_TIMEOUT,
+        |message| tracing::warn!("{message}"),
     )
 }
 
@@ -1138,6 +1139,25 @@ mod tests {
     use super::*;
     use figment::Jail;
     use serde::{Deserialize, Serialize};
+
+    #[test]
+    fn timeout_warnings_keep_transport_target() {
+        let warnings = crate::config::env_config::tests::capture_warnings(
+            "dynamo_runtime::transports::nats",
+            || {
+                for value in [None, Some("45"), Some("0"), Some("invalid")] {
+                    let _ = startup_connect_timeout_from_value(value);
+                }
+            },
+        );
+        assert_eq!(warnings.lines().count(), 2);
+        assert!(warnings.contains(
+            "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS must be >= 1; got 0. Falling back to 120."
+        ));
+        assert!(warnings.contains(
+            "Invalid NATS_STARTUP_CONNECT_TIMEOUT_SECONDS='invalid' (invalid digit found in string). Falling back to 120."
+        ));
+    }
 
     #[test]
     fn parses_startup_connect_timeout() {
