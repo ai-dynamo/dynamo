@@ -118,15 +118,25 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
+    let model = common_request.model.clone();
+    let x_request_id = super::x_request_id_from_context(context);
     let agent = has_agent_context
-        .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
+        .then(|| {
+            super::build_agent_context_trace_state(
+                common_request,
+                tracker,
+                context,
+                model.clone(),
+                x_request_id.clone(),
+            )
+        })
         .flatten();
 
     let request = RequestTraceRequestEndState {
         request_tracker,
         replay_metrics,
-        model: common_request.model.clone(),
-        x_request_id: super::x_request_id_from_context(context),
+        model,
+        x_request_id,
     };
 
     Some(RequestEndTraceState {
@@ -597,8 +607,6 @@ mod tests {
         );
     }
 
-    /// The frontend mints its own `request_id`, so the client's `x-request-id`
-    /// is the only key a client can join on. A plain request must carry it.
     #[tokio::test]
     async fn plain_request_end_carries_x_request_id_and_model() {
         BUS.init(16);

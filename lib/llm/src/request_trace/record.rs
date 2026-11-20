@@ -266,6 +266,8 @@ mod tests {
         };
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.request_id, "req-1");
+        assert_eq!(request.x_request_id.as_deref(), Some("client-1"));
+        assert_eq!(request.model.as_deref(), Some("test-model"));
         assert_eq!(request.input_tokens, Some(8));
         assert_eq!(request.output_tokens, Some(7));
         assert_eq!(request.cached_tokens, Some(4));

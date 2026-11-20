@@ -246,31 +246,19 @@ pub(crate) struct AgentContextTraceState {
     pub client_tool_names: Option<super::ClientToolNames>,
 }
 
-/// The client's `x-request-id`: from the distributed tracing context, else
-/// from the request context. Every record of one request reads it here so they
-/// agree on the client's join key.
-pub(crate) fn x_request_id_from_context(context: &Context<()>) -> Option<String> {
-    dynamo_runtime::logging::get_distributed_tracing_context()
-        .and_then(|c| c.x_request_id)
-        .or_else(|| {
-            context
-                .get::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
-                .ok()
-                .map(|v| v.as_ref().clone())
-        })
-}
-
 pub(crate) fn build_agent_context_trace_state(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
+    request_model: String,
+    x_request_id: Option<String>,
 ) -> Option<AgentContextTraceState> {
     let agent_context = common_request.agent_context.clone()?;
     Some(AgentContextTraceState {
         agent_context,
-        request_model: common_request.model.clone(),
+        request_model,
         request_tracker: tracker.clone(),
-        x_request_id: x_request_id_from_context(context),
+        x_request_id,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
         client_tool_call_ids: context
             .get::<super::ClientToolCallIds>(super::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY)
