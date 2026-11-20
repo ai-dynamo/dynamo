@@ -305,12 +305,19 @@ def _split_multimodal_data(
 
 
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Read processor kwargs from the canonical or router-compatible location."""
+    """Read processor kwargs from the canonical or router-compatible location.
+
+    The frontend forwards this field verbatim, so a non-object value is
+    rejected here as a request error instead of failing later as a server
+    error.
+    """
     value = request.get("mm_processor_kwargs")
     if value is None:
         extra_args = request.get("extra_args")
         if isinstance(extra_args, dict):
             value = extra_args.get("mm_processor_kwargs")
+    if value is not None and not isinstance(value, dict):
+        raise InvalidArgument("mm_processor_kwargs must be an object")
     return value
 
 
