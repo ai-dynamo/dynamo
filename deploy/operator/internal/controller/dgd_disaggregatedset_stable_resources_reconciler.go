@@ -25,6 +25,7 @@ import (
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -64,7 +65,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	normalizedComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 	targetRevision string,
 	targetReady bool,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
@@ -81,7 +82,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 		if dcd := dcds[componentName]; dcd != nil {
 			serviceName = dcd.Name
 		}
-		if _, selected := selection.componentToRole[componentName]; selected {
+		if _, selected := selection.ComponentToRole[componentName]; selected {
 			serviceName = dynamo.GetDCDResourceName(dgd, componentName, rollingUpdateCtx.NewWorkerHash)
 		}
 		service, deleted, err := r.renderer.generateServiceForDGDComponent(ctx, dgd, component, componentName, serviceName)
@@ -91,7 +92,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 		if deleted {
 			continue
 		}
-		if roleName, selected := selection.componentToRole[componentName]; selected && targetRevision != "" {
+		if roleName, selected := selection.ComponentToRole[componentName]; selected && targetRevision != "" {
 			existing := &corev1.Service{}
 			existingErr := r.client.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, existing)
 			if existingErr != nil && !apierrors.IsNotFound(existingErr) {
@@ -101,7 +102,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 				service,
 				existing,
 				existingErr == nil,
-				disaggregatedSetName(dgd),
+				disaggregatedset.Name(dgd),
 				roleName,
 				targetRevision,
 				component.IsMultinode(),

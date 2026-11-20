@@ -15,13 +15,16 @@
  * limitations under the License.
  */
 
-package dynamo
+package grove
 
 import (
 	"strings"
 	"testing"
 
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -85,7 +88,7 @@ func TestElasticEPLeaderServiceNameIsStable(t *testing.T) {
 
 func TestGenerateElasticEPHeadlessService(t *testing.T) {
 	t.Log("Generate the leader Service for a single-pod elastic-EP component")
-	svc := GenerateElasticEPHeadlessService(ComponentServiceParams{
+	svc := RenderElasticEPLeaderService(&v1beta1.DynamoComponentDeploymentSharedSpec{}, componentdeployment.ServiceParams{
 		ServiceName:     "my-dgd-worker",
 		Namespace:       "ns",
 		ComponentType:   "worker",
@@ -93,7 +96,7 @@ func TestGenerateElasticEPHeadlessService(t *testing.T) {
 		ComponentName:   "worker",
 		Labels:          map[string]string{"app": "x"},
 		Annotations:     map[string]string{"a": "b"},
-	})
+	}, true)
 
 	t.Log("Verify the Service identity")
 	if got, want := svc.Name, "my-dgd-worker-ray"; got != want {
