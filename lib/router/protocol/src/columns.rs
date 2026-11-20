@@ -23,6 +23,15 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request per-rank counts of the blocks the router's indexer holds, and the block count of
+    /// each rank's attached cache owner (KVCR instance). Experimental: plugins read them through
+    /// the worker-selection stage's `experimental::resident_blocks` module, and the host rejects
+    /// a policy that declares it without [`Self::CACHE`], because the counts come from the
+    /// indexer that `CACHE` starts.
+    pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
+    /// Request live frontend-local decode progress in a picker. Experimental: plugins read
+    /// it through `experimental::decode_progress`; the host collects it when declared.
+    pub const DECODE_PROGRESS: Self = Self(1 << 4);
     /// Request each row's active request count, read through the worker-selection stage's
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
     /// receive nothing.
@@ -31,10 +40,24 @@ impl WorkerInputs {
     // TODO(v1.9): Remove this alias.
     #[deprecated(since = "1.7.0", note = "use `WorkerInputs::ACTIVE_REQUESTS`")]
     pub const OCCUPANCY: Self = Self::ACTIVE_REQUESTS;
-    /// Request the KV prefix each worker could fetch from another worker or cache.
-    pub const KV_TRANSFER: Self = Self(1 << 6);
-    /// Every optional column but the fetch column, which only scorers may declare.
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
+    /// Request each worker's KV copy offer: the prefix it could copy from another worker or
+    /// cache owner.
+    ///
+    /// Which plugin kinds receive each group:
+    ///
+    /// | Group | Filters | Scorers | Pickers | Hint policies |
+    /// | --- | --- | --- | --- | --- |
+    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
+    /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
+    /// | `KV_COPY` | No | Yes | No | The booked worker's copy source |
+    ///
+    /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
+    /// booking's committed copy, which the role's `Commitments::KV_COPY` hint policy sends.
+    pub const KV_COPY: Self = Self(1 << 6);
+    /// Previous name of [`Self::KV_COPY`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
+    pub const KV_TRANSFER: Self = Self::KV_COPY;
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {
@@ -42,11 +65,11 @@ impl WorkerInputs {
     }
 
     /// Whether a policy reads the KV index: its overlaps (`CACHE`) or the
-    /// prefixes workers could fetch (`KV_TRANSFER`). Each component still reads
+    /// prefixes workers could copy (`KV_COPY`). Each component still reads
     /// only the inputs it declares.
     #[inline]
     pub const fn reads_kv_index(self) -> bool {
-        self.contains(Self::CACHE) || self.contains(Self::KV_TRANSFER)
+        self.contains(Self::CACHE) || self.contains(Self::KV_COPY)
     }
 
     /// The groups in `self` that are not in `other`.

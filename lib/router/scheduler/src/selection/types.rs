@@ -16,8 +16,8 @@ use crate::kv_hints::{
 };
 use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::{RoutingConstraints, WorkerConfigLike};
+use crate::types::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
 pub use crate::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-use crate::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
@@ -49,6 +49,9 @@ pub struct SelectionWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    /// Host-pinned capacity, in KV blocks, of each rank's attached cache owner (KVCR instance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
     pub is_eagle: Option<bool>,
     #[serde(default)]
@@ -92,12 +95,12 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         self.total_kv_blocks
     }
 
-    fn taints(&self) -> &HashSet<String> {
-        &self.taints
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
+    fn taints(&self) -> &HashSet<String> {
+        &self.taints
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -110,10 +113,6 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 
     fn kv_hint_transfer_metadata_for_dp_rank(
@@ -160,6 +159,8 @@ pub struct WorkerCatalogRecord {
     pub data_parallel_size: Option<u32>,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
     pub is_eagle: Option<bool>,
     #[serde(default)]
@@ -199,6 +200,7 @@ impl WorkerCatalogRecord {
             data_parallel_size: req.data_parallel_size,
             max_num_batched_tokens: req.max_num_batched_tokens,
             total_kv_blocks: req.total_kv_blocks,
+            cache_owner_capacity_blocks: req.cache_owner_capacity_blocks,
             stable_routing_id: req.stable_routing_id,
             is_eagle: req.is_eagle,
             taints: req.taints,
@@ -239,6 +241,7 @@ impl WorkerCatalogRecord {
             data_parallel_size: self.dp_size(),
             max_num_batched_tokens: self.max_num_batched_tokens,
             total_kv_blocks: self.total_kv_blocks,
+            cache_owner_capacity_blocks: self.cache_owner_capacity_blocks,
             stable_routing_id: self.stable_routing_id.clone(),
             is_eagle: self.is_eagle,
             taints: self.taints.clone(),
@@ -301,6 +304,7 @@ impl Default for WorkerRequest {
             data_parallel_size: None,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             stable_routing_id: None,
             is_eagle: None,
             taints: HashSet::new(),
@@ -333,6 +337,8 @@ pub struct WorkerRequest {
     pub data_parallel_size: Option<u32>,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    /// Host-pinned capacity, in KV blocks, of each rank's attached cache owner (KVCR instance).
+    pub cache_owner_capacity_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
     #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
@@ -804,9 +810,9 @@ pub struct SelectResponse {
     /// selections (`SelectRequest::advisory`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_load: Option<SelectionWorkerLoad>,
-    /// Source the chosen worker can fetch a longer cached prefix from. Present
-    /// only for bookings when the partition has router-hint-capable workers,
-    /// the indexer can retain the matched chain, and a better source exists.
+    /// The KV hint for a booking: the role's hint policies' actions in the
+    /// router's envelope. Present only for bookings to a worker that
+    /// advertises `router_hint`, when some policy returned an action.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hint: Option<KvHint>,
 }
@@ -834,6 +840,10 @@ pub struct ReservationResponse {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
+    /// The KV hint composed for a reservation that replays a selection; omitted when its hint
+    /// policies added no action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_hint: Option<KvHint>,
 }
 
 #[derive(Debug, Serialize)]
