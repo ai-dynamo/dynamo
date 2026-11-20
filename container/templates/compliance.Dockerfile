@@ -161,8 +161,10 @@ RUN python3 -m compliance.scan_codecs \
 #
 # Single FROM-scratch stage exposing the unified compliance tree for CI
 # extraction (one `-compliance` artifact): flat NOTICES-<Eco>.txt + the unified
-# osrb-deps.csv (with Notes) + osrb.cdx.json (delta CycloneDX). Export is bounded
-# by these files' size (a few MB) regardless of runtime image size.
+# osrb-deps.csv (with Notes) + osrb.cdx.json (delta CycloneDX) + THIRD-PARTY.txt.
+# Export is bounded by these files' size (several MB; THIRD-PARTY.txt
+# repeats the NOTICES and adds base Debian copyright files) regardless of
+# runtime image size.
 
 FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /

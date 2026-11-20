@@ -217,7 +217,7 @@ def _base_image_label(sbom_path: Path) -> str:
     manifest = sbom_path.parent / "manifest.json"
     try:
         entries = json.loads(manifest.read_text(encoding="utf-8")).get("entries", [])
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return sbom_path.name
     for entry in entries:
         if entry.get("baseline_sbom") == sbom_path.name:
@@ -253,7 +253,7 @@ def load_base_components(
             ident = lic.get("id") or lic.get("name")
             if not ident and entry.get("expression"):
                 ident = entry["expression"]
-            if ident and re.search(r" (AND|OR|WITH) ", ident):
+            if ident and re.search(r" (AND|OR|WITH) ", ident, re.IGNORECASE):
                 ident = f"({ident})"
             # syft names an unidentified license file by its content hash.
             if ident and not ident.startswith("sha256:") and ident not in ids:
@@ -315,7 +315,9 @@ def render_base_section(
         parts.append("\n")
         for part in _split_top_level_and(c.spdx):
             # A bare SBOM license name such as "Apache 2.0" is one identifier.
-            is_expr = part.startswith("(") or re.search(r" (OR|WITH) ", part)
+            is_expr = part.startswith("(") or re.search(
+                r" (OR|WITH) ", part, re.IGNORECASE
+            )
             license_ids.update(_spdx_ids(part) if is_expr else [part])
     license_ids -= {NOASSERTION, UNKNOWN}
     parts.append("# License texts\n\n")
