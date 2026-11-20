@@ -193,14 +193,17 @@ BASE IMAGE — {image}
 {rule}
 
 The packages below come from the base image this container is built on, as
-recorded in its baseline SBOM ({sbom}). When this image's Debian packages were
-scanned, only the base Debian packages still installed are listed, each with
-its own copyright file. Other entries are listed as the base image publishes
-them, so a package the Dynamo build removes from the base may still appear.
-The canonical text of every SPDX license named below follows the list, once
-per license.
+recorded in its baseline SBOM ({sbom}). {debs}Entries are otherwise listed as
+the base image publishes them, so a package the Dynamo build removes from the
+base may still appear. Canonical SPDX license texts follow the list, once per
+license.
 
 """
+
+_BASE_DEBS_FILTERED = (
+    "Debian packages are limited to those still installed in this image, each "
+    "with its own copyright file. "
+)
 
 # Placeholder for a base-image component whose SBOM entry declares no license.
 NOASSERTION = "NOASSERTION"
@@ -246,7 +249,9 @@ def load_base_components(
             lic = entry.get("license") or {}
             ident = lic.get("id") or lic.get("name")
             if not ident and entry.get("expression"):
-                ident = f"({entry['expression']})"
+                ident = entry["expression"]
+            if ident and re.search(r" (AND|OR|WITH) ", ident):
+                ident = f"({ident})"
             # syft names an unidentified license file by its content hash.
             if ident and not ident.startswith("sha256:") and ident not in ids:
                 ids.append(ident)
@@ -286,7 +291,9 @@ def _split_top_level_and(expr: str) -> list[str]:
     return [p for p in parts if p]
 
 
-def render_base_section(sbom_path: Path, components: list[Component]) -> str:
+def render_base_section(
+    sbom_path: Path, components: list[Component], debs_filtered: bool = False
+) -> str:
     """Render the base-image section of THIRD-PARTY.txt."""
     image = _base_image_label(sbom_path)
     parts = [
@@ -294,6 +301,7 @@ def render_base_section(sbom_path: Path, components: list[Component]) -> str:
             image=image,
             rule="=" * len(f"BASE IMAGE — {image}"),
             sbom=sbom_path.name,
+            debs=_BASE_DEBS_FILTERED if debs_filtered else "",
         )
     ]
     license_ids: set[str] = set()
@@ -306,7 +314,7 @@ def render_base_section(sbom_path: Path, components: list[Component]) -> str:
             # A bare SBOM license name such as "Apache 2.0" is one identifier.
             is_expr = part.startswith("(") or re.search(r" (OR|WITH) ", part)
             license_ids.update(_spdx_ids(part) if is_expr else [part])
-    license_ids.discard(NOASSERTION)
+    license_ids -= {NOASSERTION, UNKNOWN}
     parts.append("# License texts\n\n")
     missing: list[str] = []
     emitted: set[str] = set()
@@ -348,7 +356,8 @@ def write_third_party(
             parts.append(notices.read_text(encoding="utf-8").rstrip() + "\n\n")
     if base_sbom is not None:
         base = load_base_components(base_sbom, shipped_debs, dpkg_root)
-        parts.append(render_base_section(base_sbom, base).rstrip() + "\n")
+        section = render_base_section(base_sbom, base, shipped_debs is not None)
+        parts.append(section.rstrip() + "\n")
     path = output_dir / "THIRD-PARTY.txt"
     path.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")
     return path

@@ -52,6 +52,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
                 {"expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception"},
                 {"license": {"name": "Odd)License"}},
                 {"license": {"name": "MIT OR Zlib"}},
+                {"license": {"name": "UNKNOWN"}},
             ],
         },
         {
@@ -146,6 +147,10 @@ def test_base_components_parsed(tmp_path: Path) -> None:
         "zlib1g",
     ]
     assert comps["libb"].spdx == "MIT License AND Apache 2.0"
+    assert comps["libexpr"].spdx == (
+        "(Apache-2.0 AND Apache-2.0 WITH LLVM-exception) AND Odd)License"
+        " AND (MIT OR Zlib) AND UNKNOWN"
+    )
     assert comps["libnolicense"].spdx == NOASSERTION
 
 
@@ -219,18 +224,27 @@ def test_main_go_only_keeps_every_base_deb(tmp_path: Path) -> None:
     assert text.index("## github.com/example/mod v1.2.3") < text.index("BASE IMAGE")
     assert "## zlib1g 1.3" in text
     assert "## libremoved 3.0" in text
+    assert "limited to those still installed" not in text
 
 
 def test_main_dpkg_limits_base_debs_to_shipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     shipped = [Component(ecosystem="dpkg", name="zlib1g", version="1.3", spdx="Zlib")]
-    monkeypatch.setattr(dpkg, "collect_components", lambda root=None: shipped)
+    calls: list[Path] = []
+
+    def collect(root: Path) -> list[Component]:
+        calls.append(root)
+        return shipped
+
+    monkeypatch.setattr(dpkg, "collect_components", collect)
 
     text = _run_main(tmp_path, "go,dpkg")
 
+    assert len(calls) == 1
     assert "## zlib1g 1.3" in text
     assert "## libremoved 3.0" not in text
+    assert "limited to those still installed" in text
 
 
 def test_main_dpkg_without_packages_keeps_every_base_deb(
