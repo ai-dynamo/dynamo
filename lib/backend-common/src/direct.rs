@@ -60,6 +60,11 @@ pub struct DirectEngineSpec {
 
 /// Builds the engine implementation that talks to one listed engine; the same
 /// implementation a sidecar for that engine runs.
+///
+/// The host never cancels or times out `LLMEngine::start`, as `Worker` does
+/// not: the engine must bound it itself (the sidecar transports return
+/// `startup_timeout` errors). A start that never returns leaves its engine
+/// unregistered and never probed again.
 pub type DirectEngineFactory =
     Arc<dyn Fn(&DirectEngineSpec) -> Result<Arc<dyn LLMEngine>, DynamoError> + Send + Sync>;
 
