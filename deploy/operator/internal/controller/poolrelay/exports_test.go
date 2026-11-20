@@ -1408,6 +1408,14 @@ func TestARelayStaysAsItIsWhileItsClusterIDIsUnavailable(t *testing.T) {
 	g.Expect(relay.Status.Endpoint).To(gomega.Equal(running.Endpoint))
 	g.Expect(relay.Status.AvailableReplicas).To(gomega.Equal(running.AvailableReplicas))
 
+	t.Log("The held Relay reports the listeners that its Deployment still has")
+	held.Status.AvailableReplicas = 1
+	g.Expect(fakeClient.Status().Update(ctx, held)).To(gomega.Succeed())
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(fakeClient.Get(ctx, request.NamespacedName, relay)).To(gomega.Succeed())
+	g.Expect(relay.Status.AvailableReplicas).To(gomega.Equal(int32(1)))
+
 	t.Log("Give the cluster the ID west: the Relay runs under it")
 	g.Expect(fakeClient.Create(ctx, newClusterIDProperty("west"))).To(gomega.Succeed())
 	_, err = r.Reconcile(ctx, request)

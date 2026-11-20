@@ -429,18 +429,25 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 }
 
 // reportHeld reports a Relay that the controller leaves as it is while a setting
-// that it needs is missing. The Relay's resources keep running, so its endpoint
-// and available replicas stay as they were.
+// that it needs is missing. Its resources keep running, so the status shows what
+// the cache holds of its Service and Deployment.
 func (r *reconciler) reportHeld(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
-	before := relay.DeepCopy()
-	meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
-		Type: "Ready", Status: metav1.ConditionFalse, Reason: reason,
-		Message: truncate(problem.Error(), maxConditionMessage), ObservedGeneration: relay.Generation,
-	})
-	if equality.Semantic.DeepEqual(before.Status, relay.Status) {
-		return nil
+	// The Service gives the endpoint, and the Deployment the available replicas.
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	endpoint, available := "", int32(0)
+	var service corev1.Service
+	if err := r.Get(ctx, key, &service); err == nil && metav1.IsControlledBy(&service, relay) {
+		endpoint = key.Name
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
 	}
-	return r.Status().Update(ctx, relay)
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, key, &deployment); err == nil && metav1.IsControlledBy(&deployment, relay) {
+		available = deployment.Status.AvailableReplicas
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.setStatus(ctx, relay, false, reason, truncate(problem.Error(), maxConditionMessage), endpoint, available, false)
 }
 
 // An apply error makes the current Relay condition unready without claiming
