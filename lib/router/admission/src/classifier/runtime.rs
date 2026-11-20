@@ -7,8 +7,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(test)]
-use async_trait::async_trait;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
@@ -18,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
-use super::WorkerView;
+use super::{
+    AbortCause, ClassificationOverrides, ClassifierError, ClassifyEvent, ClassifyRequest,
+    RequestClassifier, RequestProgress, RequestProgressUpdater, WorkerView,
+};
 
 /// Why classification did not produce a classified request. The kernel maps each variant
 /// to its own error; the stage never names the kernel's.
@@ -45,11 +46,6 @@ pub enum ClassificationError {
 
 static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-use super::{
-    AbortCause, ClassificationOverrides, ClassifierError, ClassifyEvent, ClassifyRequest,
-    RequestClassifier, RequestProgress, RequestProgressUpdater,
-};
 
 /// One live lifecycle's bookkeeping. `generation` fences `classify_with`
 /// against a lifecycle that released this request id and a new one that
@@ -384,6 +380,7 @@ enum LifecyclePhase {
     Responding,
     Terminal,
 }
+
 pub struct RequestLifecycle {
     runtime: Arc<RequestClassifierRuntime>,
     request_id: String,
@@ -403,6 +400,7 @@ impl std::fmt::Debug for RequestLifecycle {
             .finish()
     }
 }
+
 impl RequestLifecycle {
     pub fn selected(&mut self, worker: WorkerWithDpRank) {
         if self.phase == LifecyclePhase::Registered {
@@ -536,15 +534,17 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
 
-    use tokio::sync::{Notify, mpsc};
-    use tokio_util::sync::CancellationToken;
+    use async_trait::async_trait;
+    use tokio::time::Instant;
 
     use super::*;
-    use crate::classifier::{ClassifierError, NoWorkers, WorkerView};
-    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use crate::classifier::NoWorkers;
+
+    fn request(input_tokens: usize, initial_cached_tokens: usize) -> ClassifyRequest {
+        ClassifyRequest::with_timing(input_tokens, initial_cached_tokens, Instant::now())
+    }
 
     struct PassThrough;
 
@@ -578,7 +578,7 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
+            .classify_with(request(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -587,7 +587,7 @@ mod tests {
                 if message == "synchronous classifier panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0), &NoWorkers)
+            .classify_with(request(2, 0), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -615,7 +615,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(FailingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
+            .classify_with(request(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -633,7 +633,7 @@ mod tests {
             _request: ClassifyRequest,
             _workers: &dyn WorkerView,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-            Ok(ClassifyRequest::new(2, 0))
+            Ok(request(2, 0))
         }
     }
 
@@ -643,7 +643,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(ReplacingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
+            .classify_with(request(1, 0), &NoWorkers)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -672,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_classifier_returns_the_same_request_without_overrides() {
-        let request = ClassifyRequest::new(128, 32)
+        let request = request(128, 32)
             .with_request_id("request-1")
             .with_initial_policy_class("latency");
 
@@ -714,7 +714,7 @@ mod tests {
         let lifecycle = runtime.begin_request("off-runtime-drop").unwrap();
         runtime
             .classify_with(
-                ClassifyRequest::new(1, 0).with_request_id("off-runtime-drop"),
+                request(1, 0).with_request_id("off-runtime-drop"),
                 &NoWorkers,
             )
             .await
@@ -755,10 +755,7 @@ mod tests {
         assert_eq!(runtime.cached_overrides("request-1"), Some(false));
 
         runtime
-            .classify_with(
-                ClassifyRequest::new(10, 10).with_request_id("request-1"),
-                &NoWorkers,
-            )
+            .classify_with(request(10, 10).with_request_id("request-1"), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(runtime.cached_overrides("request-1"), Some(true));
@@ -794,12 +791,8 @@ mod tests {
         let runtime =
             RequestClassifierRuntime::new(Box::new(SetsBackendPriority), CancellationToken::new());
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
-        let classify = || {
-            runtime.classify_with(
-                ClassifyRequest::new(10, 0).with_request_id("request-1"),
-                &NoWorkers,
-            )
-        };
+        let classify =
+            || runtime.classify_with(request(10, 0).with_request_id("request-1"), &NoWorkers);
 
         assert_eq!(classify().await.unwrap().backend_priority(), Some(-250));
         lifecycle.prepare_retry();
@@ -813,10 +806,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(PassThrough), CancellationToken::new());
         let _lifecycle = runtime.begin_request("request-1").unwrap();
         let classified = runtime
-            .classify_with(
-                ClassifyRequest::new(10, 0).with_request_id("request-1"),
-                &NoWorkers,
-            )
+            .classify_with(request(10, 0).with_request_id("request-1"), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(classified.backend_priority(), None);
@@ -834,10 +824,7 @@ mod tests {
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
 
         let first = runtime
-            .classify_with(
-                ClassifyRequest::new(10, 10).with_request_id("request-1"),
-                &NoWorkers,
-            )
+            .classify_with(request(10, 10).with_request_id("request-1"), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(first.progress().context_tokens(), 10);
@@ -846,10 +833,7 @@ mod tests {
         assert_eq!(first.progress().context_tokens(), 25);
         lifecycle.prepare_retry();
         let retry = runtime
-            .classify_with(
-                ClassifyRequest::new(20, 20).with_request_id("request-1"),
-                &NoWorkers,
-            )
+            .classify_with(request(20, 20).with_request_id("request-1"), &NoWorkers)
             .await
             .unwrap();
 
@@ -870,10 +854,7 @@ mod tests {
 
         let mut next_lifecycle = runtime.begin_request("request-1").unwrap();
         let next = runtime
-            .classify_with(
-                ClassifyRequest::new(3, 0).with_request_id("request-1"),
-                &NoWorkers,
-            )
+            .classify_with(request(3, 0).with_request_id("request-1"), &NoWorkers)
             .await
             .unwrap();
         next_lifecycle.observe_context_tokens(3);
@@ -900,10 +881,7 @@ mod tests {
         );
 
         let result = runtime
-            .classify_with(
-                ClassifyRequest::new(4, 0).with_request_id("ghost"),
-                &NoWorkers,
-            )
+            .classify_with(request(4, 0).with_request_id("ghost"), &NoWorkers)
             .await;
 
         assert!(matches!(
@@ -924,10 +902,8 @@ mod tests {
         );
         let lifecycle = runtime.begin_request("reused").unwrap();
         let guard = runtime.classifier.lock().await;
-        let mut stale = Box::pin(runtime.classify_with(
-            ClassifyRequest::new(1, 0).with_request_id("reused"),
-            &NoWorkers,
-        ));
+        let mut stale =
+            Box::pin(runtime.classify_with(request(1, 0).with_request_id("reused"), &NoWorkers));
 
         // Poll once to guarantee the old call is waiting for the lock, then
         // replace its lifecycle before the plugin can be invoked.
@@ -944,10 +920,7 @@ mod tests {
 
         // The replacement must reach the plugin, without stale overrides.
         let replacement = runtime
-            .classify_with(
-                ClassifyRequest::new(100, 0).with_request_id("reused"),
-                &NoWorkers,
-            )
+            .classify_with(request(100, 0).with_request_id("reused"), &NoWorkers)
             .await
             .unwrap();
         assert_eq!(replacement.isl_tokens(), 100);
@@ -972,10 +945,7 @@ mod tests {
         let ended_runtime = Arc::clone(&runtime);
         let ended = tokio::spawn(async move {
             ended_runtime
-                .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("ended"),
-                    &NoWorkers,
-                )
+                .classify_with(request(1, 0).with_request_id("ended"), &NoWorkers)
                 .await
         });
         tokio::task::yield_now().await;
@@ -1033,10 +1003,7 @@ mod tests {
         let worker = WorkerWithDpRank::new(7, 2);
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
         runtime
-            .classify_with(
-                ClassifyRequest::new(40, 0).with_request_id("request-1"),
-                &NoWorkers,
-            )
+            .classify_with(request(40, 0).with_request_id("request-1"), &NoWorkers)
             .await
             .unwrap();
 
@@ -1186,10 +1153,7 @@ mod tests {
         let classify_runtime = Arc::clone(&runtime);
         let classify = tokio::spawn(async move {
             classify_runtime
-                .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("reused"),
-                    &NoWorkers,
-                )
+                .classify_with(request(1, 0).with_request_id("reused"), &NoWorkers)
                 .await
         });
         tokio::task::yield_now().await;

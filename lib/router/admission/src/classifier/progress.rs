@@ -43,6 +43,7 @@ impl RequestProgressUpdater {
             .fetch_max(context_tokens, Ordering::Relaxed);
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

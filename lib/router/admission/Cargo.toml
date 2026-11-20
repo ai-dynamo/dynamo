@@ -16,9 +16,7 @@ readme = "README.md"
 [features]
 default = []
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
-testing = ["dynamo-router-protocol/testing"]
-# Test inputs for dependent crates' benchmarks.
-bench = []
+testing = []
 
 [dependencies]
 dynamo-router-protocol = { workspace = true }
@@ -37,5 +35,4 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-dynamo-router-protocol = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

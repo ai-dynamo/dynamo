@@ -20,7 +20,7 @@
 
 mod classifier;
 pub mod host;
-mod placement;
+mod lane_key;
 mod profile;
 mod queue;
 
@@ -30,7 +30,7 @@ pub use classifier::{
     RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
     RequestProgress, RequestProgressUpdater, WorkerCacheView, WorkerLoadView, WorkerView,
 };
-pub use placement::LaneKey;
+pub use lane_key::LaneKey;
 pub use profile::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,
