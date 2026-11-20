@@ -13,6 +13,7 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import numpy as np
@@ -26,6 +27,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
@@ -143,9 +145,6 @@ def _make_handler(
         enable_multimodal=config.enable_multimodal,
         use_unified_vision_chunk=False,
     )
-    # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
-    # registers per-request deferred-abort guards here.
-    handler._deferred_aborts = {}
     handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
     return handler
 
@@ -300,52 +299,6 @@ class TestReasoningParserForwarding:
             {"chat_template_kwargs": {"reasoning_effort": "high"}},
         )
 
-    def test_generate_signature_support_is_cached(self, monkeypatch):
-        class EngineClient:
-            def generate(
-                self,
-                prompt,
-                sampling_params,
-                request_id,
-                *,
-                reasoning_ended=None,
-                reasoning_parser_kwargs=None,
-            ):
-                pass
-
-        engine_client = EngineClient()
-        signature_calls = 0
-        original_signature = mod.inspect.signature
-
-        def counting_signature(obj):
-            nonlocal signature_calls
-            signature_calls += 1
-            return original_signature(obj)
-
-        monkeypatch.setattr(mod.inspect, "signature", counting_signature)
-
-        assert mod._engine_generate_reasoning_kwargs(
-            engine_client,
-            False,
-            {"chat_template_kwargs": {"reasoning_effort": "high"}},
-        ) == {
-            "reasoning_ended": False,
-            "reasoning_parser_kwargs": {
-                "chat_template_kwargs": {"reasoning_effort": "high"}
-            },
-        }
-        assert mod._engine_generate_reasoning_kwargs(
-            engine_client,
-            True,
-            {"chat_template_kwargs": {"reasoning_effort": "low"}},
-        ) == {
-            "reasoning_ended": True,
-            "reasoning_parser_kwargs": {
-                "chat_template_kwargs": {"reasoning_effort": "low"}
-            },
-        }
-        assert signature_calls == 1
-
     @pytest.mark.asyncio
     async def test_generate_tokens_forwards_reasoning_parser_metadata(self):
         from vllm.sampling_params import SamplingParams
@@ -393,46 +346,6 @@ class TestReasoningParserForwarding:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
-
-    @pytest.mark.asyncio
-    async def test_generate_tokens_drops_reasoning_metadata_for_old_vllm(self):
-        from vllm.sampling_params import SamplingParams
-
-        handler = _make_handler()
-        calls = {}
-
-        async def fake_generate(
-            prompt,
-            sampling_params,
-            request_id,
-            *,
-            lora_request=None,
-            data_parallel_rank=None,
-            trace_headers=None,
-            priority=0,
-            session_id=None,
-        ):
-            calls["called"] = True
-            if False:
-                yield None
-
-        handler.engine_client = MagicMock()
-        handler.engine_client.generate = fake_generate
-
-        chunks = []
-        async for chunk in handler.generate_tokens(
-            PatchedTokensPrompt(prompt_token_ids=[1]),
-            SamplingParams(max_tokens=1),
-            "req-1",
-            reasoning_ended=True,
-            reasoning_parser_kwargs={
-                "chat_template_kwargs": {"reasoning_effort": "low"}
-            },
-        ):
-            chunks.append(chunk)
-
-        assert chunks == []
-        assert calls == {"called": True}
 
     @pytest.mark.asyncio
     async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
@@ -943,7 +856,6 @@ def _make_decode_handler(
         enable_multimodal=True,
         use_unified_vision_chunk=False,
     )
-    handler._deferred_aborts = {}
     # Real BaseWorkerHandler.__init__ (patched out above) sets this; the
     # aggregated branch in _generate_token_mode reads it, so mirror the default.
     handler._custom_encoder = None
@@ -1021,6 +933,82 @@ async def test_engine_data_uses_effective_engine_prompt(
         assert metadata["completion_logprobs"] == pytest.approx([-0.1, -0.2])
     else:
         assert "engine_data" not in chunks[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("case", ["grammar_rejected", "engine_error"])
+async def test_generate_engine_failure_status(case):
+    """A structured-output grammar vLLM cannot compile is a client error (400),
+    not a 500. Since vLLM 0.33, AsyncLLM.generate() raises it as
+    VLLMValidationError; vLLM 0.31/0.32 dropped the reason and finished the
+    request with a bare finish_reason="error". That bare "error" is now only
+    vLLM's internal request failure (KV load, encoder cache, ...), which vLLM
+    itself maps to 500, so it stays the terminal error chunk."""
+    from vllm.exceptions import VLLMValidationError
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": {},
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[1, 2, 3])
+    )
+    # The message vLLM 0.33's scheduler builds for a failed grammar compile.
+    error = VLLMValidationError(
+        "Invalid structured outputs: regex lookahead is not supported"
+    )
+
+    async def fake_generate(*args, **kwargs):
+        if case == "grammar_rejected":
+            raise error
+        yield RequestOutput(
+            request_id="req-engine-failure",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="error",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    generate = handler.generate(request, MagicMock())
+    if case == "engine_error":
+        chunks = [chunk async for chunk in generate]
+        assert chunks[-1]["finish_reason"] == "error"
+        return
+
+    chunks = []
+    # HttpError(400) today; InvalidArgument once the 400's reason is made public.
+    with pytest.raises((HttpError, mod.InvalidArgument)) as exc_info:
+        async for chunk in generate:
+            chunks.append(chunk)
+    assert getattr(exc_info.value, "code", 400) == 400
+    assert str(error) in str(exc_info.value)
+    assert exc_info.value.__cause__ is error
+    assert chunks == []
 
 
 @pytest.mark.asyncio
@@ -1755,55 +1743,6 @@ class TestDecodeWorkerMultimodalBranching:
             async for _ in handler._generate_token_mode(request, context, "req-1"):
                 pass
 
-    async def test_decode_only_bypass_annotation_text_mode_runs_as_agg(self):
-        """Text-mode conditional-disagg bypass is not treated as decode-only."""
-        handler = _make_decode_handler(disaggregation_mode="DECODE")
-        handler.input_param_manager = MagicMock()
-        handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
-        handler.engine_client = MagicMock()
-        handler.default_sampling_params = {}
-
-        async def _empty_generate(*args, **kwargs):
-            if False:
-                yield None
-
-        handler.engine_client.generate = _empty_generate
-
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context = MagicMock()
-        context.async_killed_or_stopped.return_value = killed_future
-        context.trace_headers.return_value = {}
-
-        decode_only_values = []
-
-        @asynccontextmanager
-        async def _capture_guard(
-            engine_client,
-            request_id,
-            is_decode_only,
-            registry=None,
-            on_engine_dead=None,
-        ):
-            decode_only_values.append(is_decode_only)
-            yield None
-
-        request = {
-            "token_ids": [1, 2, 3],
-            "sampling_options": {},
-            "stop_conditions": {},
-            "output_options": {},
-            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
-        }
-
-        with patch.object(mod, "_deferred_abort_guard", _capture_guard):
-            chunks = []
-            async for chunk in handler._generate_text_mode(request, context, "req-1"):
-                chunks.append(chunk)
-
-        assert chunks == []
-        assert decode_only_values == [False]
-
     @pytest.mark.parametrize(
         "mm_processor_kwargs",
         [None, {"use_audio_in_video": True}],
@@ -2204,125 +2143,20 @@ async def test_decode_reports_cache_hit_only_without_transferred_kv(
     assert seen_report_flags == [expected_report]
 
 
-# ── Deferred abort (disagg decode KV-transfer safety) tests ────────
+# ── Abort monitor tests ────────
 
 
-class TestDeferredAbort:
-    """Tests for ``_DeferredAbort`` used in disaggregated decode mode.
+class TestAbortMonitor:
+    """Tests for ``_monitor_abort`` / ``_abort_monitor``.
 
-    Purpose: when a request is cancelled before the decode worker has
-    received the first token, the underlying NIXL KV transfer may still be
-    in flight. Calling ``engine_client.abort(request_id)`` at that moment
-    can crash EngineCore. ``_DeferredAbort`` delays the real abort call
-    until the first engine output has been signalled.
+    Client cancellation calls ``engine_client.abort`` immediately in every
+    mode, including DECODE before the first output.
     """
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_abort_before_first_token_does_not_fire_immediately(self):
-        """abort() before first token should NOT call engine_client.abort yet.
-
-        abort() awaits the deferred task to completion so the engine abort
-        cannot be dropped under concurrent cancellation, so spawn it as a
-        task to observe the mid-flight state, then use close() to cancel the
-        parked waiter and let abort() return.
-        """
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-1")
-
-        # abort() before first token returns promptly; the real abort is
-        # deferred to a background task and engine.abort is NOT called yet.
-        await asyncio.wait_for(guard.abort(), timeout=1.0)
-        engine_client.abort.assert_not_called()
-        assert guard._abort_task is not None
-        assert not guard._abort_task.done()
-
-        # Cleanup: close() cancels the parked deferred waiter without firing abort.
-        await guard.close()
-        engine_client.abort.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_abort_after_first_token_fires_immediately(self):
-        """abort() after signal_first_token should call engine_client.abort."""
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-2")
-
-        guard.signal_first_token()
-        await guard.abort()
-
-        engine_client.abort.assert_awaited_once_with("req-2")
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_deferred_background_task_fires_after_first_token(self):
-        """Background task should call abort once first token is signalled."""
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-3")
-
-        # abort() returns promptly (deferred); engine.abort not called yet.
-        await asyncio.wait_for(guard.abort(), timeout=1.0)
-        engine_client.abort.assert_not_called()
-        assert guard._abort_task is not None
-        assert not guard._abort_task.done()
-
-        # Signalling first token wakes the deferred waiter, which runs abort().
-        guard.signal_first_token()
-        await guard._abort_task
-
-        engine_client.abort.assert_awaited_once_with("req-3")
-
-    @pytest.mark.asyncio
-    async def test_signal_first_token_is_idempotent(self):
-        """Calling signal_first_token multiple times is safe."""
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-4")
-
-        guard.signal_first_token()
-        guard.signal_first_token()
-        await guard.abort()
-
-        engine_client.abort.assert_awaited_once_with("req-4")
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_monitor_abort_routes_through_guard(self):
-        """_monitor_abort should call guard.abort() instead of engine_client.abort()."""
-        handler = _make_handler()
-        handler.engine_client = MagicMock()
-        handler.engine_client.abort = AsyncMock()
-        handler.shutdown_event = None
-
-        killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
-        context = MagicMock()
-        context.async_killed_or_stopped.return_value = killed_future
-
-        guard = mod._DeferredAbort(handler.engine_client, "req-5")
-        # _monitor_abort awaits guard.abort() to completion. With first_token
-        # not yet received, that await blocks on the deferred waiter; spawn it
-        # as a task to observe state and then signal first_token to unblock.
-        monitor_task = asyncio.create_task(
-            handler._monitor_abort(
-                context, "req-5", is_prefill=False, abort_guard=guard
-            )
-        )
-        await asyncio.sleep(0)
-        handler.engine_client.abort.assert_not_called()
-        assert not monitor_task.done()
-
-        guard.signal_first_token()
-        await monitor_task
-
-        handler.engine_client.abort.assert_awaited_once_with("req-5")
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_monitor_abort_direct_when_no_guard(self):
-        """Without a guard, _monitor_abort should call engine_client.abort directly."""
+    async def test_monitor_abort_calls_engine_abort(self):
+        """_monitor_abort calls engine_client.abort directly on cancellation."""
         handler = _make_handler()
         handler.engine_client = MagicMock()
         handler.engine_client.abort = AsyncMock()
@@ -2401,104 +2235,21 @@ class TestDeferredAbort:
         assert not handler.shutdown_event._waiters
         assert not gather_entered.is_set()
 
-    # close() cleanup tests: case 1b safety
-
-    @pytest.mark.asyncio
-    async def test_close_without_pending_abort_is_noop(self):
-        """close() with no deferred abort must not call engine_client.abort."""
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-close-1")
-
-        await guard.close()
-
-        engine_client.abort.assert_not_called()
-
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_close_cancels_waiter_without_abort_when_no_first_token(self):
-        """Case 1b: close() must cancel the waiter without firing abort.
-
-        The abort guard exists to avoid calling engine_client.abort before the
-        first engine output arrives (unsafe during NIXL KV transfer). The
-        cleanup path must preserve that invariant.
-        """
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-close-1b")
-
-        # abort() awaits the deferred waiter, so spawn as a task to observe
-        # the parked state.
-        abort_task = asyncio.create_task(guard.abort())
-        await asyncio.sleep(0)
-        engine_client.abort.assert_not_called()
-        assert guard._abort_task is not None
-        assert not guard._abort_task.done()
-
-        await guard.close()
-        await abort_task
-
-        engine_client.abort.assert_not_called()
-        assert guard._abort_task.done()
-        assert guard._abort_task.cancelled()
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_close_awaits_deferred_abort_when_first_token_received(self):
-        """close() after first token must let the now-safe deferred abort finish."""
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-close-first-tok")
-
-        abort_task = asyncio.create_task(guard.abort())
-        await asyncio.sleep(0)
-        engine_client.abort.assert_not_called()
-
-        # Signal first token; the deferred waiter wakes and runs engine.abort,
-        # which unblocks abort_task. close() then observes the completed task.
-        guard.signal_first_token()
-        await abort_task
-        await guard.close()
-
-        engine_client.abort.assert_awaited_once_with("req-close-first-tok")
-        assert guard._abort_task is not None
-        assert guard._abort_task.done()
-        assert not guard._abort_task.cancelled()
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_close_observes_already_completed_deferred_abort(self):
-        """close() is safe when the background waiter already ran to completion."""
-        engine_client = MagicMock()
-        engine_client.abort = AsyncMock()
-        guard = mod._DeferredAbort(engine_client, "req-close-done")
-
-        await asyncio.wait_for(guard.abort(), timeout=1.0)
-        guard.signal_first_token()
-        await guard._abort_task
-
-        assert guard._abort_task is not None
-        assert guard._abort_task.done()
-        engine_client.abort.assert_awaited_once_with("req-close-done")
-
-        # close() must not re-issue abort and must not raise.
-        await guard.close()
-        engine_client.abort.assert_awaited_once_with("req-close-done")
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_generate_token_mode_closes_guard_on_no_output(self):
-        """_generate_token_mode awaits guard cleanup when decode yields nothing.
-
-        Verifies that in decode-only mode, when generate_tokens exits without
-        yielding any output, _generate_token_mode still awaits the deferred
-        abort guard's close() method, and does not call engine_client.abort
-        in the pre-first-token window.
-        """
+    async def test_generate_token_mode_aborts_before_first_token_in_decode_mode(
+        self,
+    ):
+        """A DECODE request whose generator never yields is aborted on cancellation."""
         config = _make_config(disaggregation_mode="DECODE")
         handler = _make_handler(config=config)
         handler.engine_client = MagicMock()
-        handler.engine_client.abort = AsyncMock()
+        aborted = asyncio.Event()
+
+        async def _abort(request_id):
+            aborted.set()
+
+        handler.engine_client.abort = AsyncMock(side_effect=_abort)
         handler.shutdown_event = None
         handler.runtime = MagicMock()
         handler.config = config
@@ -2509,30 +2260,19 @@ class TestDeferredAbort:
         handler._resolve_lora_request = MagicMock(return_value=None)
         handler._build_prompt_from_request = MagicMock(return_value=MagicMock())
 
-        # Capture the guard created inside the handler and wrap close() so
-        # the test can assert that the handler awaited it.
-        created_guards: list[mod._DeferredAbort] = []
-        real_deferred_abort = mod._DeferredAbort
-
-        def _capture(engine_client, request_id, on_engine_dead=None):
-            g = real_deferred_abort(engine_client, request_id, on_engine_dead)
-            g.close = AsyncMock(wraps=g.close)
-            created_guards.append(g)
-            return g
-
         killed_future = asyncio.get_event_loop().create_future()
         killed_future.set_result(None)
         context = MagicMock()
         context.async_killed_or_stopped.return_value = killed_future
 
-        async def _empty_gen(*args, **kwargs):
-            # Decode yields nothing: the case-1b shape.
-            await asyncio.sleep(0)
+        async def _stalled_gen(*args, **kwargs):
+            # No output ever arrives: the KV read is stuck. Only the abort
+            # ends the request.
+            await asyncio.wait_for(aborted.wait(), timeout=2.0)
             if False:
                 yield None
-            return
 
-        handler.generate_tokens = _empty_gen
+        handler.generate_tokens = _stalled_gen
 
         request = {
             "token_ids": [1, 2, 3],
@@ -2544,24 +2284,15 @@ class TestDeferredAbort:
             "model": "test-model",
         }
 
-        with patch.object(mod, "_DeferredAbort", side_effect=_capture):
-            async for _ in handler._generate_token_mode(
-                request, context, "req-decode-1b"
-            ):
-                pass
+        chunks = [
+            chunk
+            async for chunk in handler._generate_token_mode(
+                request, context, "req-decode-stalled"
+            )
+        ]
 
-        assert len(created_guards) == 1
-        guard = created_guards[0]
-
-        for _ in range(5):
-            await asyncio.sleep(0)
-
-        # _generate_token_mode must have awaited guard cleanup, and must not
-        # have called engine_client.abort in the pre-first-token window.
-        guard.close.assert_awaited_once()
-        handler.engine_client.abort.assert_not_called()
-        if guard._abort_task is not None:
-            assert guard._abort_task.done()
+        assert chunks == []
+        handler.engine_client.abort.assert_awaited_once_with("req-decode-stalled")
 
 
 class TestClassifyEmbeddingInput:
@@ -2591,36 +2322,36 @@ class TestClassifyEmbeddingInput:
         assert result == [[1, 2], [3, 4, 5]]
 
     def test_mixed_str_and_int_rejected(self):
-        with pytest.raises(TypeError, match="mixes str and non-str"):
+        with pytest.raises(mod.InvalidArgument, match="mixes str and non-str"):
             mod._classify_embedding_input(["hello", 42])
 
     def test_mixed_int_and_str_rejected(self):
-        with pytest.raises(TypeError, match="mixes int and non-int"):
+        with pytest.raises(mod.InvalidArgument, match="mixes int and non-int"):
             mod._classify_embedding_input([1, "two"])
 
     def test_mixed_list_of_lists_with_str_rejected(self):
-        with pytest.raises(TypeError, match="must be a list of"):
+        with pytest.raises(mod.InvalidArgument, match="must be a list of"):
             mod._classify_embedding_input([[1, 2], "three"])
 
     def test_inner_list_with_non_int_rejected(self):
-        with pytest.raises(TypeError, match="must be a list of"):
+        with pytest.raises(mod.InvalidArgument, match="must be a list of"):
             mod._classify_embedding_input([[1, 2], [3.5, 4]])
 
     def test_bool_is_not_treated_as_int(self):
         # `bool` is a subclass of `int`; token ids must be real ints.
-        with pytest.raises(TypeError):
+        with pytest.raises(mod.InvalidArgument):
             mod._classify_embedding_input([True, False])
 
     def test_empty_list_rejected(self):
-        with pytest.raises(ValueError, match="must be non-empty"):
+        with pytest.raises(mod.InvalidArgument, match="must be non-empty"):
             mod._classify_embedding_input([])
 
     def test_unsupported_top_level_type_rejected(self):
-        with pytest.raises(TypeError, match="Invalid 'input' type"):
+        with pytest.raises(mod.InvalidArgument, match="Invalid 'input' type"):
             mod._classify_embedding_input({"text": "hi"})
 
     def test_unsupported_element_type_rejected(self):
-        with pytest.raises(TypeError, match="Unsupported 'input' element"):
+        with pytest.raises(mod.InvalidArgument, match="Unsupported 'input' element"):
             mod._classify_embedding_input([3.14, 2.71])
 
 
@@ -2812,7 +2543,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler = self._make_embedding_handler()
         context = self._make_context()
 
-        with pytest.raises(ValueError, match="Invalid 'encoding_format' value"):
+        with pytest.raises(
+            mod.InvalidArgument, match="Invalid 'encoding_format' value"
+        ):
             async for _ in handler.generate(
                 {
                     "token_ids": [[11, 12, 13]],
@@ -2995,7 +2728,9 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "add_special_tokens": value,
         }
-        with pytest.raises(TypeError, match="Invalid 'add_special_tokens' type"):
+        with pytest.raises(
+            mod.InvalidArgument, match="Invalid 'add_special_tokens' type"
+        ):
             async for _ in handler.generate(request, context):
                 pass
 
@@ -3028,17 +2763,17 @@ class TestEmbeddingWorkerHandlerCancellation:
         ]
 
     @pytest.mark.parametrize(
-        ("truncate_prompt_tokens", "error_type", "match"),
+        ("truncate_prompt_tokens", "match"),
         [
-            ("2048", TypeError, "Invalid 'truncate_prompt_tokens' type"),
-            (True, TypeError, "Invalid 'truncate_prompt_tokens' type"),
-            (-2, ValueError, "truncate_prompt_tokens must be >= -1"),
+            ("2048", "Invalid 'truncate_prompt_tokens' type"),
+            (True, "Invalid 'truncate_prompt_tokens' type"),
+            (-2, "truncate_prompt_tokens must be >= -1"),
         ],
     )
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_truncate_prompt_tokens_rejects_invalid_values(
-        self, truncate_prompt_tokens, error_type, match
+        self, truncate_prompt_tokens, match
     ):
         """Invalid truncation values fail before the request reaches vLLM."""
         handler = self._make_embedding_handler()
@@ -3049,7 +2784,7 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "truncate_prompt_tokens": truncate_prompt_tokens,
         }
-        with pytest.raises(error_type, match=match):
+        with pytest.raises(mod.InvalidArgument, match=match):
             async for _ in handler.generate(request, context):
                 pass
 
@@ -3107,9 +2842,326 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
 
         request = {"input": ["hello"], "model": "test-model", "dimensions": 2048}
-        with pytest.raises(ValueError, match="exceeds model embedding dimension"):
+        with pytest.raises(
+            mod.InvalidArgument, match="exceeds model embedding dimension"
+        ):
             async for _ in handler.generate(request, context):
                 pass
+
+
+class TestEmbeddingWorkerHandlerChatInput:
+    """Chat-style (``messages``) embedding requests are rendered by vLLM's
+    renderer and the rendered prompts are encoded unchanged, one per
+    conversation."""
+
+    IMAGE_CONVERSATION = [
+        {
+            "role": "document",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+                {"type": "text", "text": "a chart"},
+            ],
+        }
+    ]
+    AUDIO_CONVERSATION = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "AAAA", "format": "wav"},
+                }
+            ],
+        }
+    ]
+
+    def _make_handler(self, custom_jinja_template=None):
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.EmbeddingWorkerHandler(
+                runtime=MagicMock(),
+                engine=MagicMock(),
+                config=MagicMock(
+                    served_model_name="test-model",
+                    custom_jinja_template=custom_jinja_template,
+                ),
+                shutdown_event=None,
+            )
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.engine_client.model_config.multimodal_config = None
+        handler.engine_client.renderer.tokenizer = object()
+        encoded: list = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            encoded.append((prompt, pooling_params))
+            output = MagicMock()
+            output.outputs.data = torch.tensor([float(prompt["index"]), 0.5])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        return handler, encoded
+
+    @staticmethod
+    def _make_context(stopped: Optional[asyncio.Future] = None) -> MagicMock:
+        """Like the real Context, each ``async_killed_or_stopped()`` call
+        returns a new future; the first one is ``stopped`` when given."""
+        loop = asyncio.get_running_loop()
+        first = [stopped] if stopped is not None else []
+        context = MagicMock()
+        context.id.return_value = "test-req"
+        context.async_killed_or_stopped.side_effect = lambda: (
+            first.pop() if first else loop.create_future()
+        )
+        return context
+
+    @staticmethod
+    def _rendered(conversations):
+        # Stand-ins for vLLM's rendered engine inputs; image and audio
+        # placeholders expand to several prompt tokens each.
+        return list(conversations), [
+            {"index": i, "prompt_token_ids": list(range(10 + i))}
+            for i in range(len(conversations))
+        ]
+
+    async def _generate(self, handler, request, context=None):
+        tok_params = object()
+        with (
+            patch(
+                "vllm.entrypoints.pooling.embed.protocol.EmbeddingChatRequest.build_tok_params",
+                return_value=tok_params,
+            ),
+            patch(
+                "vllm.entrypoints.pooling.embed.protocol.EmbeddingBatchChatRequest.build_tok_params",
+                return_value=tok_params,
+            ),
+        ):
+            responses = [
+                r
+                async for r in handler.generate(
+                    request, context or self._make_context()
+                )
+            ]
+        return responses, tok_params
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_conversation_is_rendered_and_encoded(self):
+        handler, encoded = self._make_handler()
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        responses, tok_params = await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": self.IMAGE_CONVERSATION,
+                "dimensions": 2,
+            },
+        )
+
+        conversations, chat_params, passed_tok_params = render.await_args.args
+        assert len(conversations) == 1
+        assert conversations[0][0]["role"] == "document"
+        assert chat_params.chat_template is None  # the model's own template
+        assert passed_tok_params is tok_params
+        # The rendered prompt reaches the engine unchanged, as an embed task.
+        assert [prompt for prompt, _ in encoded] == [
+            {"index": 0, "prompt_token_ids": list(range(10))}
+        ]
+        assert encoded[0][1].task == "embed"
+        assert encoded[0][1].dimensions == 2
+
+        assert len(responses) == 1
+        response = responses[0]
+        assert [item["index"] for item in response["data"]] == [0]
+        assert response["data"][0]["embedding"] == mod._encode_floats_to_base64(
+            [0.0, 0.5]
+        )
+        assert response["usage"] == {"prompt_tokens": 10, "total_tokens": 10}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_batch_keeps_conversation_order(self):
+        handler, encoded = self._make_handler()
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        responses, _ = await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": [self.IMAGE_CONVERSATION, self.AUDIO_CONVERSATION],
+            },
+        )
+
+        conversations = render.await_args.args[0]
+        assert [conv[0]["role"] for conv in conversations] == ["document", "user"]
+        assert len(encoded) == 2
+        data = responses[0]["data"]
+        assert [item["index"] for item in data] == [0, 1]
+        assert data[1]["embedding"] == mod._encode_floats_to_base64([1.0, 0.5])
+        assert responses[0]["usage"]["prompt_tokens"] == 10 + 11
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_custom_jinja_template_is_used(self, tmp_path):
+        template = tmp_path / "embed.jinja"
+        template.write_text("{{ messages[0]['content'] }}")
+        handler, _ = self._make_handler(custom_jinja_template=str(template))
+        render = AsyncMock(side_effect=lambda convs, *_: self._rendered(convs))
+        handler.engine_client.renderer.render_chat_async = render
+
+        await self._generate(
+            handler,
+            {
+                "model": "test-model",
+                "messages": [{"role": "query", "content": "hello"}],
+            },
+        )
+
+        chat_params = render.await_args.args[1]
+        assert chat_params.chat_template == "{{ messages[0]['content'] }}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_invalid_message_is_rejected_before_encoding(self):
+        handler, encoded = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock()
+
+        with pytest.raises(mod.InvalidArgument, match="content"):
+            await self._generate(
+                handler,
+                {"model": "test-model", "messages": [{"role": "user", "content": 5}]},
+            )
+        handler.engine_client.renderer.render_chat_async.assert_not_awaited()
+        assert encoded == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize(
+        ("case", "expected_status"),
+        [
+            ("text_only_model", None),
+            ("unsupported_modality", 400),
+            ("media_not_loadable", 422),
+        ],
+    )
+    async def test_vllm_rejection_is_a_client_error(self, case, expected_status):
+        """vLLM's rejection is a client error, not a 500. Typed vLLM client
+        errors keep their status through the shared mapper, as on the other
+        vLLM paths, so a media URL that can't be loaded is a 422; other
+        validation failures are InvalidArgument with vLLM's message."""
+        from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
+
+        error = {
+            # vLLM on a text-only model given media (a plain ValueError).
+            "text_only_model": ValueError("test-model is not a multimodal model"),
+            # vLLM on a model without the modality.
+            "unsupported_modality": VLLMValidationError(
+                "At most 0 audio(s) may be provided in one prompt.",
+                parameter="audio",
+            ),
+            # vLLM when a media URL returns 404.
+            "media_not_loadable": VLLMUnprocessableEntityError(
+                "Failed to load media from URL", parameter="image_url"
+            ),
+        }[case]
+        handler, encoded = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock(side_effect=error)
+
+        expected_type = mod.InvalidArgument if expected_status is None else HttpError
+        with pytest.raises(expected_type) as exc_info:
+            await self._generate(
+                handler,
+                {"model": "test-model", "messages": self.AUDIO_CONVERSATION},
+            )
+        if expected_status is not None:
+            assert exc_info.value.code == expected_status
+        assert str(error) in str(exc_info.value)
+        assert exc_info.value.__cause__ is error
+        assert encoded == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_engine_rejection_is_a_client_error(self):
+        """A conversation that renders but that the engine rejects (e.g. an
+        embedding template that renders roles it doesn't know as an empty
+        prompt) is a 400, as with ``vllm serve``, not a 500."""
+        from vllm.exceptions import VLLMValidationError
+
+        error = VLLMValidationError(
+            "The decoder prompt cannot be empty", parameter="prompt"
+        )
+        handler, _ = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock(
+            side_effect=lambda convs, *_: self._rendered(convs)
+        )
+
+        async def rejecting_encode(**_kwargs):
+            raise error
+            yield  # pragma: no cover - makes this an async generator
+
+        handler.engine_client.encode = rejecting_encode
+
+        with pytest.raises(HttpError) as exc_info:
+            await self._generate(
+                handler,
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "query", "content": "hello"}],
+                },
+            )
+        assert exc_info.value.code == 400
+        assert str(error) in str(exc_info.value)
+        assert exc_info.value.__cause__ is error
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("signal", ["request_stopped", "worker_shutdown"])
+    async def test_stop_during_render_cancels_it_and_skips_encoding(self, signal):
+        """A client disconnect or worker shutdown while the media is still
+        being loaded cancels the render instead of leaving it running until
+        it finishes or times out, and nothing is encoded."""
+        handler, encoded = self._make_handler()
+        handler.shutdown_event = asyncio.Event()
+        stopped = asyncio.get_running_loop().create_future()
+        render_started = asyncio.Event()
+        render_cancelled = asyncio.Event()
+
+        async def blocked_render(*_):
+            render_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                render_cancelled.set()
+                raise
+
+        handler.engine_client.renderer.render_chat_async = blocked_render
+        generate = asyncio.create_task(
+            self._generate(
+                handler,
+                {"model": "test-model", "messages": self.IMAGE_CONVERSATION},
+                context=self._make_context(stopped),
+            )
+        )
+        await render_started.wait()
+
+        if signal == "request_stopped":
+            stopped.set_result(True)
+            # Not an empty stream, which would aggregate to a successful
+            # response with no embeddings.
+            with pytest.raises(mod.Cancelled):
+                await generate
+        else:
+            handler.shutdown_event.set()
+            with pytest.raises(mod.EngineShutdown):
+                await generate
+        assert render_cancelled.is_set()
+        assert encoded == []
 
 
 class TestRLAdminRouteHardening:
@@ -3608,63 +3660,23 @@ class TestRLAdminRouteHardening:
         assert not handler._pause_lock.locked()
 
     @pytest.mark.asyncio
-    async def test_abort_request_surfaces_deferred_abort_failure(self):
+    async def test_abort_request_aborts_engine_directly(self):
         handler = _make_handler()
         handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
 
-        class _FailingGuard:
-            def __init__(self):
-                self._abort_exc = RuntimeError("engine abort boom")
-
-            async def abort(self):
-                return None
-
-        handler._deferred_aborts = {"req-x": _FailingGuard()}
         resp = await handler.abort_request({"request_id": "req-x"})
+
+        handler.engine_client.abort.assert_awaited_once_with("req-x")
+        assert resp == {"status": "ok", "request_id": "req-x"}
+
+    @pytest.mark.asyncio
+    async def test_abort_request_reports_engine_abort_failure(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock(side_effect=RuntimeError("boom"))
+
+        resp = await handler.abort_request({"request_id": "req-y"})
+
         assert resp["status"] == "error"
         assert "boom" in resp["message"]
-
-    @pytest.mark.asyncio
-    async def test_abort_request_ok_when_deferred_clean(self):
-        handler = _make_handler()
-        handler.engine_client = MagicMock()
-
-        class _CleanGuard:
-            def __init__(self):
-                self._abort_exc = None
-
-            async def abort(self):
-                return None
-
-        handler._deferred_aborts = {"req-y": _CleanGuard()}
-        resp = await handler.abort_request({"request_id": "req-y"})
-        assert resp["status"] == "ok"
-        assert resp["request_id"] == "req-y"
-
-    @pytest.mark.asyncio
-    async def test_deferred_abort_does_not_block_before_first_token(self):
-        # abort() before the first token must return promptly (the real abort is
-        # deferred to a background task), not hang on the first-token event.
-        guard = mod._DeferredAbort(MagicMock(), "req-z")
-        await asyncio.wait_for(guard.abort(), timeout=1.0)
-        assert guard._abort_exc is None
-        await guard.close()
-
-    @pytest.mark.asyncio
-    async def test_deferred_abort_escalates_engine_dead(self):
-        from vllm.v1.engine.exceptions import EngineDeadError
-
-        escalated = []
-
-        async def boom(_request_id):
-            raise EngineDeadError("engine dead")
-
-        engine = MagicMock()
-        engine.abort = boom
-        guard = mod._DeferredAbort(
-            engine, "req-d", on_engine_dead=lambda e: escalated.append(e)
-        )
-        guard.signal_first_token()  # post-first-token -> immediate abort path
-        await guard.abort()
-        assert len(escalated) == 1
-        assert isinstance(escalated[0], EngineDeadError)

@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
@@ -150,6 +151,21 @@ def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
     )
 
 
+# Must outlast the executor's TP-worker shutdown (5 s, then SIGTERM and 4 s more)
+# plus EngineCore's own teardown. vLLM uses the same value on ROCm.
+_ENGINE_CLEANUP_WINDOW_S = 15.0
+
+
+def _engine_shutdown_timeout(vllm_config: VllmConfig) -> float:
+    """Seconds EngineCore gets to exit before vLLM force-kills it."""
+    if vllm_config.shutdown_timeout > 0:
+        return float(vllm_config.shutdown_timeout)
+    # Forwarding vLLM's default 0 would SIGKILL EngineCore and its TP workers at
+    # once; VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS (or ROCm's 15 s) still wins.
+    window = get_engine_process_shutdown_timeout(0, 0)
+    return window if window else _ENGINE_CLEANUP_WINDOW_S
+
+
 async def _sync_fpm_worker_id(
     engine_client: AsyncLLM, vllm_config: VllmConfig, new_worker_id: str
 ) -> None:
@@ -193,7 +209,7 @@ async def _sync_fpm_worker_id_or_shutdown(
         await _sync_fpm_worker_id(engine_client, vllm_config, new_worker_id)
     except BaseException:
         try:
-            engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+            engine_client.shutdown(timeout=_engine_shutdown_timeout(vllm_config))
         except Exception:
             logger.exception(
                 "Failed to shut down the restored engine after the FPM worker_id "
@@ -226,6 +242,16 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     status = data.get("status", "complete" if data.get("valid") is True else "failed")
 
     def invalid(reason: str) -> RuntimeError:
+        skipped_entries = data.get("skipped_points")
+        if isinstance(skipped_entries, list) and any(
+            isinstance(entry, dict)
+            and entry.get("reason") == "fake_prefix_cache_validation_failed"
+            for entry in skipped_entries
+        ):
+            reason += (
+                " (synthetic prefix blocks never hit the prefix cache on this "
+                "KV-cache layout; set DYN_BENCH_PREFILL_REAL_SEED=on)"
+            )
         return RuntimeError(
             f"Self-benchmark produced incomplete results at {path}: {reason}; "
             f"coverage={data.get('coverage')} "
@@ -1735,7 +1761,9 @@ class _WorkerLifecycle:
                 self.handler.cleanup()
         finally:
             if self.engine_client is not None and self.vllm_config is not None:
-                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
+                self.engine_client.shutdown(
+                    timeout=_engine_shutdown_timeout(self.vllm_config)
+                )
 
 
 class WorkerFactory:
@@ -2269,6 +2297,13 @@ class WorkerFactory:
             endpoint=generate_endpoint,
             embedding_worker=True,
         )
+        # Chat-style embedding input loads media in this worker. Use dynamo's
+        # media connector, as the frontend does, so DYN_MM_ALLOW_REMOTE_URLS
+        # applies here too: vLLM's default ``http`` connector fetches any URL.
+        # Set it before the engine starts, since vLLM can cache env reads.
+        os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
+        import dynamo.common.multimodal.media_connector  # noqa: F401
+
         (
             engine_client,
             vllm_config,

@@ -187,6 +187,35 @@ def test_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
+@pytest.mark.parametrize(
+    ("shutdown_timeout", "worker_shutdown_env", "expected_timeout"),
+    [
+        # vLLM's default 0 must not reach the process manager as a zero window,
+        # or EngineCore and its TP workers are force-killed mid-teardown.
+        (0, None, 15.0),
+        (0, "9", 9.0),
+    ],
+)
+def test_worker_lifecycle_gives_engine_core_a_cleanup_window(
+    monkeypatch, shutdown_timeout, worker_shutdown_env, expected_timeout
+):
+    if worker_shutdown_env is None:
+        monkeypatch.delenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", worker_shutdown_env)
+    # ROCm gets a 15 s window when the env var is unset; pin the CUDA rule.
+    monkeypatch.setattr("vllm.v1.engine.utils.current_platform.is_rocm", lambda: False)
+    engine_client = Mock()
+    lifecycle = _WorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=shutdown_timeout),
+    )
+
+    lifecycle.cleanup()
+
+    engine_client.shutdown.assert_called_once_with(timeout=expected_timeout)
+
+
 @pytest.mark.asyncio
 async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog):
     factory = _make_factory()
@@ -607,6 +636,30 @@ async def test_wait_and_load_benchmark_rejects_inconsistent_status(
         await _wait_and_load_benchmark(
             {"output_path": str(output_path), "timeout": 1}, Mock()
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skip_reason", "hinted"),
+    [("fake_prefix_cache_validation_failed", True), ("shape mismatch", False)],
+)
+async def test_wait_and_load_benchmark_hints_real_seed_for_fake_prefix_misses(
+    monkeypatch, tmp_path, skip_reason, hinted
+):
+    output_path = tmp_path / "benchmark.json"
+    payload = _single_rank_benchmark_payload(expected_points=2)
+    payload["coverage"]["skipped_points"] = 1
+    payload["skipped_points"] = [{"reason": skip_reason}]
+    output_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    with pytest.raises(RuntimeError, match="inconsistent complete status") as exc_info:
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+    assert ("DYN_BENCH_PREFILL_REAL_SEED=on" in str(exc_info.value)) is hinted
 
 
 @pytest.mark.asyncio
@@ -1196,6 +1249,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     vllm_config = Mock(
         additional_config={},
         cache_config=SimpleNamespace(num_gpu_blocks=96),
+        shutdown_timeout=5.0,
     )
     engine_tuple: EngineSetupResult = (
         engine_client,
@@ -1954,6 +2008,28 @@ async def test_sync_or_shutdown_keeps_the_sync_error_when_shutdown_also_fails(
 
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     assert "Failed to shut down the restored engine" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sync_or_shutdown_gives_engine_core_a_cleanup_window(monkeypatch):
+    """A zero ``shutdown_timeout`` still gives EngineCore time to exit."""
+    monkeypatch.delenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr("vllm.v1.engine.utils.current_platform.is_rocm", lambda: False)
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(
+            call_utility_async=AsyncMock(side_effect=Exception("rejected"))
+        ),
+        shutdown=Mock(),
+    )
+    vllm_config = _snapshot_config()
+    vllm_config.shutdown_timeout = 0
+
+    with pytest.raises(RuntimeError, match="invisible to the planner"):
+        await _sync_fpm_worker_id_or_shutdown(
+            engine_client, vllm_config, "8465209922961459"
+        )
+
+    engine_client.shutdown.assert_called_once_with(timeout=15.0)
 
 
 def test_fpm_utility_name_matches_the_installed_method():

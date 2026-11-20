@@ -34,7 +34,8 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 use crate::tokio_runtime::{self, TaskKind};
-use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use dynamo_kv_events::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use dynamo_llm::protocols::common::extensions::HEADER_ELAPSED_SINCE_ARRIVAL_MS;
 use serde_json::value::RawValue;
 
 /// State machine phases for the ext_proc stream.
@@ -637,17 +638,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             tracing::debug!(key = %k, value = %v, "[MUTATION] Routing header going into ext_proc set_headers");
         }
 
-        // Only send NEW headers (routing headers from the picker) in the
-        // ext_proc header mutation. Do NOT re-send original request headers —
-        // they already exist on the request and Envoy rejects mutations that
-        // try to set restricted headers (x-envoy-*, x-forwarded-*, pseudo-headers).
-        ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
-            &result.endpoint,
-            Some(ctx.request_size),
-            &result.headers,
-            result.selected_prefill_endpoint.as_deref(),
-        ));
-
         // Only the rewrite path allocates a new body; otherwise the unchanged
         // body is a cheap `Bytes` clone.
         let cache_salt = match result.cache_salt_forwarding {
@@ -690,6 +680,28 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         } else {
             raw_body.clone()
         };
+
+        // Only send NEW headers (routing headers from the picker) in the
+        // ext_proc header mutation. Do NOT re-send original request headers —
+        // they already exist on the request and Envoy rejects mutations that
+        // try to set restricted headers (x-envoy-*, x-forwarded-*, pseudo-headers).
+        //
+        // The time this EPP held the request goes with them, stamped after the pick
+        // and the body rewrite: a backend that orders admission by arrival then counts
+        // the wait in the EPP's router queue, which the model server never sees.
+        let mut forwarded_headers = result.headers;
+        if let Some(received) = ctx.headers_received_at {
+            forwarded_headers.push((
+                HEADER_ELAPSED_SINCE_ARRIVAL_MS.to_string(),
+                format!("{:.3}", received.elapsed().as_secs_f64() * 1000.0),
+            ));
+        }
+        ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
+            &result.endpoint,
+            Some(ctx.request_size),
+            &forwarded_headers,
+            result.selected_prefill_endpoint.as_deref(),
+        ));
 
         ctx.trace.body_bytes_out = forwarded_body.len();
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
@@ -1937,6 +1949,52 @@ mod tests {
             .expect("on_prefill_complete should fire");
             assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// The forwarded request says how long the EPP held it, so the model server's
+    /// arrival age starts when the EPP received the request, not after the pick.
+    #[tokio::test]
+    async fn test_forwarded_request_carries_time_held_in_the_epp() {
+        use crate::proto::envoy::service::ext_proc::v3::processing_response::Response;
+
+        let block = Arc::new(Notify::new());
+        let tracker = Arc::new(Tracker::agg().blocking(block.clone()));
+        let pick_started = tracker.pick_started.clone();
+        tokio::spawn(async move {
+            pick_started.notified().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            block.notify_one();
+        });
+
+        let mut responses = connect(tracker)
+            .await
+            .process(tokio_stream::iter(stream()))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut stamps = Vec::new();
+        while let Some(response) = responses.message().await.unwrap() {
+            let Some(Response::RequestHeaders(headers)) = response.response else {
+                continue;
+            };
+            let mutation = headers.response.and_then(|common| common.header_mutation);
+            for header in mutation
+                .into_iter()
+                .flat_map(|mutation| mutation.set_headers)
+            {
+                if let Some(header) = header.header
+                    && header.key == HEADER_ELAPSED_SINCE_ARRIVAL_MS
+                {
+                    stamps.push(envoy_helpers::get_header_value(&header));
+                }
+            }
+        }
+
+        let [stamp] = stamps.as_slice() else {
+            panic!("expected one elapsed header, got {stamps:?}");
+        };
+        let elapsed_ms: f64 = stamp.parse().unwrap();
+        assert!((50.0..5_000.0).contains(&elapsed_ms), "{elapsed_ms}");
     }
 
     /// free_request: on_request_complete() fires when the stream ends.

@@ -1230,7 +1230,8 @@ def test_router_yaml_applies_before_frontend_validation(tmp_path):
         )
     )
     with pytest.raises(
-        ValueError, match="AIS perf config requires backend, system, model"
+        ValueError,
+        match=r"--router-prefill-load-model=ais requires an AIS perf model",
     ):
         config.validate()
 
@@ -1257,7 +1258,9 @@ def test_router_yaml_rejects_invalid_settings(tmp_path, settings):
 
 
 def test_shared_router_settings_fixture_flows_to_binding_kwargs(pytestconfig):
-    path = pytestconfig.rootpath / "lib/kv-router/tests/data/router-settings.yaml"
+    path = (
+        pytestconfig.rootpath / "lib/router/kv-router/tests/data/router-settings.yaml"
+    )
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
     config = KvRouterConfigBase.from_cli_args(

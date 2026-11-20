@@ -154,8 +154,8 @@ targets. The perf model is bootstrapped from the first available source:
 4. live FPM regression warmup when no pre-deployment data is available
 
 The Planner constructs all estimators through
-`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` using the
-role-indexed canonical configurations in `ais_perf_model.roles`. AISimulate owns
+`aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` using the
+canonical configurations in `ais_perf_model` (one configuration per worker type). AISimulate owns
 schema validation, selection, tuning, and prediction. Dynamo binds immutable
 worker identity and runtime limits, and derives queue drain, TTFT, ITL, and capacity.
 New configurations default to `auto` selection with `deny` fallback. Auto still
@@ -255,7 +255,11 @@ Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay ->
 - **scheduled_requests.sum_prefill_tokens**: prefill regression input
 - **scheduled_requests.sum_decode_kv_tokens**: decode regression input
 - **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
-- Idle heartbeats (wall_time=0) are skipped
+- Heartbeats (wall_time=0) are not added as regression observations, but they update moving averages and their `queued_requests` still count as queued load.
+
+The vLLM scheduler suppresses empty heartbeats while requests remain in its running or waiting queues, a scheduled batch still awaits output processing, or the parent scheduler reports pending connector work. This includes finished requests retained for connector cleanup and pending KV or encoder-cache pushes. Nonempty heartbeats carry the latest queue snapshot. The scheduler reuses completed-pass snapshots and limits extra queue scans to once per heartbeat interval, plus when an empty snapshot first gains waiting work. That transition scan ensures a new long pass reports waiting load; later steps reuse it. Counts can lag changes between snapshots. All mutable queue traversal stays on the scheduler thread.
+
+This is a partial fix for scheduler-visible work. It does not establish EngineCore idleness across input-queue work, data-parallel dummy execution, or independent timing and result lifecycles. Suppressing a new empty heartbeat does not invalidate an idle frame already cached by Planner. Those lifecycles, cached-frame handling, and the Rust publishers used by TensorRT-LLM and the mocker need follow-up work. Heartbeats do not prove end-to-end autoscaling correctness.
 
 ### Diagnostics
 
@@ -269,11 +273,11 @@ Per-engine FPM queue depths from `_collect_fpm()` are exported as labeled Promet
 
 ### Regression Models
 
-Three specialized regression models live under
-`components/src/dynamo/planner/core/perf_model/`:
-- **PrefillRegressionModel**: 1D regression `sum_prefill_tokens -> wall_time`. Estimates TTFT by simulating chunked prefill scheduling (chunks of `max_num_batched_tokens`).
-- **DecodeRegressionModel**: 1D regression `sum_decode_kv_tokens -> wall_time`. Estimates ITL for total decode load (scheduled + queued + avg decode length).
-- **AggRegressionModel**: 2D regression `(sum_prefill_tokens, sum_decode_kv_tokens) -> wall_time`. Estimates both TTFT (simulated prefill with piggybacked decode) and ITL (decode with average piggybacked prefill).
+The regression from FPM observations to forward-pass time is AISimulate's `fpm_regression`
+estimator. `PlannerEnginePerfModel` in `components/src/dynamo/planner/core/perf_model/` builds one
+estimator for each worker type and tunes it with the observed FPMs. From its forward-pass
+estimates the Planner derives TTFT by simulating chunked prefill scheduling (chunks of
+`max_num_batched_tokens`), ITL for the total decode load, and the capacity of one engine.
 
 ### Scaling Decisions
 
@@ -287,7 +291,7 @@ When both modes are enabled, throughput-based scaling (longer interval) sets a l
 
 ### Aggregated Mode
 
-In aggregated mode (`mode: agg`), engines handle both prefill and decode via chunked prefill. The planner maintains both TTFT and ITL regression models but uses per-worker time-averaged metrics (not instantaneous) for regression training to smooth out chunked prefill noise. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
+In aggregated mode (`mode: agg`), engines handle both prefill and decode via chunked prefill. The planner builds one perf model for the `aggregated` worker type, tunes it with the observed FPMs, and derives both TTFT and ITL from its forward-pass estimates. For ITL, a decode pass that carries no prefill work is estimated with the average prefill work of recent passes. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
 
 <a id="retune-experimental-simulation-only"></a>
 

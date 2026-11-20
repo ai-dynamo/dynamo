@@ -18,7 +18,22 @@ from dynamo.llm import HttpError, ModelInput, ModelRuntimeConfig, ModelType, Wor
 
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
+JSON_MULTIMODAL_CAPABILITY = "custom_json_v1"
 DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
+
+
+def publish_json_multimodal_capability(
+    runtime_config: ModelRuntimeConfig,
+    model_input: ModelInput,
+    worker_type: WorkerType,
+    enable_multimodal: bool,
+) -> None:
+    if (
+        enable_multimodal
+        and model_input == ModelInput.Tokens
+        and worker_type == WorkerType.Aggregated
+    ):
+        runtime_config.set_engine_specific(JSON_MULTIMODAL_CAPABILITY, json.dumps(True))
 
 
 def publish_engine_generate_capability(
@@ -57,19 +72,10 @@ class EngineGenerateInput:
 
 @lru_cache(maxsize=1)
 def _native_generate_api() -> tuple[Any, Any]:
-    try:
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            decode_mm_kwargs_item,
-        )
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            GenerateRequest,
-        )
-    except ModuleNotFoundError as exc:
-        expected_module = "vllm.entrypoints.scale_out.token_in_token_out"
-        if exc.name is None or not expected_module.startswith(exc.name):
-            raise
-        from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
-        from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        decode_mm_kwargs_item,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 
     return decode_mm_kwargs_item, GenerateRequest
 
@@ -253,8 +259,6 @@ def adapt_engine_generate_request(
             f"({max_num_seqs}), got {sampling_params.n}."
         )
     if not native_request.is_sampling_param_provided("max_tokens"):
-        # Older supported vLLM builds do not expose this helper. Keep the import
-        # lazy so workers that do not adapt native Generate requests still start.
         from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 
         model_config = vllm_config.model_config
@@ -298,8 +302,15 @@ def adapt_engine_generate_request(
             cache_salt=engine_cache_salt,
         )
 
+    # The frontend mirrors the client's priority into routing.priority, negated to Dynamo's
+    # higher-is-sooner scale, and a router request classifier may replace it there.
+    routing_priority = (request.get("routing") or {}).get("priority")
     return EngineGenerateInput(
         prompt=prompt,
         sampling_params=sampling_params,
-        priority=native_request.priority,
+        priority=(
+            native_request.priority
+            if routing_priority is None
+            else -int(routing_priority)
+        ),
     )
