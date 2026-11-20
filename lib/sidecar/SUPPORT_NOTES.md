@@ -20,9 +20,11 @@ If an output stream closes early without an error, the sidecar treats the closur
 
 ## SGLang
 
-The standard gRPC generation path requires one completion per request (`n=1`). It accepts image, video, and audio input as `http://`, `https://`, or `data:` URLs. The sidecar does not accept per-request `mm_processor_kwargs` or separate encoder handoffs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
+The standard gRPC generation path requires one completion per request (`n=1`). It accepts image, video, and audio input as `http://`, `https://`, or `data:` URLs. The sidecar rejects per-request `mm_processor_kwargs` on media inputs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
 
-Multimodal disaggregated serving is untested. Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
+Standalone image encoder workers require the SGLang staged image RPCs and an external-handoff-capable Rust language server. Run one sidecar per native encoder. Use `--encoder-advertise-endpoint` when the consumer reaches the encoder at a different address from its colocated sidecar. Enable `--route-to-encoder` on the prefill or aggregated sidecar and set `SGLANG_EXTERNAL_ENCODER_HANDOFF=1` on all language servers. Dynamo routes each request's ordered images to one encoder. Prefill or aggregated serving retrieves the staged embedding over native `zmq_to_scheduler`, and decode uses the same image layout for KV bootstrap. Text requests bypass the encoder. The deployment targets Qwen-VL images with TP=DP=1. Native `/generate` accepts a URL string or a flat list of URL strings alongside the original `input_ids`. See the [E/PD and E/P/D launcher](sglang/launch/encoded.sh).
+
+Disaggregated validation covers Qwen-VL image inputs. Native video and audio disaggregation remain untested. Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 
 SGLang's Rust server downloads HTTP and HTTPS media URLs from any host. This includes `127.0.0.1` and SGLang's own HTTP API. The Rust server does not support `--allowed-media-domains` (v0.5.23 ignores it; later builds refuse to start with it), so limit the engine's network access instead, for example with a Kubernetes NetworkPolicy.
 

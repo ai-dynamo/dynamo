@@ -146,3 +146,82 @@ fn codec_extends_native_field_rules_and_joins_structured_sequences() {
         json!({"data":[1,2,3],"dtype":"u8"})
     );
 }
+
+fn bind_native(body: &Value, staged: bool) -> Result<Bound, ClientError> {
+    let opened = SglangFormat::native().open(ClientRequest {
+        body: &serde_json::to_vec(body).unwrap(),
+        headers: &HeaderMap::from_iter([(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )]),
+        default_request_id: "public",
+    })?;
+    opened.validation?;
+    (opened.bind)(&Worker {
+        sglang_staged_images: staged,
+        ..crate::testkit::worker()
+    })
+}
+
+#[test]
+fn staged_generate_projects_ordered_images_and_retains_token_ids_and_hashes() {
+    let first = "data:image/png;base64,AQ==";
+    let second = "data:image/jpeg;base64,Ag==";
+    let ids = [11, 151655, 12, 151655, 13];
+    let req = bind_native(
+        &json!({
+            "input_ids": ids, "image_data": [first, second], "mm_hashes": ["A", "B"],
+            "sampling_params": {"max_new_tokens": 5}, "rid": "original"
+        }),
+        true,
+    )
+    .unwrap()
+    .request;
+    assert_eq!(req.token_ids.as_slice(), ids);
+    assert_eq!(
+        serde_json::to_value(req.multi_modal_data.as_ref().unwrap()).unwrap(),
+        json!({"image_url": [{"Url": first}, {"Url": second}]})
+    );
+    let payload = &req.extra_args.as_ref().unwrap()[crate::PAYLOAD_KEY];
+    assert!(payload.get("image_data").is_none());
+    assert_eq!(payload["mm_hashes"], json!(["A", "B"]));
+    assert_eq!(payload["sampling_params"]["max_new_tokens"], 5);
+    let one = bind_native(&json!({"input_ids":[151655], "image_data":first}), true).unwrap();
+    assert_eq!(one.request.multi_modal_data.unwrap()["image_url"].len(), 1);
+}
+
+#[test]
+fn staged_generate_bypasses_text_and_legacy_generate_preserves_opaque_media() {
+    for media in [Value::Null, json!([])] {
+        let req = bind_native(&json!({"input_ids": [1], "image_data": media}), true).unwrap();
+        assert!(req.request.multi_modal_data.is_none());
+    }
+    let legacy = json!({
+        "input_ids":[1], "image_data":[{"url":"/native/file.png"}],
+        "audio_data":"native-audio", "images_config":{"detail":"high"}
+    });
+    let req = bind_native(&legacy, false).unwrap().request;
+    assert!(req.multi_modal_data.is_none());
+    let payload = &req.extra_args.as_ref().unwrap()[crate::PAYLOAD_KEY];
+    for key in ["image_data", "audio_data", "images_config"] {
+        assert_eq!(payload[key], legacy[key]);
+    }
+}
+
+#[test]
+fn staged_generate_rejects_unsupported_media_before_encoding() {
+    let image = "data:image/png;base64,AQ==";
+    for fields in [
+        json!({"image_data": [[image]]}),
+        json!({"image_data": 7}),
+        json!({"image_data": "file:///native/file.png"}),
+        json!({"image_data": image, "audio_data": ["sound"]}),
+        json!({"video_data": "video"}),
+        json!({"image_data": image, "images_config":{"width":1024}}),
+        json!({"image_data": image, "mm_processor_kwargs":{"size":42}}),
+    ] {
+        let mut body = fields;
+        body["input_ids"] = json!([1]);
+        assert!(bind_native(&body, true).is_err(), "{body}");
+    }
+}

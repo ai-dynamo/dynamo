@@ -47,8 +47,11 @@ use crate::response_merge::{Assembler, RuleSet};
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
 };
+use dynamo_llm::preprocessor::media::MediaFetcher;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use dynamo_llm::protocols::common::preprocessor::RoutingHints;
+use dynamo_llm::protocols::common::preprocessor::{
+    MultimodalData, MultimodalDataMap, RoutingHints,
+};
 use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use dynamo_llm::protocols::response_merge::prefill_annotations;
 
@@ -163,6 +166,66 @@ impl<C: ClientCodec> SglangFormat<C> {
     }
 }
 
+/// For an external encoder, move single-prompt image sources into the
+/// canonical media slots inspected by EncoderRouter. Keep hashes in the
+/// native envelope so P and D apply them to the same reconstructed layout.
+fn take_staged_images(
+    body: &mut Map<String, Value>,
+) -> Result<Option<MultimodalDataMap>, ClientError> {
+    for field in ["video_data", "audio_data"] {
+        if body
+            .get(field)
+            .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|items| !items.is_empty()))
+        {
+            return Err(ClientError::new(
+                "standalone SGLang encoders support images only",
+            ));
+        }
+    }
+    let sources = match body.remove("image_data") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(items)) if items.is_empty() => return Ok(None),
+        Some(Value::Array(items)) => items,
+        Some(source) => vec![source],
+    };
+    for field in [
+        "images_config",
+        "mm_processor_kwargs",
+        "media_io_kwargs",
+        "modalities",
+    ] {
+        if body.get(field).is_some_and(|v| !v.is_null()) {
+            return Err(ClientError::new(format!(
+                "{field} is unsupported for staged SGLang images"
+            )));
+        }
+    }
+    let policy = MediaFetcher::from_env();
+    let mut images = Vec::with_capacity(sources.len());
+    for value in sources {
+        let Value::String(source) = value else {
+            return Err(ClientError::new(
+                "image_data must be a URL string or a flat list of URL strings for staged images",
+            ));
+        };
+        if source.starts_with("data:") {
+            images.push(MultimodalData::RawUrl(source));
+        } else {
+            let url = source
+                .parse()
+                .map_err(|_| ClientError::new("invalid staged image URL"))?;
+            policy
+                .check_if_url_allowed(&url)
+                .map_err(|err| ClientError::new(err.to_string()))?;
+            images.push(MultimodalData::Url(url));
+        }
+    }
+    Ok(Some(MultimodalDataMap::from([(
+        "image_url".to_owned(),
+        images,
+    )])))
+}
+
 impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
     fn name(&self) -> &str {
         &self.name
@@ -202,7 +265,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let priority = request.priority.unwrap_or_default();
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
-        let (input_ids, body) = request.into_worker_envelope(&request_id);
+        let (input_ids, mut body) = request.into_worker_envelope(&request_id);
         let rules = self.rules.clone();
         let prefill_need = rules.prefill_need(&body);
         let codec = self.codec.clone();
@@ -213,9 +276,15 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             input_tokens,
             validation,
             bind: Box::new(move |worker| {
+                let media = if worker.sglang_staged_images {
+                    take_staged_images(&mut body)?
+                } else {
+                    None
+                };
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)
+                    .multi_modal_data(media)
                     .stop_conditions(limits?)
                     .sampling_options(SamplingOptions {
                         n: Some(1),

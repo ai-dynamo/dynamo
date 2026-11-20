@@ -180,6 +180,9 @@ pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
 pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";
 
+/// The selected SGLang worker accepts already-staged images in native Generate.
+pub const SGLANG_STAGED_IMAGES_V1: &str = "sglang_staged_images_v1";
+
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///

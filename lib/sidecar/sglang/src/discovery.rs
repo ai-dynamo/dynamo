@@ -97,6 +97,7 @@ pub(crate) struct EngineInfo {
     /// Request context limit, preferring the served model card.
     pub context_length: Option<u32>,
     pub disaggregation_mode: DisaggregationMode,
+    pub accepts_encoder_handoff: bool,
     /// Reported prefill bootstrap port, validated only for prefill workers.
     pub disaggregation_bootstrap_port: Option<u64>,
     /// Server host, the preferred prefill bootstrap host when routable.
@@ -134,6 +135,8 @@ pub(crate) struct EngineInfo {
     pub kv_events: Result<NodeMetadata, DynamoError>,
 }
 
+// SglangService hosts language workers. Encoder-only deployments run the
+// separate SglangEncoder service and are identified by GetEncoderInfo.
 pub(crate) fn disaggregation_mode(mode: &str) -> Result<DisaggregationMode, DynamoError> {
     match mode {
         "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
@@ -252,6 +255,7 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         served_model_name,
         context_length: max_model_len,
         disaggregation_mode,
+        accepts_encoder_handoff: server_info.accepts_encoder_handoff,
         disaggregation_bootstrap_port: deployment.disaggregation_bootstrap_port.map(u64::from),
         host: Some(server_info.host.clone()).filter(|host| !host.is_empty()),
         // The rendezvous names node 0. A Rust-server prefill listener on any

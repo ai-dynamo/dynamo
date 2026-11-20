@@ -355,6 +355,7 @@ async fn handler(
         kv_cache_block_size: selection.kv_cache_block_size,
         lora_name: selection.lora_name.as_deref(),
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
+        sglang_staged_images: selection.sglang_staged_images,
     };
     let Bound {
         mut request,

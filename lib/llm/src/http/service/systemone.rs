@@ -747,6 +747,7 @@ fn bind_native(
         kv_cache_block_size,
         lora_name: None,
         tower_connector_lora_enabled: false,
+        sglang_staged_images: false,
     })
     .map_err(|error| anyhow::anyhow!(error.message))
 }

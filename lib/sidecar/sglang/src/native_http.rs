@@ -65,6 +65,20 @@ pub(crate) fn request(
         ));
     }
 
+    if body.remove("encoder_handoff").is_some() {
+        return Err(client::invalid_request(
+            "encoder_handoff is supplied by Dynamo's EncoderRouter",
+        ));
+    }
+    if let Some(handoff) = &request.encoder_result {
+        for key in ["image_data", "video_data", "audio_data"] {
+            body.remove(key);
+        }
+        if let Some(hashes) = request.extra_args.as_ref().and_then(|v| v.get("mm_hashes")) {
+            body.insert("mm_hashes".into(), hashes.clone());
+        }
+        body.insert("encoder_handoff".into(), handoff.clone());
+    }
     let rid = rid.to_string();
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
     body.insert("rid".into(), Value::String(rid.clone()));

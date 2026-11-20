@@ -125,6 +125,8 @@ pub struct Worker<'a> {
     pub kv_cache_block_size: u32,
     pub lora_name: Option<&'a str>,
     pub tower_connector_lora_enabled: bool,
+    /// Native image URLs move into Dynamo's encoder pipeline for this worker set.
+    pub sglang_staged_images: bool,
 }
 
 /// A started client request.

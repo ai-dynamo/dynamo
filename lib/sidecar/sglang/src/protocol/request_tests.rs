@@ -426,7 +426,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "prompt_embeds",
         "mm_processor_kwargs",
         "multi_modal_uuids",
-        "encoder_result",
     ] {
         let mut request = request();
         let message = match field {
@@ -448,10 +447,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
                     vec![None, Some("image-a".to_string())],
                 )]));
                 "media uuids"
-            }
-            "encoder_result" => {
-                request.encoder_result = Some(json!({}));
-                "encoder_result"
             }
             _ => unreachable!(),
         };
@@ -550,6 +545,14 @@ fn unsupported_media_is_refused() {
         );
         assert_invalid(error, message);
     }
+}
+
+#[test]
+fn stage_moves_the_inline_image_buffer() {
+    let uri = String::from("data:image/png;base64,AAAA");
+    let buffer = uri.as_ptr();
+    let staged = into_media_source(MultimodalData::RawUrl(uri)).unwrap();
+    assert_eq!(staged.as_ptr(), buffer);
 }
 
 #[test]
@@ -1029,4 +1032,64 @@ fn handoff_names_rank_only_when_prefill_named_it() {
         build(&decode_request, DisaggregationMode::Decode).unwrap_err(),
         "disagg_prefill_dp_rank must be a DP rank",
     );
+}
+
+#[test]
+fn external_handoff_preserves_token_layout_and_hashes_without_raw_media() {
+    let mut req = request();
+    req.token_ids = vec![31, 151655, 32, 151655, 33].into();
+    req.multi_modal_data = Some(HashMap::from([(
+        "image_url".into(),
+        vec![
+            url("https://example.test/a.png"),
+            url("https://example.test/b.png"),
+        ],
+    )]));
+    req.extra_args = Some(json!({"mm_hashes": ["ff", "02"]}));
+    let staged = json!({
+        "version": 1, "request_id": "public", "transfer_id": "10".repeat(16),
+        "part_id": format!("{}_local_part_0", "10".repeat(16)), "num_parts": 1, "part_idx": 0,
+        "peer": "grpc://e2:9100", "image_count": 2,
+        "images": [
+            {"t":1, "h":4, "w":4, "identity":"a".repeat(64)},
+            {"t":1, "h":6, "w":4, "identity":"b".repeat(64)}
+        ]
+    });
+
+    assert!(crate::encoder::validate_consumer(&req, "public", true).is_err());
+    req.encoder_result = Some(staged.clone());
+    assert!(crate::encoder::validate_consumer(&req, "other", true).is_err());
+    crate::encoder::validate_consumer(&req, "public", true).unwrap();
+    req.bootstrap_info = routed_bootstrap(None).bootstrap_info;
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let generated = build(&req, mode).unwrap();
+        assert_eq!(input_ids(&generated), [31, 151655, 32, 151655, 33]);
+        assert!(
+            generated.image_data.is_none()
+                && generated.video_data.is_none()
+                && generated.audio_data.is_none()
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(generated.encoder_handoff.as_ref().unwrap()).unwrap(),
+            staged
+        );
+        assert!(
+            matches!(generated.mm_hashes.unwrap().value, Some(pb::string_list_or_list::Value::One(list)) if list.items == ["ff", "02"])
+        );
+    }
+    req.multi_modal_data = None;
+    crate::encoder::validate_consumer(&req, "public", true).unwrap();
+    req.encoder_result.as_mut().unwrap()["version"] = json!(2);
+    assert!(crate::encoder::validate_consumer(&req, "public", true).is_err());
+    let mut text = request();
+    crate::encoder::validate_consumer(&text, "public", true).unwrap();
+    // Native /generate envelopes may carry media without canonical media slots.
+    text.extra_args = Some(
+        json!({(dynamo_sglang_generate::PAYLOAD_KEY):{"image_data":"data:image/png;base64,AA=="}}),
+    );
+    assert!(crate::encoder::validate_consumer(&text, "public", true).is_err());
 }

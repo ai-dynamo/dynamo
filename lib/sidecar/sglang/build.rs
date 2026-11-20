@@ -11,6 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir = manifest_dir.join("proto");
     let proto_path = proto_dir.join("sglang/api/v1/service.proto");
 
+    let encoder = proto_dir.join("sglang/encoder/v1/encoder.proto");
+
     // `--experimental_allow_proto3_optional` lets older protoc (the container's
     // apt protoc 3.12) compile the proto3 `optional` fields in the contract
     // (e.g. `routed_dp_rank`). The flag was added in protoc 3.12 for exactly
@@ -19,7 +21,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .build_server(true)
         .protoc_arg("--experimental_allow_proto3_optional")
-        .compile_protos(&[proto_path.as_path()], &[proto_dir.as_path()])?;
+        .type_attribute(
+            ".sglang.grpc.encoder",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .compile_protos(
+            &[proto_path.as_path(), encoder.as_path()],
+            &[proto_dir.as_path()],
+        )?;
 
     // service.proto imports the rest of the contract.
     println!("cargo:rerun-if-changed={}", proto_dir.display());
