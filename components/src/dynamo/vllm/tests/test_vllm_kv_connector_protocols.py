@@ -350,14 +350,14 @@ def test_make_kv_connector_protocol_raises_when_multiconnector_is_ambiguous():
 def test_make_kv_connector_protocol_dispatches_pd_connector_to_nixl():
     """Dynamo's PdConnector (dynamo.vllm.pd_connector) subclasses
     vLLM's MultiConnector with the same config shape — an offload child
-    (e.g. DynamoConnector) plus NixlConnector for PD — so it must resolve
+    (e.g. LMCacheConnectorV1) plus NixlConnector for PD — so it must resolve
     through the same delegation instead of the unsupported-connector error."""
     proto = make_kv_connector_protocol(
         _config(
             "PdConnector",
             kv_connector_extra_config={
                 "connectors": [
-                    {"kv_connector": "DynamoConnector"},
+                    {"kv_connector": "LMCacheConnectorV1"},
                     {"kv_connector": "NixlConnector"},
                 ]
             },
@@ -374,7 +374,7 @@ def test_pd_connector_errors_name_the_wrapper():
             _config(
                 "PdConnector",
                 kv_connector_extra_config={
-                    "connectors": [{"kv_connector": "DynamoConnector"}]
+                    "connectors": [{"kv_connector": "LMCacheConnectorV1"}]
                 },
             )
         )

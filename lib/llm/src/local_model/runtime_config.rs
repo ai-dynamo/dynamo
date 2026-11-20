@@ -50,6 +50,11 @@ pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
+/// Runtime-data key indicating that the backend compiles a lark
+/// `guided_decoding.grammar` with llguidance, so `<[id]>` special tokens and
+/// `%json` schemas are valid. Absence means `false`.
+pub const LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY: &str = "llguidance_lark_grammar";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false
@@ -188,6 +193,8 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
+
+pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
 
 /// Worker-advertised guarantee that disaggregated prefill cancellation is safe
 /// at any point before the prefill stream finishes.
@@ -597,23 +604,12 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
         })
     }
 
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.runtime_data
-            .get("native_offloading_capacity")?
-            .get("total_tokens")?
-            .as_u64()
-    }
-
     fn cache_owner_capacity_blocks(&self) -> Option<u64> {
         self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
-    }
-
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -630,10 +626,6 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 }
 
@@ -1279,21 +1271,6 @@ mod tests {
 
         let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
         assert!(error.contains("basetenkenizer"));
-    }
-
-    #[test]
-    fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_scheduler::host::WorkerConfigLike;
-
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .set_engine_specific(
-                "native_offloading_capacity",
-                serde_json::json!({"total_tokens": 300}),
-            )
-            .unwrap();
-
-        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]

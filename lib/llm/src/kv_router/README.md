@@ -177,6 +177,7 @@ errors, which return to the client.
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Encoder handoff / mandatory prefill | `PreprocessedRequest::encoder_result` and `requires_encoder_result` from the admitted prefill card |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+| Decode progress (experimental picker input) | Original streamed-output observations in this frontend's native bookings; enabled by the policy's `DECODE_PROGRESS` declaration, independent of output-block accounting. The standalone EPP has no producer and supplies none. |
 
 The frontend's prefill operator owns the handoff bypass decision. Runtime EPP query and
 reservation inputs are unchanged.

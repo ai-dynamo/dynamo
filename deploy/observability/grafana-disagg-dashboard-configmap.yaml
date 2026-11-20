@@ -1351,8 +1351,8 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "DCGM_FI_DEV_GPU_UTIL",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "expr": "label_replace(label_replace(DCGM_FI_DEV_GPU_UTIL, \"dcgm_host\", \"$1\", \"Hostname\", \"(.+)\"), \"dcgm_host\", \"$1\", \"hostname\", \"(.+)\")",
+              "legendFormat": "GPU {{gpu}} - {{dcgm_host}}",
               "range": true,
               "refId": "A"
             }
@@ -1454,8 +1454,8 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "DCGM_FI_DEV_MEM_COPY_UTIL",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "expr": "label_replace(label_replace(DCGM_FI_DEV_MEM_COPY_UTIL, \"dcgm_host\", \"$1\", \"Hostname\", \"(.+)\"), \"dcgm_host\", \"$1\", \"hostname\", \"(.+)\")",
+              "legendFormat": "GPU {{gpu}} - {{dcgm_host}}",
               "range": true,
               "refId": "A"
             }
@@ -1546,8 +1546,8 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "DCGM_FI_DEV_FB_USED / 1024",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "expr": "label_replace(label_replace(DCGM_FI_DEV_FB_USED / 1024, \"dcgm_host\", \"$1\", \"Hostname\", \"(.+)\"), \"dcgm_host\", \"$1\", \"hostname\", \"(.+)\")",
+              "legendFormat": "GPU {{gpu}} - {{dcgm_host}}",
               "range": true,
               "refId": "A"
             }
@@ -2032,8 +2032,8 @@ data:
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "(DCGM_FI_PROF_NVLINK_TX_BYTES + DCGM_FI_PROF_NVLINK_RX_BYTES) / 1e9",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "expr": "label_replace(label_replace((DCGM_FI_PROF_NVLINK_TX_BYTES + DCGM_FI_PROF_NVLINK_RX_BYTES) / 1e9, \"dcgm_host\", \"$1\", \"Hostname\", \"(.+)\"), \"dcgm_host\", \"$1\", \"hostname\", \"(.+)\")",
+              "legendFormat": "GPU {{gpu}} - {{dcgm_host}}",
               "refId": "A"
             }
           ],

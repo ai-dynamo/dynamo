@@ -299,52 +299,6 @@ class TestReasoningParserForwarding:
             {"chat_template_kwargs": {"reasoning_effort": "high"}},
         )
 
-    def test_generate_signature_support_is_cached(self, monkeypatch):
-        class EngineClient:
-            def generate(
-                self,
-                prompt,
-                sampling_params,
-                request_id,
-                *,
-                reasoning_ended=None,
-                reasoning_parser_kwargs=None,
-            ):
-                pass
-
-        engine_client = EngineClient()
-        signature_calls = 0
-        original_signature = mod.inspect.signature
-
-        def counting_signature(obj):
-            nonlocal signature_calls
-            signature_calls += 1
-            return original_signature(obj)
-
-        monkeypatch.setattr(mod.inspect, "signature", counting_signature)
-
-        assert mod._engine_generate_reasoning_kwargs(
-            engine_client,
-            False,
-            {"chat_template_kwargs": {"reasoning_effort": "high"}},
-        ) == {
-            "reasoning_ended": False,
-            "reasoning_parser_kwargs": {
-                "chat_template_kwargs": {"reasoning_effort": "high"}
-            },
-        }
-        assert mod._engine_generate_reasoning_kwargs(
-            engine_client,
-            True,
-            {"chat_template_kwargs": {"reasoning_effort": "low"}},
-        ) == {
-            "reasoning_ended": True,
-            "reasoning_parser_kwargs": {
-                "chat_template_kwargs": {"reasoning_effort": "low"}
-            },
-        }
-        assert signature_calls == 1
-
     @pytest.mark.asyncio
     async def test_generate_tokens_forwards_reasoning_parser_metadata(self):
         from vllm.sampling_params import SamplingParams
@@ -392,46 +346,6 @@ class TestReasoningParserForwarding:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
-
-    @pytest.mark.asyncio
-    async def test_generate_tokens_drops_reasoning_metadata_for_old_vllm(self):
-        from vllm.sampling_params import SamplingParams
-
-        handler = _make_handler()
-        calls = {}
-
-        async def fake_generate(
-            prompt,
-            sampling_params,
-            request_id,
-            *,
-            lora_request=None,
-            data_parallel_rank=None,
-            trace_headers=None,
-            priority=0,
-            session_id=None,
-        ):
-            calls["called"] = True
-            if False:
-                yield None
-
-        handler.engine_client = MagicMock()
-        handler.engine_client.generate = fake_generate
-
-        chunks = []
-        async for chunk in handler.generate_tokens(
-            PatchedTokensPrompt(prompt_token_ids=[1]),
-            SamplingParams(max_tokens=1),
-            "req-1",
-            reasoning_ended=True,
-            reasoning_parser_kwargs={
-                "chat_template_kwargs": {"reasoning_effort": "low"}
-            },
-        ):
-            chunks.append(chunk)
-
-        assert chunks == []
-        assert calls == {"called": True}
 
     @pytest.mark.asyncio
     async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
@@ -1019,6 +933,82 @@ async def test_engine_data_uses_effective_engine_prompt(
         assert metadata["completion_logprobs"] == pytest.approx([-0.1, -0.2])
     else:
         assert "engine_data" not in chunks[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("case", ["grammar_rejected", "engine_error"])
+async def test_generate_engine_failure_status(case):
+    """A structured-output grammar vLLM cannot compile is a client error (400),
+    not a 500. Since vLLM 0.33, AsyncLLM.generate() raises it as
+    VLLMValidationError; vLLM 0.31/0.32 dropped the reason and finished the
+    request with a bare finish_reason="error". That bare "error" is now only
+    vLLM's internal request failure (KV load, encoder cache, ...), which vLLM
+    itself maps to 500, so it stays the terminal error chunk."""
+    from vllm.exceptions import VLLMValidationError
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": {},
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[1, 2, 3])
+    )
+    # The message vLLM 0.33's scheduler builds for a failed grammar compile.
+    error = VLLMValidationError(
+        "Invalid structured outputs: regex lookahead is not supported"
+    )
+
+    async def fake_generate(*args, **kwargs):
+        if case == "grammar_rejected":
+            raise error
+        yield RequestOutput(
+            request_id="req-engine-failure",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="error",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    generate = handler.generate(request, MagicMock())
+    if case == "engine_error":
+        chunks = [chunk async for chunk in generate]
+        assert chunks[-1]["finish_reason"] == "error"
+        return
+
+    chunks = []
+    # HttpError(400) today; InvalidArgument once the 400's reason is made public.
+    with pytest.raises((HttpError, mod.InvalidArgument)) as exc_info:
+        async for chunk in generate:
+            chunks.append(chunk)
+    assert getattr(exc_info.value, "code", 400) == 400
+    assert str(error) in str(exc_info.value)
+    assert exc_info.value.__cause__ is error
+    assert chunks == []
 
 
 @pytest.mark.asyncio

@@ -4,9 +4,10 @@
 """E2E coverage for native-gRPC sidecar launch scripts."""
 
 import importlib.util
+import json
 import os
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -25,6 +26,10 @@ from tests.utils.engine_metrics import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
+from tests.utils.multimodal import (
+    make_sidecar_image_identity_payload,
+    make_sidecar_media_payload,
+)
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_kv_routing_payload,
@@ -49,6 +54,22 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
 )
+
+
+def _sglang_reports_node_listeners() -> bool:
+    """Does the installed SGLang report `DeploymentInfo.node_listeners`?
+
+    The SGLang sidecar needs that table to serve DP>1 (sgl-project/sglang#46637).
+    Like `_trtllm_serves_openengine`, this reads the package without importing
+    it, so the DP>1 case runs once the pinned image has the field.
+    """
+    spec = importlib.util.find_spec("sglang")
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    for root in locations or ():
+        api_types = pathlib.Path(root) / "api" / "v1" / "api_types.py"
+        if api_types.is_file() and "node_listeners" in api_types.read_text():
+            return True
+    return False
 
 
 def _trtllm_serves_openengine() -> bool:
@@ -180,6 +201,8 @@ class SidecarConfig(EngineConfig):
     port_env: dict[str, tuple[int, DynamoPortRange]] = field(default_factory=dict)
     # Upload the test LoRA adapter to MinIO before launch.
     needs_minio_lora: bool = False
+    runtime_transports: tuple[str, str, str | None] = ("etcd", "nats", None)
+    model_revision: str | None = None
 
 
 def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
@@ -190,7 +213,52 @@ def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
 # has not been profiled for the sidecar launch path. Add one once measured, to
 # admit these into the parallel stage alongside the equivalent dynamo.{backend}
 # scenarios in tests/serve/test_{vllm,sglang,trtllm}.py.
+_MEDIA_MODELS = {
+    "vision": ("Qwen/Qwen3-VL-2B-Instruct", "89644892e4d85e24eaac8bacfd4f463576704203"),
+    "audio": ("openai/whisper-tiny", "169d4a4341b33bc18d8881c4b69c2e104e1cc0af"),
+}
+
+
 sidecar_configs = {
+    **{
+        f"trtllm_{scenario.replace('-', '_')}": SidecarConfig(
+            name=f"trtllm_{scenario.replace('-', '_')}",
+            directory=trtllm_sidecar_dir,
+            script_name="agg.sh",
+            marks=[
+                pytest.mark.trtllm,
+                pytest.mark.gpu_1,
+                pytest.mark.nightly,
+                pytest.mark.multimodal,
+                pytest.mark.upstream_trtllm,
+                *(
+                    []
+                    if scenario == "audio"
+                    else [pytest.mark.requested_trtllm_kv_tokens(2048)]
+                ),
+                pytest.mark.model(model, revision=revision),
+                pytest.mark.timeout(1200),
+            ],
+            model=model,
+            model_revision=revision,
+            timeout=1000,
+            runtime_transports=("file", "tcp", "zmq"),
+            health_check_workers=True,
+            health_check_worker_count=1,
+            env={
+                **TRTLLM_MULTI_ENGINE_ENV,
+                "DYN_REQUEST_PLANE": "tcp",
+                "DYN_EVENT_PLANE": "zmq",
+                "TRTLLM_TEST_MEDIA": scenario,
+                "TRTLLM_CONTEXT_LENGTH": "1500" if scenario == "audio" else "2048",
+            },
+            request_payloads=[make_sidecar_media_payload(scenario)],
+        )
+        for scenario in ("image", "video", "audio", "image-routing")
+        for model, revision in [
+            _MEDIA_MODELS["audio" if scenario == "audio" else "vision"]
+        ]
+    },
     "vllm_aggregated": SidecarConfig(
         name="vllm_aggregated",
         directory=vllm_sidecar_dir,
@@ -632,6 +700,11 @@ sidecar_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.skipif(
+                not _sglang_reports_node_listeners(),
+                reason="the installed SGLang does not report "
+                "DeploymentInfo.node_listeners, which the sidecar needs for DP>1",
+            ),
         ],
         model="silence09/DeepSeek-R1-Small-2layers",
         health_check_workers=True,
@@ -649,9 +722,75 @@ sidecar_configs = {
 }
 
 
-@pytest.fixture(params=params_with_model_mark(sidecar_configs))
-def sidecar_config_test(request, monkeypatch, discovery_backend):
+def _prepare_media_config(config, request, tmp_path, ports):
+    from huggingface_hub import snapshot_download
+
+    scenario = config.env["TRTLLM_TEST_MEDIA"]
+    options = {
+        "max_batch_size": 1,
+        "max_num_tokens": 2048,
+        "kv_cache_config": {"max_tokens": 2048, "free_gpu_memory_fraction": 0.15},
+    }
+    env = dict(config.env)
+    if scenario == "audio":
+        import yaml
+
+        options = yaml.safe_load(
+            pathlib.Path(trtllm_sidecar_dir, "ci/whisper.yaml").read_text()
+        )
+        template = tmp_path / "transcribe.jinja"
+        template.write_text("<|startoftranscript|><|en|><|transcribe|><|notimestamps|>")
+        env.update(
+            DYN_CUSTOM_JINJA_TEMPLATE=str(template),
+            DYN_MIGRATION_LIMIT="0",
+            TRTLLM_DISABLE_GUIDED_DECODING="1",
+        )
+    elif scenario == "image-routing":
+        # Native SM100/103 FMHA lacks BF16 paged-context kernels for 64-token pages.
+        options["attn_backend"] = "FLASHINFER"
+        options["kv_cache_config"].update(
+            {
+                "tokens_per_block": KV_ROUTING_BLOCK_SIZE,
+                "use_kv_cache_manager_v2": True,
+                "enable_block_reuse": True,
+                "kv_cache_event_hash_algo": "v1_block_key",
+                "kv_events_config": {
+                    "enable_kv_cache_events": True,
+                    "publisher": "zmq",
+                    "endpoint": f"tcp://127.0.0.1:{ports.kv_event_ports[0]}",
+                },
+            }
+        )
+        env.update(
+            DYN_ROUTER_MODE="kv",
+            DYN_ROUTER_USE_KV_EVENTS="true",
+            DYN_ROUTER_MIN_INITIAL_WORKERS="1",
+            DYN_ROUTER_TEMPERATURE="0",
+            TRTLLM_MEDIA_ALLOW_PRIVATE_URLS="1",
+            DYN_MM_ALLOW_INTERNAL="1",
+        )
+    path = tmp_path / "native-media.json"
+    path.write_text(json.dumps(options))
+    env["AGG_ENGINE_ARGS"] = str(path)
+    model_path = snapshot_download(
+        config.model, revision=config.model_revision, local_files_only=True
+    )
+    payload = make_sidecar_media_payload(scenario)
+    if scenario == "image-routing":
+        payload = make_sidecar_image_identity_payload(
+            request.getfixturevalue("httpserver")
+        )
+        payload.cache_block_size = KV_ROUTING_BLOCK_SIZE
+    return replace(config, model=model_path, env=env, request_payloads=[payload])
+
+
+@pytest.fixture
+def sidecar_config_test(
+    request, monkeypatch, discovery_backend, dynamo_dynamic_ports, tmp_path
+):
     config = sidecar_configs[request.param]
+    if "TRTLLM_TEST_MEDIA" in config.env:
+        config = _prepare_media_config(config, request, tmp_path, dynamo_dynamic_ports)
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
@@ -661,9 +800,9 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     for name, indices in config.gpu_env.items():
         devices = map_cuda_visible_devices(indices, visible).split(",")
-        assert (
-            len(set(devices)) == len(indices) and "-1" not in devices
-        ), f"{name} requires {len(indices)} distinct visible GPU(s)"
+        assert len(set(devices)) == len(indices) and "-1" not in devices, (
+            f"{name} requires {len(indices)} distinct visible GPU(s)"
+        )
         monkeypatch.setenv(name, ",".join(devices))
     for name, (block_size, port_range) in config.port_env.items():
         ports = allocate_contiguous_ports(1, block_size, port_range.value)
@@ -674,11 +813,33 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     return config
 
 
-@pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports
 @pytest.mark.parametrize("num_system_ports", [4], indirect=True)
+@pytest.mark.parametrize(
+    ("sidecar_config_test", "discovery_backend", "request_plane", "event_plane"),
+    [
+        pytest.param(
+            *case.values,
+            *sidecar_configs[case.values[0]].runtime_transports,
+            marks=[
+                *case.marks,
+                *(
+                    []
+                    if any(
+                        mark.name in {"multimodal", "router", "fault_tolerance", "core"}
+                        for mark in case.marks
+                    )
+                    else [pytest.mark.core]
+                ),
+            ],
+            id=case.values[0],
+        )
+        for case in params_with_model_mark(sidecar_configs)
+    ],
+    indirect=True,
+)
 def test_serve_deployment(
     sidecar_config_test,
     request,
@@ -688,9 +849,9 @@ def test_serve_deployment(
     predownload_models,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 2, (
+        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    )
     run_serve_deployment(
         sidecar_config_test,
         request,
