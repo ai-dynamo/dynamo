@@ -9,6 +9,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 
 import importlib.util
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -24,6 +25,7 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
+from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -406,6 +408,13 @@ class TestDynamoJsonToolCallFallback:
 @pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained(MODEL)
+
+
+# Qwen3's tokenizer has GLM's <think>/</think> markers, so the real vLLM GLM
+# parser runs on these prompts. Only the tail matters to the reasoning state.
+_GLM_PROMPT_PREFIX = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+_GLM_OPEN_PROMPT = _GLM_PROMPT_PREFIX + "<think>\n"
+_GLM_CLOSED_PROMPT = _GLM_PROMPT_PREFIX + "<think>\n\n</think>\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -946,6 +955,91 @@ class TestReasoningParserMetadata:
             "chat_template_kwargs": {"reasoning_effort": "high"}
         }
 
+    @staticmethod
+    def _glm_metadata(
+        tokenizer,
+        parser_name,
+        prompt_text,
+        chat_template_kwargs,
+        **request_fields,
+    ):
+        """Read reasoning controls for a real GLM parser and a chosen prompt tail."""
+        from vllm.reasoning import ReasoningParserManager
+
+        from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
+
+        request = SimpleNamespace(
+            **{
+                "include_reasoning": True,
+                "add_generation_prompt": True,
+                "continue_final_message": False,
+                **request_fields,
+            }
+        )
+        return _build_reasoning_parser_metadata(
+            ReasoningParserManager.get_reasoning_parser(parser_name),
+            tokenizer,
+            chat_template_kwargs,
+            request,
+            tokenizer.encode(prompt_text, add_special_tokens=False),
+        )
+
+    # Mirrors glm_generation_reasoning_follows_rendered_prompt in preprocessor.rs.
+    @pytest.mark.parametrize(
+        "trailing_whitespace",
+        ["", "\n " * 64, "\u2003" * 64],
+        ids=["short-tail", "long-tail", "multibyte-whitespace"],
+    )
+    @pytest.mark.parametrize("requested", [False, True])
+    @pytest.mark.parametrize("control", ["enable_thinking", "thinking"])
+    @pytest.mark.parametrize("prompt_open", [True, False], ids=["open", "closed"])
+    @pytest.mark.parametrize("parser_name", ["glm45", "glm47"])
+    def test_glm_reasoning_follows_rendered_prompt(
+        self,
+        tokenizer,
+        parser_name,
+        prompt_open,
+        control,
+        requested,
+        trailing_whitespace,
+    ):
+        """GLM worker controls must follow the template when request flags disagree."""
+        chat_template_kwargs = {control: requested, "reasoning_effort": "low"}
+        metadata = self._glm_metadata(
+            tokenizer,
+            parser_name,
+            (_GLM_OPEN_PROMPT if prompt_open else _GLM_CLOSED_PROMPT)
+            + trailing_whitespace,
+            chat_template_kwargs,
+        )
+
+        assert metadata.engine_reasoning_ended is (not prompt_open)
+        assert metadata.response_reasoning_ended is (not prompt_open)
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {
+                "reasoning_effort": "low",
+                "thinking": prompt_open,
+                "enable_thinking": prompt_open,
+            }
+        }
+        assert chat_template_kwargs == {control: requested, "reasoning_effort": "low"}
+
+    @pytest.mark.parametrize("parser_name", ["glm45", "glm47"])
+    def test_glm_open_prompt_keeps_hidden_reasoning_active(
+        self, tokenizer, parser_name
+    ):
+        """Hiding reasoning must not start the worker's grammar before </think>."""
+        metadata = self._glm_metadata(
+            tokenizer,
+            parser_name,
+            _GLM_OPEN_PROMPT,
+            {"enable_thinking": False},
+            include_reasoning=False,
+        )
+
+        assert metadata.engine_reasoning_ended is False
+        assert metadata.response_reasoning_ended is False
+
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
         from dynamo.frontend.vllm_processor import _inject_routing_metadata
 
@@ -1198,6 +1292,14 @@ class _FakePostProcessor:
         }
 
 
+class _FakeContext:
+    def __init__(self, request_id="ctx-request"):
+        self._request_id = request_id
+
+    def id(self):
+        return self._request_id
+
+
 @pytest.fixture
 def real_vllm_processor_module():
     """Defer real vLLM imports until execution so marker collection stays light."""
@@ -1221,6 +1323,194 @@ def vllm_processor_module(monkeypatch, real_vllm_processor_module):
     monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
     monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
     return module
+
+
+@pytest.fixture
+def cache_salt_processor(vllm_processor_module, monkeypatch):
+    """Keep the real request-to-engine path, with model work replaced by fakes."""
+    module = vllm_processor_module
+
+    async def preprocess(request, **kwargs):
+        return SimpleNamespace(
+            request_for_sampling=prepost_module.ChatCompletionRequest.model_construct(
+                **request
+            ),
+            tool_parser=None,
+            chat_template_kwargs={},
+            engine_prompt={"prompt": "Hello"},
+            prompt_token_ids=[1, 2, 3],
+            guided_decoding=None,
+            uses_dynamo_json_tool_call_fallback=False,
+        )
+
+    monkeypatch.setattr(module, "preprocess_chat_request", preprocess)
+    monkeypatch.setattr(
+        module.InputProcessor, "assign_request_id", lambda request: None
+    )
+    monkeypatch.setattr(
+        module, "StreamingPostProcessor", lambda **kwargs: _FakePostProcessor()
+    )
+
+    def make_processor(mm_features=None):
+        def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+            return SimpleNamespace(
+                request_id=request_id,
+                external_req_id=None,
+                sampling_params=sampling_params,
+                prompt_token_ids=engine_inputs["prompt_token_ids"],
+                mm_features=mm_features,
+            )
+
+        routed_engine = _FakeRoutedEngine([])
+        processor = module.VllmProcessor(
+            tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+            input_processor=SimpleNamespace(
+                generation_config_fields={},
+                renderer=SimpleNamespace(
+                    process_for_engine_async=AsyncMock(
+                        side_effect=lambda prompt, arrival_time: prompt
+                    )
+                ),
+                process_inputs=process_inputs,
+                model_config=None,
+            ),
+            output_processor=_FakeOutputProcessor(),
+            tool_parser_class=None,
+            reasoning_parser_class=None,
+            routed_engine=routed_engine,
+        )
+        processor.nixl_mm_enabled = False
+        return processor, routed_engine
+
+    return make_processor
+
+
+@pytest.mark.asyncio
+@pytest.mark.router
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        pytest.param({}, None, id="absent"),
+        pytest.param(
+            {"routing": {"backend_instance_id": 7, "cache_salt": "internal"}},
+            None,
+            id="internal-hint-is-not-public-salt",
+        ),
+        pytest.param({"cache_salt": ""}, None, id="empty-legacy"),
+        pytest.param({"nvext": {"cache_salt": ""}}, None, id="empty-canonical"),
+        pytest.param({"cache_salt": "legacy"}, "legacy", id="legacy"),
+        pytest.param(
+            {"nvext": {"cache_salt": None}, "cache_salt": "legacy"},
+            "legacy",
+            id="null-canonical-fallback",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": ""}, "cache_salt": "legacy"},
+            "legacy",
+            id="empty-canonical-fallback",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "canonical"}, "cache_salt": "legacy"},
+            "canonical",
+            id="canonical-precedence",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "tenant-a"}, "allowed_token_ids": [123]},
+            "tenant-a",
+            id="salt-with-sampling-options",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "canonical"}, "routing": None},
+            "canonical",
+            id="no-routing-hints",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "dynamo-cache-salt:租户"}},
+            "dynamo-cache-salt:租户",
+            id="public-value-preserved",
+        ),
+    ],
+)
+async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expected):
+    """Preserve public salt precedence across local, router, and worker inputs."""
+    processor, routed_engine = cache_salt_processor()
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 1,
+        "routing": {"backend_instance_id": 7, "priority": 2},
+        **fields,
+    }
+    original = deepcopy(request)
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    assert request == original
+    assert len(routed_engine.requests) == 1
+    preprocessed = routed_engine.requests[0]
+    renderer = processor.input_processor.renderer.process_for_engine_async
+    local_prompt = renderer.await_args.args[0]
+    if expected is None:
+        assert preprocessed["routing"] == original["routing"]
+        assert "extra_args" not in preprocessed
+        assert "cache_salt" not in local_prompt
+    else:
+        assert preprocessed["routing"] == {
+            **(original["routing"] or {}),
+            "cache_salt": expected,
+        }
+        expected_extra_args = {"nvext": {"cache_salt": expected}}
+        if "allowed_token_ids" in fields:
+            expected_extra_args["sampling_options"] = {
+                "allowed_token_ids": fields["allowed_token_ids"]
+            }
+        assert preprocessed["extra_args"] == expected_extra_args
+        assert local_prompt["cache_salt"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_generator_cache_salt_survives_multimodal_metadata(
+    cache_salt_processor, vllm_processor_module, monkeypatch
+):
+    """Keep salt and multimodal metadata together without mutating the request."""
+    feature = SimpleNamespace(
+        modality="image",
+        mm_hash="a" * 64,
+        data=object(),
+        mm_position=SimpleNamespace(offset=0, length=3),
+    )
+    mm_routing_info = {"block_mm_infos": [None]}
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *args, **kwargs: mm_routing_info,
+    )
+    processor, routed_engine = cache_salt_processor([feature])
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 1,
+        "nvext": {"cache_salt": "canonical"},
+        "routing": {"backend_instance_id": 7, "cache_salt": "stale"},
+    }
+    original = deepcopy(request)
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    assert request == original
+    preprocessed = routed_engine.requests[0]
+    assert preprocessed["routing"] == {
+        "backend_instance_id": 7,
+        "cache_salt": "canonical",
+    }
+    assert preprocessed["extra_args"] == {
+        "nvext": {"cache_salt": "canonical"},
+        "mm_hashes": [feature.mm_hash],
+        "mm_hashes_by_modality": {"image": [feature.mm_hash]},
+        "mm_placeholders": [(0, 3)],
+        "mm_placeholders_by_modality": {"image": [(0, 3)]},
+        "expanded_token_ids": [1, 2, 3],
+    }
+    assert preprocessed["mm_routing_info"] == mm_routing_info
 
 
 @pytest.mark.asyncio
@@ -1626,9 +1916,11 @@ async def test_generator_forwards_chat_logprobs_count(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("context_id", ["ctx-123", None])
 async def test_include_reasoning_false_keeps_response_parser_active(
     vllm_processor_module,
     monkeypatch,
+    context_id,
 ):
     class RequestForSampling(SimpleNamespace):
         model_fields = frozenset()
@@ -1698,6 +1990,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
     )
 
     def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        captured["input_request_id"] = request_id
         return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
 
     input_processor = SimpleNamespace(
@@ -1735,6 +2028,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         mm_routing_info,
         context,
     ):
+        captured["stream_request_id"] = request_id
         captured["dynamo_preproc"] = dynamo_preproc
         captured["post_processor"] = post_processors[0]
         yield {"captured": True}
@@ -1751,11 +2045,17 @@ async def test_include_reasoning_false_keeps_response_parser_active(
             {
                 "model": "test",
                 "messages": [{"role": "user", "content": "Hello"}],
-            }
+            },
+            context=_FakeContext(context_id) if context_id is not None else None,
         )
     ]
 
     assert results == [{"captured": True}]
+    assert captured["input_request_id"] == captured["stream_request_id"]
+    if context_id is not None:
+        assert captured["stream_request_id"] == context_id
+    else:
+        assert len(captured["stream_request_id"]) == 16
     assert captured["dynamo_preproc"]["reasoning_ended"] is True
     post_processor = captured["post_processor"]
     assert post_processor.reasoning_is_done is False
@@ -1953,6 +2253,339 @@ async def test_generator_inner_forwards_reasoning_parser_and_model_config(
     assert captured.get("model_config") is sentinel_model_config
 
 
+async def _capture_rendered_reasoning_processors(
+    module,
+    monkeypatch,
+    tokenizer,
+    request,
+    prompt_text,
+    parser_name,
+    backend_defers_grammar,
+):
+    """Use real preprocessing and capture the worker controls and response parser."""
+    monkeypatch.setattr(
+        module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+    processor = module.VllmProcessor(
+        tokenizer=tokenizer,
+        input_processor=SimpleNamespace(
+            generation_config_fields={},
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(
+                        None,
+                        {
+                            "prompt_token_ids": tokenizer.encode(
+                                prompt_text, add_special_tokens=False
+                            )
+                        },
+                    )
+                ),
+                process_for_engine_async=AsyncMock(return_value={}),
+            ),
+            process_inputs=lambda request_id, inputs, sampling_params, tasks: (
+                SimpleNamespace(
+                    sampling_params=sampling_params.clone(), mm_features=None
+                )
+            ),
+            model_config=None,
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(parser_name),
+        backend_defers_grammar=backend_defers_grammar,
+        routed_engine=object(),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id, request, dynamo_preproc, tokens, vllm_preproc, post_processors, **_
+    ):
+        captured["dynamo_preproc"] = dynamo_preproc
+        captured["post"] = post_processors[0]
+        yield {}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+    async for _ in processor._generator_inner(request):
+        pass
+    return captured["dynamo_preproc"], captured["post"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "prompt_text",
+        "chat_template_kwargs",
+        "expected",
+        "tool_choice",
+        "include_reasoning",
+        "stream_response",
+        "combined_chunk",
+    ),
+    [
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            {control: False},
+            ("plan", "Hello"),
+            tool_choice,
+            include_reasoning,
+            stream_response,
+            combined_chunk,
+            id=f"open-{control}-{choice_id}-{'combined' if combined_chunk else 'split'}",
+        )
+        for control in ("enable_thinking", "thinking")
+        for choice_id, tool_choice, include_reasoning, stream_response in (
+            ("plain", None, True, True),
+            ("required-tool", "required", True, True),
+            ("required-tool-hidden-reasoning-stream", "required", False, True),
+            ("required-tool-hidden-reasoning-buffered", "required", False, False),
+            (
+                "named-tool-hidden-reasoning-stream",
+                {"type": "function", "function": {"name": "get_weather"}},
+                False,
+                True,
+            ),
+            (
+                "named-tool-hidden-reasoning",
+                {"type": "function", "function": {"name": "get_weather"}},
+                False,
+                False,
+            ),
+        )
+        for combined_chunk in (False, True)
+    ]
+    + [
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, "plan</think>Hello"),
+            None,
+            True,
+            True,
+            False,
+            id="closed-plain-split",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, "plan</think>Hello"),
+            None,
+            True,
+            True,
+            True,
+            id="closed-plain-combined",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, ""),
+            "required",
+            True,
+            True,
+            False,
+            id="closed-required-tool",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, ""),
+            {"type": "function", "function": {"name": "get_weather"}},
+            False,
+            False,
+            False,
+            id="closed-named-tool-hidden-reasoning",
+        ),
+    ],
+)
+# _generator_inner reads the deprecated max_tokens field of a real request.
+@pytest.mark.filterwarnings(
+    "ignore:max_tokens is deprecated in favor of the max_completion_tokens field"
+    ":DeprecationWarning"
+)
+async def test_generator_inner_follows_rendered_glm_reasoning_state(
+    vllm_processor_module,
+    monkeypatch,
+    tokenizer,
+    prompt_text,
+    chat_template_kwargs,
+    expected,
+    tool_choice,
+    include_reasoning,
+    stream_response,
+    combined_chunk,
+):
+    """The worker controls and the response parser follow the GLM prompt."""
+    prompt_open = prompt_text == _GLM_OPEN_PROMPT
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "chat_template_kwargs": chat_template_kwargs,
+        "stream": stream_response,
+        "include_reasoning": include_reasoning,
+        **(
+            {"tools": TOOL_REQUEST["tools"], "tool_choice": tool_choice}
+            if tool_choice is not None
+            else {}
+        ),
+    }
+    dynamo_preproc, post = await _capture_rendered_reasoning_processors(
+        vllm_processor_module,
+        monkeypatch,
+        tokenizer,
+        request,
+        prompt_text,
+        "glm45",
+        True,
+    )
+    assert dynamo_preproc["reasoning_ended"] is (not prompt_open)
+    assert dynamo_preproc["reasoning_parser_kwargs"] == {
+        "chat_template_kwargs": {
+            "thinking": prompt_open,
+            "enable_thinking": prompt_open,
+        }
+    }
+    # vLLM's GLM parser needs the markers detokenized.
+    assert dynamo_preproc["output_options"]["skip_special_tokens"] is False
+
+    assert post.reasoning_is_done is dynamo_preproc["reasoning_ended"]
+    assert post._uses_dynamo_json_tool_call_fallback is (tool_choice is not None)
+    reasoning, content = "", ""
+    tool_calls = []
+    answer = "Hello"
+    if tool_choice is not None:
+        answer = (
+            '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+            if tool_choice == "required"
+            else '{"city":"Paris"}'
+        )
+    pieces = ["plan", "</think>", answer]
+    # Replay the worker's grammar gate: an ended state permits tool JSON first.
+    # Hidden reasoning on an open prompt must still generate the closing marker.
+    if tool_choice is not None and dynamo_preproc["reasoning_ended"]:
+        pieces = [answer]
+    if combined_chunk:
+        pieces = ["".join(pieces)]
+    for index, piece in enumerate(pieces):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=piece,
+                token_ids=tokenizer.encode(piece, add_special_tokens=False),
+                finish_reason="stop" if index == len(pieces) - 1 else None,
+                logprobs=None,
+            )
+        )
+        delta = choice["delta"] if choice else {}
+        reasoning += delta.get("reasoning_content") or ""
+        content += delta.get("content") or ""
+        tool_calls.extend(delta.get("tool_calls") or [])
+        if index < len(pieces) - 1 and prompt_open and include_reasoning and index == 0:
+            assert delta.get("reasoning_content") == "plan"
+    if tool_choice is None:
+        assert (reasoning or None, content) == expected
+        assert tool_calls == []
+    else:
+        assert reasoning == ("plan" if prompt_open and include_reasoning else "")
+        assert content == ""
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
+        assert choice["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("parser_name", "guidance", "backend_defers_grammar"),
+    [
+        (parser, guidance, defers)
+        for parser in ("glm45", "glm47")
+        for guidance in ("named", "required", "json")
+        for defers in (False, True)
+    ]
+    + [("qwen3", guidance, False) for guidance in ("named", "required")],
+)
+@pytest.mark.parametrize("combined_chunk", [False, True], ids=["split", "combined"])
+@pytest.mark.filterwarnings(
+    "ignore:max_tokens is deprecated in favor of the max_completion_tokens field:DeprecationWarning"
+)
+async def test_guided_json_follows_worker_grammar_scheduling(
+    vllm_processor_module,
+    monkeypatch,
+    tokenizer,
+    parser_name,
+    guidance,
+    backend_defers_grammar,
+    combined_chunk,
+):
+    """Immediate and delayed worker grammars must both preserve hidden tool calls."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "chat_template_kwargs": {"enable_thinking": parser_name == "qwen3"},
+        "include_reasoning": False,
+        "stream": True,
+    }
+    answer = '{"city":"Paris"}'
+    if guidance == "json":
+        request["response_format"] = {"type": "json_object"}
+    else:
+        request["tools"] = TOOL_REQUEST["tools"]
+        request["tool_choice"] = (
+            "required"
+            if guidance == "required"
+            else {"type": "function", "function": {"name": "get_weather"}}
+        )
+        if guidance == "required":
+            answer = '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+    metadata, post = await _capture_rendered_reasoning_processors(
+        vllm_processor_module,
+        monkeypatch,
+        tokenizer,
+        request,
+        _GLM_OPEN_PROMPT,
+        parser_name,
+        backend_defers_grammar,
+    )
+    if parser_name != "qwen3":
+        assert metadata["reasoning_ended"] is (not backend_defers_grammar)
+        assert post.reasoning_is_done is (not backend_defers_grammar)
+    pieces = ["plan", "</think>", answer] if backend_defers_grammar else [answer]
+    if combined_chunk:
+        pieces = ["".join(pieces)]
+    deltas = []
+    for index, piece in enumerate(pieces):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=piece,
+                token_ids=tokenizer.encode(piece, add_special_tokens=False),
+                finish_reason="stop" if index == len(pieces) - 1 else None,
+                logprobs=None,
+            )
+        )
+        if choice:
+            deltas.append(choice["delta"])
+    assert not any(delta.get("reasoning_content") for delta in deltas)
+    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+    if guidance == "json":
+        assert "".join(delta.get("content", "") for delta in deltas) == answer
+        assert calls == []
+        assert choice["finish_reason"] == "stop"
+    else:
+        assert "".join(delta.get("content", "") for delta in deltas) == ""
+        assert len(calls) == 1
+        assert calls[0]["function"] == {
+            "name": "get_weather",
+            "arguments": answer if guidance == "named" else '{"city":"Paris"}',
+        }
+        assert choice["finish_reason"] == "tool_calls"
+
+
 def _make_processor(module, routed_engine):
     processor = module.VllmProcessor.__new__(module.VllmProcessor)
     processor.routed_engine = routed_engine
@@ -1977,6 +2610,7 @@ async def _run_generate(
     processor,
     preproc,
     *,
+    request_id="request-id",
     mm_routing_info=None,
     context=None,
     request=None,
@@ -1993,7 +2627,7 @@ async def _run_generate(
     return [
         item
         async for item in processor._generate_and_stream(
-            "request-id",
+            request_id,
             request if request is not None else {"model": MODEL},
             preproc,
             preproc["token_ids"],
@@ -2859,7 +3493,7 @@ class TestRoutedEnginePath:
 
         assert envelope["_dynamo_annotated"] is True
         assert envelope["data"] == {
-            "id": "request-id",
+            "id": "chatcmpl-request-id",
             "choices": [
                 {
                     "index": 0,
@@ -2880,6 +3514,32 @@ class TestRoutedEnginePath:
 
         assert "event" not in envelope
         assert "comment" not in envelope
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_id", ["ctx-123", None])
+    async def test_routed_stream_keeps_caller_request_id(
+        self, vllm_processor_module, context_id
+    ):
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {"token_ids": [102], "index": 0, "finish_reason": "stop"},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request_id="resolved-request",
+            context=_FakeContext(context_id),
+        )
+
+        assert [chunk["data"]["id"] for chunk in chunks] == [
+            "chatcmpl-resolved-request",
+            "chatcmpl-resolved-request",
+        ]
+        assert routed_engine.kwargs[0]["context"].id() == context_id
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
@@ -3103,6 +3763,62 @@ class TestPreprocessRawRequestControls:
             default_thinking_mode="disabled",
         )
         assert "thinking_mode" not in result.chat_template_kwargs
+
+
+class _FakeResponseFormatConsumingReasoningParser:
+    def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+        del tokenizer, chat_template_kwargs, model_config
+
+    def adjust_request(self, request):
+        request.response_format = None
+        return request
+
+
+class TestChatParamsResponseFormat:
+    """The renderer must see the caller's response_format, as in vLLM's serving.
+
+    vLLM renders from build_chat_params() before any parser adjusts the request,
+    and renderers such as Kimi K3 consume ChatParams.response_format directly.
+    Stock vLLM 0.33.0's Mistral renderer/tokenizer do not forward that field.
+    """
+
+    def _prepare(self, tokenizer, request_extra, **parsers):
+        request_for_sampling, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                **request_extra,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=parsers.get("tool_parser_class"),
+            reasoning_parser_class=parsers.get("reasoning_parser_class"),
+        )
+        return request_for_sampling, chat_params
+
+    def test_without_parsers(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(tokenizer, {})
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format.type == "json_object"
+
+    def test_reasoning_parser_clears_it(self, tokenizer):
+        # No tools: only the reasoning parser runs, as for a Mistral json_object request.
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer,
+            {},
+            reasoning_parser_class=_FakeResponseFormatConsumingReasoningParser,
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format is None
+
+    def test_tool_parser_clears_it(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer,
+            {"tools": TOOL_REQUEST["tools"], "tool_choice": "auto"},
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format is None
 
 
 class _FakeStructuralTagReasoningParser:
@@ -5518,7 +6234,9 @@ class TestToolCallGrammarReasoningStart:
         prompt_text,
         reasoning_parser_class,
         structural_tag_excludes_reasoning=False,
+        chat_template_kwargs=None,
     ):
+        """Capture whether tool guidance starts inside the rendered reasoning block."""
         parsers = []
 
         def make_parser(tokenizer, tools):
@@ -5527,8 +6245,11 @@ class TestToolCallGrammarReasoningStart:
             return parser
 
         monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+        request = {**TOOL_REQUEST, "tool_choice": "auto"}
+        if chat_template_kwargs is not None:
+            request["chat_template_kwargs"] = chat_template_kwargs
         result = await prepost_module.preprocess_chat_request(
-            {**TOOL_REQUEST, "tool_choice": "auto"},
+            request,
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -5588,6 +6309,33 @@ class TestToolCallGrammarReasoningStart:
             prompt_text=prompt_text,
             reasoning_parser_class=_prompt_reasoning_parser(parser_start),
             structural_tag_excludes_reasoning=excludes_reasoning,
+        )
+        assert reasoning == [expected]
+
+    @pytest.mark.parametrize(
+        ("prompt_text", "parser_name", "expected"),
+        [
+            (_GLM_OPEN_PROMPT, "glm45", True),
+            (_GLM_CLOSED_PROMPT, "glm47", False),
+            (_GLM_OPEN_PROMPT, "qwen3", False),
+        ],
+        ids=["glm-open", "glm-closed", "non-glm-open"],
+    )
+    @pytest.mark.asyncio
+    async def test_glm_prompt_state_overrides_false_thinking_flag(
+        self, tokenizer, monkeypatch, prompt_text, parser_name, expected
+    ):
+        """Only GLM prompt markers override a false flag when tool guidance starts."""
+        from vllm.reasoning import ReasoningParserManager
+
+        reasoning = await self._reasoning_requested(
+            tokenizer,
+            monkeypatch,
+            prompt_text=prompt_text,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(
+                parser_name
+            ),
+            chat_template_kwargs={"enable_thinking": False},
         )
         assert reasoning == [expected]
 

@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
+from dynamo.vllm import decision_execution as decisions
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -613,6 +614,105 @@ def test_muse_grammar_owns_reasoning_before_engine_launch(
 
 
 @pytest.mark.parametrize(
+    ("backend", "expected"),
+    [("auto", False), ("guidance", True), ("xgrammar", False), ("outlines", False)],
+)
+def test_vllm_publishes_llguidance_lark_grammar(backend: str, expected: bool) -> None:
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(backend=backend)
+    )
+
+    vllm_main.publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, json.dumps(expected)
+    )
+
+
+_MOCK_TEKKEN_DIR = (
+    Path(__file__).resolve().parents[5]
+    / "lib/llm/tests/data/sample-models/mock-mistral-tekken"
+)
+
+
+def _tekken_vllm_config(tokenizer: Path, outputs: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(tokenizer=str(tokenizer), tokenizer_revision=None),
+        structured_outputs_config=outputs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("files", "backend", "expected"),
+    [
+        (["tekken.json"], "auto", "guidance"),
+        (["tekken.json", "tokenizer.json"], "auto", "guidance"),
+        (["tekken.json"], "xgrammar", "xgrammar"),
+        (["tokenizer.json"], "auto", "auto"),
+    ],
+)
+def test_tekken_checkpoints_pin_guidance(
+    tmp_path: Path, files: list[str], backend: str, expected: str
+) -> None:
+    from vllm.transformers_utils.repo_utils import list_repo_files
+
+    vllm_main = _load_vllm_main()
+    for name in files:
+        (tmp_path / name).write_text("{}")
+    # vLLM caches each path's file listing for the whole process, and pytest
+    # reuses this `tmp_path` name once an earlier passing case has deleted it.
+    list_repo_files.cache_clear()
+    outputs = SimpleNamespace(backend=backend)
+
+    vllm_main.pin_guidance_for_tekken_checkpoints(
+        _tekken_vllm_config(tmp_path, outputs)
+    )
+
+    assert outputs.backend == expected
+
+
+def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
+    """A regex, a JSON schema and a lark grammar resolve to one backend.
+
+    Under `auto`, vLLM resolves the lark grammar to a different backend than
+    the others, and the engine rejects whichever kind arrives second.
+    """
+    from vllm.config import StructuredOutputsConfig
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    vllm_main = _load_vllm_main()
+    tokenizer = MistralTokenizer.from_pretrained(str(_MOCK_TEKKEN_DIR))
+
+    def resolved_backends(config: StructuredOutputsConfig) -> list[str]:
+        backends = []
+        for constraint in (
+            StructuredOutputsParams(regex="yes|no"),
+            StructuredOutputsParams(json={"type": "object"}),
+            StructuredOutputsParams(grammar='start: "yes" | "no"'),
+        ):
+            params = SamplingParams(structured_outputs=constraint)
+            params._validate_structured_outputs(
+                SimpleNamespace(is_diffusion=False), config, tokenizer
+            )
+            backends.append(params.structured_outputs._backend)
+        return backends
+
+    assert resolved_backends(StructuredOutputsConfig(backend="auto")) == [
+        "xgrammar",
+        "xgrammar",
+        "guidance",
+    ]
+    pinned = StructuredOutputsConfig(backend="auto")
+    vllm_main.pin_guidance_for_tekken_checkpoints(
+        _tekken_vllm_config(_MOCK_TEKKEN_DIR, pinned)
+    )
+    assert resolved_backends(pinned) == ["guidance", "guidance", "guidance"]
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
@@ -700,8 +800,18 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     assert should_register_model_ignore_weights(config) is False
 
 
-def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+@pytest.mark.parametrize("shared_embedding", [False, True])
+@pytest.mark.parametrize(
+    "qualification",
+    ["disabled", "qualified", "release", "architecture", "scheduler", "cache"],
+)
+def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
+    monkeypatch, tmp_path, shared_embedding, qualification
+):
     from dynamo.vllm import main as vllm_main
+
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    order = []
 
     # Isolate NIXL env so allow_nixl_telemetry_capture() cannot leak into later tests.
     for var in (
@@ -713,6 +823,16 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     class FakeModelConfig:
+        architecture = "Qwen3ForCausalLM"
+        runner_type = "generate"
+        logprobs_mode = "raw_logprobs"
+        is_encoder_decoder = False
+        is_diffusion = False
+        model_impl = "auto"
+        model_class_overrides = None
+        convert_type = "none"
+        max_model_len = 2048
+
         def get_diff_sampling_param(self):
             return {"temperature": 0.7}
 
@@ -720,6 +840,15 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         additional_config={},
         cache_config=SimpleNamespace(block_size=None),
         model_config=FakeModelConfig(),
+        structured_outputs_config=SimpleNamespace(backend="xgrammar"),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=1, scheduler_cls=None, async_scheduling=False
+        ),
+        parallel_config=SimpleNamespace(data_parallel_size=1),
+        lora_config=None,
+        speculative_config=None,
+        kv_transfer_config=None,
+        ec_transfer_config=None,
     )
 
     class FakeEngineArgs:
@@ -732,6 +861,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
             raise AssertionError("setup_vllm_engine must not create ModelConfig twice")
 
         def create_engine_config(self, usage_context):
+            order.append("create_engine_config")
             return vllm_config
 
     engine_client = SimpleNamespace(vllm_config=vllm_config)
@@ -739,7 +869,27 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     class FakeAsyncLLM:
         @staticmethod
         def from_vllm_config(**_kwargs):
+            order.append("engine_factory")
             return engine_client
+
+    def create_shared_engine(**_kwargs):
+        order.append("shared_engine_factory")
+        return engine_client, vllm_config, None
+
+    def installed_version(_package):
+        order.append("release")
+        return "0.32.0" if qualification == "release" else "0.33.0"
+
+    def verify_cache_sources():
+        order.append("cache_sources")
+        return qualification != "cache"
+
+    monkeypatch.setattr(decisions, "version", installed_version)
+    monkeypatch.setattr(decisions, "verify_cache_sources", verify_cache_sources)
+    if qualification == "architecture":
+        vllm_config.model_config.architecture = "UnknownForCausalLM"
+    elif qualification == "scheduler":
+        vllm_config.scheduler_config.scheduler_cls = "custom.Scheduler"
 
     class FakeMetrics:
         def __init__(self, **_kwargs):
@@ -753,6 +903,9 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
     monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
     monkeypatch.setattr(
+        vllm_main, "create_shared_embedding_engine_client", create_shared_engine
+    )
+    monkeypatch.setattr(
         vllm_main,
         "get_engine_cache_info",
         lambda _engine: {"block_size": 16},
@@ -762,8 +915,9 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),
-        embedding_worker=False,
-        embedding_worker_processes=1,
+        embedding_worker=shared_embedding,
+        embedding_worker_processes=2 if shared_embedding else 1,
+        systemone_serial=qualification != "disabled",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
         gms_shadow_mode=False,
@@ -772,9 +926,28 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         served_model_name="Qwen/Qwen3-0.6B",
     )
 
-    _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
+    errors = {
+        "release": "vLLM 0.33.0",
+        "architecture": "unsupported model architecture",
+        "scheduler": "standard scheduler_cls",
+        "cache": "cache sources",
+    }
+    if qualification in errors:
+        with pytest.raises(ValueError, match=errors[qualification]):
+            vllm_main.setup_vllm_engine(config)
+        assert "engine_factory" not in order
+        assert "shared_engine_factory" not in order
+        assert order[0] == "create_engine_config"
+    else:
+        _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
-    assert default_sampling_params == {"temperature": 0.7}
+        assert default_sampling_params == {"temperature": 0.7}
+        factory_name = "shared_engine_factory" if shared_embedding else "engine_factory"
+        assert order == (
+            ["create_engine_config", factory_name]
+            if qualification == "disabled"
+            else ["create_engine_config", "release", "cache_sources", factory_name]
+        )
 
 
 # --disaggregation-mode tests
@@ -1473,14 +1646,7 @@ def test_build_vllm_kv_hints_constructs_envelope():
             }
         ],
     }
-    action_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
-    envelope_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
-
-    with patch(
-        "dynamo.vllm.handlers._vllm_kv_hints_types",
-        return_value=(action_type, envelope_type),
-    ):
-        envelope = _build_vllm_kv_hints({"kv_hint": kv_hint})
+    envelope = _build_vllm_kv_hints({"kv_hint": kv_hint})
 
     assert envelope.protocol_version == "0.1"
     assert envelope.message_id == "msg-123"
@@ -1964,16 +2130,6 @@ class TestRunnerPreservation:
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert engine_cfg.runner == "draft"
-
-    def test_no_runner_attr_skipped_gracefully(self):
-        """If engine_config lacks a 'runner' attr (older vLLM), no error is raised."""
-        dynamo_cfg = _make_dynamo_config()
-        engine_cfg = _make_engine_config_with_runner()
-        del engine_cfg.runner  # simulate older vLLM without runner
-
-        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
-
-        assert not hasattr(engine_cfg, "runner")
 
 
 class TestForwardPassMetricsActivation:
@@ -2537,7 +2693,6 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
         engine_client=EngineClient(),
-        _deferred_aborts={},
         _shutdown_on_engine_dead=lambda exc: None,
         _abort_monitor=abort_monitor,
         _to_local_dp_rank=lambda rank: None,
@@ -2617,7 +2772,6 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
         engine_client=EngineClient(),
-        _deferred_aborts={},
         _shutdown_on_engine_dead=lambda exc: None,
         _abort_monitor=abort_monitor,
         _to_local_dp_rank=lambda rank: None,

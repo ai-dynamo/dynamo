@@ -176,6 +176,8 @@ enum MutationRequest {
 
 struct DirectLruSink {
     sender: flume::Sender<ApproximateLruTask>,
+    /// Cancelled when the indexer thread exits.
+    lane_exited: CancellationToken,
 }
 
 impl ApproximateLruCommandSink for DirectLruSink {
@@ -184,6 +186,10 @@ impl ApproximateLruCommandSink for DirectLruSink {
         self.sender
             .send(task)
             .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn lane_exited(&self) -> &CancellationToken {
+        &self.lane_exited
     }
 }
 
@@ -336,31 +342,6 @@ fn drain_pending_mutations(
     }
 }
 
-/// Construction options for a single-threaded KV indexer.
-pub struct KvIndexerBuilder {
-    token: CancellationToken,
-    kv_block_size: u32,
-    metrics: Arc<KvIndexerMetrics>,
-    retention: Option<ApproximateRetentionConfig>,
-    delegate: Option<Arc<dyn super::KvIndexerDelegate>>,
-}
-
-impl KvIndexerBuilder {
-    pub fn delegate(mut self, delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
-        self.delegate = Some(delegate);
-        self
-    }
-
-    pub fn retention(mut self, retention: ApproximateRetentionConfig) -> Self {
-        self.retention = Some(retention);
-        self
-    }
-
-    pub fn build(self) -> KvIndexer {
-        KvIndexer::from_builder(self)
-    }
-}
-
 /// The KV Indexer, managing the KV store and handling events and match requests.
 #[derive(Clone)]
 pub struct KvIndexer {
@@ -430,34 +411,39 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         retention: Option<ApproximateRetentionConfig>,
     ) -> Self {
-        let mut builder = Self::builder(token, kv_block_size, metrics);
-        builder.retention = retention;
-        builder.build()
-    }
-
-    /// Configure the indexer before its mutation thread starts.
-    pub fn builder(
-        token: CancellationToken,
-        kv_block_size: u32,
-        metrics: Arc<KvIndexerMetrics>,
-    ) -> KvIndexerBuilder {
-        KvIndexerBuilder {
-            token,
-            kv_block_size,
-            metrics,
-            retention: None,
-            delegate: None,
+        #[cfg(test)]
+        {
+            Self::spawn(token, kv_block_size, metrics, retention, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::spawn(token, kv_block_size, metrics, retention)
         }
     }
 
-    fn from_builder(builder: KvIndexerBuilder) -> Self {
-        let KvIndexerBuilder {
-            token,
-            kv_block_size,
-            metrics,
-            retention,
-            delegate,
-        } = builder;
+    /// Test hook: an indexer whose actor thread parks before dequeuing its first mutation
+    /// until the returned sender fires or drops. Everything enqueued meanwhile is applied
+    /// afterwards in FIFO order from a real backlog. Only enqueue-only calls are safe while
+    /// parked; `flush` or `find_matches` would deadlock.
+    #[cfg(test)]
+    fn new_parked(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> (Self, oneshot::Sender<()>) {
+        let (release_tx, release_rx) = oneshot::channel();
+        let indexer = Self::spawn(token, kv_block_size, metrics, retention, Some(release_rx));
+        (indexer, release_tx)
+    }
+
+    fn spawn(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        retention: Option<ApproximateRetentionConfig>,
+        #[cfg(test)] park: Option<oneshot::Receiver<()>>,
+    ) -> Self {
         let (prune_config, approximate_lru_enabled) = match retention {
             Some(ApproximateRetentionConfig::Ttl(config)) => (Some(config), false),
             Some(ApproximateRetentionConfig::Lru { fallback_ttl }) => (Some(fallback_ttl), true),
@@ -479,15 +465,18 @@ impl KvIndexer {
         let (approximate_lru_tx, approximate_lru_rx) = approximate_lru_enabled
             .then(flume::unbounded::<ApproximateLruTask>)
             .map_or((None, None), |(tx, rx)| (Some(tx), Some(rx)));
+        let thread_exited = CancellationToken::new();
         let approximate_lru = approximate_lru_tx.as_ref().map(|sender| {
             ApproximateLruClient::new(Arc::new(DirectLruSink {
                 sender: sender.clone(),
+                lane_exited: thread_exited.clone(),
             }))
         });
 
         let cancel_clone = token.clone();
 
         std::thread::spawn(move || {
+            let _exited = thread_exited.drop_guard();
             let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -504,7 +493,7 @@ impl KvIndexer {
                     let mut track_resident_blocks_rx = track_resident_blocks_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
-                    let mut trie = delegate.map_or_else(RadixTree::new, RadixTree::new_with_delegate);
+                    let mut trie = RadixTree::new();
                     let mut approximate_lru_lane = ApproximateLruLane::default();
                     let approximate_lru_rx = approximate_lru_rx;
 
@@ -512,6 +501,11 @@ impl KvIndexer {
                     let mut prune_ready_rx = prune_manager.as_ref().map(|pm| pm.subscribe_ready());
                     let mut event_id_counter = 0u64;
                     let counters = metrics.prebind();
+
+                    #[cfg(test)]
+                    if let Some(park) = park {
+                        let _ = park.await;
+                    }
 
                     loop {
                         tokio::select! {
@@ -1085,10 +1079,7 @@ impl Drop for KvIndexer {
 
 #[cfg(test)]
 mod fifo_reset_tests {
-    use std::sync::Mutex;
-
     use super::*;
-    use crate::KvIndexerDelegate;
     use crate::testing::{create_store_event, make_store_event_with_dp_rank};
 
     #[tokio::test]
@@ -1137,54 +1128,65 @@ mod fifo_reset_tests {
         assert_eq!(new_scores.scores.get(&worker), Some(&1));
     }
 
-    /// Parks the indexer thread on its first `on_create` until the test releases it.
-    struct Gate {
-        entered: Mutex<Option<oneshot::Sender<()>>>,
-        open: Mutex<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl KvIndexerDelegate for Gate {
-        fn on_create(&self, _: ExternalSequenceBlockHash) {
-            let entered = self.entered.lock().unwrap().take();
-            if let Some(entered) = entered {
-                let _ = entered.send(());
-                let _ = self.open.lock().unwrap().recv();
-            }
-        }
-
-        fn on_remove(&self, _: ExternalSequenceBlockHash) {}
-    }
-
-    /// Returns an indexer whose thread is parked, plus the sender that releases it.
+    /// Returns an indexer whose actor is parked, plus the sender that releases it.
     ///
     /// Until release, mutations only queue up, so the test fixes their order. Only
     /// enqueue-only calls are safe before release; `flush` or `find_matches` would deadlock.
-    async fn parked_indexer() -> (KvIndexer, std::sync::mpsc::Sender<()>) {
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (open_tx, open_rx) = std::sync::mpsc::channel();
-        let gate = Arc::new(Gate {
-            entered: Mutex::new(Some(entered_tx)),
-            open: Mutex::new(open_rx),
-        });
-        let indexer = KvIndexer::builder(
-            CancellationToken::new(),
+    fn parked_indexer() -> (KvIndexer, oneshot::Sender<()>) {
+        parked_indexer_with(CancellationToken::new(), None)
+    }
+
+    fn parked_indexer_with(
+        token: CancellationToken,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> (KvIndexer, oneshot::Sender<()>) {
+        KvIndexer::new_parked(
+            token,
             32,
             Arc::new(KvIndexerMetrics::new_unregistered()),
+            retention,
         )
-        .delegate(gate)
-        .build();
-        indexer
-            .apply_event(create_store_event(99, 0, vec![1], None))
-            .await;
-        entered_rx.await.unwrap();
-        (indexer, open_tx)
+    }
+
+    /// Mutations still queued behind the parked actor.
+    fn queued_mutations(indexer: &KvIndexer) -> usize {
+        indexer.mutation_tx.max_capacity() - indexer.mutation_tx.capacity()
+    }
+
+    /// The thread shuts down with an acknowledged LRU task still queued. The client's sender
+    /// keeps that task and its reply alive, so the wait must observe the thread's exit.
+    #[tokio::test]
+    async fn lru_wait_fails_when_indexer_thread_exits_with_it_queued() {
+        let token = CancellationToken::new();
+        let retention = ApproximateRetentionConfig::Lru {
+            fallback_ttl: PruneConfig {
+                ttl: std::time::Duration::from_secs(120),
+            },
+        };
+        let (indexer, release) = parked_indexer_with(token.clone(), Some(retention));
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                indexer.approximate_lru_stats()
+            ),
+            async {
+                tokio::task::yield_now().await;
+                token.cancel();
+                release.send(()).unwrap();
+            },
+        );
+        let result = result.expect("LRU wait hung after the indexer thread exited");
+        assert!(
+            matches!(result, Err(KvRouterError::IndexerOffline)),
+            "returned {result:?}"
+        );
     }
 
     /// Removing one dp_rank must apply after already-queued stores and keep sibling ranks.
     #[tokio::test]
     async fn remove_worker_dp_rank_does_not_overtake_queued_stores() {
         let hashes = [11, 12, 13, 14];
-        let (indexer, release) = parked_indexer().await;
+        let (indexer, release) = parked_indexer();
         indexer
             .apply_event(make_store_event_with_dp_rank(7, &hashes, 1))
             .await;
@@ -1192,6 +1194,11 @@ mod fifo_reset_tests {
             .apply_event(make_store_event_with_dp_rank(7, &hashes, 0))
             .await;
         indexer.remove_worker_dp_rank(7, 0).await;
+        assert_eq!(
+            queued_mutations(&indexer),
+            3,
+            "stores must still be queued when the removal is sent"
+        );
         release.send(()).unwrap();
         indexer.flush().await;
 
@@ -1214,7 +1221,7 @@ mod fifo_reset_tests {
     #[tokio::test]
     async fn remove_worker_does_not_overtake_queued_stores() {
         let hashes = vec![11, 12, 13, 14];
-        let (indexer, release) = parked_indexer().await;
+        let (indexer, release) = parked_indexer();
         indexer
             .apply_event(create_store_event(7, 0, hashes.clone(), None))
             .await;
@@ -1222,6 +1229,11 @@ mod fifo_reset_tests {
             .apply_event(create_store_event(8, 0, hashes.clone(), None))
             .await;
         indexer.remove_worker(7).await;
+        assert_eq!(
+            queued_mutations(&indexer),
+            3,
+            "stores must still be queued when the removal is sent"
+        );
         release.send(()).unwrap();
         indexer.flush().await;
 

@@ -3,9 +3,8 @@
 
 //! A worker's hashed hint identity, built once from its runtime config: the key builder over
 //! the config's fields, the once-per-config cache, and the two plain data types a worker's
-//! runtime config speaks about hints. The label hashing ([`label_key`], [`topology_keys`]) is
-//! the indexer's, re-exported here so worker keys and the indexer's cache-owner keys hash the
-//! same way.
+//! runtime config speaks about hints. The label hashing (`label_key`, `topology_keys`) is
+//! the indexer's, so worker keys and the indexer's cache-owner keys hash the same way.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -14,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transfer::WorkerKvTransferKeys;
 
-pub use dynamo_kv_indexer::{label_key, topology_keys};
+use dynamo_kv_indexer::{label_key, topology_keys};
 
 /// TRANSFER hint metadata a worker config exposes for one global DP rank.
 ///

@@ -50,7 +50,6 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
-    lifecycle: super::HashLifecycle,
     sweep_schedule: SweepSchedule,
     /// Nodes that lost their last holder since the last stale-leaf sweep began.
     deaths_since_sweep: AtomicU64,
@@ -139,28 +138,10 @@ impl Drop for ConcurrentRadixTreeCompressed {
 }
 
 impl ConcurrentRadixTreeCompressed {
-    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
-        Self::with_lifecycle(super::HashLifecycle::new(delegate))
-    }
-
-    pub(super) fn with_lifecycle(lifecycle: super::HashLifecycle) -> Self {
-        let mut backend = Self::new();
-        backend.lifecycle = lifecycle;
-        backend
-    }
-
-    fn release_hash(&self, worker: WorkerWithDpRank, hash: ExternalSequenceBlockHash) {
-        // Synthetic branch anchors borrow router-owned prefixes, not backend ownership.
-        if self.lifecycle.is_enabled() && !self.anchor_nodes.contains_key(&hash) {
-            self.lifecycle.remove(worker, hash);
-        }
-    }
-
     pub fn new() -> Self {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
-            lifecycle: super::HashLifecycle::default(),
             sweep_schedule: SweepSchedule {
                 tick: Some(SWEEP_TICK),
                 after_deaths: SWEEP_AFTER_DEATHS,
@@ -347,32 +328,10 @@ impl ConcurrentRadixTreeCompressed {
         });
     }
 
-    fn update_lookup_for_blocks(
-        &self,
-        worker: WorkerWithDpRank,
-        lookup: &mut LaneLookup,
-        blocks: &[KvCacheStoredBlockData],
-        node: &SharedNode,
-    ) -> bool {
-        let changed =
-            lookup.upsert_all(worker, blocks.iter().map(|block| block.block_hash), node) > 0;
-        self.insert_lifecycle_hashes(worker, blocks);
-        changed
-    }
-
-    fn insert_lifecycle_hashes(&self, worker: WorkerWithDpRank, blocks: &[KvCacheStoredBlockData]) {
-        if self.lifecycle.is_enabled() {
-            for block in blocks {
-                self.lifecycle.insert(worker, block.block_hash);
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // apply_event dispatch
     // ------------------------------------------------------------------
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn apply_event(
         &self,
         lookup: &mut LaneLookup,

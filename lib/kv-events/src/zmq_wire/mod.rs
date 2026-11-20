@@ -423,6 +423,16 @@ impl ZmqEventNormalizer {
         raw: &mut RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<(), ZmqEventFilterReason> {
+        // vLLM's CPU offload tier republishes device hashes without their salt
+        // (#18052). Its stores and evictions refer to a lower-tier copy of the
+        // device block, so they must not demote or drop the device namespace.
+        // Limit the removal skip to Framework: KVCR events also reach this
+        // function through the cache-owner normalizer, and every KVCR event is
+        // HostPinned or lower, so that map never sees a device store. Skipping
+        // a salted KVCR removal would leak the entry until AllBlocksCleared.
+        let host_pinned = storage_tier_of(raw) == Some(StorageTier::HostPinned);
+        let skip_host_pinned_removal =
+            host_pinned && matches!(raw.ownership(), Ok(KvEventOwnership::Framework));
         match raw {
             RawKvEvent::BlockStored {
                 block_hashes,
@@ -484,7 +494,7 @@ impl ZmqEventNormalizer {
                             })
                             .or_insert_with(|| state.clone());
                     }
-                } else {
+                } else if !host_pinned {
                     // Do not retain every unsalted block. If this hash already
                     // belongs to a namespace, however, fail closed on future
                     // propagation because the external hash is now ambiguous.
@@ -498,6 +508,7 @@ impl ZmqEventNormalizer {
                     }
                 }
             }
+            RawKvEvent::BlockRemoved { .. } if skip_host_pinned_removal => {}
             RawKvEvent::BlockRemoved { block_hashes, .. } => {
                 for block_hash in block_hashes.iter() {
                     let key = (worker, (*block_hash).into_u64());
