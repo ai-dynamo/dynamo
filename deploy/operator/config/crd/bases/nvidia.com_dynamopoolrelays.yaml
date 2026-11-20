@@ -59,10 +59,15 @@ spec:
               description: DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
               properties:
                 clusterId:
-                  description: ClusterID is the Relay's stable logical cluster ID across restarts.
+                  description: |-
+                    ClusterID is the Relay's logical cluster ID. Omitted, it is the operator's
+                    multiCluster.clusterId, or else, with mcsImplementation mcs, the cluster's ID in
+                    its ClusterSet from the About API's ClusterProperty cluster.clusterset.k8s.io.
+                    Set it when the main container sets DYN_RELAY_ROUTING_POOL itself. A changed ID
+                    restarts the Relay's Pods.
                   maxLength: 128
                   minLength: 1
-                  pattern: ^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$
+                  pattern: ^[^\p{Cc}\p{Z}/]([^\p{Cc}/]*[^\p{Cc}\p{Z}/])?$
                   type: string
                 podTemplate:
                   description: |-
@@ -8195,7 +8200,6 @@ spec:
                   minimum: 1
                   type: integer
               required:
-                - clusterId
                 - podTemplate
               type: object
             status:
@@ -8207,14 +8211,11 @@ spec:
                   type: integer
                 conditions:
                   description: |-
-                    Conditions includes Ready for listener availability, not model or KV readiness.
-                    Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
-                    DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
-                    InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
-                    With multi-cluster export configured, Conditions also includes Exported: True
-                    with reason Exported once the pool's Services are exported, or False with
-                    reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong,
-                    NoFrontend, ClusterIDMismatch, or ExportFailed.
+                    Conditions includes Ready for listener availability, not model or KV readiness;
+                    its reasons are ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating,
+                    UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration,
+                    ClusterIDUnavailable, ReconcileFailed and ResourceOwnershipConflict. With multi-cluster
+                    export it also includes Exported, whose reasons the "Deploy the Pool Relay" guide lists.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:

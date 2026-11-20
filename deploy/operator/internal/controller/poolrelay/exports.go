@@ -99,8 +99,9 @@ type exportSettings struct {
 	runtimeConfig *commoncontroller.RuntimeConfig
 	// clusterPropertyWatched is true when the controller watches the About API's
 	// ClusterProperties: the MCS implementation labels imports with the cluster's
-	// ID in its ClusterSet, and the cluster serves the API. Otherwise the check of
-	// a pool's cluster ID is skipped.
+	// ID in its ClusterSet, and the cluster serves the API. A Relay that omits its
+	// clusterId, without the operator's multiCluster.clusterId, then runs under that
+	// ID. Otherwise its cluster ID is not checked.
 	clusterPropertyWatched bool
 }
 
@@ -152,11 +153,16 @@ func (r *reconciler) watchExports(
 		return controllerBuilder, err
 	}
 	if !served {
-		mgr.GetLogger().Info("The cluster does not serve the About API's ClusterProperty, " +
-			"so the clusterId of DynamoPoolRelays is not checked; to check it, install the About API and restart the operator")
+		mgr.GetLogger().Info("The cluster does not serve the About API's ClusterProperty, so DynamoPoolRelays need a " +
+			"clusterId, and it is not checked; to use the cluster's ID instead, install the About API and restart the operator")
 		return controllerBuilder, nil
 	}
 	r.exports.clusterPropertyWatched = true
+	if config.MultiCluster.ClusterID != "" {
+		mgr.GetLogger().Info("multiCluster.clusterId wins over the cluster's ID in its ClusterSet for DynamoPoolRelays "+
+			"without a clusterId; the Global Discovery Service lists their pools only if the two are equal",
+			"clusterId", config.MultiCluster.ClusterID)
+	}
 	return controllerBuilder.Watches(
 		multicluster.NewClusterProperty(),
 		handler.EnqueueRequestsFromMapFunc(r.mapClusterPropertyToRelays),
@@ -540,19 +546,27 @@ func (r *reconciler) exportProblems(
 
 	// A standard implementation labels the pool's imports with the cluster's ID in
 	// its ClusterSet, and the Global Discovery Service joins the pool's
-	// registration to them only under the same cluster ID.
+	// registration to them only under the same cluster ID. A Relay that runs under
+	// that ID cannot differ from it.
 	if !r.exports.clusterPropertyWatched {
 		return problems, nil
+	}
+	clusterID, source, err := r.resolveClusterID(ctx, relay)
+	if errors.Is(err, errNoClusterID) || err == nil && source == clusterIDFromClusterSet {
+		return problems, nil
+	}
+	if err != nil {
+		return problems, err
 	}
 	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
 	if err != nil || property == nil {
 		return problems, err
 	}
-	if clusterID := multicluster.ClusterPropertyValue(property); clusterID != "" && clusterID != relay.Spec.ClusterID {
+	if value := multicluster.ClusterPropertyValue(property); value != "" && value != clusterID {
 		problems = append(problems, exportProblem{reason: reasonClusterIDMismatch, related: property, message: fmt.Sprintf(
-			"clusterId %q differs from the ID %q that ClusterProperty %s gives this cluster in its ClusterSet; "+
+			"%s %q differs from the ID %q that ClusterProperty %s gives this cluster in its ClusterSet; "+
 				"the Global Discovery Service lists the pool only when they match",
-			relay.Spec.ClusterID, clusterID, multicluster.ClusterIDProperty)})
+			source, clusterID, value, multicluster.ClusterIDProperty)})
 	}
 	return problems, nil
 }
@@ -643,8 +657,8 @@ func (r *reconciler) relaysExportingService(ctx context.Context, namespace, name
 }
 
 // mapClusterPropertyToRelays requeues every Relay in a namespace that the
-// operator manages: each pool's cluster ID is compared with the cluster's ID in
-// its ClusterSet.
+// operator manages: a Relay may run under the cluster's ID in its ClusterSet,
+// and the cluster ID of any other is compared with it.
 func (r *reconciler) mapClusterPropertyToRelays(ctx context.Context, _ client.Object) []ctrl.Request {
 	relays := &v1alpha1.DynamoPoolRelayList{}
 	if err := r.List(ctx, relays); err != nil {

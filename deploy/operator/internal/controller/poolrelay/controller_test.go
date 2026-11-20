@@ -9,11 +9,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -21,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/yaml"
 )
 
 func relaySpec(clusterID string) v1alpha1.DynamoPoolRelaySpec {
@@ -634,7 +640,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 	}
-	_, old, err := render(relay, []string{"green-runtime"})
+	_, old, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,7 +654,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 	}
 	stale := old.DeepCopy()
 	relay.Spec.PodTemplate.Spec.Containers[0].Image = "relay:new"
-	_, wanted, err := render(relay, []string{"green-runtime"})
+	_, wanted, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +746,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 	}
 	relay.Spec.PodTemplate.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "relay-registry"}}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_PUBLICATION_THRESHOLD", Value: "32"}}
-	_, deployment, err := render(relay, []string{"green-runtime"})
+	_, deployment, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatalf("supported Relay tuning was rejected: %v", err)
 	}
@@ -753,7 +759,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 		t.Fatal("PodTemplate image pull secrets were not preserved")
 	}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_CONNECTION_REVISION", Value: "wrong"}}
-	if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
+	if _, _, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"}); err == nil {
 		t.Fatal("operator-owned connection revision was accepted")
 	}
 }
@@ -767,10 +773,34 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 				ObjectMeta: relayMeta,
 				Spec:       relaySpec(clusterID),
 			}
-			if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
+			if _, _, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"}); err == nil {
 				t.Fatalf("accepted cluster ID %q", clusterID)
 			}
 		})
+	}
+}
+
+func TestClusterIDSchemaIsCheckClusterID(t *testing.T) {
+	t.Log("Read clusterId's schema from the generated CRD")
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "bases", "nvidia.com_dynamopoolrelays.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := yaml.Unmarshal(data, crd); err != nil {
+		t.Fatal(err)
+	}
+	schema := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["clusterId"]
+	if schema.MaxLength == nil || *schema.MaxLength != configvalidation.MaxClusterIDLength {
+		t.Fatalf("clusterId's MaxLength is %v, but MaxClusterIDLength is %d", schema.MaxLength, configvalidation.MaxClusterIDLength)
+	}
+
+	t.Log("The schema's pattern accepts exactly what CheckClusterID accepts")
+	pattern := regexp.MustCompile(schema.Pattern)
+	for _, value := range []string{"aws-east", "a", "us east", " east", "east\u00a0", "east\x1f", "aws/east", "ea\tst", "ea\u0085st"} {
+		if accepted := configvalidation.CheckClusterID(value) == nil; pattern.MatchString(value) != accepted {
+			t.Errorf("for %q, the pattern says %v but CheckClusterID says %v", value, !accepted, accepted)
+		}
 	}
 }
 

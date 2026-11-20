@@ -69,7 +69,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
 	var firstResourceVersion string
 	for attempt := range 2 {
-		_, wanted, err := render(relay, []string{"green-runtime"})
+		_, wanted, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	if err := apiClient.Update(ctx, &drifted); err != nil {
 		t.Fatal(err)
 	}
-	_, wanted, err := render(relay, []string{"green-runtime"})
+	_, wanted, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 		corev1.Container{Name: "metrics", Image: "metrics:test"})
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = append(relay.Spec.PodTemplate.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: "DYN_EVENT_PLANE", Value: "zmq"})
-	_, wanted, err = render(relay, []string{"green-runtime"})
+	_, wanted, err = render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	}
 	relay.Spec.PodTemplate.Spec.Containers = relay.Spec.PodTemplate.Spec.Containers[:1]
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = nil
-	_, wanted, err = render(relay, []string{"green-runtime"})
+	_, wanted, err = render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}

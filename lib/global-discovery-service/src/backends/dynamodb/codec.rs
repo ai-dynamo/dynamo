@@ -141,6 +141,9 @@ pub(super) fn number(value: u64) -> AttributeValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Stored {
     pub registration: PoolRegistration,
+    /// The hash of the registration as this reader encodes it, not the
+    /// writer's: a field the reader drops, as an older writer's
+    /// `capabilities`, must not count as a change.
     pub hash: String,
     pub renewed_at_ms: u64,
     pub lease_s: u64,
@@ -182,9 +185,12 @@ pub(super) fn decode(item: &HashMap<String, AttributeValue>) -> anyhow::Result<S
         None => None,
         Some(_) => Some(string(item, keys::WRITTEN_IN)?.to_owned()),
     };
+    let hash = encode(&registration)
+        .with_context(|| format!("{sort_key}: cannot encode the registration again"))?
+        .hash;
     Ok(Stored {
         registration,
-        hash: string(item, keys::HASH)?.to_owned(),
+        hash,
         renewed_at_ms: unsigned(item, keys::RENEWED_AT)?,
         lease_s: unsigned(item, keys::LEASE_S)?,
         written_in,
@@ -217,7 +223,7 @@ fn unsigned(item: &HashMap<String, AttributeValue>, name: &str) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use dynamo_global_common::{Capacity, PoolKey, PoolLocation};
+    use dynamo_global_common::{PoolKey, PoolLocation};
     use url::Url;
 
     use super::*;
@@ -232,12 +238,7 @@ mod tests {
                 datacenter: None,
             },
             model: "Qwen/Qwen3-0.6B".to_owned(),
-            capabilities: vec!["decode".to_owned(), "prefill".to_owned()],
             frontends: vec![Url::parse("http://10.43.1.2:8000/").unwrap()],
-            capacity: vec![Capacity {
-                sku: "H100".to_owned(),
-                workers: 8,
-            }],
         }
     }
 
@@ -332,6 +333,23 @@ mod tests {
         assert_eq!(decode(&item).unwrap().written_in, None);
     }
 
+    /// An older writer's JSON still has `capabilities` and `capacity`. This
+    /// reader drops them, so the item hashes as one it wrote itself.
+    #[test]
+    fn fields_this_reader_drops_are_no_change() {
+        let encoded = encode(&registration()).unwrap();
+        let mut older: serde_json::Value = serde_json::from_str(&encoded.registration).unwrap();
+        older["capabilities"] = serde_json::json!(["aggregated"]);
+        older["capacity"] = serde_json::json!([{"sku": "H100", "workers": 8}]);
+        let older = older.to_string();
+        let mut item = item(&encoded, 1_000, 15);
+        item.insert(keys::HASH.to_owned(), AttributeValue::S(hash(&older)));
+        item.insert(keys::REGISTRATION.to_owned(), AttributeValue::S(older));
+        let stored = decode(&item).unwrap();
+        assert_eq!(stored.registration, registration());
+        assert_eq!(stored.hash, encoded.hash);
+    }
+
     #[test]
     fn the_hash_follows_the_content() {
         let first = encode(&registration()).unwrap();
@@ -388,7 +406,7 @@ mod tests {
         let good = item(&encoded, 1_000, 15);
         let mut other = registration();
         other.key = PoolKey::new("aws-east", "dynamo", "mocker").unwrap();
-        let damaged: [(&str, Option<AttributeValue>); 10] = [
+        let damaged: [(&str, Option<AttributeValue>); 9] = [
             (keys::WRITTEN_IN, Some(number(1))),
             (keys::SK, None),
             (keys::SK, Some(AttributeValue::S("a#b".to_owned()))),
@@ -398,7 +416,6 @@ mod tests {
                 keys::REGISTRATION,
                 Some(AttributeValue::S(serde_json::to_string(&other).unwrap())),
             ),
-            (keys::HASH, Some(number(1))),
             (keys::RENEWED_AT, None),
             (keys::RENEWED_AT, Some(AttributeValue::N("-1".to_owned()))),
             (keys::LEASE_S, Some(AttributeValue::S("15".to_owned()))),

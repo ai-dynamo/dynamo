@@ -12,12 +12,16 @@ import (
 
 // DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
 type DynamoPoolRelaySpec struct {
-	// ClusterID is the Relay's stable logical cluster ID across restarts.
-	// +required
+	// ClusterID is the Relay's logical cluster ID. Omitted, it is the operator's
+	// multiCluster.clusterId, or else, with mcsImplementation mcs, the cluster's ID in
+	// its ClusterSet from the About API's ClusterProperty cluster.clusterset.k8s.io.
+	// Set it when the main container sets DYN_RELAY_ROUTING_POOL itself. A changed ID
+	// restarts the Relay's Pods.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
-	// +kubebuilder:validation:Pattern=`^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$`
-	ClusterID string `json:"clusterId"`
+	// +kubebuilder:validation:Pattern=`^[^\p{Cc}\p{Z}/]([^\p{Cc}/]*[^\p{Cc}\p{Z}/])?$`
+	ClusterID string `json:"clusterId,omitempty"`
 
 	// PodTemplate configures Relay Pods. Its main container needs an image with
 	// dynamo.pool_relay and --sources-file support from the operator's revision.
@@ -51,14 +55,11 @@ type DynamoPoolRelayStatus struct {
 	// AvailableReplicas is the number of Relay Pods the Deployment reports available.
 	// +optional
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
-	// Conditions includes Ready for listener availability, not model or KV readiness.
-	// Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
-	// DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
-	// InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
-	// With multi-cluster export configured, Conditions also includes Exported: True
-	// with reason Exported once the pool's Services are exported, or False with
-	// reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong,
-	// NoFrontend, ClusterIDMismatch, or ExportFailed.
+	// Conditions includes Ready for listener availability, not model or KV readiness;
+	// its reasons are ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating,
+	// UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration,
+	// ClusterIDUnavailable, ReconcileFailed and ResourceOwnershipConflict. With multi-cluster
+	// export it also includes Exported, whose reasons the "Deploy the Pool Relay" guide lists.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

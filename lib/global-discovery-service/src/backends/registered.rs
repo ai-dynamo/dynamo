@@ -10,9 +10,8 @@
 //! standard MCS, or its member cluster name with Karmada.
 //!
 //! Each source gives what it knows best. The registration says what the pool
-//! serves: model, capabilities, capacity and location. MCS gives the
-//! addresses other clusters can reach: every Ready PoolRelay's, and the
-//! frontends'.
+//! serves and where it is: its model and location. MCS gives the addresses
+//! other clusters can reach: every Ready PoolRelay's, and the frontends'.
 //!
 //! Each source also covers a gap in the other. MCS drops a pool within
 //! seconds when its Relay stops or its export is removed. The lease drops a
@@ -164,9 +163,7 @@ fn merge(mcs: &PoolListing, registered: &PoolListing) -> PoolListing {
         key: mcs.key.clone(),
         location: registered.location.clone(),
         model: registered.model.clone(),
-        capabilities: registered.capabilities.clone(),
         frontends: mcs.frontends.clone(),
-        capacity: registered.capacity.clone(),
         relay_identities: mcs.relay_identities.clone(),
     }
 }
@@ -475,7 +472,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::backends::memory::{MemoryPoolStore, SWEEP_EVERY};
-    use crate::pool_discovery::{Capacity, PoolRegistrar, PoolRegistration};
+    use crate::pool_discovery::{PoolRegistrar, PoolRegistration};
     use dynamo_global_common::PoolLocation;
     use url::Url;
 
@@ -499,9 +496,7 @@ mod tests {
                 datacenter: None,
             },
             model: None,
-            capabilities: Vec::new(),
             frontends: vec![Url::parse("http://10.43.0.2:8000/").unwrap()],
-            capacity: Vec::new(),
             relay_identities: vec!["ip:10.43.0.1".to_owned()],
         }
     }
@@ -516,12 +511,7 @@ mod tests {
                 datacenter: None,
             },
             model: model.to_owned(),
-            capabilities: Vec::new(),
             frontends: vec![Url::parse("http://mocker-frontend:8000/").unwrap()],
-            capacity: vec![Capacity {
-                sku: "H100".to_owned(),
-                workers: 8,
-            }],
         }
     }
 
@@ -532,9 +522,7 @@ mod tests {
             key: registration.key,
             location: registration.location,
             model: Some(registration.model),
-            capabilities: registration.capabilities,
             frontends: registration.frontends,
-            capacity: registration.capacity,
             relay_identities: Vec::new(),
         }
     }
@@ -764,7 +752,6 @@ mod tests {
         let registration = registered("both", "qwen");
         assert_eq!(listing.model.as_deref(), Some("qwen"));
         assert_eq!(listing.location, registration.location);
-        assert_eq!(listing.capacity, registration.capacity);
         assert_eq!(listing.frontends, from_mcs("both").frontends);
         assert_eq!(listing.relay_identities, from_mcs("both").relay_identities);
     }

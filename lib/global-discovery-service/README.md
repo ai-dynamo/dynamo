@@ -22,7 +22,7 @@ renews its own membership through `POST /routers`.
 - `karmada` or `mcs`: the EndpointSlices that Multi-Cluster Services imports, named the Karmada way or
   the standard way, joined with live registrations. A pool is listed while MCS imports a Ready
   Pool Relay endpoint for it and its registration lease lasts. MCS supplies the addresses; the
-  registration supplies the model, capabilities, capacity, and location.
+  registration supplies the model and location.
 
 ## Router self-registration
 

@@ -16,7 +16,8 @@ use crate::pool::{self, PoolKey, PoolLocation};
 use crate::replicas::RouterReplica;
 
 /// `POST /pools` body. A PoolRelay sends it on a timer, and each call is also
-/// the pool's heartbeat.
+/// the pool's heartbeat. Older PoolRelays also send `capabilities` and
+/// `capacity`, which the service ignores.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolRegistration {
     pub key: PoolKey,
@@ -25,13 +26,9 @@ pub struct PoolRegistration {
     /// [`PoolKey::new`] checks the key's fields.
     #[serde(deserialize_with = "checked_model")]
     pub model: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     /// Local frontends the Global Router sends requests to.
     #[serde(default)]
     pub frontends: Vec<Url>,
-    #[serde(default)]
-    pub capacity: Vec<Capacity>,
 }
 
 fn checked_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -116,13 +113,6 @@ impl TryFrom<RouterRegistrationFields> for RouterRegistration {
     }
 }
 
-/// The workers of one hardware SKU.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Capacity {
-    pub sku: String,
-    pub workers: u32,
-}
-
 /// `POST /pools` reply: register again after the heartbeat interval. If the
 /// lease passes with no successful registration, the pool drops out of
 /// `GET /pools`.
@@ -196,20 +186,17 @@ pub struct PoolsResponse {
     pub complete: bool,
 }
 
-/// One pool in `GET /pools`.
+/// One pool in `GET /pools`. Older services also list `capabilities` and
+/// `capacity`, which readers ignore.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolListing {
     pub key: PoolKey,
     pub location: PoolLocation,
     /// `None` when the service does not know the pool's model.
     pub model: Option<String>,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     /// Local frontends the Global Router sends requests to.
     #[serde(default)]
     pub frontends: Vec<Url>,
-    #[serde(default)]
-    pub capacity: Vec<Capacity>,
     /// The PoolRelays allowed to stream this pool's state, by each identity
     /// they can connect with. A pool runs active-active PoolRelay replicas,
     /// each reporting to every router, and routers dedupe the overlapping
@@ -264,9 +251,7 @@ mod tests {
             "key": key,
             "location": location,
             "model": "Qwen/Qwen3-0.6B",
-            "capabilities": ["aggregated"],
-            "frontends": ["http://10.43.1.2:8000/"],
-            "capacity": [{"sku": "H100", "workers": 8}]
+            "frontends": ["http://10.43.1.2:8000/"]
         });
         round_trip::<PoolRegistration>(registration.clone());
         registration["model"] = json!(" ");
@@ -276,9 +261,7 @@ mod tests {
                 "key": key,
                 "location": location,
                 "model": null,
-                "capabilities": [],
                 "frontends": [],
-                "capacity": [],
                 "relay_identities": ["ip:10.43.66.175", "ip:fd00::5"]
             }],
             "complete": true
