@@ -243,82 +243,6 @@ def _base_image_label(sbom_path: Path) -> str:
     return sbom_path.name
 
 
-def load_base_components(
-    sbom_path: Path,
-    shipped_debs: set[tuple[str, str]] | None = None,
-    dpkg_root: Path = Path("/"),
-) -> list[Component]:
-    """Return the library and application components of a baseline CycloneDX SBOM.
-
-    Licenses are joined with " AND "; a component with none gets NOASSERTION.
-    shipped_debs is the (name, version) set the dpkg generator found in the
-    shipped filesystem at dpkg_root: a Debian package outside it is dropped, and
-    one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
-    as license text. An empty set means the scan found nothing: no filter.
-    """
-    shipped_debs = shipped_debs or None
-    doc = json.loads(sbom_path.read_text(encoding="utf-8"))
-    by_key: dict[tuple[str, str], Component] = {}
-    for c in doc.get("components", []) or []:
-        name, version = c.get("name"), c.get("version")
-        if c.get("type") not in ("library", "application") or not name or not version:
-            continue
-        version = str(version)
-        is_deb = (c.get("purl") or "").startswith("pkg:deb/")
-        ids: list[str] = []
-        for entry in c.get("licenses") or []:
-            lic = entry.get("license") or {}
-            ident = lic.get("id") or lic.get("name")
-            if is_deb and not lic.get("id") and ident:
-                ident = _DEBIAN_EXACT_ALIASES.get(ident, ident)
-            if not ident and entry.get("expression"):
-                ident = entry["expression"]
-            if ident and re.search(r" (AND|OR|WITH) ", ident):
-                ident = f"({ident})"
-            # syft names an unidentified license file by its content hash.
-            if ident and not ident.startswith("sha256:") and ident not in ids:
-                ids.append(ident)
-        text = None
-        if shipped_debs is not None and is_deb:
-            if (name, version) not in shipped_debs:
-                continue
-            text = read_deb_copyright(dpkg_root, name)
-        comp = Component(
-            ecosystem="base",
-            name=name,
-            version=version,
-            spdx=" AND ".join(ids) if ids else NOASSERTION,
-            license_text=text,
-        )
-        existing = by_key.get((name, version))
-        if existing is None or (existing.spdx == NOASSERTION and ids):
-            by_key[(name, version)] = comp
-    return list(by_key.values())
-
-
-def _split_top_level_and(expr: str) -> list[str]:
-    """Split on " AND " outside parentheses: "A AND (B WITH C)" -> ["A", "(B WITH C)"]."""
-    # Only paired parentheses group: SBOM names such as "(MIT" or "Odd)License"
-    # carry stray ones.
-    opens: list[int] = []
-    paired: set[int] = set()
-    for i, ch in enumerate(expr):
-        if ch == "(":
-            opens.append(i)
-        elif ch == ")" and opens:
-            paired.update((opens.pop(), i))
-    parts: list[str] = []
-    depth = start = 0
-    for i, ch in enumerate(expr):
-        if i in paired:
-            depth += 1 if ch == "(" else -1
-        elif depth == 0 and expr.startswith(" AND ", i):
-            parts.append(expr[start:i])
-            start = i + len(" AND ")
-    parts.append(expr[start:])
-    return [p for p in parts if p]
-
-
 _LICENSE_NAME_FILLER = frozenset({"License", "license", "The", "the"})
 
 
@@ -334,8 +258,77 @@ def _bare_license_ids(name: str) -> list[str]:
     return [name]
 
 
+@dataclasses.dataclass(frozen=True)
+class BaseComponent(Component):
+    """A baseline SBOM component, with the license IDs parsed from each entry."""
+
+    license_ids: tuple[str, ...] = ()
+
+
+def load_base_components(
+    sbom_path: Path,
+    shipped_debs: set[tuple[str, str]] | None = None,
+    dpkg_root: Path = Path("/"),
+) -> list[BaseComponent]:
+    """Return the library and application components of a baseline CycloneDX SBOM.
+
+    Licenses are joined with " AND "; a component with none gets NOASSERTION.
+    shipped_debs is the (name, version) set the dpkg generator found in the
+    shipped filesystem at dpkg_root: a Debian package outside it is dropped, and
+    one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
+    as license text. An empty set means the scan found nothing: no filter.
+    """
+    shipped_debs = shipped_debs or None
+    doc = json.loads(sbom_path.read_text(encoding="utf-8"))
+    by_key: dict[tuple[str, str], BaseComponent] = {}
+    for c in doc.get("components", []) or []:
+        name, version = c.get("name"), c.get("version")
+        if c.get("type") not in ("library", "application") or not name or not version:
+            continue
+        version = str(version)
+        is_deb = (c.get("purl") or "").startswith("pkg:deb/")
+        ids: list[str] = []
+        license_ids: list[str] = []
+        for entry in c.get("licenses") or []:
+            lic = entry.get("license") or {}
+            ident = lic.get("id") or lic.get("name") or entry.get("expression")
+            # syft names an unidentified license file by its content hash.
+            if not ident or ident.startswith("sha256:"):
+                continue
+            if is_deb and not lic.get("id"):
+                ident = _DEBIAN_EXACT_ALIASES.get(ident, ident)
+            # Parse each entry on its own, so a stray paren stays inside it.
+            if lic.get("id"):
+                entry_ids = [ident]
+            elif re.search(r" (AND|OR|WITH) ", ident):
+                entry_ids = _spdx_ids(ident)
+                ident = f"({ident})"
+            else:
+                entry_ids = _bare_license_ids(ident)
+            if ident not in ids:
+                ids.append(ident)
+                license_ids.extend(entry_ids)
+        text = None
+        if shipped_debs is not None and is_deb:
+            if (name, version) not in shipped_debs:
+                continue
+            text = read_deb_copyright(dpkg_root, name)
+        comp = BaseComponent(
+            ecosystem="base",
+            name=name,
+            version=version,
+            spdx=" AND ".join(ids) if ids else NOASSERTION,
+            license_text=text,
+            license_ids=tuple(license_ids),
+        )
+        existing = by_key.get((name, version))
+        if existing is None or (existing.spdx == NOASSERTION and ids):
+            by_key[(name, version)] = comp
+    return list(by_key.values())
+
+
 def render_base_section(
-    sbom_path: Path, components: list[Component], debs_note: str = ""
+    sbom_path: Path, components: list[BaseComponent], debs_note: str = ""
 ) -> str:
     """Render the base-image section of THIRD-PARTY.txt."""
     image = _base_image_label(sbom_path)
@@ -353,9 +346,7 @@ def render_base_section(
         if c.license_text:
             parts.append("\n```\n" + c.license_text.rstrip() + "\n```\n")
         parts.append("\n")
-        for part in _split_top_level_and(c.spdx):
-            is_expr = re.search(r" (AND|OR|WITH) ", part)
-            license_ids.update(_spdx_ids(part) if is_expr else _bare_license_ids(part))
+        license_ids.update(c.license_ids)
     license_ids -= {NOASSERTION, UNKNOWN}
     parts.append("# License texts\n\n")
     missing: list[str] = []

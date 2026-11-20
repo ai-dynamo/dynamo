@@ -62,6 +62,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
                 {"license": {"name": "MIT OR Zlib"}},
                 {"license": {"name": "UNKNOWN"}},
                 {"license": {"name": "(MIT"}},
+                {"license": {"name": "Late)License"}},
                 {"license": {"name": "Apache-2.0 with LLVM exceptions"}},
             ],
         },
@@ -168,7 +169,19 @@ def test_base_components_parsed(tmp_path: Path) -> None:
     assert comps["libb"].spdx == "MIT License AND Apache 2.0"
     assert comps["libexpr"].spdx == (
         "(Apache-2.0 AND Apache-2.0 WITH LLVM-exception) AND Odd)License"
-        " AND (MIT OR Zlib) AND UNKNOWN AND (MIT AND Apache-2.0 with LLVM exceptions"
+        " AND (MIT OR Zlib) AND UNKNOWN AND (MIT AND Late)License"
+        " AND Apache-2.0 with LLVM exceptions"
+    )
+    assert comps["libexpr"].license_ids == (
+        "Apache-2.0",
+        "LLVM-exception",
+        "Odd)License",
+        "MIT",
+        "Zlib",
+        "UNKNOWN",
+        "MIT",
+        "Late)License",
+        "Apache-2.0 with LLVM exceptions",
     )
     assert comps["libnolicense"].spdx == NOASSERTION
     assert comps["zlib1g"].spdx == "Zlib AND MIT AND Artistic AND public-domain"
@@ -198,6 +211,7 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
         "Apache 2.0",
         "Apache-2.0 with LLVM exceptions",
         "Artistic",
+        "Late)License",
         NVIDIA_LICENSE_NAME,
         "Odd)License",
         "public-domain",
