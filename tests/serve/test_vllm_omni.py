@@ -245,14 +245,17 @@ vllm_omni_configs = {
             ),
         ],
     ),
-    # vLLM defaults to FlashInfer only on B200/GB200, which CI does not have.
+    # vLLM defaults to FlashInfer only on SM100 (B200/GB200). CI's Blackwell
+    # runners are SM120 and default to FlashAttention, so force it here.
     "omni_audio_flashinfer": VLLMOmniConfig(
         name="omni_audio_flashinfer",
         directory=vllm_dir,
         script_name="agg_omni_audio.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.post_merge,
+            # TODO: revert to pytest.mark.post_merge after pre_merge validation
+            # on this PR (see .ai/ci-guidelines.md).
+            pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
