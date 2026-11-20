@@ -541,7 +541,7 @@ impl Worker {
     /// with every stage drawing on one budget armed at the first entry:
     ///   1. unregister from discovery — routers stop selecting this worker.
     ///   2. router grace — keep serving while routers observe that.
-    ///   3. stop admission — reject new requests with `WorkerDraining`.
+    ///   3. stop admission — return worker unavailability with the draining retry hint.
     ///   4. wait for in-flight requests, bounded by the drain allowance.
     ///      On expiry, engine cleanup must cancel unfinished execution.
     ///   5. on prefill, wait for KV-transfer quiescence.
