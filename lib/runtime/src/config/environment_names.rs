@@ -489,10 +489,9 @@ pub mod llm {
     pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
-    /// Render control-token spellings in chat request text as ordinary text
-    /// under every chat template, so only the template's own markers encode as
-    /// control tokens. On by default; set this to a falsy value (`0`/`false`)
-    /// to turn it off. Harmony templates render this way regardless.
+    /// Render recognized control-token spellings in Jinja chat request text as
+    /// ordinary text by default. Set `0`, `false`, `off`, or `no` to opt out for
+    /// non-Harmony templates.
     pub const DYN_REQUEST_CONTROL_TOKENS_AS_TEXT: &str = "DYN_REQUEST_CONTROL_TOKENS_AS_TEXT";
 
     /// Master switch for the frontend's HTTP admin API surface.

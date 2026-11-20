@@ -11,9 +11,9 @@
 use std::sync::LazyLock;
 
 use dynamo_runtime::config::{
-    env_is_falsey, env_is_truthy,
+    env_is_truthy,
     environment_names::llm::{self as env_llm, metrics as env_metrics},
-    is_truthy,
+    is_truthy, parse_bool_opt,
 };
 
 use crate::protocols::openai::chat_completions::{
@@ -25,11 +25,15 @@ use crate::reasoning_field::ReasoningField;
 pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
 
-/// Process-wide: whether control-token spellings in chat request text render as
-/// ordinary text under every chat template. On unless the variable is set to a
-/// falsy value. Read when the first prompt formatter is built.
-pub(crate) static REQUEST_CONTROL_TOKENS_AS_TEXT: LazyLock<bool> =
-    LazyLock::new(|| !env_is_falsey(env_llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT));
+/// Process-wide Jinja control-token handling. Enabled unless explicitly
+/// disabled. Read when the first prompt formatter is built.
+pub(crate) static REQUEST_CONTROL_TOKENS_AS_TEXT: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var(env_llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_opt)
+        .unwrap_or(true)
+});
 
 /// Metrics naming controls for frontend-owned services.
 ///
