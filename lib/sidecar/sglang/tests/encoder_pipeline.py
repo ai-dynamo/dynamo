@@ -4,7 +4,7 @@
 """CPU smoke with real Dynamo frontend, sidecars and SGLang Stage/Deliver leases.
 
 Supply the patched SGLang Python package on PYTHONPATH. The driver needs
-grpcio-tools and pyzmq. --model is a local Qwen-VL tokenizer/config directory.
+grpcio-tools and pyzmq. --model is a local Qwen-VL or Qwen-Omni tokenizer/config directory.
 The fixture replaces model computation with identifiable byte strings. No GPU
 or KV data is accessed. --split verifies P/D bootstrap and the metadata-only D.
 --native-generate also exercises the patched frontend's public /generate route
@@ -67,6 +67,10 @@ IMAGES = [png((255, 0, 0)), png((0, 0, 255))]
 VIDEOS = ["data:video/mp4;base64,AA==", "data:video/mp4;base64,AQ=="]
 
 
+AUDIOS = ["data:audio/wav;base64,AA==", "data:audio/mpeg;base64,AQ=="]
+AUDIO_MODEL_TYPE = "qwen3_omni_moe"
+
+
 class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
     def __init__(self, model, sockets):
         self.sockets = sockets
@@ -77,20 +81,27 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
         self.fail = False
         super().__init__(
             encode=self.encode,
+            describe=lambda part: encoder_pb2.DescribeResponse(
+                shape=[len(self.parts[part]), 16], dtype="bfloat16"
+            ),
             send=self.send,
             release=self.release,
             make_part_id=lambda key, i: f"{key}_local_part_{i}",
             info=encoder_pb2.GetEncoderInfoResponse(
-                model_path=model, served_model_name="vision", supports_staged_video=True
+                model_path=model,
+                served_model_name="vision",
+                supports_staged_video=True,
+                staged_audio_model_type=AUDIO_MODEL_TYPE,
             ),
             capacity=4,
             ttl=30,
             stage_timeout=5,
         )
 
-    async def encode(self, part, images, videos):
+    async def encode(self, part, images, videos, audios):
         assert images == IMAGES[: len(images)]
         assert videos == VIDEOS[: len(videos)]
+        assert audios == AUDIOS[: len(audios)]
         self.encodes.append(part)
         if self.fail:
             raise ValueError("injected encode failure")
@@ -98,10 +109,16 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
         def digest(source):
             return hashlib.sha256(source.encode()).digest()
 
-        self.parts[part] = [digest(source) for source in (*images, *videos)]
+        self.parts[part] = [digest(source) for source in (*images, *videos, *audios)]
         return (
             [
-                encoder_pb2.ImageLayout(t=1, h=2, w=2, identity=digest(image).hex())
+                encoder_pb2.ImageLayout(
+                    t=1,
+                    h=2,
+                    w=2,
+                    identity=digest(image).hex(),
+                    embedding_rows=int(bool(audios)),
+                )
                 for image in images
             ],
             [
@@ -111,8 +128,18 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
                     w=2,
                     identities=[digest(video).hex()],
                     second_per_grid_ts=0.5,
+                    embedding_rows=int(bool(audios)),
                 )
                 for video in videos
+            ],
+            [
+                encoder_pb2.AudioLayout(
+                    identity=digest(audio).hex(),
+                    feature_length=2,
+                    embedding_rows=1,
+                    embedding_width=16,
+                )
+                for audio in audios
             ],
         )
 
@@ -150,6 +177,9 @@ async def run(args, tmp, stack):
 
     model = str(args.model.resolve())
     config = json.loads((args.model / "config.json").read_text())
+    config = config.get("thinker_config", config)
+    # /generate accepts pre-tokenized requests even on the visual-only test tokenizer.
+    audio_token = config.get("audio_token_id", 9876)
     image_token = config["image_token_id"]
     video_token = config["video_token_id"]
     sockets = zmq.asyncio.Context()
@@ -177,6 +207,7 @@ async def run(args, tmp, stack):
                 incremental_streaming_output=True,
                 disaggregation_mode=self.role,
                 accepts_encoder_handoff=True,
+                staged_audio_model_type=AUDIO_MODEL_TYPE,
                 supports_staged_video=True,
                 host="127.0.0.1",
                 port=self.http_port,
@@ -204,13 +235,14 @@ async def run(args, tmp, stack):
         async def consume(self, ids, handoff, room, host, port):
             images = ids.count(image_token)
             videos = ids.count(video_token)
+            audios = ids.count(audio_token)
             if args.split:
                 assert port == languages[0].receiver_port
                 assert host == "127.0.0.1"
             transfer = None
-            if images or videos:
-                transfer = EncoderHandoff.parse(handoff, images, videos)
-                assert transfer.version == (2 if videos else 1)
+            if images or videos or audios:
+                transfer = EncoderHandoff.parse(handoff, images, videos, audios)
+                assert transfer.version == (4 if audios else 2 if videos else 1)
                 if self.role != "decode":
                     await asyncio.sleep(0.05)
                     await transfer.deliver(f"127.0.0.1:{self.receiver_port}", 5)
@@ -219,7 +251,7 @@ async def run(args, tmp, stack):
                         transfer.part_id.encode(),
                         *(
                             hashlib.sha256(i.encode()).digest()
-                            for i in IMAGES[:images] + VIDEOS[:videos]
+                            for i in IMAGES[:images] + VIDEOS[:videos] + AUDIOS[:audios]
                         ),
                     ]
                     self.receives.append(transfer.part_id)
@@ -228,14 +260,18 @@ async def run(args, tmp, stack):
             requests.append((self.role, room, transfer, ids))
 
         async def Generate(self, req, ctx):
-            assert not req.HasField("image_data") and not req.HasField("video_data")
+            assert all(
+                not req.HasField(k) for k in ("image_data", "video_data", "audio_data")
+            )
             ids = list(req.input_ids.one.ids)
             await self.consume(
                 ids,
                 req.encoder_handoff if req.HasField("encoder_handoff") else None,
-                req.bootstrap_room.one.value
-                if req.HasField("bootstrap_room")
-                else None,
+                (
+                    req.bootstrap_room.one.value
+                    if req.HasField("bootstrap_room")
+                    else None
+                ),
                 req.bootstrap_host.one.value,
                 req.bootstrap_port.one.value,
             )
@@ -257,12 +293,16 @@ async def run(args, tmp, stack):
             async def generate(request):
                 self.http_requests += 1
                 body = await request.json()
-                assert "image_data" not in body and "video_data" not in body
+                assert not {"image_data", "video_data", "audio_data"}.intersection(body)
                 assert body["stream"]
                 assert body["mm_hashes"] == (
-                    ["0xc1", "0xa1", "0xc2"]
-                    if video_token in body["input_ids"]
-                    else ["0xa1", "0xb2"]
+                    ["0xd1", "0xa1", "0xc1", "0xd2"]
+                    if audio_token in body["input_ids"]
+                    else (
+                        ["0xc1", "0xa1", "0xc2"]
+                        if video_token in body["input_ids"]
+                        else ["0xa1", "0xb2"]
+                    )
                 )
                 ids = body["input_ids"]
                 await self.consume(
@@ -413,8 +453,16 @@ async def run(args, tmp, stack):
     def payload(media):
         content = [{"type": "text", "text": "Describe in order."}]
         for source in media:
-            key = "video_url" if source.startswith("data:video/") else "image_url"
-            content.append({"type": key, key: {"url": source}})
+            if source == AUDIOS[0]:
+                content.append(
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"format": "wav", "data": source.split(",")[1]},
+                    }
+                )
+            else:
+                key = source.split(":", 1)[1].split("/", 1)[0] + "_url"
+                content.append({"type": key, key: {"url": source}})
             content.append({"type": "text", "text": "Next."})
         return {
             "model": "vision",
@@ -450,6 +498,21 @@ async def run(args, tmp, stack):
     await chat([VIDEOS[0]])
     await chat([VIDEOS[0], IMAGES[0], VIDEOS[1]])
     media_requests = 14
+    if "audio_token_id" in config:
+        before = len(requests)
+        await chat([AUDIOS[0], IMAGES[0], VIDEOS[0], AUDIOS[1]])
+        for _, _, transfer, ids in requests[before:]:
+            assert transfer.version == 4
+            assert [v for v in ids if v in (audio_token, image_token, video_token)] == [
+                audio_token,
+                image_token,
+                video_token,
+                audio_token,
+            ]
+        media_requests += 1
+        print(
+            "PASS Chat audio, image, video and audio placeholders retained input order"
+        )
     if args.native_generate:
         start, end = config["vision_start_token_id"], config["vision_end_token_id"]
         native_ids = [10, start, image_token, end, 11, start, image_token, end, 12]
@@ -509,13 +572,32 @@ async def run(args, tmp, stack):
         hops = requests[before:]
         assert len(hops) == (2 if args.split else 1)
         assert all(hop[3] == mixed["input_ids"] and hop[2].version == 2 for hop in hops)
-        media_requests += 2
+        audio_mixed = {
+            **body,
+            "rid": "client-native-audio",
+            "input_ids": [audio_token, image_token, video_token, audio_token],
+            "audio_data": AUDIOS,
+            "image_data": IMAGES[0],
+            "video_data": VIDEOS[0],
+            "mm_hashes": ["0xd1", "0xa1", "0xc1", "0xd2"],
+        }
+        before = len(requests)
+        result = await exchange("/generate", audio_mixed)
+        assert result["meta_info"]["id"] == audio_mixed["rid"]
+        hops = requests[before:]
+        assert len(hops) == (2 if args.split else 1)
+        assert all(
+            hop[3] == audio_mixed["input_ids"] and hop[2].version == 4 for hop in hops
+        )
+        media_requests += 3
         print(
-            "PASS public /generate routed images and interleaved video, and rejected private encoder_handoff"
+            "PASS public /generate routed images, video and interleaved audio, and rejected private encoder_handoff"
         )
 
     assert sum(len(e.encodes) for e in encoders) == media_requests
     assert sum(len(language.receives) for language in languages) == media_requests
+    if args.split:
+        assert not languages[1].receives
     for e in encoders:
         assert sorted(e.encodes) == sorted(e.releases)
         assert sorted(e.encodes) == sorted(part for part, _ in e.sends)

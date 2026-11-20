@@ -31,6 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r#"#[serde(default, skip_serializing_if = "Vec::is_empty")]"#,
         )
         .field_attribute(
+            ".sglang.grpc.encoder.StagedImageTransfer.audios",
+            r#"#[serde(default, skip_serializing_if = "Vec::is_empty")]"#,
+        )
+        .field_attribute(
             ".sglang.grpc.encoder.VideoLayout.timestamps",
             "#[serde(default)]",
         )

@@ -9,6 +9,10 @@ use std::time::Duration;
 use dynamo_backend_common::{
     DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
+use dynamo_llm::local_model::runtime_config::{
+    SGLANG_STAGED_AUDIO_V4, SGLANG_STAGED_IMAGES_V1, SGLANG_STAGED_NATIVE_V3,
+    SGLANG_STAGED_VIDEO_V2,
+};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
@@ -60,6 +64,69 @@ pub(crate) async fn discover(
     }
 }
 
+/// The same advertisement governs source admission and descriptor validation
+/// on E and on every language worker. Audio uses its own contract so a visual
+/// request can still use the older descriptors on an audio-capable worker.
+#[derive(Default)]
+pub(crate) struct StagedCapabilities {
+    pub(crate) images: bool,
+    pub(crate) video: bool,
+    pub(crate) native_model_type: String,
+    pub(crate) audio_model_type: String,
+}
+
+impl StagedCapabilities {
+    pub(crate) fn advertise(&self, config: &mut EngineConfig) {
+        if self.images {
+            config
+                .runtime_data
+                .insert(SGLANG_STAGED_IMAGES_V1.into(), true.into());
+        }
+        if self.video {
+            config
+                .runtime_data
+                .insert(SGLANG_STAGED_VIDEO_V2.into(), true.into());
+        }
+        if !self.native_model_type.is_empty() {
+            config.runtime_data.insert(
+                SGLANG_STAGED_NATIVE_V3.into(),
+                self.native_model_type.clone().into(),
+            );
+        }
+        if !self.audio_model_type.is_empty() {
+            config.runtime_data.insert(
+                SGLANG_STAGED_AUDIO_V4.into(),
+                serde_json::json!({
+                    "model_type": self.audio_model_type,
+                    "supports_images": self.images,
+                }),
+            );
+        }
+    }
+
+    fn model_for(&self, [images, videos, audios]: [usize; 3]) -> Result<&str, DynamoError> {
+        if images > 0 && !self.images {
+            return Err(client::invalid_request(
+                "the selected SGLang worker does not support staged images",
+            ));
+        }
+        if videos > 0 && !self.video {
+            return Err(client::invalid_request(
+                "the selected SGLang worker does not support staged video",
+            ));
+        }
+        if audios == 0 {
+            return Ok(&self.native_model_type);
+        }
+        if self.audio_model_type.is_empty() {
+            return Err(client::invalid_request(
+                "the selected SGLang worker does not support staged audio",
+            ));
+        }
+        Ok(&self.audio_model_type)
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct Handoff {
     peer: String,
@@ -71,22 +138,22 @@ impl Handoff {
     fn validate(
         &self,
         request_id: &str,
-        images: usize,
-        videos: usize,
+        [images, videos, audios]: [usize; 3],
         native_model_type: &str,
     ) -> Result<(), DynamoError> {
         let t = &self.transfer;
-        if !matches_layout_contract(t, videos, native_model_type)
+        if !matches_layout_contract(t, videos, audios, native_model_type)
             || request_id.is_empty()
             || t.request_id != request_id
             || !is_lower_hex(&t.transfer_id, 32)
             || t.part_id != format!("{}_local_part_0", t.transfer_id)
             || t.part_idx != 0
             || t.num_parts != 1
-            || (images == 0 && videos == 0)
+            || (images == 0 && videos == 0 && audios == 0)
             || t.image_count as usize != images
             || t.images.len() != images
             || t.videos.len() != videos
+            || t.audios.len() != audios
             || !t.videos.iter().all(|v| valid_video_layout(v, t.version))
             || t.images
                 .iter()
@@ -110,13 +177,15 @@ impl Handoff {
 fn matches_layout_contract(
     transfer: &pb::StagedImageTransfer,
     videos: usize,
+    audios: usize,
     native_model_type: &str,
 ) -> bool {
     if transfer.native_model_type != native_model_type {
         return false;
     }
     if native_model_type.is_empty() {
-        return transfer.version == (if videos == 0 { 1 } else { 2 })
+        return audios == 0
+            && transfer.version == (if videos == 0 { 1 } else { 2 })
             && transfer.embedding_width == 0
             && transfer
                 .images
@@ -127,7 +196,17 @@ fn matches_layout_contract(
                 .iter()
                 .all(|layout| layout.embedding_rows == 0);
     }
-    transfer.version == 3
+    transfer.version == (if audios == 0 { 3 } else { 4 })
+        && transfer.audios.iter().all(|layout| {
+            is_lower_hex(&layout.identity, 64)
+                && layout.feature_length > 0
+                && layout.embedding_rows > 0
+                && layout.embedding_width > 0
+                && layout.embedding_width <= transfer.embedding_width
+                && (!transfer.images.is_empty()
+                    || !transfer.videos.is_empty()
+                    || layout.embedding_width == transfer.embedding_width)
+        })
         && transfer.embedding_width > 0
         && transfer.images.iter().all(|layout| {
             layout.embedding_rows > 0
@@ -144,7 +223,7 @@ fn valid_video_layout(layout: &pb::VideoLayout, version: u32) -> bool {
     let temporal_grid = layout.t as usize;
     // The v3 processor may compress several temporal patches into one frame
     // embedding. Its timestamps and per-frame identities refer to those groups.
-    let groups = if version == 3 && !layout.timestamps.is_empty() {
+    let groups = if version >= 3 && !layout.timestamps.is_empty() {
         layout.timestamps.len()
     } else {
         temporal_grid
@@ -201,49 +280,40 @@ fn advertised_peer(raw: &str) -> Result<String, DynamoError> {
 
 /// Count original source items, including one item per video regardless of its
 /// temporal grid size. Each source list preserves its own placeholder order.
-fn media_counts(request: &PreprocessedRequest) -> Result<(usize, usize), DynamoError> {
+fn media_counts(request: &PreprocessedRequest) -> Result<[usize; 3], DynamoError> {
     let Some(media) = &request.multi_modal_data else {
-        return Ok((0, 0));
+        return Ok([0; 3]);
     };
-    if media
-        .iter()
-        .any(|(key, items)| !matches!(key.as_str(), "image_url" | "video_url") && !items.is_empty())
-    {
+    if media.iter().any(|(key, items)| {
+        !matches!(key.as_str(), "image_url" | "video_url" | "audio_url") && !items.is_empty()
+    }) {
         return Err(client::invalid_request(
-            "staged SGLang encoders accept images and videos only",
+            "staged SGLang encoders require image, video, or audio URLs",
         ));
     }
-    Ok((
-        media.get("image_url").map_or(0, Vec::len),
-        media.get("video_url").map_or(0, Vec::len),
-    ))
+    Ok(["image_url", "video_url", "audio_url"].map(|key| media.get(key).map_or(0, Vec::len)))
 }
 
 pub(crate) fn validate_consumer(
     request: &PreprocessedRequest,
     request_id: &str,
     required: bool,
-    supports_staged_video: bool,
-    native_model_type: &str,
+    capabilities: &StagedCapabilities,
 ) -> Result<(), DynamoError> {
     if let Some(result) = &request.encoder_result {
         let handoff = Handoff::deserialize(result)
             .map_err(|e| client::invalid_arg(format!("invalid SGLang encoder_result: {e}")))?;
         // The native consumer counts placeholders in the original token IDs.
-        // When Dynamo retains sources for retries, also check both modality counts.
-        let (images, videos) = match &request.multi_modal_data {
+        // When Dynamo retains sources for retries, also check each modality's count.
+        let counts = match &request.multi_modal_data {
             Some(_) => media_counts(request)?,
-            None => (
+            None => [
                 handoff.transfer.image_count as usize,
                 handoff.transfer.videos.len(),
-            ),
+                handoff.transfer.audios.len(),
+            ],
         };
-        if videos > 0 && !supports_staged_video {
-            return Err(client::invalid_request(
-                "the selected SGLang language worker does not support staged video",
-            ));
-        }
-        handoff.validate(request_id, images, videos, native_model_type)?;
+        handoff.validate(request_id, counts, capabilities.model_for(counts)?)?;
     } else if required
         && (request
             .multi_modal_data
@@ -276,19 +346,15 @@ pub(crate) fn validate_consumer(
 pub(crate) fn stage_request(
     request: PreprocessedRequest,
     request_id: String,
-    supports_video: bool,
+    capabilities: &StagedCapabilities,
 ) -> Result<pb::StageRequest, DynamoError> {
-    let (images, videos) = media_counts(&request)?;
-    if (images == 0 && videos == 0) || request.encoder_result.is_some() {
+    let counts = media_counts(&request)?;
+    if counts == [0; 3] || request.encoder_result.is_some() {
         return Err(client::invalid_request(
             "SGLang Stage requires unencoded media",
         ));
     }
-    if videos > 0 && !supports_video {
-        return Err(client::invalid_request(
-            "the selected SGLang encoder does not support staged video",
-        ));
-    }
+    capabilities.model_for(counts)?;
     protocol::validate_request(&request)?;
     if request.media_io_kwargs.is_some() {
         return Err(client::invalid_request(
@@ -308,11 +374,13 @@ pub(crate) fn stage_request(
         request_id,
         mm_items: sources("image_url")?,
         video_urls: sources("video_url")?,
+        audio_urls: sources("audio_url")?,
     })
 }
 
 pub(crate) struct Encoder {
     info: pb::GetEncoderInfoResponse,
+    capabilities: StagedCapabilities,
     peer: String,
     pool: OnceCell<GrpcChannelPool>,
     media: Option<Arc<StagedMedia>>,
@@ -336,6 +404,12 @@ impl Encoder {
             .transpose()?
             .map(Arc::new);
         Ok(Self {
+            capabilities: StagedCapabilities {
+                images: info.supports_staged_images.unwrap_or(true),
+                video: info.supports_staged_video,
+                native_model_type: info.native_model_type.clone(),
+                audio_model_type: info.staged_audio_model_type.clone(),
+            },
             info,
             media,
             peer: advertised_peer(advertised.unwrap_or(endpoint.as_str()))?,
@@ -378,18 +452,7 @@ impl Encoder {
             llm: Some(Default::default()),
             ..Default::default()
         };
-        if self.info.supports_staged_video {
-            config.runtime_data.insert(
-                dynamo_llm::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2.into(),
-                true.into(),
-            );
-        }
-        if !self.info.native_model_type.is_empty() {
-            config.runtime_data.insert(
-                dynamo_llm::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3.into(),
-                self.info.native_model_type.clone().into(),
-            );
-        }
+        self.capabilities.advertise(&mut config);
         Ok(config)
     }
 
@@ -433,13 +496,14 @@ impl Encoder {
         stop: CancellationToken,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let request_id = ctx.id().to_string();
-        let mut message =
-            stage_request(request, request_id.clone(), self.info.supports_staged_video)?;
+        let mut message = stage_request(request, request_id.clone(), &self.capabilities)?;
         let images = message.mm_items.len();
         let videos = message.video_urls.len();
+        let audios = message.audio_urls.len();
+        let counts = [images, videos, audios];
         let mut rpc = self.rpc()?;
         let peer = self.peer.clone();
-        let native_model_type = self.info.native_model_type.clone();
+        let native_model_type = self.capabilities.model_for(counts)?.to_owned();
         let media = self.media.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let response = tokio::select! {
@@ -458,7 +522,7 @@ impl Encoder {
             let transfer = response?
                 .into_inner().transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
             let handoff = Handoff { peer, transfer };
-            if let Err(error) = handoff.validate(&request_id, images, videos, &native_model_type) {
+            if let Err(error) = handoff.validate(&request_id, counts, &native_model_type) {
                 let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
                     transfer_id: handoff.transfer.transfer_id.clone(),
                 })).await;
@@ -470,6 +534,7 @@ impl Encoder {
                 part_id = %handoff.transfer.part_id,
                 image_count = images,
                 video_count = videos,
+                audio_count = audios,
                 "native SGLang encoder staged media"
             );
             let result = serde_json::to_value(&handoff).map_err(|e| client::protocol_error(e.to_string()))?;
@@ -493,7 +558,7 @@ mod tests {
             "num_parts":1,"part_idx":0,"image_count":1,"images":[{"t":1,"h":4,"w":4,"identity":"c".repeat(64)}]
         });
         let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
-        handoff.validate("r", 1, 0, "").unwrap();
+        handoff.validate("r", [1, 0, 0], "").unwrap();
         assert_eq!(serde_json::to_value(handoff).unwrap(), descriptor);
     }
 
@@ -511,10 +576,10 @@ mod tests {
             }]
         });
         let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
-        handoff.validate("r", 1, 0, "kimi_vl").unwrap();
+        handoff.validate("r", [1, 0, 0], "kimi_vl").unwrap();
         assert_eq!(serde_json::to_value(&handoff).unwrap(), descriptor);
-        assert!(handoff.validate("r", 1, 0, "").is_err());
-        assert!(handoff.validate("r", 1, 0, "glm4v").is_err());
+        assert!(handoff.validate("r", [1, 0, 0], "").is_err());
+        assert!(handoff.validate("r", [1, 0, 0], "glm4v").is_err());
         for (field, value) in [
             ("/version", serde_json::json!(1)),
             ("/embedding_width", serde_json::json!(0)),
@@ -525,7 +590,10 @@ mod tests {
             let mut malformed = descriptor.clone();
             *malformed.pointer_mut(field).unwrap() = value;
             let handoff: Handoff = serde_json::from_value(malformed).unwrap();
-            assert!(handoff.validate("r", 1, 0, "kimi_vl").is_err(), "{field}");
+            assert!(
+                handoff.validate("r", [1, 0, 0], "kimi_vl").is_err(),
+                "{field}"
+            );
         }
     }
 }

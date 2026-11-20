@@ -93,6 +93,7 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) tower_connector_lora_enabled: bool,
     pub(crate) sglang_staged_images: bool,
     pub(crate) sglang_staged_video: bool,
+    pub(crate) sglang_staged_audio: bool,
 }
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
@@ -807,6 +808,7 @@ impl Model {
                     sglang_staged_video: ws.supports_runtime_capability(
                         crate::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2,
                     ),
+                    sglang_staged_audio: ws.card().runtime_config.sglang_staged_audio(),
                     tower_connector_lora_enabled: ws
                         .card()
                         .runtime_config

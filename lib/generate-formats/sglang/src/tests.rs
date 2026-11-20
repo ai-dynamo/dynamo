@@ -148,10 +148,10 @@ fn codec_extends_native_field_rules_and_joins_structured_sequences() {
 }
 
 fn bind_native(body: &Value, staged: bool) -> Result<Bound, ClientError> {
-    bind_media(body, staged, false)
+    bind_media(body, [staged, false, false])
 }
 
-fn bind_media(body: &Value, images: bool, videos: bool) -> Result<Bound, ClientError> {
+fn bind_media(body: &Value, [images, videos, audios]: [bool; 3]) -> Result<Bound, ClientError> {
     let opened = SglangFormat::native().open(ClientRequest {
         body: &serde_json::to_vec(body).unwrap(),
         headers: &HeaderMap::from_iter([(
@@ -164,6 +164,7 @@ fn bind_media(body: &Value, images: bool, videos: bool) -> Result<Bound, ClientE
     (opened.bind)(&Worker {
         sglang_staged_images: images,
         sglang_staged_video: videos,
+        sglang_staged_audio: audios,
         ..crate::testkit::worker()
     })
 }
@@ -248,8 +249,8 @@ fn staged_video_preserves_clip_order_and_interleaved_prompt() {
         "video_data": [clip, clip2], "image_data": image,
         "mm_hashes": ["a1","a2","a3"],
     });
-    assert!(bind_media(&body, true, false).is_err());
-    let req = bind_media(&body, true, true).unwrap().request;
+    assert!(bind_media(&body, [true, false, false]).is_err());
+    let req = bind_media(&body, [true, true, false]).unwrap().request;
     assert_eq!(req.token_ids.as_slice(), [7, 151656, 8, 151655, 9, 151656]);
     assert_eq!(
         serde_json::to_value(req.multi_modal_data.unwrap()).unwrap(),
@@ -263,17 +264,44 @@ fn staged_video_preserves_clip_order_and_interleaved_prompt() {
     assert!(
         bind_media(
             &json!({"input_ids":[151656], "video_data":clip}),
-            true,
-            true
+            [true, true, false]
         )
         .is_ok()
     );
     assert!(
         bind_media(
             &json!({"input_ids":[151656], "video_data":clip, "audio_data":"x"}),
-            true,
-            true
+            [true, true, false]
         )
         .is_err()
     );
+}
+
+#[test]
+fn staged_audio_uses_native_token_order_and_requires_advertised_modalities() {
+    let first = "data:audio/wav;base64,AQ==";
+    let second = "https://example.test/sound.wav";
+    let image = "https://example.test/image.jpg";
+    let ids = [41, 1, 50, 2, 41];
+    let mut body = json!({"input_ids":ids, "audio_data":[first, second]});
+    let req = bind_media(&body, [false, false, true]).unwrap().request;
+    assert_eq!(req.token_ids.as_slice(), ids);
+    assert!(
+        req.extra_args.unwrap()[crate::PAYLOAD_KEY]
+            .get("audio_data")
+            .is_none()
+    );
+    assert!(bind_media(&body, [true, true, false]).is_err());
+    body["image_data"] = json!(image);
+    assert!(bind_media(&body, [false, false, true]).is_err());
+    let req = bind_media(&body, [true, true, true]).unwrap().request;
+    assert_eq!(req.token_ids.as_slice(), ids);
+    assert_eq!(
+        serde_json::to_value(req.multi_modal_data.unwrap()).unwrap(),
+        json!({"image_url":[{"Url":image}], "audio_url":[{"Url":first},{"Url":second}]})
+    );
+    for value in [json!([[first]]), json!("file:///tmp/sound.wav")] {
+        body["audio_data"] = value;
+        assert!(bind_media(&body, [true, true, true]).is_err());
+    }
 }

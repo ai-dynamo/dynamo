@@ -129,6 +129,8 @@ pub struct Worker<'a> {
     pub sglang_staged_images: bool,
     /// The selected language worker accepts v2 descriptors containing video.
     pub sglang_staged_video: bool,
+    /// The selected language worker accepts v4 descriptors containing audio.
+    pub sglang_staged_audio: bool,
 }
 
 /// A started client request.

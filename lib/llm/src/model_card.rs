@@ -1559,6 +1559,12 @@ impl ModelDeploymentCard {
                     crate::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3,
                 );
 
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::SGLANG_STAGED_AUDIO_V4,
+                );
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -4175,6 +4181,26 @@ mod ownership_tests {
         let glm = card(Some("glm4v"));
         assert_ne!(glm.mdcsum(), card(None).mdcsum());
         assert_ne!(glm.mdcsum(), card(Some("kimi_vl")).mdcsum());
+    }
+
+    #[test]
+    fn staged_audio_worker_sets_require_the_same_native_contract() {
+        use crate::local_model::runtime_config::SGLANG_STAGED_AUDIO_V4;
+        let card = |model: &str, images: bool| {
+            let mut card = ModelDeploymentCard::with_name_only("audio");
+            card.runtime_config.runtime_data.insert(
+                SGLANG_STAGED_AUDIO_V4.into(),
+                serde_json::json!({"model_type":model,"supports_images":images}),
+            );
+            card
+        };
+        let audio = card("qwen2_audio", false);
+        let legacy = ModelDeploymentCard::with_name_only("audio");
+        assert!(audio.runtime_config.sglang_staged_audio());
+        assert!(!legacy.runtime_config.sglang_staged_audio());
+        assert_ne!(audio.mdcsum(), legacy.mdcsum());
+        assert_ne!(audio.mdcsum(), card("qwen2_audio", true).mdcsum());
+        assert_ne!(audio.mdcsum(), card("dots3_note", false).mdcsum());
     }
 
     #[test]

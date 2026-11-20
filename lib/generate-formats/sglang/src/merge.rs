@@ -45,7 +45,7 @@ use axum::response::IntoResponse;
 
 use crate::response_merge::{Assembler, RuleSet};
 use dynamo_llm::generate_format::{
-    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
+    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
 use dynamo_llm::preprocessor::media::{MediaFetcher, max_data_url_bytes};
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
@@ -167,31 +167,33 @@ impl<C: ClientCodec> SglangFormat<C> {
 }
 
 /// Project each modality in source order. The native token IDs preserve how
-/// images and videos are interleaved in the prompt.
+/// media items are interleaved in the prompt.
 fn take_staged_media(
     body: &mut Map<String, Value>,
-    supports_video: bool,
+    worker: &Worker<'_>,
 ) -> Result<Option<MultimodalDataMap>, ClientError> {
     let nonempty = |key: &str| {
         body.get(key)
             .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|items| !items.is_empty()))
     };
-    if nonempty("audio_data") {
-        return Err(ClientError::new(
-            "standalone SGLang encoders do not support audio",
-        ));
+    for (field, modality, supported) in [
+        ("image_data", "image", worker.sglang_staged_images),
+        ("video_data", "video", worker.sglang_staged_video),
+        ("audio_data", "audio", worker.sglang_staged_audio),
+    ] {
+        if nonempty(field) && !supported {
+            return Err(ClientError::new(format!(
+                "this SGLang worker does not support staged {modality}"
+            )));
+        }
     }
-    if nonempty("video_data") && !supports_video {
-        return Err(ClientError::new(
-            "this SGLang worker does not support staged video",
-        ));
-    }
-    if !nonempty("image_data") && !nonempty("video_data") {
+    if !nonempty("image_data") && !nonempty("video_data") && !nonempty("audio_data") {
         return Ok(None);
     }
     for field in [
         "images_config",
         "videos_config",
+        "audio_config",
         "mm_processor_kwargs",
         "media_io_kwargs",
         "modalities",
@@ -204,7 +206,11 @@ fn take_staged_media(
     }
     let policy = MediaFetcher::from_env();
     let mut media = MultimodalDataMap::new();
-    for (field, key) in [("image_data", "image_url"), ("video_data", "video_url")] {
+    for (field, key) in [
+        ("image_data", "image_url"),
+        ("video_data", "video_url"),
+        ("audio_data", "audio_url"),
+    ] {
         let sources = match body.remove(field) {
             None | Some(Value::Null) => continue,
             Some(Value::Array(items)) if items.is_empty() => continue,
@@ -290,8 +296,8 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             input_tokens,
             validation,
             bind: Box::new(move |worker| {
-                let media = if worker.sglang_staged_images {
-                    take_staged_media(&mut body, worker.sglang_staged_video)?
+                let media = if worker.sglang_staged_images || worker.sglang_staged_audio {
+                    take_staged_media(&mut body, worker)?
                 } else {
                     None
                 };

@@ -24,19 +24,22 @@ The standard gRPC generation path requires one completion per request (`n=1`). I
 
 Run one Dynamo sidecar per native SGLang encoder. Enable `--route-to-encoder` on the prefill or aggregated sidecar and set `SGLANG_EXTERNAL_ENCODER_HANDOFF=1` on each language server. Set `--encoder-advertise-endpoint` if the language server reaches E at a different address from its sidecar. The launcher uses DP=PP=1. Set `--tp-size N` for tensor parallelism or `--encoder-tp-size N` for a different encoder degree. Each role takes a separate GPU group by default. Use `--colocate` to put E and the language workers on the same GPUs.
 
-Dynamo sends all images and videos in a request to one encoder. Text requests bypass E. Chat accepts `image_url` and `video_url`. Native `/generate` accepts a URL string or flat list for each of `image_data` and `video_data`. The original `input_ids` determine their order. SGLang advertises the staged media capabilities of the loaded model. Dynamo forwards the descriptor to P/PD and D with the original token IDs.
+Dynamo sends all media in a request to one encoder. Text requests bypass E. Chat accepts `image_url`, `video_url`, `audio_url` and inline `input_audio`. Native `/generate` accepts a URL string or flat list for each of `image_data`, `video_data` and `audio_data`. The original `input_ids` determine their order. SGLang advertises the staged media capabilities of the loaded model. Dynamo forwards the descriptor to P/PD and D with the original token IDs.
 
-| SGLang model family | Staged image | Staged video |
-|---|---|---|
-| Qwen2-VL, Qwen2.5-VL, Qwen3-VL/MoE, Qwen3.5/MoE, Intern-S2 Preview, Qwen3-Omni-MoE | Yes | Yes |
-| GLM-5-Next (GLM-5.3-Flash), GLM-4V/MoE, MiniMax-M3, Muse Spark | Yes | Yes |
-| MiMo-V2 with a vision encoder | Yes | Clips without an audio track |
-| Kimi-VL, Kimi K2.5, K3, K3.1, Dots3-Note, Inkling2 | Yes | Image items only |
-| Qwen2-Audio, Qwen2.5-Omni | No | No |
+| Model family | Image | Video | Separate audio input |
+|---|---|---|---|
+| Qwen2-VL, Qwen2.5-VL, Qwen3-VL/MoE, Qwen3.5/MoE, Intern-S2 Preview | Yes | Yes | — |
+| GLM-5-Next (GLM-5.3-Flash), GLM-4V/MoE, MiniMax-M3 | Yes | Yes | — |
+| Qwen3-Omni-MoE | Yes | Yes | Yes |
+| Muse Spark | Yes | Yes | With a tokenizer that defines the soft-audio delimiters |
+| MiMo-V2 with the corresponding towers | Yes | Clips without an audio track | Yes |
+| Dots3-Note | Yes | Image items only | Yes |
+| Kimi-VL, Kimi K2.5, K3, K3.1, Inkling2 | Yes | Image items only | — |
+| Qwen2-Audio, Qwen3-ASR | — | — | Yes |
 
-The native SGLang EPD launch list at `9fc0e2a6` includes 18 registered visual architectures. The staged image path covers all 18 and adds GLM-4V and GLM-4V-MoE. Of these 20, 14 accept direct video input. Qwen2-Audio is audio-only. The pinned revision lists Qwen2.5-Omni in its launch check but has no registered vision implementation for it. [Native EPD launch list](https://github.com/sgl-project/sglang/blob/9fc0e2a6/python/sglang/srt/arg_groups/pd_disaggregation_hook.py#L366-L387) · [SGLang implementation](https://github.com/sgl-project/sglang/pull/51754)
+The native SGLang EPD launch list at `9fc0e2a6` includes 18 registered visual architectures. The staged image path covers all 18 and adds GLM-4V and GLM-4V-MoE. Of these 20, 14 accept direct video input. The pinned revision lists Qwen2.5-Omni in its launch check but has no registered vision implementation for it. [Native EPD launch list](https://github.com/sgl-project/sglang/blob/9fc0e2a6/python/sglang/srt/arg_groups/pd_disaggregation_hook.py#L366-L387) · [SGLang implementation](https://github.com/sgl-project/sglang/pull/51754)
 
-Kimi K3/K3.1 process video as timestamped image chunks in unified serving. Dots3-Note interleaves frames, text and optional audio. The staged path accepts image items for these models. Qwen-family handoffs use v1 for images and v2 for video. Other visual processors use v3, which carries the native model type, the embedding width and the row count of each item.
+Kimi K3/K3.1 process video as timestamped image chunks in unified serving. Dots3-Note interleaves frames, text and optional audio. Submit image items for Kimi and Dots3-Note vision. Dots3-Note also accepts separate audio items. Qwen-family handoffs use v1 for images and v2 for video. Other visual processors use v3, which carries the native model type, the embedding width and the row count of each item.
 
 Chat also requires a compatible frontend tokenizer and chat template. For `moonshotai/Kimi-VL-A3B-Instruct`, the pinned Dynamo Rust tokenizer does not recognize the checkpoint's `kimi_vl` tiktoken configuration. Set `DYN_CHAT_PROCESSOR=sglang`, `DYN_ENDPOINT_TYPES=chat` and `DYN_TRUST_REMOTE_CODE=true` to use the checkpoint tokenizer with the SGLang chat processor in a frontend environment with SGLang installed. Pass `-- --trust-remote-code --skip-tokenizer-init` to the launcher. The Rust ingress then accepts the prepared token IDs, and the SGLang receiver still initializes the visual processor. Native `/generate` accepts pretokenized input when enabled with `DYN_SGLANG_ENABLE_GENERATE=1`.
 
@@ -49,13 +52,15 @@ GPU validation covered the following checkpoints.
 | GLM-5.3-Flash | All 347 official vision tensors ran at E TP4. NIXL reproduced native encoder outputs byte-for-byte on seven image/video batches. Full language generation is unverified. |
 | Qwen2.5-VL-3B-Instruct | An earlier PR revision passed 33 Chat and `/generate` requests across E/PD and E/P/D using both NIXL and ZMQ. |
 
+For requests with audio, E and the language worker must advertise the same audio model type. The v4 descriptor records native feature lengths, embedding rows, widths and identities. P/PD binds the rows to their placeholders, and split D reconstructs positions using the same metadata. Vision-only requests retain their v1–v3 formats.
+
 The launcher defaults to NIXL/UCX. P or PD registers host memory for the encoder to write into. Install NIXL with its UCX plugin on both ends, or select ZMQ with `--encoder-transfer-backend zmq_to_scheduler`. In E/P/D, D receives the layout and video timing to reconstruct token positions. The P→D KV transfer backend is configured separately. See the [E/PD and E/P/D launcher](sglang/launch/encoded.sh).
 
 To serve video, deploy video-capable builds on every E and every participating language worker for the model in its Dynamo namespace. EncoderRouter binds one encoder worker set and selects replicas round-robin. A mixed rollout can leave the router without a unique encoder set or send a video to an image-only encoder, which rejects it.
 
 For encoders that advertise their media policy, the E sidecar fetches remote media under Dynamo's DNS and redirect checks and the native encoder's allowed domains, size limit, and timeout. The complete Stage request, including base64 expansion, must fit the 64 MiB gRPC limit. On older image-only encoders the native process fetches its own image URLs.
 
-The staged path accepts images and videos. Audio uses the regular generation path when supported by the native engine. Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
+Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 
 SGLang's Rust server downloads HTTP and HTTPS media URLs from any host. This includes `127.0.0.1` and SGLang's own HTTP API. The Rust server does not support `--allowed-media-domains` (v0.5.23 ignores it; later builds refuse to start with it), so limit the engine's network access instead, for example with a Kubernetes NetworkPolicy.
 

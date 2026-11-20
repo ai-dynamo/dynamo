@@ -14,6 +14,7 @@ fn routing_metadata(
         tower_connector_lora_enabled,
         sglang_staged_images: false,
         sglang_staged_video: false,
+        sglang_staged_audio: false,
         lora_name,
     }
 }

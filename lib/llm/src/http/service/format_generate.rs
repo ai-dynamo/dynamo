@@ -357,6 +357,7 @@ async fn handler(
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
         sglang_staged_images: selection.sglang_staged_images,
         sglang_staged_video: selection.sglang_staged_video,
+        sglang_staged_audio: selection.sglang_staged_audio,
     };
     let Bound {
         mut request,

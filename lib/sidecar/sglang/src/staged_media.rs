@@ -185,6 +185,7 @@ async fn prepare_with_limits(
     for (modality, sources, default_timeout) in [
         ("image", &mut message.mm_items, Duration::from_secs(3)),
         ("video", &mut message.video_urls, Duration::from_secs(10)),
+        ("audio", &mut message.audio_urls, Duration::from_secs(5)),
     ] {
         for source in sources {
             if source.starts_with("data:") {
@@ -196,9 +197,9 @@ async fn prepare_with_limits(
                 continue;
             }
             let Some(fetcher) = fetcher else {
-                if modality == "video" {
+                if modality != "image" {
                     return Err(client::invalid_request(
-                        "remote staged video requires the encoder's media policy",
+                        "remote staged video or audio requires the encoder's media policy",
                     ));
                 }
                 // v1 encoders do not publish their native domain and size
@@ -308,6 +309,22 @@ mod tests {
                 .to_string()
                 .contains("size limit")
         );
+    }
+
+    #[tokio::test]
+    async fn staged_audio_fetches_once_under_both_encoder_and_frontend_limits() {
+        let reply = "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc";
+        let mut message = StageRequest {
+            audio_urls: vec![serve(reply).await],
+            ..Default::default()
+        };
+        assert!(prepare(&mut message, None).await.is_err());
+        prepare(&mut message, Some(&test_fetcher(3))).await.unwrap();
+        assert_eq!(message.audio_urls, ["data:audio/wav;base64,YWJj"]);
+        message.audio_urls = vec![serve(reply).await];
+        assert!(prepare(&mut message, Some(&test_fetcher(2))).await.is_err());
+        message.audio_urls = vec![serve(&reply.replace("audio/wav", "text/html")).await];
+        assert!(prepare(&mut message, Some(&test_fetcher(3))).await.is_err());
     }
 
     #[tokio::test]

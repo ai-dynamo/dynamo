@@ -189,6 +189,9 @@ pub const SGLANG_STAGED_VIDEO_V2: &str = "sglang_staged_video_v2";
 /// The native processor model type advertised for version 3 staged handoffs.
 pub const SGLANG_STAGED_NATIVE_V3: &str = "sglang_staged_native_v3";
 
+/// The audio processor and image support for the model's version 4 handoff.
+pub const SGLANG_STAGED_AUDIO_V4: &str = "sglang_staged_audio_v4";
+
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///
@@ -552,6 +555,14 @@ impl ModelRuntimeConfig {
             Some(serde_json::Value::String(value)) => is_truthy(value),
             _ => false,
         }
+    }
+
+    pub(crate) fn sglang_staged_audio(&self) -> bool {
+        self.runtime_data
+            .get(SGLANG_STAGED_AUDIO_V4)
+            .and_then(|contract| contract.get("model_type"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|model_type| !model_type.is_empty())
     }
 
     /// Check whether a runtime capability is explicitly enabled.

@@ -14,7 +14,6 @@ use dynamo_backend_common::{
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_llm::local_model::runtime_config::{
-    SGLANG_STAGED_IMAGES_V1, SGLANG_STAGED_NATIVE_V3, SGLANG_STAGED_VIDEO_V2,
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
 use dynamo_sidecar_common::{
@@ -29,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::{self, AbortRpc, Client, GRPC_SERVICE, Pool, Retry, WORKER_GROUP_KEY};
 use crate::discovery::{self, EngineInfo, sglang_eagle_enabled};
-use crate::encoder::{self, Encoder, NativeBackend};
+use crate::encoder::{self, Encoder, NativeBackend, StagedCapabilities};
 use crate::listeners::{Listener, NodeListeners};
 use crate::native_http::{self, NativeHttp};
 use crate::node::{self, NodeInfo, NodeTable};
@@ -59,8 +58,7 @@ enum NativeService {
 struct StartedState {
     listeners: NodeListeners,
     accepts_encoder_handoff: bool,
-    supports_staged_video: bool,
-    native_model_type: String,
+    staged_capabilities: StagedCapabilities,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
 }
@@ -409,8 +407,6 @@ impl LLMEngine for SglangSidecarEngine {
         .await?;
         let infos: Vec<_> = started.iter().map(|(_, info)| info).collect();
         let accepts_encoder_handoff = infos.iter().all(|info| info.accepts_encoder_handoff);
-        let supports_staged_video =
-            accepts_encoder_handoff && infos.iter().all(|info| info.supports_staged_video);
         if self.route_to_encoder && !accepts_encoder_handoff {
             return Err(client::invalid_arg(
                 "native SGLang handoff capability changed during startup",
@@ -428,22 +424,17 @@ impl LLMEngine for SglangSidecarEngine {
         // startup deadline: the worker group's DNS lookup needs some of it.
         let kv_event_sources = discover_kv_event_sources(&node, &mut config, deadline).await?;
         let native_http = self.native_http(&started, &endpoints, deadline).await?;
-        if accepts_encoder_handoff {
-            config
-                .runtime_data
-                .insert(SGLANG_STAGED_IMAGES_V1.into(), true.into());
-        }
-        if supports_staged_video {
-            config
-                .runtime_data
-                .insert(SGLANG_STAGED_VIDEO_V2.into(), true.into());
-        }
-        if accepts_encoder_handoff && !node.engine.native_model_type.is_empty() {
-            config.runtime_data.insert(
-                SGLANG_STAGED_NATIVE_V3.into(),
-                node.engine.native_model_type.clone().into(),
-            );
-        }
+        let staged_capabilities = if accepts_encoder_handoff {
+            StagedCapabilities {
+                images: node.engine.supports_staged_images,
+                video: infos.iter().all(|info| info.supports_staged_video),
+                native_model_type: node.engine.native_model_type.clone(),
+                audio_model_type: node.engine.staged_audio_model_type.clone(),
+            }
+        } else {
+            StagedCapabilities::default()
+        };
+        staged_capabilities.advertise(&mut config);
         if native_http.is_some() {
             config
                 .runtime_data
@@ -485,8 +476,7 @@ impl LLMEngine for SglangSidecarEngine {
             .set(StartedState {
                 listeners,
                 accepts_encoder_handoff,
-                supports_staged_video,
-                native_model_type: node.engine.native_model_type,
+                staged_capabilities,
                 kv_event_sources,
                 combined_token_limit,
             })
@@ -524,8 +514,7 @@ impl LLMEngine for SglangSidecarEngine {
             &request,
             ctx.id(),
             self.route_to_encoder || state.accepts_encoder_handoff,
-            state.supports_staged_video,
-            &state.native_model_type,
+            &state.staged_capabilities,
         )?;
         if request.encoder_result.is_some() && !state.accepts_encoder_handoff {
             return Err(client::invalid_request(
