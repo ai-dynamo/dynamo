@@ -53,6 +53,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
                 {"license": {"name": "Odd)License"}},
                 {"license": {"name": "MIT OR Zlib"}},
                 {"license": {"name": "UNKNOWN"}},
+                {"license": {"name": "(MIT"}},
             ],
         },
         {
@@ -149,7 +150,7 @@ def test_base_components_parsed(tmp_path: Path) -> None:
     assert comps["libb"].spdx == "MIT License AND Apache 2.0"
     assert comps["libexpr"].spdx == (
         "(Apache-2.0 AND Apache-2.0 WITH LLVM-exception) AND Odd)License"
-        " AND (MIT OR Zlib) AND UNKNOWN"
+        " AND (MIT OR Zlib) AND UNKNOWN AND (MIT"
     )
     assert comps["libnolicense"].spdx == NOASSERTION
 

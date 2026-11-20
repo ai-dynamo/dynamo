@@ -202,7 +202,7 @@ license.
 
 _BASE_DEBS_FILTERED = (
     "Debian packages are limited to those still installed in this image, each "
-    "with its own copyright file. "
+    "followed by its copyright file where the image ships one. "
 )
 
 # Placeholder for a base-image component whose SBOM entry declares no license.
