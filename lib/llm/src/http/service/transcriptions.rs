@@ -24,7 +24,7 @@ use tracing::Instrument;
 
 use super::{
     RouteDoc,
-    disconnect::create_connection_monitor,
+    disconnect::create_http_connection_monitor,
     error::HttpError,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, process_response_and_observe_metrics,
@@ -243,7 +243,7 @@ async fn audio_transcription(
         endpoint: Endpoint::Transcriptions.to_string(),
         request_type: "unary".to_string(),
     };
-    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+    let (mut connection_handle, _stream_handle) = create_http_connection_monitor(
         request.context(),
         Some(state.metrics_clone()),
         cancellation_labels,
