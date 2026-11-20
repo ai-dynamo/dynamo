@@ -189,8 +189,9 @@ mod ffi {
     /// The calling thread's OS id, which is what `nvtxNameOsThread` expects.
     #[cfg(target_os = "linux")]
     fn os_thread_id() -> u32 {
-        // SAFETY: gettid has no preconditions and cannot fail.
-        unsafe { libc::gettid() as u32 }
+        // SAFETY: SYS_gettid takes no arguments and cannot fail. A raw syscall because the
+        // gettid() wrapper needs glibc 2.30 and the wheel targets manylinux_2_28.
+        unsafe { libc::syscall(libc::SYS_gettid) as u32 }
     }
 
     #[cfg(target_os = "macos")]
