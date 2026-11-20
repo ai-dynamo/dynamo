@@ -1163,19 +1163,6 @@
       }
     },
     {
-      "name": "KV Block Manager",
-      "sglang": {
-        "status": "wip",
-        "note": "Work in progress across all combinations"
-      },
-      "trtllm": {
-        "status": "yes"
-      },
-      "vllm": {
-        "status": "yes"
-      }
-    },
-    {
       "name": "Multimodal (Image)",
       "sglang": {
         "status": "yes",
@@ -2289,7 +2276,7 @@
       "knownIssues": 3
     }
   },
-  "nightliesNote": "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.",
+  "nightliesNote": "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.",
   "nightlyBuilds": [
     {
       "version": "1.8.0.dev20261119",

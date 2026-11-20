@@ -47,18 +47,17 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Disaggregated Serving** | — | | | | | | | | | |
-| **KV-Aware Routing** | ✅ | — | | | | | | | | |
-| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | Unsupported | Unsupported | Unsupported | — | | | | | | |
-| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | Unsupported | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | Unsupported | 🚧 | — | | | | |
-| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | Unsupported | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
-| **LoRA** | | | | Unsupported | | | | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | Unsupported | ✅ | ✅ | ✅ | | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | Unsupported | — | ✅ | ✅ | | ✅ | — |
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | — | | | | |
+| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
+| **LoRA** | | | | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | — | ✅ | ✅ | | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source](multimodal.md))
