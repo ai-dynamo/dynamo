@@ -1758,21 +1758,20 @@ mod tests {
 
     fn instance_with_modalities(
         id: u64,
-        source: &str,
+        kv_cache_block_size: u32,
         modalities: Option<serde_json::Value>,
     ) -> DesiredInstance {
-        let mut desired = instance(id, source);
-        let mut card = ModelDeploymentCard::with_name_only("model");
-        card.source_path = Some(source.to_string());
+        let mut desired = instance(id, "model");
+        let card = &mut desired.card;
+        card.kv_cache_block_size = kv_cache_block_size;
         if let Some(value) = modalities {
             card.runtime_config.runtime_data.insert(
                 crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES.into(),
                 value,
             );
         }
-        desired.input_modalities = crate::discovery::watcher::input_modalities_contract(&card);
+        desired.input_modalities = crate::discovery::watcher::input_modalities_contract(card);
         desired.mdc_checksum = card.mdcsum().to_string();
-        desired.card = card;
         desired
     }
 
@@ -1817,13 +1816,10 @@ mod tests {
                 }
             }
         }
-        let normalized = instance_with_modalities(
-            1,
-            "same",
-            Some(serde_json::json!(["text", "image", "text"])),
-        );
+        let normalized =
+            instance_with_modalities(1, 16, Some(serde_json::json!(["text", "image", "text"])));
         assert_eq!(normalized.input_modalities, Some(modalities));
-        let malformed = instance_with_modalities(2, "same", Some(serde_json::json!(["text", 1])));
+        let malformed = instance_with_modalities(2, 16, Some(serde_json::json!(["text", 1])));
         assert!(malformed.input_modalities.is_none());
     }
 
@@ -1832,8 +1828,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (host, mut starts) = FakeHost::new();
             let mut controller = ModelDiscoveryController::new(host.clone());
-            let text = instance_with_modalities(1, "same", Some(serde_json::json!(["text"])));
-            let legacy = instance_with_modalities(2, "same", None);
+            let text = instance_with_modalities(1, 16, Some(serde_json::json!(["text"])));
+            let legacy = instance_with_modalities(2, 16, None);
             assert_eq!(text.mdc_checksum, legacy.mdc_checksum);
             controller.apply_added(text.clone());
             controller.apply_added(legacy.clone());
@@ -1844,8 +1840,8 @@ mod tests {
             finish_build(&mut controller).await;
             assert_eq!(host.members(&group_key()).len(), 2);
 
-            let competing =
-                instance_with_modalities(9, "rejected-cohort", Some(serde_json::json!(["image"])));
+            let competing = instance_with_modalities(9, 32, Some(serde_json::json!(["image"])));
+            assert_ne!(competing.mdc_checksum, text.mdc_checksum);
             controller.apply_added(competing);
             assert_eq!(host.starts.load(Ordering::SeqCst), 1);
             controller.apply_removed(&legacy.key);
@@ -1857,7 +1853,7 @@ mod tests {
             finish_build(&mut controller).await;
 
             let vision =
-                instance_with_modalities(3, "same", Some(serde_json::json!(["text", "image"])));
+                instance_with_modalities(3, 16, Some(serde_json::json!(["text", "image"])));
             controller.apply_added(vision.clone());
             controller.start_queued_builds();
             let mixed = starts.recv().await.unwrap();
@@ -1876,7 +1872,7 @@ mod tests {
             finish_build(&mut controller).await;
 
             // Same-ID publication must not keep using a pipeline that omitted images.
-            controller.apply_added(instance_with_modalities(1, "same", None));
+            controller.apply_added(instance_with_modalities(1, 16, None));
             assert!(host.members(&group_key()).is_empty());
             controller.start_queued_builds();
             assert!(starts.recv().await.unwrap().input_modalities.is_none());
@@ -1908,7 +1904,7 @@ mod tests {
                 for id in [1, 2] {
                     controller.apply_added(instance_with_modalities(
                         id,
-                        "same",
+                        16,
                         Some(serde_json::json!(["text"])),
                     ));
                 }
@@ -1920,7 +1916,7 @@ mod tests {
                 if start_rebuild {
                     host.failures
                         .store(usize::from(fail_rebuild), Ordering::SeqCst);
-                    controller.apply_added(instance_with_modalities(3, "same", None));
+                    controller.apply_added(instance_with_modalities(3, 16, None));
                     controller.start_queued_builds();
                     assert!(starts.recv().await.unwrap().input_modalities.is_none());
                     if fail_rebuild {
@@ -1928,7 +1924,7 @@ mod tests {
                         finish_build(&mut controller).await;
                     }
                 }
-                controller.apply_added(instance_with_modalities(1, "same", modalities));
+                controller.apply_added(instance_with_modalities(1, 16, modalities));
                 assert_eq!(host.members(&group_key()).len(), 2);
                 assert_eq!(*admissions.borrow(), vec![2]);
                 assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
