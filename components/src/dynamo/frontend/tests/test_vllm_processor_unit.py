@@ -6240,3 +6240,66 @@ class TestResponseFormatReasoningStart:
             extra={"guided_json": _JSON_SCHEMA},
         )
         assert guided == {"json": _JSON_SCHEMA}
+
+
+class TestBufferedToolPathReasoningSplit:
+    """Unary requests with a tool parser split reasoning like streaming does.
+
+    The reasoning block contains `</think>` spelled with ordinary tokens before
+    the real end token. Only the end token ends reasoning.
+    """
+
+    @staticmethod
+    def _ids(tokenizer):
+        end_id = tokenizer.convert_tokens_to_ids("</think>")
+        reasoning = [
+            i
+            for piece in ("Consider the literal </", "think", "> spelling.")
+            for i in tokenizer.encode(piece, add_special_tokens=False)
+        ] + tokenizer.encode(" Still reasoning.", add_special_tokens=False)
+        answer = tokenizer.encode('{"city":"Paris"}', add_special_tokens=False)
+        assert end_id not in reasoning
+        assert "</think> spelling." in tokenizer.decode(reasoning)
+        return reasoning + [end_id] + answer
+
+    @pytest.mark.parametrize("chunk_size", [1, 64])
+    @pytest.mark.parametrize("stream_response", [True, False])
+    def test_only_the_end_token_ends_reasoning(
+        self, tokenizer, stream_response, chunk_size
+    ):
+        from vllm.reasoning import ReasoningParserManager
+
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="auto", model_fields=frozenset()
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=tokenizer.encode(
+                "<|im_start|>assistant\n<think>", add_special_tokens=False
+            ),
+            tool_parser=_resolve_qwen3_tool_parser_class()(tokenizer),
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("qwen3"),
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+        ids = self._ids(tokenizer)
+        chunks = [ids[i : i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        content, reasoning = "", ""
+        for n, chunk in enumerate(chunks):
+            choice = post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=tokenizer.decode(chunk),
+                    token_ids=chunk,
+                    finish_reason="stop" if n == len(chunks) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            delta = (choice or {}).get("delta") or {}
+            content += delta.get("content") or ""
+            reasoning += delta.get("reasoning_content") or ""
+
+        assert content == '{"city":"Paris"}'
+        assert "</think> spelling. Still reasoning." in reasoning

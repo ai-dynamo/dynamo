@@ -1249,6 +1249,9 @@ class StreamingPostProcessor:
         self._tool_text_buffer: str | None = None
         self._pending_tool_opener = ""
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+        # Reasoning and answer text of the buffered non-streaming tool path.
+        self._buffered_reasoning = ""
+        self._buffered_content = ""
 
     @property
     def reasoning_token_total(self) -> int:
@@ -1615,23 +1618,49 @@ class StreamingPostProcessor:
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
+        # Split reasoning chunk by chunk, as the streaming path does. The
+        # streaming parser ends reasoning on the end token's id; the text-only
+        # extract_reasoning() would also end it at the same marker spelled with
+        # ordinary tokens, and return the rest of the reasoning as content.
+        split: DeltaMessage | None = DeltaMessage(content=delta_text)
+        if not self.reasoning_is_done and self.reasoning_parser:
+            split = self.reasoning_parser.extract_reasoning_streaming(
+                self.previous_text,
+                current_text,
+                delta_text,
+                self.previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+            )
+            if self.reasoning_parser.engine_based_streaming:
+                reasoning_ended = (
+                    self.reasoning_parser.has_engine_confirmed_reasoning_end()
+                )
+            else:
+                reasoning_ended = self.reasoning_parser.is_reasoning_end_streaming(
+                    current_token_ids, delta_token_ids
+                )
+            if reasoning_ended or output.finish_reason:
+                split = self._merge_delta_messages(
+                    split, self._finish_engine_parser(self.reasoning_parser)
+                )
+            if reasoning_ended:
+                self.reasoning_is_done = True
+        if split is not None:
+            self._buffered_reasoning += split.reasoning or ""
+            self._buffered_content += split.content or ""
+
         self.previous_text = current_text
         self.previous_token_ids = current_token_ids
         if not output.finish_reason:
             return None
 
-        saved_reasoning = None
-        content = current_text
-        if self.reasoning_parser:
-            saved_reasoning, content = self.reasoning_parser.extract_reasoning(
-                current_text,
-                request=self.request_for_sampling,
-            )
-            if not self.request_for_sampling.include_reasoning:
-                saved_reasoning = None
+        saved_reasoning = self._buffered_reasoning or None
+        if not self.request_for_sampling.include_reasoning:
+            saved_reasoning = None
 
         delta_message = self._extract_tool_calls_from_text(
-            content or "",
+            self._buffered_content,
             saved_reasoning=saved_reasoning,
         )
         if delta_message is None:
