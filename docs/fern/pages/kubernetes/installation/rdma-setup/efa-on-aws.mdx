@@ -123,12 +123,12 @@ docker buildx build --platform=linux/arm64 --target aws \
 # TRT-LLM EFA image (amd64 or arm64 — upstream nvcr.io/nvidia/tensorrt-llm/release
 # publishes both variants; arm64 is what you want for GB200 / Grace EFA nodes)
 container/render.py --framework=trtllm --target=runtime --platform=linux/amd64 \
-    --cuda-version=13.1 --make-efa --output-short-filename
+    --cuda-version=13.4 --make-efa --output-short-filename
 docker build --target aws -t dynamo:latest-trtllm-runtime-efa \
     -f container/rendered.Dockerfile .
 
 container/render.py --framework=trtllm --target=runtime --platform=linux/arm64 \
-    --cuda-version=13.1 --make-efa --output-short-filename
+    --cuda-version=13.4 --make-efa --output-short-filename
 docker buildx build --platform=linux/arm64 --target aws \
     -t dynamo:latest-trtllm-runtime-efa-arm64 -f container/rendered.Dockerfile .
 ```
