@@ -309,6 +309,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>TensorRT-LLM</span><span>8x B200/GB200/H200</span><span>Agentic + multimodal</span></div>
   <a className="dynamo-card-link" href="gemma-4-31b.mdx" aria-label="Open the Gemma-4-31B recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang" data-hardware="b200 vr200" data-technique="aggregated disaggregated kv-routing" data-workload="chat" data-targets="agg-b200 disagg-b200 agg-vr200 disagg-vr200">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.webp" alt="" />
+      <div><h3>Inkling 2 Mini</h3><p>Thinking Machines</p></div>
+    </div>
+    <p className="dynamo-model-summary">A multimodal thinking MoE with NVFP4 routed experts. SGLang recipes serve it aggregated on 2 GPUs or disaggregated 1P1D on 4 GPUs, on B200 or VR200, with reasoning, tool calling, structured output, and image input.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>2x or 4x B200 / VR200</span><span>Chat · tool calling</span><span>Text + image</span></div>
+  <a className="dynamo-card-link" href="inkling-2-mini.mdx" aria-label="Open the Inkling 2 Mini recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang vllm" data-hardware="b200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse" data-targets="agg-gb300-agentic disagg-gb300-agentic agg-b200">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.webp" alt="" />

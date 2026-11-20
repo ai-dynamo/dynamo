@@ -975,6 +975,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Inkling 2 Mini
+                path: ../pages-dev/recipes/model-recipes/inkling-2-mini.mdx
+                slug: inkling-2-mini
               - page: Inkling NVFP4
                 path: ../pages-dev/recipes/model-recipes/inkling-nvfp4.mdx
                 slug: inkling
