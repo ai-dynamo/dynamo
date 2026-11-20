@@ -5,8 +5,8 @@
 //!
 //! The crate holds the radix trees (`radix_tree`, `positional`, the concurrent compressed
 //! tree), the thread-pool and branch-sharded wrappers, `KvIndexer` and `LocalKvIndexer`,
-//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the hash
-//! lifecycle delegate (`delegate`), the indexer counters (`metrics`), the residency
+//! approximate LRU retention and pruning, the cuckoo-filter pool index (`cuckoo`), the
+//! indexer counters (`metrics`), the residency
 //! projection (`residency`), overlap scores (`overlap`), KV transfer candidates (`kv_hints`),
 //! the lower-tier continuation index with its per-tier registry, the ingest backend
 //! (`backend`, `lookup`, `recording`, `session_updates`), the session prefix index, the
@@ -61,7 +61,6 @@ mod compressed_radix;
 mod concurrent_radix_tree_compressed;
 mod config;
 pub mod cuckoo;
-mod delegate;
 pub mod host;
 mod identity;
 mod kv_hints;
@@ -93,8 +92,6 @@ mod thread_pool;
 mod traits;
 mod types;
 
-#[cfg(test)]
-mod delegate_tests;
 #[cfg(test)]
 mod local_tests;
 #[cfg(test)]
@@ -128,8 +125,8 @@ pub use api::{
     IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT, KvStateAgentIdentity, KvStateAgentStatus,
-    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, MaybeError,
-    WorkerKvQueryKind, WorkerKvQueryRequest, WorkerKvQueryResponse,
+    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, WorkerKvQueryKind,
+    WorkerKvQueryRequest, WorkerKvQueryResponse,
 };
 pub use approximate_lru::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruClient, ApproximateLruIncarnation,
@@ -146,7 +143,6 @@ pub use branch_sharded::AnchorAwareBranchShardedIndexer;
 pub use branch_sharded::BranchShardedIndexer;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{ApproximateCachePolicyKind, IndexerConfig};
-pub use delegate::{HashLifecycle, KvIndexerDelegate};
 pub use identity::{
     CanonicalIdentityMaterial, ExplicitIdentityMap, IdentitySpecError, IndexerIdentitySpec,
     MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
@@ -156,7 +152,7 @@ pub use kv_hints::{
     CacheOwnerKvTransferKeys, KvTransferCandidateSource, KvTransferCandidates,
     KvTransferSourceInterval, label_key, topology_keys,
 };
-pub use kv_indexer::{KvEventSender, KvIndexer, KvIndexerBuilder};
+pub use kv_indexer::{KvEventSender, KvIndexer};
 pub use local::LocalKvIndexer;
 pub use lookup::HashInput;
 pub use lower_tier::{
@@ -169,10 +165,8 @@ pub use lower_tier_indexers::{
     query_lower_tiers_with_options_and_snapshot,
 };
 pub use metrics::{
-    CkfMutationKind, EventKind, EventWarningKind, KvIndexerMetrics,
-    METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED, METRIC_CKF_MUTATION_UNKNOWN_REMOVE,
-    METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED, METRIC_EVENT_STORED,
-    METRIC_STATUS_ALLOCATION_FAILED, METRIC_STATUS_BLOCK_NOT_FOUND,
+    EventKind, EventWarningKind, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
+    METRIC_EVENT_STORED, METRIC_STATUS_ALLOCATION_FAILED, METRIC_STATUS_BLOCK_NOT_FOUND,
     METRIC_STATUS_CAPACITY_EXHAUSTED, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION,
     METRIC_STATUS_INVALID_BLOCK, METRIC_STATUS_OK, METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW,
     METRIC_STATUS_PARENT_NOT_FOUND, METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN,

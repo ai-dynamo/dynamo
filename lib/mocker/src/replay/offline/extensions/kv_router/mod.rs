@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_admission::host::{
-    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement,
+    BlockReason, LaneCheck, LaneKey, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueLane,
+    QueueMetadata, QueueSnapshot, RecheckScope,
 };
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
 use dynamo_kv_hashing::LocalBlockHash;
@@ -59,13 +60,13 @@ use crate::common::protocols::MockerConfig;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
-    replay_slots, replay_worker_config,
+    replay_slots, replay_worker_config, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{
     ConversationAffinityConfig, ConversationAffinityMode, ReplayPrefillLoadEstimator,
 };
-use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use aisimulate_core::replay::{
+use aisim_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use aisim_core::replay::{
     KvFetchAction, KvHints, Placement, PlacementCacheSample, PlacementDecision, PlacementEffects,
     PlacementPolicy, ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
@@ -1017,8 +1018,7 @@ impl OfflineReplayRouter {
                     .and_then(|identity| identity.lineage.as_ref())
                     .context("sibling affinity requires unambiguous conversation lineage")?;
                 anyhow::ensure!(
-                    lineage.schema
-                        == aisimulate_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
+                    lineage.schema == aisim_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
                         && !lineage.root_conversation_id.is_empty(),
                     "unsupported conversation lineage"
                 );
@@ -1147,16 +1147,6 @@ impl OfflineReplayRouter {
 
         if should_queue {
             let snapshot = self.snapshot_for(&mut pending);
-            let placement = pending
-                .affinity_hold
-                .as_ref()
-                .and_then(Hold::target)
-                .and_then(|target| {
-                    target
-                        .dp_rank
-                        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
-                })
-                .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
             let metadata = QueueMetadata {
                 class_index,
                 snapshot,
@@ -1166,9 +1156,26 @@ impl OfflineReplayRouter {
                 // from scheduler ingress, after any affinity wait.
                 class_due_at: class.slo_ttft_due_at(decay_now),
                 arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+                lane_key: None,
             };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
+            // As in the live router, a session's requests wait in their own lane, so a
+            // session bound to a busy rank holds only itself; a sessionless request bound to a
+            // rank by its affinity hold waits in that rank's lane.
+            let lane = match pending.session_id.as_deref() {
+                Some(session) => QueueLane::Keyed(LaneKey::new(session)),
+                None => pending
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .and_then(|target| {
+                        target
+                            .dp_rank
+                            .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
+                    })
+                    .map_or(QueueLane::Shared, QueueLane::Exact),
+            };
             self.pending
                 .enqueue_with_due_at(
                     metadata,
@@ -1177,7 +1184,7 @@ impl OfflineReplayRouter {
                         .saturating_mul(self.dp_size as usize),
                     priority_jump,
                     strict_priority,
-                    placement,
+                    lane,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
@@ -1435,6 +1442,17 @@ impl OfflineReplayRouter {
             || self.indexer.approximate.is_some()
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
+        // A request list arrives without replay hashes; a salted request
+        // needs the engine's.
+        let cache_salt = request_cache_salt(request);
+        let replay_hashes = match (replay_hashes, cache_salt) {
+            (None, Some(cache_salt)) => Some(salted_request_hashes(
+                &request_view.prompt_tokens_for_placement()?,
+                self.block_size,
+                cache_salt,
+            )),
+            (replay_hashes, _) => replay_hashes,
+        };
         let (tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let local_hashes =
@@ -1454,12 +1472,17 @@ impl OfflineReplayRouter {
                         .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
                 } else {
                     let tokens = request_view.prompt_tokens_for_placement()?;
+                    // Keyed identities never meet engine hashes; the namespace
+                    // only keeps one salt's active blocks apart from another's.
                     self.config.compute_seq_hashes_for_tracking_with_context(
                         &self.tracking_hash,
                         self.tracking_hash_scope(),
                         &tokens,
                         None,
-                        BlockHashOptions::default(),
+                        BlockHashOptions {
+                            cache_namespace: cache_salt,
+                            ..Default::default()
+                        },
                         None,
                     )
                 };
@@ -1639,17 +1662,42 @@ impl OfflineReplayRouter {
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         self.needs_drain = false;
         let mut admissions = Vec::new();
-        self.pending.recheck_all_workers();
+        // Replay has no dispatch gate: capacity is the only reason a lane blocks.
+        self.pending.recheck_blocked_lanes(RecheckScope::Capacity);
+        let mut class_room: Vec<Option<bool>> = vec![None; self.pending.class_count()];
         loop {
             // Most completions find an empty queue, which never consults the
             // predicate, so only snapshot worker loads once one is needed.
             let mut worker_loads = None;
             let slots = &self.slots;
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, request| {
+            // Every head without an affinity target asks the same question of the same loads,
+            // so each class answers it once per pass rather than once per session lane.
+            class_room.fill(None);
+            let Some(popped) = self.pending.pop_next(|class_index, class, request| {
+                let unconstrained = request
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .is_none();
+                let shared = |room: bool| {
+                    if room {
+                        LaneCheck::Dispatch
+                    } else {
+                        LaneCheck::Blocked(BlockReason::SharedCapacity)
+                    }
+                };
+                if unconstrained && let Some(room) = class_room[class_index] {
+                    return shared(room);
+                }
                 let worker_loads =
                     worker_loads.get_or_insert_with(|| slots.project_worker_loads(None, decay_now));
-                !Self::request_workers_busy(worker_loads, workers, class, request)
+                let room = !Self::request_workers_busy(worker_loads, workers, class, request);
+                if unconstrained {
+                    class_room[class_index] = Some(room);
+                    return shared(room);
+                }
+                LaneCheck::from(room)
             }) else {
                 break;
             };
@@ -1786,7 +1834,7 @@ mod tests {
     };
     use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{
+    use aisim_core::replay::{
         KvFetchAction, KvHints, Placement, PlacementDecision, PlacementPolicy,
         ReplayPromptTokenSource, ReplayRequestContext, WorkerTopology,
     };
@@ -1800,7 +1848,7 @@ mod tests {
         #[case] dp_size: u32,
     ) {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = dp_size;
         let mut policy = Policy::new_with_selector_seed(
@@ -1901,7 +1949,7 @@ mod tests {
     #[test]
     fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         use dynamo_scheduler::host::KvSchedulerError;
         let mut policy = Policy::new_with_selector_seed(
             &queueing_args(),
@@ -1961,7 +2009,7 @@ mod tests {
 
     #[test]
     fn affinity_queue_cost_uses_only_the_bound_rank_cache() {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = 2;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -2040,7 +2088,7 @@ mod tests {
         #[case] evict: bool,
         #[case] authored_hashes: bool,
     ) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
             &queueing_args(),
             Some(queueing_router_config()),
@@ -2127,7 +2175,7 @@ mod tests {
     #[case(false)]
     #[case(true)]
     fn affinity_clock_does_not_drain_on_decay_and_abort_releases_capacity(#[case] affinity: bool) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut config = queueing_router_config();
         config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -2197,7 +2245,7 @@ mod tests {
     #[test]
     fn affinity_table_full_routes_without_affinity() {
         use super::{KvRouterPlacement as Policy, SessionAffinity, SessionAffinityConfig};
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = Policy::new_with_selector_seed(
             &replay_args(),
             None,
@@ -2333,6 +2381,7 @@ mod tests {
             policy_class: None,
             replay_context: None,
             images: Vec::new(),
+            cache_salt: None,
         }
     }
 
@@ -2340,7 +2389,7 @@ mod tests {
     fn unhandled_request_fields_are_rejected_instead_of_dropped() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
-        request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+        request.kv_hints = Some(aisim_core::replay::AuthoredKvHints {
             source_worker: 0,
             source_dp_rank: 0,
         });
@@ -2348,11 +2397,11 @@ mod tests {
         assert!(error.to_string().contains("authored KV fetch hints"));
         assert_eq!(router.pending_count(), 0);
         request.kv_hints = None;
-        request.images.push(aisimulate_core::engine::ImageSpec {
+        request.images.push(aisim_core::engine::ImageSpec {
             identity: 1,
             token_start: 0,
             token_end: 1,
-            encoder: aisimulate_core::engine::EncoderShape {
+            encoder: aisim_core::engine::EncoderShape {
                 sequences: 1,
                 patch_tokens: 1,
                 transformer_tokens: 1,
@@ -2491,6 +2540,101 @@ mod tests {
 
         assert_eq!(pending.token_seq, expected);
         assert_ne!(pending.token_seq, Some(replay_hashes.sequence_hashes));
+    }
+
+    fn cache_salt_request(uuid: u128, cache_salt: Option<&str>) -> DirectRequest {
+        DirectRequest {
+            cache_salt: cache_salt.map(str::to_owned),
+            ..request(uuid, 7)
+        }
+    }
+
+    /// A request list reaches the router without replay hashes. Its salted
+    /// requests still have to match what the engine publishes for the salt.
+    #[test]
+    fn request_list_cache_salt_selects_the_engine_cache_namespace() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let block_size = router.block_size;
+        let published = |cache_salt| {
+            ReplayRequestHashes::from_tokens_with_cache_salt(
+                &request(0, 7).tokens,
+                block_size,
+                cache_salt,
+            )
+        };
+        // The worker holds the one-block prompt under salt "a".
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                published(Some("a")).local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        // Routing overlap and the worker's active blocks after each arrival.
+        // Active blocks are shared only inside a namespace, and an empty salt
+        // is the unsalted one.
+        let namespaces = [Some("a"), Some("b"), None, Some(""), Some("a")];
+        let mut observed = Vec::new();
+        for (index, cache_salt) in namespaces.into_iter().enumerate() {
+            let request = cache_salt_request(index as u128 + 1, cache_salt);
+            let effects = router.on_request_arrival(&request, None, 0.0).unwrap();
+            observed.push((
+                effects.admissions[0].best_available_overlap_blocks,
+                router.debug_snapshot(0.0).active_blocks_by_worker[0].1,
+            ));
+        }
+        assert_eq!(observed, [(1, 1), (0, 2), (0, 3), (0, 3), (1, 3)]);
+
+        // Public tracking identities are the engine's sequence hashes.
+        for cache_salt in namespaces {
+            let request = cache_salt_request(9, cache_salt);
+            let pending = router
+                .build_pending_request(&request, request.max_output_tokens, None, None)
+                .unwrap();
+            assert_eq!(
+                pending.token_seq,
+                Some(published(cache_salt).sequence_hashes),
+                "{cache_salt:?}"
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::request_list(false)]
+    #[case::replay_hashes(true)]
+    fn keyed_tracking_identities_follow_the_cache_salt(#[case] with_replay_hashes: bool) {
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file.write_all(&[0x39; 32]).unwrap();
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            router_tracking_key_file: Some(key_file.path().to_path_buf()),
+            router_tracking_key_id: Some("2026-01".to_string()),
+            ..Default::default()
+        };
+        let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let identities = |cache_salt: Option<&str>| {
+            let request = cache_salt_request(1, cache_salt);
+            let replay_hashes = with_replay_hashes.then(|| {
+                ReplayRequestHashes::from_tokens_with_cache_salt(
+                    &request.tokens,
+                    router.block_size,
+                    cache_salt,
+                )
+            });
+            router
+                .build_pending_request(&request, request.max_output_tokens, replay_hashes, None)
+                .unwrap()
+                .token_seq
+                .expect("active blocks are tracked")
+        };
+        let unsalted = identities(None);
+        assert_eq!(unsalted.len(), 1);
+        assert_eq!(identities(Some("")), unsalted);
+        assert_eq!(identities(Some("a")), identities(Some("a")));
+        assert_ne!(identities(Some("a")), unsalted);
+        assert_ne!(identities(Some("a")), identities(Some("b")));
     }
 
     #[test]

@@ -26,10 +26,6 @@ spec:
         mode: aggregated
         context_length: 32768
         workers:
-          # TODO(#17581): Remove this explicit value after AISimulate preserves an unset runtime block size.
-          aggregated:
-            kv_cache:
-              block_size: 64
           prefill: null
           decode: null
       traffic:

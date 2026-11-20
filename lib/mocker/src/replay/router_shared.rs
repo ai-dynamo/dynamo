@@ -8,7 +8,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::protocols::MockerConfig;
+use crate::common::protocols::{DirectRequest, MockerConfig};
+use crate::loadgen::ReplayRequestHashes;
 use dynamo_kv_hints::{
     KvHintTransferWorkerMetadata, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
@@ -22,6 +23,27 @@ use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, ActiveSequencesMultiWorker, LocalWorkerLoad, SchedulerLoadSnapshot,
     SequencePublisher,
 };
+
+/// The cache salt a replay router places the request under. An empty salt is
+/// no salt, as in the engine.
+pub(super) fn request_cache_salt(request: &DirectRequest) -> Option<&str> {
+    request
+        .cache_salt
+        .as_deref()
+        .filter(|salt| !salt.is_empty())
+}
+
+/// A salted prompt's block identities. The engine hashes it in AISim's cache
+/// namespace and its KV events carry those hashes, so a router looks the
+/// request up by the same contract: the block seed behind
+/// `BlockHashOptions::cache_namespace` is a different one.
+pub(super) fn salted_request_hashes(
+    tokens: &[u32],
+    block_size: u32,
+    cache_salt: &str,
+) -> ReplayRequestHashes {
+    ReplayRequestHashes::from_tokens_with_cache_salt(tokens, block_size, Some(cache_salt))
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;

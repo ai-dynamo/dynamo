@@ -73,11 +73,6 @@ debug symbols:
 cargo build --profile profiling --features dynamo-runtime/nvtx
 ```
 
-> [!WARNING]
-> Scope the Cargo feature to `dynamo-runtime/nvtx`. A bare `--features nvtx` at the workspace root
-> also turns on the `kvbm-engine` markers, which ignore `DYN_NVTX` and fire whenever they are
-> compiled in.
-
 ## Rust Ranges
 
 Names are hierarchical, so a prefix filter in Nsight Systems isolates one stage. Ranges are

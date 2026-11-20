@@ -883,25 +883,30 @@ mod tests {
 
     #[test]
     fn prologue_round_trips_the_typed_error() {
-        let prologue = ResponseStreamPrologue {
-            error: Some("Generate Error: unsupported input".to_string()),
-            typed_error: Some(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
-                    .message("unsupported input")
-                    .build(),
-            ),
-        };
+        for error_type in [
+            ErrorType::Backend(BackendError::InvalidArgument),
+            ErrorType::NotImplemented,
+        ] {
+            let prologue = ResponseStreamPrologue {
+                error: Some("Generate Error: unsupported input".to_string()),
+                typed_error: Some(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message("unsupported input")
+                        .build(),
+                ),
+            };
 
-        let encoded = serde_json::to_vec(&prologue).expect("prologue should serialize");
-        let decoded: ResponseStreamPrologue =
-            serde_json::from_slice(&encoded).expect("prologue should deserialize");
+            let encoded = serde_json::to_vec(&prologue).expect("prologue should serialize");
+            let decoded: ResponseStreamPrologue =
+                serde_json::from_slice(&encoded).expect("prologue should deserialize");
 
-        assert_eq!(decoded, prologue);
-        assert_eq!(
-            decoded.typed_error.map(|e| e.error_type()),
-            Some(ErrorType::Backend(BackendError::InvalidArgument))
-        );
+            assert_eq!(decoded, prologue);
+            assert_eq!(
+                decoded.typed_error.map(|e| e.error_type()),
+                Some(error_type)
+            );
+        }
     }
 
     #[test]

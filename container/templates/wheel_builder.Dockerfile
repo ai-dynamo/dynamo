@@ -49,10 +49,7 @@ RUN apt clean && apt-get update -y && \
     libgl1 \
     libaio-dev \
     linux-libc-dev && \
-    . /etc/os-release && \
-    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "20260816ubuntu0.${VERSION_ID}.1"
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}
@@ -698,7 +695,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         --only-binary=:all: \
         --no-deps \
         --no-index \
-        --find-links https://pypi.nvidia.com/aisimulate/ \
+        --find-links https://pypi.nvidia.com/aisim/ \
         --dest /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
@@ -734,7 +731,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisimulate*.whl; do \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisim-*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
@@ -764,7 +761,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:
-#   cargo build --features dynamo-llm/block-manager
+#   cargo build
 #   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.

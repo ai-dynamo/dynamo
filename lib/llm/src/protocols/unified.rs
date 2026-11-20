@@ -481,6 +481,10 @@ impl OAIChatLikeRequest for UnifiedRequest {
         OAIChatLikeRequest::template_tools(&self.inner)
     }
 
+    fn raw_tools(&self) -> Option<minijinja::value::Value> {
+        OAIChatLikeRequest::raw_tools(&self.inner)
+    }
+
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
         OAIChatLikeRequest::tool_choice(&self.inner)
     }
@@ -555,6 +559,7 @@ mod tests {
             common: CommonExt::default(),
             nvext: None,
             responses_tools: None,
+            chat_template_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,

@@ -62,6 +62,9 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 	}
 
 	// Orchestrator defaults
+	if obj.Orchestrators.KaiScheduler.SchedulerName == "" {
+		obj.Orchestrators.KaiScheduler.SchedulerName = DefaultKaiSchedulerName
+	}
 	if obj.Orchestrators.Grove.TerminationDelay.Duration == 0 {
 		obj.Orchestrators.Grove.TerminationDelay = metav1.Duration{Duration: 15 * time.Minute}
 	}
