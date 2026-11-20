@@ -4925,16 +4925,24 @@ mod tests {
 
     #[test]
     fn kimi_replay_preserves_historical_tool_identity() {
-        for (call_id, namespace, expected) in [
-            ("call_1", None, "exec"),
-            ("call_1_bare", Some("functions"), "functions.exec"),
+        for (call_id, item_id, namespace, expected) in [
+            ("call_1", None, None, "exec"),
+            ("call_1_bare", None, Some("functions"), "functions.exec"),
             (
                 "dynamo_kimi_bare_v1_Y2FsbF8x",
+                None,
                 Some("functions"),
                 "functions.exec",
             ),
             (
                 "dynamo_kimi_bare_v2_fc_other",
+                Some("fc_other"),
+                Some("functions"),
+                "functions.exec",
+            ),
+            (
+                "dynamo_kimi_bare_v2_fc_00000000000040000000000000000001",
+                None,
                 Some("functions"),
                 "functions.exec",
             ),
@@ -4942,7 +4950,7 @@ mod tests {
             let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
                 "model":"m", "tools":[{"type":"namespace","name":"functions","tools":[
                     {"type":"function","name":"exec","parameters":{"type":"object"}}
-                ]}], "input":[{"type":"function_call","id":"fc_1","call_id":call_id,
+                ]}], "input":[{"type":"function_call","id":item_id,"call_id":call_id,
                     "name":"exec","namespace":namespace,"arguments":"{}"}]
             }))
             .unwrap();
@@ -4980,12 +4988,14 @@ mod tests {
             preserve_tool_spelling: true,
             ..Default::default()
         };
-        for (item_id, original_id) in [("fc_1", "call_1"), ("fc_2", "dynamo_kimi_bare_v1_Y2FsbF8x")]
-        {
+        for (item_id, keep_item_id) in [
+            ("fc_00000000000040008000000000000001", true),
+            ("fc_00000000000040008000000000000002", false),
+        ] {
             let item = params
                 .tool_output(
                     item_id.into(),
-                    original_id.into(),
+                    "call_1".into(),
                     "exec",
                     "{}",
                     OutputStatus::Completed,
@@ -4998,6 +5008,10 @@ mod tests {
             assert_eq!(call.namespace.as_deref(), Some("functions"));
             let mut body = serde_json::to_value(&request).unwrap();
             let call_id = call.call_id.clone();
+            let mut item = serde_json::to_value(item).unwrap();
+            if !keep_item_id {
+                item.as_object_mut().unwrap().remove("id");
+            }
             body["input"] = serde_json::json!([
                 item,
                 {"type":"function_call_output","call_id":call_id,"output":"first"},
@@ -5015,6 +5029,10 @@ mod tests {
             let call = &assistant.tool_calls.as_ref().unwrap()[0];
             assert_eq!(call.function.name, "exec");
             assert_eq!(call.id, call_id);
+            let ChatCompletionRequestMessage::Tool(result) = &chat.inner.messages[1] else {
+                panic!("missing tool result");
+            };
+            assert_eq!(result.tool_call_id, call_id);
             let ChatCompletionRequestMessage::Assistant(second) = &chat.inner.messages[2] else {
                 panic!("missing second assistant");
             };
@@ -5022,6 +5040,41 @@ mod tests {
                 second.tool_calls.as_ref().unwrap()[0].function.name,
                 "functions.exec"
             );
+        }
+    }
+
+    #[test]
+    fn kimi_qualified_output_avoids_reserved_bare_call_id() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model":"m", "input":"run pwd", "tools":[{"type":"namespace", "name":"functions", "tools":[
+                {"type":"function", "name":"exec", "parameters":{"type":"object"}}
+            ]}]
+        })).unwrap();
+        let params = ResponseParams {
+            tools: request
+                .inner
+                .tools
+                .map(|tools| tools.into_iter().map(|tool| tool.inner).collect()),
+            preserve_tool_spelling: true,
+            ..Default::default()
+        };
+        let item_id = "fc_00000000000040008000000000000002";
+        let backend_id = "dynamo_kimi_bare_v2_fc_00000000000040008000000000000001";
+        for status in [OutputStatus::InProgress, OutputStatus::Completed] {
+            let OutputItem::FunctionCall(call) = params
+                .tool_output(
+                    item_id.into(),
+                    backend_id.into(),
+                    "functions.exec",
+                    "{}",
+                    status,
+                )
+                .unwrap()
+            else {
+                panic!("missing function call");
+            };
+            assert_eq!(call.call_id, format!("call_{item_id}"));
+            assert_eq!(call.namespace.as_deref(), Some("functions"));
         }
     }
 
