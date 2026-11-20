@@ -23,7 +23,7 @@ omitted from this snapshot. The SHA-256 digests of the vendored files follow.
 | `sglang/api/v1/hicache.proto` | `3224ff3d64234d23678d1a6f899c35b131ebc73eddeabf4a6b25fa983852e736` |
 | `sglang/api/v1/sampling.proto` | `64621faa7bc31835a52973db9ce8e961c14e66c7d95b21282399d5049531fa6f` |
 | `sglang/api/v1/service.proto` | `570a287ac1c47c9963f43dd97cdd8fbe512453af3e469f48cfac59c7d3db5b1f` |
-| `sglang/encoder/v1/encoder.proto` | `76d5060508a03ddbc59161c5a027b8432d247dc26804bb88978e19501d2f77ee` |
+| `sglang/encoder/v1/encoder.proto` | `e0f551004312da8c4987117d24b253105ef423a97936525c66f3412722e81c6d` |
 | `sglang/json/v1/options.proto` | `d1aa73d1a5ee39b180ccc5967dae55d061a4e6e10f9a01d4c116d3a269b111fe` |
 
 All of them are excluded from Dynamo's formatting and copyright-header checks.

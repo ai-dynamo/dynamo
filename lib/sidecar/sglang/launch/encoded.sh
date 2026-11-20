@@ -13,6 +13,7 @@ source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 model="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 encoders=1
+encoder_transfer_backend="${SGLANG_ENCODER_TRANSFER_BACKEND:-nixl}"
 split=false
 packed=false
 engine_args=()
@@ -20,12 +21,13 @@ while (($#)); do
     case "$1" in
         --model|--model-path) model="${2:?missing model}"; shift 2 ;;
         --encoders) encoders="${2:?missing number of encoders}"; shift 2 ;;
+        --encoder-transfer-backend) encoder_transfer_backend="${2:?missing encoder transfer backend}"; shift 2 ;;
         --split-pd) split=true; shift ;;
         --single-gpu) packed=true; shift ;;
         --) shift; engine_args=("$@"); break ;;
         -h|--help)
             cat <<'HELP'
-Usage: encoded.sh [--model MODEL] [--encoders N] [--split-pd] [--single-gpu] [-- SGLANG_OPTIONS...]
+Usage: encoded.sh [--model MODEL] [--encoders N] [--encoder-transfer-backend BACKEND] [--split-pd] [--single-gpu] [-- SGLANG_OPTIONS...]
 
 Starts Dynamo, N independently registered native encoder/sidecar pairs, and
 a native language engine/sidecar. --split-pd starts separate prefill and decode
@@ -39,12 +41,19 @@ Indexed DYN_ENGINE_GRPC_PORT, DYN_ENGINE_HTTP_PORT (language workers),
 DYN_NCCL_PORT, and DYN_SYSTEM_PORT override local ports, starting at index 1.
 MAX_MODEL_LEN, MAX_CONCURRENT_SEQS and SGLANG_KV_TRANSFER_BACKEND override
 the 4096 context, two sequences and nixl P/D transfer defaults.
+E to P/PD uses nixl by default and requires the NIXL UCX plugin on both
+ends. Select zmq_to_scheduler with --encoder-transfer-backend or set
+SGLANG_ENCODER_TRANSFER_BACKEND. The flag takes precedence over the variable.
 HELP
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
 [[ "$encoders" =~ ^[1-9][0-9]*$ ]] || { echo "--encoders needs a positive integer" >&2; exit 2; }
+case "$encoder_transfer_backend" in
+    nixl|zmq_to_scheduler) ;;
+    *) echo "Unsupported encoder transfer backend '$encoder_transfer_backend'. Choose nixl or zmq_to_scheduler." >&2; exit 2 ;;
+esac
 
 host=127.0.0.1
 sgpy="${SGLANG_PYTHON:-python3}"
@@ -87,7 +96,7 @@ for ((i=1; i<=roles; i++)); do
     nccl_port=$(dyn_port DYN_NCCL_PORT "$i" "$((29500 + i))")
     system_port=$(dyn_port DYN_SYSTEM_PORT "$i" "$((8080 + i))")
     args=(--model-path "$model" --host "$host" --tp-size 1 --dp-size 1
-        --encoder-transfer-backend zmq_to_scheduler --nccl-port "$nccl_port" "${engine_args[@]}")
+        --encoder-transfer-backend "$encoder_transfer_backend" --nccl-port "$nccl_port" "${engine_args[@]}")
     sidecar_args=(--grpc-endpoint "$host:$grpc_port")
     if ((i <= encoders)); then
         # SglangEncoder is the encoder-only Python service. Its listener uses --port.
