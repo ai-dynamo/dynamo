@@ -421,7 +421,12 @@ jobs:
                   -H "Authorization: Bearer ${GH_TOKEN}" \
                   -H "Accept: application/vnd.github+json" \
                   "https://api.github.com/repos/${REPO}/actions/workflows/enterprise-ci.yml/runs?head_sha=${SHA}&event=push&per_page=1") \
+                && ENT_COUNT=$(echo "${ENT_RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null) \
                 && ENT_STATUS=$(echo "${ENT_RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null); then
+                if [ "${ENT_COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
+                  echo "::error::enterprise CI never started for ${SHA} (push event); ${SHA}-vllm-runtime-enterprise is missing"
+                  exit 1
+                fi
                 if [ "${ENT_STATUS}" = "completed" ]; then
                   ENT_CONCLUSION=$(echo "${ENT_RUNS}" | jq -r '.workflow_runs[0].conclusion // "unknown"')
                   echo "::error::enterprise CI for ${SHA} completed (${ENT_CONCLUSION}) without ${SHA}-vllm-runtime-enterprise"
