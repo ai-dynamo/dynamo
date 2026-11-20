@@ -225,6 +225,10 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
             "DYN_TOOL_CALL_PARSER": "hermes",
+            # vLLM's V2 model runner can stall mid-decode at 128 sequence tokens
+            # on Blackwell (SM120) CI runners. Use V1, as test_vllm.py's
+            # aggregated config does; remove once vLLM fixes the V2 runner.
+            "VLLM_USE_V2_MODEL_RUNNER": "0",
         },
         request_payloads=[
             *_aggregated_payloads(
