@@ -95,7 +95,7 @@ class WorkerShutdown:
         self.pre_shutdown = pre_shutdown
         self.finalize_worker: Callable[[], Awaitable[None]] | None = None
         self.post_shutdown: Callable[[], Awaitable[None]] | None = None
-        self.pre_unregister: Callable[[], Awaitable[None]] | None = None
+        self.wait_for_control_tasks: Callable[[], Awaitable[None]] | None = None
         # Gateway parents delegate discovery and request draining to children.
         self.notify_children: Callable[[], None] | None = None
         self.wait_for_children: Callable[[], Awaitable[None]] | None = None
@@ -210,7 +210,14 @@ class WorkerShutdown:
     def _drain_remaining(self) -> float:
         return max(0.0, self._drain_deadline - time.monotonic())
 
-    async def _stage(self, name: str, awaitable: Awaitable, seconds: float) -> bool:
+    async def _stage(
+        self,
+        name: str,
+        awaitable: Awaitable,
+        seconds: float,
+        *,
+        errors: list[Exception] | None = None,
+    ) -> bool:
         start = time.monotonic()
         self._observe_stage(name, "started", 0.0)
         logger.info(
@@ -239,7 +246,9 @@ class WorkerShutdown:
             task.result()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            if errors is not None:
+                errors.append(error)
             # Continue to later teardown stages; cleanup/runtime failures become
             # a terminal error in _shutdown rather than abandoning resources here.
             logger.exception("shutdown stage=%s failed", name)
@@ -279,24 +288,24 @@ class WorkerShutdown:
     async def _shutdown(self) -> None:
         assert self._worker is not None
 
-        async def stop_controls():
-            await self.runtime.shutdown_engine_routes()
-            if self.pre_unregister is not None:
-                await self.pre_unregister()
+        controls_active = self.runtime.close_engine_routes()
 
-        # Controls may resume generation or republish discovery. Join them before
-        # withdrawal, without cancelling the transports needed for engine cleanup.
-        if not await self._stage("engine_controls", stop_controls(), self._remaining()):
-            raise RuntimeError(
-                "engine control callbacks did not stop; cleanup is unsafe"
-            )
+        async def join_controls():
+            if controls_active:
+                await self.runtime.shutdown_engine_routes()
+            if self.wait_for_control_tasks is not None:
+                await self.wait_for_control_tasks()
+
+        controls_done = asyncio.create_task(join_controls())
         if self.notify_children is not None:
             self.notify_children()
-        await self._stage(
-            "unregister",
-            _unregister_endpoints(list(self.endpoints), report_failure=True),
-            self._drain_remaining(),
-        )
+
+        async def withdraw():
+            # A registration submitted before close may still publish discovery.
+            await self.runtime.wait_for_endpoint_registration()
+            await _unregister_endpoints(list(self.endpoints), report_failure=True)
+
+        await self._stage("unregister", withdraw(), self._drain_remaining())
         grace = min(self._caps["router_grace"], self._drain_remaining())
         if grace:
             await self._stage(
@@ -349,6 +358,16 @@ class WorkerShutdown:
             self._observe_stage("kv_transfer", "skipped", 0.0)
             logger.info("shutdown stage=kv_transfer reason=skipped")
 
+        if not await self._stage(
+            "engine_controls", controls_done, self._drain_remaining()
+        ):
+            # Unwinding asyncio.run would cancel the engine owner and run its
+            # cleanup concurrently with the callback. Exit without unwinding.
+            logger.error(
+                "Engine controls still own the engine at the cleanup deadline; force-exiting"
+            )
+            os._exit(70)
+
         # Engine cleanup and transport teardown share one cleanup allowance.
         self._hard_deadline = min(
             self._deadline, time.monotonic() + self._caps["cleanup"]
@@ -365,16 +384,23 @@ class WorkerShutdown:
             )
         self.shutdown_event.set()
         cleanup_budget = max(0.0, self._hard_deadline - time.monotonic())
-        clean = await self._stage("cleanup", self._cleanup_worker(), cleanup_budget)
+        errors: list[Exception] = []
+        clean = await self._stage(
+            "cleanup", self._cleanup_worker(), cleanup_budget, errors=errors
+        )
         runtime_budget = max(0.0, self._hard_deadline - time.monotonic())
         runtime_clean = await self._stage(
             "runtime",
             self.runtime.shutdown_and_wait(timeout_secs=runtime_budget),
             runtime_budget,
+            errors=errors,
         )
         if self._worker.done() and self.finalize_worker is not None:
             finalized = await self._stage(
-                "worker_resources", self.finalize_worker(), self.cleanup_remaining()
+                "worker_resources",
+                self.finalize_worker(),
+                self.cleanup_remaining(),
+                errors=errors,
             )
             runtime_clean = runtime_clean and finalized
         if clean and runtime_clean and self.post_shutdown is not None:
@@ -383,6 +409,7 @@ class WorkerShutdown:
                     "deferred_signals",
                     self.post_shutdown(),
                     max(0.0, self._hard_deadline - time.monotonic()),
+                    errors=errors,
                 )
                 and runtime_clean
             )
@@ -393,7 +420,9 @@ class WorkerShutdown:
             if not self._worker.cancelled():
                 self._worker.result()
         if not (clean and runtime_clean):
-            raise RuntimeError("worker shutdown did not complete")
+            raise RuntimeError("worker shutdown did not complete") from (
+                errors[0] if errors else None
+            )
 
     async def run(self, worker: Coroutine, *, install_signals: bool = True) -> None:
         """Run the engine owner and join the complete sequence before returning."""

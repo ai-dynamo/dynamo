@@ -365,7 +365,7 @@ async def init_decode(
             handler.register_engine_routes(runtime)
             if attached_engine is not None:
                 if shutdown is not None:
-                    shutdown.pre_unregister = handler.wait_for_discovery_sync
+                    shutdown.wait_for_control_tasks = handler.wait_for_discovery_sync
                 handler.follow_shared_pause_state()
             await state_agent.start(engine, config, generate_endpoint)
             gather_tasks = [
@@ -572,7 +572,7 @@ async def init_prefill(
             handler.register_engine_routes(runtime)
             if attached_engine is not None:
                 if shutdown is not None:
-                    shutdown.pre_unregister = handler.wait_for_discovery_sync
+                    shutdown.wait_for_control_tasks = handler.wait_for_discovery_sync
                 handler.follow_shared_pause_state()
             await state_agent.start(engine, config, generate_endpoint)
             await asyncio.gather(

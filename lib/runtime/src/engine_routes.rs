@@ -81,6 +81,10 @@ impl EngineRouteRegistry {
         self.closed.load(Ordering::SeqCst)
     }
 
+    pub fn is_idle(&self) -> bool {
+        self.active.try_write().is_ok()
+    }
+
     /// Join admitted callbacks without shutting down runtime transports.
     pub async fn wait_for_idle(&self) {
         let _guard = self.active.write().await;

@@ -22,6 +22,14 @@ pytestmark = [
 ]
 
 
+class IdleRuntime:
+    def close_engine_routes(self):
+        return False
+
+    async def wait_for_endpoint_registration(self):
+        pass
+
+
 @pytest.fixture
 def shutdown_env(monkeypatch):
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
@@ -50,10 +58,7 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
         release = asyncio.Event()
         stop = asyncio.Event()
 
-        class Runtime:
-            async def shutdown_engine_routes(self):
-                pass
-
+        class Runtime(IdleRuntime):
             async def shutdown_and_wait(self, timeout_secs=None):
                 assert events[-1] == "engine"
                 assert 0 < timeout_secs <= 0.5
@@ -122,10 +127,7 @@ def test_child_lifetime_is_not_limited_by_the_request_stage(shutdown_env, monkey
         retired = asyncio.Event()
         cleaned = asyncio.Event()
 
-        class Runtime:
-            async def shutdown_engine_routes(self):
-                pass
-
+        class Runtime(IdleRuntime):
             async def shutdown_and_wait(self, timeout_secs=None):
                 assert cleaned.is_set()
 
@@ -169,12 +171,11 @@ def test_delayed_child_signal_keeps_parent_deadline(shutdown_env, monkeypatch):
     monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "5")
 
     async def run():
-        runtime = Mock()
+        runtime = IdleRuntime()
 
         async def done(*args, **kwargs):
             pass
 
-        runtime.shutdown_engine_routes = done
         runtime.shutdown_and_wait = done
         parent = ws.WorkerShutdown(runtime, [], asyncio.Event())
 
@@ -262,10 +263,7 @@ def test_prefill_reserves_cleanup_inside_total(shutdown_env, monkeypatch):
         cleaned = asyncio.Event()
         started = asyncio.Event()
 
-        class Runtime:
-            async def shutdown_engine_routes(self):
-                pass
-
+        class Runtime(IdleRuntime):
             async def shutdown_and_wait(self, timeout_secs=None):
                 assert cleaned.is_set()
 
@@ -304,10 +302,7 @@ def test_cleanup_timeout_is_failure_and_does_not_extend_stage(
         started = asyncio.Event()
         finish = asyncio.Event()
 
-        class Runtime:
-            async def shutdown_engine_routes(self):
-                pass
-
+        class Runtime(IdleRuntime):
             async def shutdown_and_wait(self, timeout_secs=None):
                 pass
 
@@ -398,10 +393,7 @@ def test_unregister_failure_is_observed_without_stopping_teardown(
             async def unregister_endpoint_instance(self):
                 raise RuntimeError("discovery unavailable")
 
-        class Runtime:
-            async def shutdown_engine_routes(self):
-                pass
-
+        class Runtime(IdleRuntime):
             async def shutdown_and_wait(self, timeout_secs=None):
                 if runtime_fails:
                     raise RuntimeError("runtime teardown incomplete")
@@ -418,8 +410,11 @@ def test_unregister_failure_is_observed_without_stopping_teardown(
         await asyncio.sleep(0)
         shutdown.request_shutdown()
         if runtime_fails:
-            with pytest.raises(RuntimeError, match="worker shutdown did not complete"):
+            with pytest.raises(
+                RuntimeError, match="worker shutdown did not complete"
+            ) as exc:
                 await task
+            assert str(exc.value.__cause__) == "runtime teardown incomplete"
         else:
             await task
         outcomes = [
@@ -464,10 +459,7 @@ def test_sglang_deferred_signals_run_after_runtime_teardown(shutdown_env):
         events = []
         started = asyncio.Event()
 
-        class Runtime:
-            async def shutdown_engine_routes(self):
-                pass
-
+        class Runtime(IdleRuntime):
             async def shutdown_and_wait(self, timeout_secs=None):
                 events.append("runtime")
 

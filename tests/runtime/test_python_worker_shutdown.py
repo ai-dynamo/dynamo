@@ -60,6 +60,7 @@ async def test_python_draining_rejection_survives_transport(
     monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
     monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "5")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "1")
     runtime = DistributedRuntime(
         asyncio.get_running_loop(),
         discovery_backend,
@@ -122,8 +123,11 @@ async def test_python_draining_rejection_survives_transport(
                 try:
                     await entered.wait()
                     shutdown.request_shutdown()
-                    while not runtime.engine_routes_closed():
-                        await asyncio.sleep(0)
+                    # A held control must not keep the worker in discovery.
+                    async with asyncio.timeout(2):
+                        while client.instance_ids():
+                            await asyncio.sleep(0.01)
+                    assert runtime.engine_routes_closed()
                     assert not cleanup_entered.is_set()
                     assert (await http.post(url, json={})).status_code == 503
                 finally:

@@ -5260,7 +5260,8 @@ async def test_transcription_worker_publishes_metrics_and_cleans_up(
     endpoint.unregister_endpoint_instance = AsyncMock()
     runtime = Mock()
     runtime.endpoint.return_value = endpoint
-    runtime.shutdown_engine_routes = AsyncMock()
+    runtime.close_engine_routes.return_value = False
+    runtime.wait_for_endpoint_registration = AsyncMock()
     runtime.shutdown_and_wait = AsyncMock()
 
     prometheus_temp_dir = Mock()

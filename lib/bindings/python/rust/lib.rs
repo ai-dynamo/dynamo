@@ -1592,6 +1592,24 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
+    /// Close control admission now. An already admitted callback must finish
+    /// before engine cleanup, but need not delay discovery withdrawal.
+    fn close_engine_routes(&self) -> bool {
+        self.inner.runtime().mark_shutting_down();
+        let routes = self.inner.engine_routes();
+        routes.close();
+        !routes.is_idle()
+    }
+
+    /// Join only the discovery writes that started before registration closed.
+    fn wait_for_endpoint_registration<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let runtime = self.inner.runtime().clone();
+        crate::future_into_py(py, async move {
+            runtime.close_endpoint_registration().await;
+            Ok(())
+        })
+    }
+
     /// Fence endpoint registration, stop controls, and join admitted callbacks.
     fn shutdown_engine_routes<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let runtime = self.inner.runtime().clone();

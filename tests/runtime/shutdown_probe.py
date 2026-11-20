@@ -339,7 +339,10 @@ if __name__ == "__main__":
 
         async def failed_probe():
             class Runtime:
-                async def shutdown_engine_routes(self):
+                def close_engine_routes(self):
+                    return False
+
+                async def wait_for_endpoint_registration(self):
                     pass
 
                 async def shutdown_and_wait(self, timeout_secs=None):
