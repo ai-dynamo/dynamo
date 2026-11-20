@@ -10,7 +10,7 @@ cd "$SHUTDOWN_REPO_ROOT"
 SHUTDOWN_PYTHON="${SHUTDOWN_PYTHON:-python3}"
 
 cargo test -p dynamo-runtime --lib runtime::tests::shutdown
-cargo test -p dynamo-runtime --lib draining_uses_compatible_worker_unavailable_wire_identity
+cargo test -p dynamo-error --lib tests::draining_hint_preserves_worker_identity_and_wrapping -- --exact
 cargo test -p dynamo-runtime --lib shutdown_budget_includes_post_cancellation_teardown
 cargo test -p dynamo-backend-common --lib worker::tests -- --test-threads=1
 cargo test -p dynamo-backend-common --lib shutdown::tests -- --test-threads=1
