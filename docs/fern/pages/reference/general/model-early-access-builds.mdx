@@ -14,7 +14,7 @@ import { ModelEABuildCards } from "@/components/ModelEABuildCards";
 **Model early access builds do not go through QA validation.** They are experimental builds intended for early testing of a specific model. They may contain bugs, require pinned runtime flags, and receive no patch support. Use a stable release container for production workloads unless the build's GA path says the recipe is promoted.
 </Warning>
 
-A **model early access build** packages a single model's recipe on one runtime container, tagged `X.Y.Z-<model>-dev.N` and cut from a side branch ahead of that model's launch — independently of the stable release cadence. When the model's backend patches land upstream in the versions a stable release ships, the recipe is **promoted** to the plain `:X.Y.Z` release container and the early access image is no longer needed.
+A **model early access build** packages a single model's recipe on one runtime container, tagged `X.Y.Z-<model>-dev.N` (or `-post.N` for a rebuild after the release) and cut from a side branch ahead of that model's launch — independently of the stable release cadence. When the model's backend patches land upstream in the versions a stable release ships, the recipe is **promoted** to the plain `:X.Y.Z` release container and the early access image is no longer needed.
 
 Full-platform early access builds (`vX.Y.Z-dev.N`, covering all runtimes, wheels, crates, and Helm charts) are platform previews and are documented under [Early Access Artifacts](release-artifacts.mdx#early-access-artifacts) instead.
 
@@ -23,6 +23,7 @@ Full-platform early access builds (`vX.Y.Z-dev.N`, covering all runtimes, wheels
 - **Promoted** — the recipe runs on the stock `:X.Y.Z` stable release container; the early access image is superseded.
 - **Dev-only** — the model still requires this early access image (its patches are not yet in a stable release).
 - **Recipe in GA** — the model ships as a recipe on the standard release container.
+- **Superseded** — a later build or release replaces this one, and the recipe no longer pins it.
 
 Every card's tag is click-to-copy as a full `docker pull` command. The coverage dots show what each build actually shipped — model builds publish container images only (no wheels, Helm charts, or crates).
 
@@ -39,6 +40,30 @@ See [Compatibility](compatibility.mdx) for hardware, platform, and backend featu
 
 | Model | Tag | Release line | Runtimes | Shipped | GA path | Status | Coverage (images / wheels / helm / crates) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| Kimi-K3.1-Pro | `1.7.0-kimi-k3.1-pro-dev.1` | v1.7.0 | vllm-runtime, sglang-runtime | Nov 6, 2026 | Dev-only | One tag on both runtimes: vLLM for GB300, B200, and VR200 and SGLang for GB300 (functional only). The recipes pin this image. | yes / no / no / no |
+| Mistral-Large-4 | `1.7.0-mistral-large-4-dev.1-post.1` | v1.7.0 | vllm-runtime | Nov 5, 2026 | Dev-only · amd64 | amd64-only companion to 1.7.0-mistral-large-4-dev.1, which is arm64-only. It does not supersede that build; use the one that matches your host architecture. | yes / no / no / no |
+| Mistral-Large-4 | `1.7.0-mistral-large-4-dev.1` | v1.7.0 | vllm-runtime | Nov 2, 2026 | Dev-only · arm64 | arm64-only build; the amd64 build is 1.7.0-mistral-large-4-dev.1-post.1. Carries mistral-common 1.13.0 (needed for the checkpoint's reasoning-effort levels) and, for Vera Rubin, the sm_107 FlashInfer MoE and sparse-indexer kernels. All recipes run it with runtimeVersionOverride 1.6.0. | yes / no / no / no |
+| DeepSeek-V4.1-Flash | `1.6.0-deepseek-v4.1-flash-dev.2-post.1` | v1.6.0 | vllm-runtime | Nov 5, 2026 | Dev-only | Current vLLM image for the DeepSeek-V4.1-Flash recipes on B200, GB200, and H200 (aggregated and disaggregated). | yes / no / no / no |
+| MiniMax-M3.1-Flash | `1.6.0-minimax-m3.1-flash-dev.1` | v1.6.0 | vllm-runtime, sglang-runtime, tensorrtllm-runtime | Oct 24, 2026 | Dev-only | One tag on all three runtimes; the MiniMax-M3.1 recipes pin this image. | yes / no / no / no |
+| Muse-Spark-Open | `1.6.0-muse-spark-open-dev.1` | v1.6.0 | vllm-runtime, sglang-runtime, tensorrtllm-runtime | Oct 20, 2026 | Dev-only | One tag on all three runtimes; the Muse-Spark-Open agentic recipes on GB200 and GB300 pin this image. | yes / no / no / no |
+| Beam-1.0-501B | `1.6.0-beam-1.0-501b-dev.1` | v1.6.0 | vllm-runtime, sglang-runtime | Oct 19, 2026 | Dev-only | One tag on both runtimes; the Beam-1.0-501B recipes on H200, B200, B300, GB200, and GB300 pin this image. | yes / no / no / no |
+| Nemotron-3.5-Super-VL | `1.6.0-nemotron-3.5-super-vl-dev.1` | v1.6.0 | vllm-runtime, tensorrtllm-runtime | Oct 15, 2026 | Dev-only | vLLM recipes cover H100 through VR200; TensorRT-LLM recipes cover B200. All pin this image. | yes / no / no / no |
+| GLM-5.3-Flash | `1.6.0-glm-5.3-flash-dev.1` | v1.6.0 | sglang-runtime | Oct 14, 2026 | Dev-only | SGLang image for the GLM-5.3-Flash recipes on B200 and GB200; the vLLM recipes do not use this image. | yes / no / no / no |
+| MiniMax-M3 | `1.6.0-minimax-m3-dev.1` | v1.6.0 | vllm-runtime | Oct 9, 2026 | Dev-only | vLLM image for the MiniMax-M3 agentic recipes on GB200 (aggregated and disaggregated). | yes / no / no / no |
+| DeepSeek-V4.1-Flash | `1.6.0-deepseek-v4.1-flash-dev.2` | v1.6.0 | vllm-runtime | Oct 8, 2026 | Superseded by dev.2-post.1 | The vLLM recipes now pin 1.6.0-deepseek-v4.1-flash-dev.2-post.1. | yes / no / no / no |
+| DeepSeek-V4.1-Flash | `1.6.0-deepseek-v4.1-flash-dev.1` | v1.6.0 | sglang-runtime | Sep 12, 2026 | Dev-only | SGLang image for the DeepSeek-V4.1-Flash GB200 recipes; the vLLM recipes use a later build. | yes / no / no / no |
+| Kimi-K3 | `1.5.1-kimi-k3-post.1` | v1.5.1 | sglang-runtime | Oct 8, 2026 | Dev-only | Multi-arch SGLang image (amd64 + arm64). The Kimi-K3 SGLang recipes on GB300 pin it, while the GB200 SGLang recipes stay on 1.5.0-kimi-k3-dev.1. | yes / no / no / no |
+| Motif-3 | `1.5.0-motif-3-dev.2` | v1.5.0 | vllm-runtime | Oct 14, 2026 | Dev-only | Current vLLM image for the experimental Motif-3 NVFP4 recipes on B200. | yes / no / no / no |
+| Motif-3 | `1.5.0-motif-3-dev.1` | v1.5.0 | vllm-runtime | Oct 1, 2026 | Superseded by dev.2 | The Motif-3 recipes now pin 1.5.0-motif-3-dev.2. | yes / no / no / no |
+| Kimi-K3 | `1.5.0-kimi-k3-dev.1` | v1.5.0 | vllm-runtime, sglang-runtime | Sep 9, 2026 | Dev-only | One tag on both runtimes: vLLM for H200, GB200, and GB300 and SGLang for GB200. SGLang on GB300 uses 1.5.1-kimi-k3-post.1. | yes / no / no / no |
+| DeepSeek-V4-Pro-0813 | `1.5.0-deepseek-v4-pro-0813-dev.1` | v1.5.0 | vllm-runtime | Sep 4, 2026 | Dev-only | vLLM image for the DeepSeek-V4-Pro-0813 GB200 recipes (aggregated and disaggregated). | yes / no / no / no |
+| Gemma-4-31B | `1.5.0-gemma-4-31b-dev.1` | v1.5.0 | tensorrtllm-runtime | Sep 3, 2026 | Dev-only | TensorRT-LLM image for the Gemma-4-31B agentic recipes on B200, GB200, and H200. | yes / no / no / no |
+| Inkling | `1.5.0-inkling-dev.1` | v1.5.0 | vllm-runtime | Sep 3, 2026 | Dev-only · v1.5.0 line | vLLM image for the Inkling GB300 agentic recipes; the SGLang recipes stay on the v1.4.0 build below. | yes / no / no / no |
+| Nemotron-3.5-Lightning | `1.5.0-nemotron-3.5-lightning-dev.1` | v1.5.0 | vllm-runtime, tensorrtllm-runtime | Aug 11, 2026 | Dev-only | One tag on both runtimes; the Nemotron 3.5 Lightning recipes pin this image. | yes / no / no / no |
+| K-EXAONE 2.0 | `1.4.1-k-exaone-2.0-750b-post.1` | v1.4.1 | vllm-runtime | Sep 17, 2026 | Dev-only | Post-release vLLM image on the v1.4.1 line for the K-EXAONE 2.0 B200 recipes. | yes / no / no / no |
+| Solar Open2 250B | `1.4.1-solar-open2-250b-post.1` | v1.4.1 | vllm-runtime | Sep 16, 2026 | Dev-only | Post-release vLLM image on the v1.4.1 line for the Solar Open2 250B B200 recipes. | yes / no / no / no |
+| A.X-K2 | `1.4.1-a.x-k2-post.1` | v1.4.1 | vllm-runtime | Sep 15, 2026 | Dev-only | Post-release vLLM image on the v1.4.1 line for the A.X-K2 B200 and H200 recipes. | yes / no / no / no |
+| Qwen3.8-2.4T-A95B | `1.4.0-qwen-3.8-2.4t-dev.1` | v1.4.0 | vllm-runtime, sglang-runtime | Aug 27, 2026 | Dev-only · v1.4.0 line | One tag on both runtimes; the Qwen3.8-2.4T-A95B recipes on GB200 and GB300 pin this image. | yes / no / no / no |
 | Inkling | `1.4.0-inkling-dev.1` | v1.4.0 | sglang-runtime | Jul 17, 2026 | Dev-only · v1.4.0 line | First build on the v1.4.0 line; targets the next stable release. | yes / no / no / no |
 | GLM-5.2 | `1.3.0-glm-5.2-dev.1` | v1.3.0 | sglang-runtime | Jul 20, 2026 | Dev-only | Container carries SGLang cherry-picks (stability, config parsing, model support) opened upstream but not yet in a released SGLang. | yes / no / no / no |
 | MiniMax-M3 | `1.3.0-minimax-m3-dev.1` | v1.3.0 | vllm-runtime, sglang-runtime, tensorrtllm-runtime | Jun 12, 2026 | Promoted → :1.3.0 | Dynamo changes and the M2 tool-calling fix are in release/1.3.0; the recipes run on the stock :1.3.0 containers. | yes / no / no / no |

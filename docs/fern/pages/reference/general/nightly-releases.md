@@ -26,7 +26,7 @@ Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/
 
 - **Runtime container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC, each with an Elastic Fabric Adapter (EFA) variant under a `-efa` tag suffix.
 - **Component container images:** `kubernetes-operator-nightly`, `dynamo-planner-nightly`, and `dynamo-frontend-nightly` to NGC.
-- **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
+- **Python wheels:** `ai-dynamo` and `ai-dynamo-runtime` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
 - **Helm chart:** [`dynamo-platform-nightly`](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform-nightly) to the NGC Helm registry, kept separate from the stable `dynamo-platform` chart.
 
 The runtime images and the wheels gate the release: if any of them fails to build, that night publishes nothing. The component images, the EFA variants, and the Helm chart stage fail-soft, so a flake in one of them skips that artifact for the night without holding back the rest.

@@ -4,7 +4,7 @@
 
 [package]
 name = "dynamo-kv-hashing"
-description = "Universal Request → PositionalLineageHash contract for KV cache identity across Dynamo (router, consolidator, kvbm, frameworks)"
+description = "Universal Request → PositionalLineageHash contract for KV cache identity across Dynamo (router, frameworks)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
