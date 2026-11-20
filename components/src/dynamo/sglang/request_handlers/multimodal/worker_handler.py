@@ -634,6 +634,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             external_trace_header=trace_header,
             rid=context.trace_id if context else None,
         )
+        del input_ids, request_data
+        request.request.token_ids = []
 
         rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
         first_token = True

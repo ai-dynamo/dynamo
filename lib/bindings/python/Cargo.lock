@@ -1018,6 +1018,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -2547,9 +2549,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd946b8d59920320e43e2d1b48b2bbb6553d50bc9c23b511293615714008476a"
+checksum = "f1211739971e54b388ccfe341e9cabb5cb77dfe0c17c43effae542d5c76640ec"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2661,9 +2663,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "10.4.0"
+version = "10.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59af10814eee0cdfff02328287bb4fd6e16b4f43265f9c0dd714ae457c77f0ec"
+checksum = "4966b8af6e83e8a320406a394fdb14cbb7450d3c76d4a3fd723bf804fb4351a9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2699,6 +2701,7 @@ dependencies = [
  "async-trait",
  "dynamo-kv-router",
  "fastrand",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
@@ -2756,7 +2759,7 @@ dependencies = [
  "nix 0.30.1",
  "notify",
  "nuid",
- "nvtx",
+ "nvtx-sys",
  "once_cell",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -2807,7 +2810,6 @@ dependencies = [
  "async-trait",
  "blake3",
  "crossbeam-queue",
- "derive_builder",
  "dynamo-admission",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -2822,7 +2824,6 @@ dependencies = [
  "futures-util",
  "http 1.4.2",
  "once_cell",
- "ordered-float 4.6.0",
  "parking_lot",
  "rmp-serde",
  "rustc-hash 2.1.2",
@@ -6061,12 +6062,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
-name = "nvtx"
-version = "1.3.0"
+name = "nvtx-sys"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad2e855e8019f99e4b94ac33670eb4e4f570a2e044f3749a0b2c7f83b841e52c"
+checksum = "6487075dff3d392a6fa6a42a661c14fa35011e1b2e06ff435456bded512d341e"
 dependencies = [
+ "bindgen 0.72.1",
  "cc",
+ "widestring",
 ]
 
 [[package]]
@@ -10564,6 +10567,12 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi"

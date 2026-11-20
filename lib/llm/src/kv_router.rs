@@ -572,6 +572,8 @@ pub struct AdmittedFindBestMatchOutcome {
     /// The selected worker's scheduler-load snapshot; set only by advisory
     /// probes (`FindBestMatchAdmission::WithoutAdmission`), which never book.
     pub(super) advisory_load: Option<dynamo_scheduler::host::AdvisoryWorkerLoad>,
+    /// Set by the request classifier; replaces the request's `priority` on dispatch.
+    pub(super) backend_priority: Option<i32>,
 }
 
 impl AdmittedFindBestMatchOutcome {
@@ -1496,6 +1498,7 @@ impl KvRouter {
                     outcome: FindBestMatchOutcome::QueueRejected { rejection },
                     booking: None,
                     advisory_load: None,
+                    backend_priority: None,
                 });
             }
             Err(SelectionError::Scheduler(error)) => return Err(map_scheduler_error(error)),
@@ -1514,6 +1517,7 @@ impl KvRouter {
             routing_hashes,
             shared_cache_hits,
             booking,
+            backend_priority,
             ..
         } = selected;
         if update_states && is_admitted_routing && booking.is_none() {
@@ -1609,8 +1613,11 @@ impl KvRouter {
                     m.shared_cache_hit_rate
                         .observe(hits.total_hits as f64 / num_blocks as f64);
                 }
+                // What the scorer credits: the run past the worker's device, host and
+                // disk prefix. A multi-rank worker's snapshot holds its deepest rank.
+                let local_blocks = overlap_blocks.max(response.selected_worker_tiers.disk_blocks);
                 m.shared_cache_beyond_blocks
-                    .observe(hits.hits_beyond(overlap_blocks) as f64);
+                    .observe(hits.loadable_beyond(local_blocks) as f64);
             }
         }
 
@@ -1635,6 +1642,7 @@ impl KvRouter {
             },
             booking,
             advisory_load,
+            backend_priority,
         })
     }
 
@@ -1903,7 +1911,8 @@ impl KvRouter {
     ///
     /// Device, host-pinned, and disk values are keyed by `(worker_id, dp_rank)`.
     /// Shared-cache hits are global to the request, so each worker row reports
-    /// only the shared blocks beyond that rank's device-local prefix.
+    /// only the shared blocks that rank can load past its local prefix. LoRA
+    /// requests skip the shared cache, as worker selection does.
     pub async fn get_overlap_scores(
         &self,
         tokens: &[u32],
@@ -1923,7 +1932,7 @@ impl KvRouter {
 
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
 
-        let (shared_hits, shared_error) = if include_shared {
+        let (shared_hits, shared_error) = if include_shared && lora_name.is_none_or(str::is_empty) {
             if let Some(shared_cache) = self.shared_cache.as_ref() {
                 match shared_cache
                     .check_blocks(tokens, self.block_size, cache_namespace)
@@ -3651,6 +3660,20 @@ mod tests {
             assert_eq!(worker.disk_extension_blocks, 0);
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
         }
+
+        // Shared-cache keys carry no adapter, so a LoRA request reports no shared hits.
+        let scores = router
+            .get_overlap_scores(&[11, 12, 21, 22], None, Some("adapter-a"), None, true)
+            .await
+            .unwrap();
+        assert!(scores.shared_cache.enabled);
+        assert_eq!(scores.shared_cache.total_hit_blocks, 0);
+        assert!(
+            scores
+                .workers
+                .iter()
+                .all(|worker| worker.shared_beyond_device_blocks.is_none())
+        );
     }
 
     #[tokio::test]
