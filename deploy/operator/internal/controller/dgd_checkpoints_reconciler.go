@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
@@ -1065,11 +1066,14 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				}
 
 				baseEnv := existing.Env
+				baseEnvFrom := slices.Clone(existing.EnvFrom)
 				user := override.DeepCopy()
 				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
 					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
 				existing.Env = dynamo.MergeEnvs(baseEnv, user.Env)
+				// mergo replaces slices, so re-append the component's envFrom ahead of the override's.
+				existing.EnvFrom = append(baseEnvFrom, user.EnvFrom...)
 				if user.LivenessProbe != nil {
 					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
 				}
