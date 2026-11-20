@@ -155,6 +155,25 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
         {
             "num_prefill": 1,
             "num_decode": 1,
+            "max_tokens": 1,
+            # As prefill-tokens, but the startup threshold is too high to trip:
+            # the gating value arrives through `/busy_threshold`.
+            "prefill_speedup": _SLOW_SPEEDUP,
+            "decode_speedup": _FAST_SPEEDUP,
+            "thresholds": {
+                "blocks_threshold": "None",
+                "tokens_threshold": 100_000_000,
+                "tokens_threshold_frac": "None",
+                "router_queue_threshold": "None",
+            },
+            "busy_threshold_write": {"active_prefill_tokens_threshold": 1},
+        },
+        id="prefill-tokens-api-write",
+    ),
+    pytest.param(
+        {
+            "num_prefill": 1,
+            "num_decode": 1,
             "max_tokens": 50,
             # Gate the DECODE pool only: fast prefill, slow decode (fills its
             # limited blocks). Prefill threshold disabled.
@@ -1263,6 +1282,10 @@ def test_mocker_disagg_router_overload_529(
       PREFILL pool. This was previously a silent no-op in disagg (the
       overloaded set landed on the decode pool and the prefill router never saw
       it), so this case is the regression guard for that fix.
+    - prefill-tokens-api-write: the same threshold written through
+      ``/busy_threshold`` after startup must gate the PREFILL pool too. The
+      prefill pool has its own threshold handle, so this guards the write
+      reaching it.
     - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the
       DECODE pool (the path that already worked).
     """
@@ -1300,6 +1323,7 @@ def test_mocker_disagg_router_overload_529(
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             max_tokens=overload_case["max_tokens"],
+            busy_threshold_write=overload_case.get("busy_threshold_write"),
             **overload_case["thresholds"],
         )
 
