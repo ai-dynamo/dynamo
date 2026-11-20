@@ -229,7 +229,7 @@ async fn prepare_with_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
     async fn serve(reply: &str) -> String {
@@ -238,8 +238,12 @@ mod tests {
         let reply = reply.to_owned();
         tokio::spawn(async move {
             let (mut conn, _) = listener.accept().await.unwrap();
-            let mut headers = [0; 1024];
-            conn.read(&mut headers).await.unwrap();
+            let mut headers = BufReader::new(&mut conn).lines();
+            while let Some(line) = headers.next_line().await.unwrap() {
+                if line.is_empty() {
+                    break;
+                }
+            }
             conn.write_all(reply.as_bytes()).await.unwrap();
         });
         url
