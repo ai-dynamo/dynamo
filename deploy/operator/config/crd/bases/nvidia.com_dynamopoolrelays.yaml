@@ -66,10 +66,10 @@ spec:
                   type: string
                 globalDiscovery:
                   description: |-
-                    GlobalDiscovery registers the pool as <clusterId>/<namespace>/<name> with the
+                    GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the
                     operator's Global Discovery Service, so that Global Routers send it requests.
-                    Unset, the Relay registers nothing. Set, it reserves the env names that the
-                    "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
+                    Unset, the operator sets no registration env. Set, it reserves the env names that
+                    the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
                     URL and region, the Relay is left as it is and reported unready.
                   properties:
                     frontends:
@@ -78,23 +78,19 @@ spec:
                         requests to. Only a Global Discovery Service that takes pools from
                         registrations, rather than from MCS, needs them.
                       items:
-                        maxLength: 2048
-                        pattern: ^[^\p{Cc}\p{Z},]+$
+                        maxLength: 512
+                        pattern: ^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?([/?#][^\p{Cc}\p{Z},]*)?$
                         type: string
                       maxItems: 16
                       type: array
                       x-kubernetes-list-type: set
                   type: object
-                  x-kubernetes-validations:
-                    - fieldPath: .frontends
-                      message: frontends must be absolute HTTP(S) URLs with a host, and a port of at most 65535
-                      rule: '!has(self.frontends) || self.frontends.all(f, isURL(f) && url(f).getScheme() in [''http'', ''https''] && size(url(f).getHostname()) > 0 && (size(url(f).getPort()) == 0 || (size(url(f).getPort()) <= 5 && int(url(f).getPort()) <= 65535)))'
                 podTemplate:
                   description: |-
                     PodTemplate configures Relay Pods. Its main container needs an image with
-                    dynamo.pool_relay and --sources-file support from the operator's revision.
-                    The controller sets the main command, listener probes, source volume, service
-                    account, and Relay identity, discovery and registration env. The main container
+                    dynamo.pool_relay and --sources-file support from the operator's revision. The
+                    controller sets the main command, listener probes, source volume, service account,
+                    and Relay env, with registration env only under globalDiscovery. The main container
                     cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
                   properties:
                     metadata:

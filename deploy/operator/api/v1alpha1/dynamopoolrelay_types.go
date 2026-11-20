@@ -20,9 +20,9 @@ type DynamoPoolRelaySpec struct {
 	ClusterID string `json:"clusterId"`
 
 	// PodTemplate configures Relay Pods. Its main container needs an image with
-	// dynamo.pool_relay and --sources-file support from the operator's revision.
-	// The controller sets the main command, listener probes, source volume, service
-	// account, and Relay identity, discovery and registration env. The main container
+	// dynamo.pool_relay and --sources-file support from the operator's revision. The
+	// controller sets the main command, listener probes, source volume, service account,
+	// and Relay env, with registration env only under globalDiscovery. The main container
 	// cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
 	// +required
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate"`
@@ -33,10 +33,10 @@ type DynamoPoolRelaySpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// GlobalDiscovery registers the pool as <clusterId>/<namespace>/<name> with the
+	// GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the
 	// operator's Global Discovery Service, so that Global Routers send it requests.
-	// Unset, the Relay registers nothing. Set, it reserves the env names that the
-	// "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
+	// Unset, the operator sets no registration env. Set, it reserves the env names that
+	// the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
 	// URL and region, the Relay is left as it is and reported unready.
 	// +optional
 	GlobalDiscovery *DynamoPoolRelayGlobalDiscovery `json:"globalDiscovery,omitempty"`
@@ -44,7 +44,6 @@ type DynamoPoolRelaySpec struct {
 
 // DynamoPoolRelayGlobalDiscovery turns on the pool's registration. The Global
 // Discovery Service's URL and the region are the operator's settings.
-// +kubebuilder:validation:XValidation:rule="!has(self.frontends) || self.frontends.all(f, isURL(f) && url(f).getScheme() in ['http', 'https'] && size(url(f).getHostname()) > 0 && (size(url(f).getPort()) == 0 || (size(url(f).getPort()) <= 5 && int(url(f).getPort()) <= 65535)))",message="frontends must be absolute HTTP(S) URLs with a host, and a port of at most 65535",fieldPath=".frontends"
 type DynamoPoolRelayGlobalDiscovery struct {
 	// Frontends are the HTTP(S) URLs that Global Routers send the pool's
 	// requests to. Only a Global Discovery Service that takes pools from
@@ -52,8 +51,8 @@ type DynamoPoolRelayGlobalDiscovery struct {
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=16
-	// +kubebuilder:validation:items:MaxLength=2048
-	// +kubebuilder:validation:items:Pattern=`^[^\p{Cc}\p{Z},]+$`
+	// +kubebuilder:validation:items:MaxLength=512
+	// +kubebuilder:validation:items:Pattern=`^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?([/?#][^\p{Cc}\p{Z},]*)?$`
 	Frontends []string `json:"frontends,omitempty"`
 }
 

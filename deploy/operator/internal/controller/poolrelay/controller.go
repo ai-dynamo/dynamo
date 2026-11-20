@@ -98,7 +98,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamopoolrelays/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamoworkermetadatas,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update
@@ -160,24 +160,12 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	}
 	for _, resource := range resources {
 		if err := r.apply(ctx, &relay, resource); err != nil {
-			if errors.Is(err, errOwnershipConflict) {
-				_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
-				return ctrl.Result{}, errors.Join(err, withdrawErr)
-			}
-			return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
+			return r.reportWriteFailure(ctx, &relay, err)
 		}
 	}
 	deployment, err := r.applyDeployment(ctx, &relay, desiredDeployment)
 	if err != nil {
-		if errors.Is(err, errOwnershipConflict) {
-			_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
-			return ctrl.Result{}, errors.Join(err, withdrawErr)
-		}
-		// A write that raced a newer Deployment retries without failing the Relay.
-		if apierrors.IsConflict(err) {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
+		return r.reportWriteFailure(ctx, &relay, err)
 	}
 
 	// Deployment status is listener availability, never model or KV readiness.
@@ -405,19 +393,40 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 	return observed, nil
 }
 
-// reportHeld reports a Relay that the controller leaves as it is while a setting
-// that it needs is missing. The Relay's resources keep running, so its endpoint
-// and available replicas stay as they were.
-func (r *reconciler) reportHeld(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
-	before := relay.DeepCopy()
-	meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
-		Type: "Ready", Status: metav1.ConditionFalse, Reason: reason,
-		Message: problem.Error(), ObservedGeneration: relay.Generation,
-	})
-	if equality.Semantic.DeepEqual(before.Status, relay.Status) {
-		return nil
+// reportWriteFailure handles a failed write of one of the Relay's resources. An
+// ownership conflict withdraws the Relay, a write that raced a newer object
+// retries without failing it, and any other error reports it unready.
+func (r *reconciler) reportWriteFailure(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, err error) (ctrl.Result, error) {
+	if errors.Is(err, errOwnershipConflict) {
+		_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
+		return ctrl.Result{}, errors.Join(err, withdrawErr)
 	}
-	return r.Status().Update(ctx, relay)
+	if apierrors.IsConflict(err) {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
+}
+
+// reportHeld reports a Relay that the controller leaves as it is while a setting
+// that it needs is missing. Its resources keep running, so the status shows what
+// the cache holds of its Service and Deployment.
+func (r *reconciler) reportHeld(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
+	// The Service gives the endpoint, and the Deployment the available replicas.
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
+	endpoint, available := "", int32(0)
+	var service corev1.Service
+	if err := r.Get(ctx, key, &service); err == nil && metav1.IsControlledBy(&service, relay) {
+		endpoint = key.Name
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	var deployment appsv1.Deployment
+	if err := r.Get(ctx, key, &deployment); err == nil && metav1.IsControlledBy(&deployment, relay) {
+		available = deployment.Status.AvailableReplicas
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.setStatus(ctx, relay, false, reason, problem.Error(), endpoint, available, false)
 }
 
 // An apply error makes the current Relay condition unready without claiming
@@ -555,11 +564,6 @@ func render(
 	// Registration names are reserved only with a globalDiscovery block, so a
 	// relay that sets them by hand keeps working.
 	if relay.Spec.GlobalDiscovery != nil {
-		registration, err := registrationEnv(relay, globalDiscovery)
-		if err != nil {
-			return nil, nil, err
-		}
-		env = append(env, registration...)
 		for _, name := range registrationEnvNames {
 			reserved[name] = true
 		}
@@ -567,6 +571,30 @@ func render(
 	mainIndex, userEnv, err := validateRelayPodTemplate(podTemplate, reserved)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// The controller's Pod labels win, and the podTemplate cannot change them.
+	podLabels := maps.Clone(podTemplate.Labels)
+	if podLabels == nil {
+		podLabels = map[string]string{}
+	}
+	for key, value := range labels {
+		if supplied, exists := podLabels[key]; exists && supplied != value {
+			return nil, nil, fmt.Errorf("podTemplate label %s is reserved for the Relay controller", key)
+		}
+		podLabels[key] = value
+	}
+	podLabels["nvidia.com/dynamo-discovery-backend"] = "kubernetes"
+	podLabels["nvidia.com/dynamo-discovery-enabled"] = "true"
+
+	// The registration comes after every spec check, so that only an otherwise
+	// valid relay waits for the operator's settings.
+	if relay.Spec.GlobalDiscovery != nil {
+		registration, err := registrationEnv(relay, globalDiscovery)
+		if err != nil {
+			return nil, nil, err
+		}
+		env = append(env, registration...)
 	}
 	env = append(env, userEnv...)
 	main := &podTemplate.Spec.Containers[mainIndex]
@@ -592,18 +620,6 @@ func render(
 	service := &corev1.Service{ObjectMeta: *metadata.DeepCopy(), Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: labels, Ports: []corev1.ServicePort{{Name: "grpc", Port: relayPort, TargetPort: intstr.FromString("grpc"), Protocol: corev1.ProtocolTCP}}}}
 	service.Labels["nvidia.com/dynamo-discovery-backend"] = "kubernetes"
 	service.Labels["nvidia.com/dynamo-discovery-enabled"] = "true"
-	podLabels := maps.Clone(podTemplate.Labels)
-	if podLabels == nil {
-		podLabels = map[string]string{}
-	}
-	for key, value := range labels {
-		if supplied, exists := podLabels[key]; exists && supplied != value {
-			return nil, nil, fmt.Errorf("podTemplate label %s is reserved for the Relay controller", key)
-		}
-		podLabels[key] = value
-	}
-	podLabels["nvidia.com/dynamo-discovery-backend"] = "kubernetes"
-	podLabels["nvidia.com/dynamo-discovery-enabled"] = "true"
 	probeHandler := corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: new("dynamo.kvrelay.v1.KvEventRelay")}}
 	container := *main.DeepCopy()
 	container.Command = []string{"python3", "-m", "dynamo.pool_relay"}
@@ -650,20 +666,20 @@ var registrationEnvNames = []string{
 }
 
 // registrationEnv returns the settings that register the relay's pool as
-// <clusterId>/<namespace>/<name>. relay.Spec.GlobalDiscovery must be set, and
-// settings, which validation keeps to both fields or neither, must be set.
+// <clusterId>/<namespace>/<name>, or errGlobalDiscoveryNotConfigured for a relay
+// that is otherwise valid while the operator has no settings, which validation
+// keeps to both fields or neither. relay.Spec.GlobalDiscovery must be set.
 func registrationEnv(
 	relay *v1alpha1.DynamoPoolRelay,
 	settings configv1alpha1.GlobalDiscoveryConfiguration,
 ) ([]corev1.EnvVar, error) {
-	if settings.URL == "" {
-		return nil, errGlobalDiscoveryNotConfigured
-	}
-
 	// The pool key's fields hold no slash or control character, as the Relay checks.
 	clusterID := relay.Spec.ClusterID
 	if strings.Contains(clusterID, "/") || strings.ContainsFunc(clusterID, unicode.IsControl) {
 		return nil, fmt.Errorf("clusterId %q cannot name a routing pool: it holds a slash or a control character", clusterID)
+	}
+	if settings.URL == "" {
+		return nil, errGlobalDiscoveryNotConfigured
 	}
 	env := []corev1.EnvVar{
 		{Name: "DYN_RELAY_GLOBAL_DISCOVERY_URL", Value: settings.URL},
@@ -671,9 +687,11 @@ func registrationEnv(
 		{Name: "DYN_RELAY_ROUTING_POOL_REGION", Value: settings.Region},
 	}
 
-	// The schema keeps commas, white space and repeats out of the frontends.
+	// The schema keeps commas, white space and repeats out of the frontends, a set
+	// whose order must not roll the Relay.
 	if frontends := relay.Spec.GlobalDiscovery.Frontends; len(frontends) > 0 {
-		env = append(env, corev1.EnvVar{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: strings.Join(frontends, ",")})
+		sorted := slices.Sorted(slices.Values(frontends))
+		env = append(env, corev1.EnvVar{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: strings.Join(sorted, ",")})
 	}
 	return env, nil
 }

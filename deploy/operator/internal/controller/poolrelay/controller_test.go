@@ -11,17 +11,21 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/yaml"
 )
 
 func relaySpec(clusterID string) v1alpha1.DynamoPoolRelaySpec {
@@ -880,8 +885,10 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 		globalDiscovery *v1alpha1.DynamoPoolRelayGlobalDiscovery
 		settings        configv1alpha1.GlobalDiscoveryConfiguration
 		// want are the registration settings that the Relay gets.
-		want    map[string]string
-		wantErr bool
+		want map[string]string
+		// wantErr says render fails, and held that it fails only for want of the
+		// operator's settings.
+		wantErr, held bool
 	}{
 		{
 			name:     "without the block the operator sets nothing",
@@ -893,9 +900,9 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 			settings:  settings,
 		},
 		{
-			name: "the operator's settings and the frontends, with the pool named after the relay",
+			name: "the operator's settings and the frontends in order, with the pool named after the relay",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{
-				Frontends: []string{"http://green-a.example.com:8000", "https://green-b.example.com"},
+				Frontends: []string{"https://green-b.example.com", "http://green-a.example.com:8000"},
 			},
 			settings: settings,
 			want: map[string]string{
@@ -917,6 +924,13 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 		},
 		{
 			name:            "the operator has no settings",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
+			wantErr:         true,
+			held:            true,
+		},
+		{
+			name:            "a cluster ID that cannot name a pool is invalid even without operator settings",
+			clusterID:       "aws/east",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
 			wantErr:         true,
 		},
@@ -944,8 +958,8 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 			relay.Spec.GlobalDiscovery = tc.globalDiscovery
 			_, deployment, err := render(relay, []string{"green-runtime"}, tc.settings)
 			if tc.wantErr {
-				if err == nil {
-					t.Fatal("render accepted a relay that cannot register")
+				if err == nil || errors.Is(err, errGlobalDiscoveryNotConfigured) != tc.held {
+					t.Fatalf("render error = %v, want held = %v", err, tc.held)
 				}
 				return
 			}
@@ -954,10 +968,28 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 			}
 
 			t.Log("Check the registration settings that the Relay gets")
-			if got := registrationEnvOf(deployment); !maps.Equal(got, tc.want) {
+			if got := registrationEnvOf(t, deployment); !maps.Equal(got, tc.want) {
 				t.Fatalf("registration settings = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFrontendsSchemaIsCheckHTTPURL(t *testing.T) {
+	t.Log("Read the frontends' schema from the generated CRD")
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "bases", "nvidia.com_dynamopoolrelays.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := yaml.Unmarshal(data, crd); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Each frontend must match the pattern that CheckHTTPURL uses for the operator's URL")
+	frontends := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["globalDiscovery"].Properties["frontends"]
+	if frontends.Items == nil || frontends.Items.Schema == nil || frontends.Items.Schema.Pattern != configvalidation.HTTPURLPattern {
+		t.Fatalf("the frontends' pattern is not HTTPURLPattern: %+v", frontends.Items)
 	}
 }
 
@@ -981,15 +1013,18 @@ func TestRegistrationNamesAreReservedOnlyWithTheBlock(t *testing.T) {
 				t.Fatalf("hand-set %s was not forwarded", name)
 			}
 
-			t.Log("With the block, the operator owns the name and refuses a hand-set value")
+			t.Log("With the block, the operator owns the name and refuses a hand-set value, with or without its settings")
 			relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
-			if _, _, err := render(relay, []string{"green-runtime"}, settings); err == nil || !strings.Contains(err.Error(), "env "+name+" is reserved") {
-				t.Fatalf("hand-set %s next to the block was not refused as reserved: %v", name, err)
+			for _, operatorSettings := range []configv1alpha1.GlobalDiscoveryConfiguration{settings, {}} {
+				if _, _, err := render(relay, []string{"green-runtime"}, operatorSettings); err == nil || !strings.Contains(err.Error(), "env "+name+" is reserved") {
+					t.Fatalf("hand-set %s next to the block was not refused as reserved: %v", name, err)
+				}
 			}
 		})
 	}
 }
 
+//nolint:gocyclo // This test follows one Relay through a hold and out of it.
 func TestARelayThatRegistersWaitsForTheOperatorsSettings(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -1044,6 +1079,7 @@ func TestARelayThatRegistersWaitsForTheOperatorsSettings(t *testing.T) {
 
 	t.Log("Adding the block while the operator has no settings leaves the Relay as it is, and it reports why")
 	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
+	relay.Generation++
 	if err := apiClient.Update(ctx, relay); err != nil {
 		t.Fatal(err)
 	}
@@ -1065,7 +1101,23 @@ func TestARelayThatRegistersWaitsForTheOperatorsSettings(t *testing.T) {
 	}
 	condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready")
 	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "GlobalDiscoveryNotConfigured" ||
-		relay.Status.Endpoint != running.Endpoint || relay.Status.AvailableReplicas != running.AvailableReplicas {
+		relay.Status.Endpoint != running.Endpoint || relay.Status.AvailableReplicas != running.AvailableReplicas ||
+		relay.Status.ObservedGeneration != running.ObservedGeneration {
+		t.Fatalf("held Relay reports %+v", relay.Status)
+	}
+
+	t.Log("A held Relay reports the listeners that its Deployment still has")
+	held.Status.AvailableReplicas = 1
+	if err := apiClient.Status().Update(ctx, &held); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, key, relay); err != nil {
+		t.Fatal(err)
+	}
+	if relay.Status.AvailableReplicas != 1 || meta.FindStatusCondition(relay.Status.Conditions, "Ready").Reason != "GlobalDiscoveryNotConfigured" {
 		t.Fatalf("held Relay reports %+v", relay.Status)
 	}
 
@@ -1078,19 +1130,25 @@ func TestARelayThatRegistersWaitsForTheOperatorsSettings(t *testing.T) {
 	if err := apiClient.Get(ctx, childKey, &registered); err != nil {
 		t.Fatal(err)
 	}
-	if got := registrationEnvOf(&registered); got["DYN_RELAY_GLOBAL_DISCOVERY_URL"] != "http://discovery:8080/" ||
+	if got := registrationEnvOf(t, &registered); got["DYN_RELAY_GLOBAL_DISCOVERY_URL"] != "http://discovery:8080/" ||
 		got["DYN_RELAY_ROUTING_POOL_REGION"] != "us-east-1" {
 		t.Fatalf("the Relay registers with %v", got)
 	}
 }
 
-// registrationEnvOf returns the registration settings of deployment's Relay.
-func registrationEnvOf(deployment *appsv1.Deployment) map[string]string {
+// registrationEnvOf returns the registration settings of deployment's Relay, and
+// fails t when one is set twice.
+func registrationEnvOf(t *testing.T, deployment *appsv1.Deployment) map[string]string {
+	t.Helper()
 	registered := map[string]string{}
 	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
-		if slices.Contains(registrationEnvNames, item.Name) {
-			registered[item.Name] = item.Value
+		if !slices.Contains(registrationEnvNames, item.Name) {
+			continue
 		}
+		if _, twice := registered[item.Name]; twice {
+			t.Fatalf("%s is set twice", item.Name)
+		}
+		registered[item.Name] = item.Value
 	}
 	return registered
 }

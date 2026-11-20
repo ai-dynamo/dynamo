@@ -1409,7 +1409,7 @@ Discovery Service's URL and the region are the operator's settings.
 
 <ParamField path="frontends" type="string array">
 Frontends are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global Discovery Service that takes pools from registrations, rather than from MCS, needs them.
-**Validation:** MaxItems: 16  items:MaxLength: 2048  items:Pattern: `^[^\p\{Cc\}\p\{Z\},]+$`  Optional: \&#123;\&#125;
+**Validation:** MaxItems: 16  items:MaxLength: 512  items:Pattern: `^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.])\{3\}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]\{2\}|6[0-4][0-9]\{3\}|[1-5][0-9]\{4\}|[1-9][0-9]\{0,3\}))?([/?#][^\p\{Cc\}\p\{Z\},]*)?$`  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1426,7 +1426,7 @@ ClusterID is the Relay's stable logical cluster ID across restarts.
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec" required={true}>
-PodTemplate configures Relay Pods. Its main container needs an image with dynamo.pool_relay and --sources-file support from the operator's revision. The controller sets the main command, listener probes, source volume, service account, and Relay identity, discovery and registration env. The main container cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
+PodTemplate configures Relay Pods. Its main container needs an image with dynamo.pool_relay and --sources-file support from the operator's revision. The controller sets the main command, listener probes, source volume, service account, and Relay env, with registration env only under globalDiscovery. The main container cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
@@ -1437,7 +1437,7 @@ Replicas sets the number of active Relay Pods. Each watches the DGD.
 </ParamField>
 
 <ParamField path="globalDiscovery" type="DynamoPoolRelayGlobalDiscovery">
-GlobalDiscovery registers the pool as &lt;clusterId&gt;/&lt;namespace&gt;/&lt;name&gt; with the operator's Global Discovery Service, so that Global Routers send it requests. Unset, the Relay registers nothing. Set, it reserves the env names that the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery URL and region, the Relay is left as it is and reported unready.
+GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the operator's Global Discovery Service, so that Global Routers send it requests. Unset, the operator sets no registration env. Set, it reserves the env names that the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery URL and region, the Relay is left as it is and reported unready.
 See [DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

@@ -20,8 +20,8 @@ package validation
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 
@@ -73,17 +73,20 @@ func validateGlobalDiscovery(globalDiscovery *configv1alpha1.GlobalDiscoveryConf
 	return allErrs
 }
 
-// CheckHTTPURL returns an error unless value is an absolute HTTP(S) URL with a
-// host, and with a port that fits in 16 bits if it has one.
+// HTTPURLPattern is the URL rule that CheckHTTPURL and the DynamoPoolRelay schema's
+// frontends share: http or https; a DNS name whose last label is not all digits, a
+// dotted-quad IPv4 address or a bracketed IPv6 address; a port from 1 to 65535; and
+// no white space, control character or comma, at which a list of frontends splits.
+const HTTPURLPattern = `^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?([/?#][^\p{Cc}\p{Z},]*)?$`
+
+var httpURL = regexp.MustCompile(HTTPURLPattern)
+
+// CheckHTTPURL returns an error unless value matches HTTPURLPattern, which keeps
+// to URLs that the PoolRelay's URL parser accepts.
 func CheckHTTPURL(value string) error {
-	parsed, err := url.Parse(value)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
-		return fmt.Errorf("must be an absolute HTTP(S) URL, not %q", value)
-	}
-	if port := parsed.Port(); port != "" {
-		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-			return fmt.Errorf("must have a port of at most 65535, not %q", value)
-		}
+	if !httpURL.MatchString(value) {
+		return fmt.Errorf("must be an HTTP(S) URL whose host is a DNS name, an IPv4 address or a bracketed IPv6 address, "+
+			"with a port from 1 to 65535 and no white space or comma, not %q", value)
 	}
 	return nil
 }

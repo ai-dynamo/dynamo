@@ -113,15 +113,17 @@ spec:
 
 - The Global Discovery Service's URL and the cluster's region are operator settings, the same for
   every relay. Set both at install with the Helm values
-  `dynamo-operator.dynamo.globalDiscovery.url` and `dynamo-operator.dynamo.globalDiscovery.region`;
-  the operator does not start with only one of them. Until both are set, the operator leaves a relay
-  with `globalDiscovery` as it is, and the relay's `Ready` condition is `False` with reason
-  `GlobalDiscoveryNotConfigured`.
+  `dynamo-operator.dynamo.globalDiscovery.url` and `dynamo-operator.dynamo.globalDiscovery.region`.
+  The operator does not start with only one of them, or with a URL that breaks the rule for
+  frontends below. Until both are set, the operator leaves an otherwise valid relay with
+  `globalDiscovery` as it is: its Pods keep running, and its `Ready` condition is `False` with
+  reason `GlobalDiscoveryNotConfigured`.
 - `frontends` are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global
   Discovery Service run with `--pool-discovery registrations` needs them; with MCS, it finds the
-  frontends through the imported frontend Services. The API server rejects a frontend that is not
-  an absolute HTTP(S) URL with a host, has a port above 65535, holds a comma or white space, or is
-  listed twice.
+  frontends through the imported frontend Services. The API server accepts only `http` and `https`
+  URLs whose host is a DNS name whose last label is not all digits, an IPv4 address, or an IPv6
+  address in brackets, whose port, if any, is from 1 to 65535, and that hold no white space or
+  comma. It also rejects a frontend that is listed twice.
 - With `globalDiscovery` set, `clusterId` cannot contain `/` or control characters, because it
   becomes the first part of the pool name. The operator then removes the Relay's Deployment and
   Service, and the relay's `Ready` condition is `False` with reason `InvalidConfiguration`.

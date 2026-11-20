@@ -171,29 +171,56 @@ func TestValidateOperatorConfiguration_CheckpointDisabledSkipsValidation(t *test
 }
 
 func TestValidateOperatorConfiguration_GlobalDiscovery(t *testing.T) {
+	// TestCheckHTTPURL covers the URL rule itself.
 	for _, tc := range []struct {
-		name       string
-		url        string
-		region     string
-		wantErrors int
+		name, url, region string
+		// wantField is the field of the one expected error, if any.
+		wantField string
 	}{
-		{name: "unset", wantErrors: 0},
-		{name: "valid", url: "http://global-discovery.global-router.svc:8080/", region: "us-east-1", wantErrors: 0},
-		{name: "https", url: "https://discovery.example.com/", region: "us-east-1", wantErrors: 0},
-		{name: "a URL without a region", url: "http://discovery:8080/", wantErrors: 1},
-		{name: "a region without a URL", region: "us-east-1", wantErrors: 1},
-		{name: "not HTTP", url: "grpc://discovery:8080", region: "us-east-1", wantErrors: 1},
-		{name: "no host", url: "http:///path", region: "us-east-1", wantErrors: 1},
-		{name: "port above 65535", url: "http://discovery:99999/", region: "us-east-1", wantErrors: 1},
-		{name: "region with whitespace", url: "http://discovery:8080/", region: " us-east-1", wantErrors: 1},
-		{name: "region ending in a separator the PoolRelay strips", url: "http://discovery:8080/", region: "us-east-1\x1f", wantErrors: 1},
+		{name: "unset"},
+		{name: "valid", url: "http://global-discovery.global-router.svc:8080/", region: "us-east-1"},
+		{name: "a URL without a region", url: "http://discovery:8080/", wantField: "globalDiscovery.region"},
+		{name: "a region without a URL", region: "us-east-1", wantField: "globalDiscovery.url"},
+		{name: "a URL that the PoolRelay cannot parse", url: "http://discovery:0/", region: "us-east-1", wantField: "globalDiscovery.url"},
+		{name: "region with whitespace", url: "http://discovery:8080/", region: " us-east-1", wantField: "globalDiscovery.region"},
+		{name: "region ending in a separator the PoolRelay strips", url: "http://discovery:8080/", region: "us-east-1\x1f", wantField: "globalDiscovery.region"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Validate the settings for relays that register with Global Discovery")
 			cfg := validConfig()
 			cfg.GlobalDiscovery = configv1alpha1.GlobalDiscoveryConfiguration{URL: tc.url, Region: tc.region}
-			if errs := ValidateOperatorConfiguration(cfg); len(errs) != tc.wantErrors {
-				t.Errorf("expected %d errors, got %d: %v", tc.wantErrors, len(errs), errs)
+			errs := ValidateOperatorConfiguration(cfg)
+			if tc.wantField == "" && len(errs) != 0 || tc.wantField != "" && (len(errs) != 1 || errs[0].Field != tc.wantField) {
+				t.Errorf("errors = %v, want one for %q", errs, tc.wantField)
+			}
+		})
+	}
+}
+
+func TestCheckHTTPURL(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"http://frontend.inference.svc:8000", true},
+		{"https://Frontend.Example.com/v1", true},
+		{"http://10.0.0.1:8000", true},
+		{"http://[fd00::1]:8000/", true},
+		{"grpc://green:8000", false},
+		{"http:///green", false},
+		{"http://green:0/", false},
+		{"http://green:99999", false},
+		{"http://10.0.0.256:8000/", false},
+		{"http://frontend.123:8000/", false},
+		{"http://[fe80::1%25eth0]:8000/", false},
+		{"http://a<b:8000/", false},
+		{"http://green:8000/a,b", false},
+		{"http://green:8000/v1 ", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Log("Check the URL against the rule that the PoolRelay's URL parser needs")
+			if err := CheckHTTPURL(tc.value); (err == nil) != tc.valid {
+				t.Errorf("CheckHTTPURL(%q) = %v, want valid = %v", tc.value, err, tc.valid)
 			}
 		})
 	}

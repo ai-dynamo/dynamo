@@ -791,7 +791,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `frontends` _string array_ | Frontends are the HTTP(S) URLs that Global Routers send the pool's<br />requests to. Only a Global Discovery Service that takes pools from<br />registrations, rather than from MCS, needs them. |  | MaxItems: 16 <br />items:MaxLength: 2048 <br />items:Pattern: `^[^\p\{Cc\}\p\{Z\},]+$` <br />Optional: \{\} <br /> |
+| `frontends` _string array_ | Frontends are the HTTP(S) URLs that Global Routers send the pool's<br />requests to. Only a Global Discovery Service that takes pools from<br />registrations, rather than from MCS, needs them. |  | MaxItems: 16 <br />items:MaxLength: 512 <br />items:Pattern: `^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?\|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])\|((25[0-5]\|2[0-4][0-9]\|1[0-9][0-9]\|[1-9]?[0-9])[.])\{3\}(25[0-5]\|2[0-4][0-9]\|1[0-9][0-9]\|[1-9]?[0-9])\|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]\|655[0-2][0-9]\|65[0-4][0-9]\{2\}\|6[0-4][0-9]\{3\}\|[1-5][0-9]\{4\}\|[1-9][0-9]\{0,3\}))?([/?#][^\p\{Cc\}\p\{Z\},]*)?$` <br />Optional: \{\} <br /> |
 
 
 #### DynamoPoolRelaySpec
@@ -808,9 +808,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$` <br />Required: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision.<br />The controller sets the main command, listener probes, source volume, service<br />account, and Relay identity, discovery and registration env. The main container<br />cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them. |  | Required: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision. The<br />controller sets the main command, listener probes, source volume, service account,<br />and Relay env, with registration env only under globalDiscovery. The main container<br />cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them. |  | Required: \{\} <br /> |
 | `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `globalDiscovery` _[DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery)_ | GlobalDiscovery registers the pool as <clusterId>/<namespace>/<name> with the<br />operator's Global Discovery Service, so that Global Routers send it requests.<br />Unset, the Relay registers nothing. Set, it reserves the env names that the<br />"Deploy the Pool Relay" guide lists; until the operator has a Global Discovery<br />URL and region, the Relay is left as it is and reported unready. |  | Optional: \{\} <br /> |
+| `globalDiscovery` _[DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery)_ | GlobalDiscovery registers the pool as `<clusterId>/<namespace>/<name>` with the<br />operator's Global Discovery Service, so that Global Routers send it requests.<br />Unset, the operator sets no registration env. Set, it reserves the env names that<br />the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery<br />URL and region, the Relay is left as it is and reported unready. |  | Optional: \{\} <br /> |
 
 
 #### DynamoPoolRelayStatus
