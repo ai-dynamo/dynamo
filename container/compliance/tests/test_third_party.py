@@ -38,7 +38,12 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
             "name": "zlib1g",
             "version": "1.3",
             "purl": "pkg:deb/ubuntu/zlib1g@1.3",
-            "licenses": [{"license": {"id": "Zlib"}}, {"license": {"name": "Expat"}}],
+            "licenses": [
+                {"license": {"id": "Zlib"}},
+                {"license": {"name": "Expat"}},
+                {"license": {"name": "Artistic"}},
+                {"license": {"name": "public-domain"}},
+            ],
         },
         {
             "type": "library",
@@ -166,7 +171,7 @@ def test_base_components_parsed(tmp_path: Path) -> None:
         " AND (MIT OR Zlib) AND UNKNOWN AND (MIT AND Apache-2.0 with LLVM exceptions"
     )
     assert comps["libnolicense"].spdx == NOASSERTION
-    assert comps["zlib1g"].spdx == "Zlib AND MIT"
+    assert comps["zlib1g"].spdx == "Zlib AND MIT AND Artistic AND public-domain"
     assert "libremoved" in {c.name for c in load_base_components(sbom, set())}
 
 
@@ -192,10 +197,14 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     assert missing.splitlines() == [
         "Apache 2.0",
         "Apache-2.0 with LLVM exceptions",
+        "Artistic",
         NVIDIA_LICENSE_NAME,
         "Odd)License",
+        "public-domain",
     ]
     assert "\nCUDA\n" not in missing
+    artistic2 = spdx_license_text("Artistic-2.0")
+    assert artistic2 and artistic2 not in text
 
 
 def test_base_debs_limited_to_shipped_versions(tmp_path: Path) -> None:

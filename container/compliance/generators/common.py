@@ -220,6 +220,11 @@ def read_deb_copyright(root: Path, package: str) -> str | None:
         return None
 
 
+# Debian license names that are exactly an SPDX license. dpkg's wider mapping
+# guesses versions (Artistic -> Artistic-2.0, public-domain -> CC0-1.0), which
+# would change a baseline's declared terms.
+_DEBIAN_EXACT_ALIASES = {"Expat": "MIT"}
+
 # Placeholder for a base-image component whose SBOM entry declares no license.
 NOASSERTION = "NOASSERTION"
 
@@ -251,9 +256,6 @@ def load_base_components(
     one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
     as license text. An empty set means the scan found nothing: no filter.
     """
-    # Function-local: dpkg imports this module at load time.
-    from .dpkg import _normalize_debian_license
-
     shipped_debs = shipped_debs or None
     doc = json.loads(sbom_path.read_text(encoding="utf-8"))
     by_key: dict[tuple[str, str], Component] = {}
@@ -268,8 +270,7 @@ def load_base_components(
             lic = entry.get("license") or {}
             ident = lic.get("id") or lic.get("name")
             if is_deb and not lic.get("id") and ident:
-                # Debian spellings such as "Expat" have SPDX names.
-                ident = _normalize_debian_license(ident) or ident
+                ident = _DEBIAN_EXACT_ALIASES.get(ident, ident)
             if not ident and entry.get("expression"):
                 ident = entry["expression"]
             if ident and re.search(r" (AND|OR|WITH) ", ident):
