@@ -225,8 +225,10 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
             "DYN_TOOL_CALL_PARSER": "hermes",
-            # vLLM's V2 model runner can stall mid-decode on Blackwell (SM120)
-            # CI runners; use V1 until vLLM fixes it.
+            # Mitigation, cause unknown: on Blackwell (SM120) CI runners this
+            # config's first long request can stall mid-decode on vLLM's V2
+            # model runner, though other V2 configs decode it there. Drop once
+            # the cause is found.
             "VLLM_USE_V2_MODEL_RUNNER": "0",
         },
         request_payloads=[
