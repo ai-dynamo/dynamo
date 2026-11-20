@@ -102,7 +102,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--speedup-ratio",
         type=float,
         default=DEFAULT_SPEEDUP,
-        help="Mocker speedup (0=infinite)",
+        help="Mocker speedup ratio (0 runs at unscaled 1.0x timing; "
+        "use a large value, e.g. 1000000, for near-zero delays)",
     )
     parser.add_argument(
         "--benchmark-duration",
