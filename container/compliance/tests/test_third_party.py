@@ -70,7 +70,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
             "type": "library",
             "name": "liba",
             "version": "1.0",
-            "licenses": [{"license": {"id": "MIT"}}],
+            "licenses": [{"license": {"id": "MIT"}}, {"license": {"id": "LGPL-3.0+"}}],
         },
         {
             "type": "library",
@@ -196,12 +196,14 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     text = write_third_party(out, [], base_sbom=sbom).read_text(encoding="utf-8")
 
     assert "BASE IMAGE — nvcr.io/nvidia/base/ubuntu:noble-test" in text
-    assert "## liba 1.0\n\nLicenses: MIT\n" in text
+    assert "## liba 1.0\n\nLicenses: MIT AND LGPL-3.0+\n" in text
     assert "## libnolicense 0.1\n\nLicenses: NOASSERTION\n" in text
     assert text.count("## libnolicense 0.1") == 1
     assert "/etc/skipped-file" not in text
     mit = spdx_license_text("MIT")
     assert mit and text.count(mit) == 1
+    lgpl3 = spdx_license_text("LGPL-3.0")
+    assert lgpl3 and text.count(lgpl3) == 1
     zlib = spdx_license_text("Zlib")
     assert zlib and text.count(zlib) == 1
     apache = spdx_license_text("Apache-2.0")

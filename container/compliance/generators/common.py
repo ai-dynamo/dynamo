@@ -299,7 +299,7 @@ def load_base_components(
                 ident = _DEBIAN_EXACT_ALIASES.get(ident, ident)
             # Parse each entry on its own, so a stray paren stays inside it.
             if lic.get("id"):
-                entry_ids = [ident]
+                entry_ids = _spdx_ids(ident)  # "LGPL-3.0+" -> "LGPL-3.0"
             elif re.search(r" (AND|OR|WITH) ", ident):
                 entry_ids = _spdx_ids(ident)
                 ident = f"({ident})"
