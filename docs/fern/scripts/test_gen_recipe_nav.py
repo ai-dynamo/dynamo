@@ -288,7 +288,6 @@ def test_tagged_panel_shows_its_target_badge_first():
     assert lines[1] == OPTIMIZED
     assert lines[2] == FACT
     assert "dynamo-badge-functional" in lines[5]
-    # Regenerating a badged page changes nothing.
     assert gen.set_target_badges(out, badged_recipe("optimized", "functional")) == out
 
 
