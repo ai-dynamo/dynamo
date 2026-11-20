@@ -92,6 +92,11 @@ func main() {
     )
 
 
+class MetricsHandler(http.server.SimpleHTTPRequestHandler):
+    def guess_type(self, path):
+        return "text/plain; version=0.0.4"
+
+
 def main():
     dev = json.loads(
         Path("dev/observability/grafana_dashboards/disagg-dashboard.json").read_text()
@@ -125,9 +130,7 @@ def main():
         (directory / "metrics").write_text("\n".join(lines) + "\n")
         server = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0),
-            functools.partial(
-                http.server.SimpleHTTPRequestHandler, directory=temporary
-            ),
+            functools.partial(MetricsHandler, directory=temporary),
         )
         threading.Thread(target=server.serve_forever, daemon=True).start()
         download(
@@ -189,7 +192,18 @@ def main():
                                     (directory / "prometheus.log").read_text()
                                 )
                         if time.monotonic() > deadline:
-                            raise TimeoutError("Prometheus did not return all fixtures")
+                            targets_url = (
+                                api.split("/api/v1/query?")[0] + "/api/v1/targets"
+                            )
+                            with urllib.request.urlopen(
+                                targets_url, timeout=5
+                            ) as result:
+                                scrape_state = json.load(result)
+                            raise TimeoutError(
+                                f"Prometheus did not return all fixtures: {payload}; "
+                                f"scrapes: {scrape_state}; log: "
+                                + (directory / "prometheus.log").read_text()
+                            )
                         time.sleep(0.2)
                     by_case = {
                         sample["metric"]["scenario"]: sample for sample in samples
