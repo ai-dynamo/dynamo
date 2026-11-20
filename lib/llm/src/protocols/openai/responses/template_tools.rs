@@ -7,6 +7,7 @@ use dynamo_protocols::types::responses::CustomToolParamFormat;
 
 use super::super::tools::custom_input_or_raw;
 use super::*;
+use crate::preprocessor::prompt::is_kimi_k3_prompt_hint;
 
 #[derive(Clone, Debug, Default)]
 pub struct ResponsesToolContext {
@@ -493,16 +494,7 @@ impl NvCreateChatCompletionRequest {
             ]
             .into_iter()
             .flatten()
-            .any(|hint| {
-                let bytes = hint.as_bytes();
-                bytes
-                    .windows(6)
-                    .any(|part| part.eq_ignore_ascii_case(b"kimik3"))
-                    || bytes.windows(7).any(|part| {
-                        part.eq_ignore_ascii_case(b"kimi-k3")
-                            || part.eq_ignore_ascii_case(b"kimi_k3")
-                    })
-            });
+            .any(is_kimi_k3_prompt_hint);
             if can_select_positional_encoder
                 && (!context.history_tool_calls.is_empty()
                     || self

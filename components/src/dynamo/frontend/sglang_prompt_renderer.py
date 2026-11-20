@@ -15,6 +15,8 @@ from sglang.srt.parser.jinja_template_utils import (
     process_content_for_template_format,
 )
 
+from dynamo._core import _is_kimi_k3_prompt_hint
+
 from .sglang_deepseek import (
     RecipeRequestError,
     recipe_renderer,
@@ -108,10 +110,6 @@ class JinjaPromptRenderer:
 _KIMI_K3_THINKING_EFFORTS = frozenset({"low", "high", "max"})
 
 
-def _normalize_kimi_k3_hint(value: Any) -> str:
-    return str(value or "").lower().replace("-", "").replace("_", "")
-
-
 def _should_use_kimi_k3_prompt_bridge(
     request: dict[str, Any],
     *,
@@ -130,12 +128,13 @@ def _should_use_kimi_k3_prompt_bridge(
         return False
 
     return any(
-        "kimik3" in _normalize_kimi_k3_hint(hint)
+        _is_kimi_k3_prompt_hint(str(hint))
         for hint in (
             request.get("model"),
             tool_call_parser_name,
             reasoning_parser_name,
         )
+        if hint
     )
 
 
