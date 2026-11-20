@@ -4124,9 +4124,7 @@ def test_prefill_real_seed_auto_follows_recurrent_state_layout(monkeypatch, valu
         monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
     else:
         monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
-    state_subclass = type(
-        "GatedDeltaStateSpec", (MambaSpec,), {}
-    )
+    state_subclass = type("GatedDeltaStateSpec", (MambaSpec,), {})
     hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
     hybrid_subclass = _realseed_layout_stub(
         "FullAttentionSpec", state_subclass.__new__(state_subclass)

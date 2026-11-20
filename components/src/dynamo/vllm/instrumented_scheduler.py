@@ -145,9 +145,6 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.kv_groups import kv_group_is_state as _kv_group_is_state
-from dynamo.vllm.kv_groups import kv_group_specs as _kv_group_specs
-from dynamo.vllm.kv_groups import kv_spec_is_state as _kv_spec_is_state
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     RANDOM_KDA_BOUND,
@@ -159,6 +156,9 @@ from dynamo.vllm.benchmark_points import (
     DecodePointCandidate,
     PrefillPointCandidate,
 )
+from dynamo.vllm.kv_groups import kv_group_is_state as _kv_group_is_state
+from dynamo.vllm.kv_groups import kv_group_specs as _kv_group_specs
+from dynamo.vllm.kv_groups import kv_spec_is_state as _kv_spec_is_state
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -379,8 +379,12 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
         specs = _kv_group_specs(group)
         if not specs:
             continue
-        spec = specs[0] if len(specs) == 1 else SimpleNamespace(
-            kv_cache_specs={str(i): s for i, s in enumerate(specs)}
+        spec = (
+            specs[0]
+            if len(specs) == 1
+            else SimpleNamespace(
+                kv_cache_specs={str(i): s for i, s in enumerate(specs)}
+            )
         )
         entry = _bench_engine_kv_cache_spec(spec)
         if getattr(group, "kv_cache_spec", None) is None:
@@ -3246,7 +3250,9 @@ class InstrumentedScheduler(AsyncScheduler):
                     "block_size": getattr(manager, "block_size", None),
                     "admission_cap": self._kvwarm_admission_cap(manager),
                     "mamba_cache_mode": getattr(manager, "mamba_cache_mode", None),
-                    "num_prefill_checkpoint_blocks": _kv_manager_checkpoint_blocks(manager),
+                    "num_prefill_checkpoint_blocks": _kv_manager_checkpoint_blocks(
+                        manager
+                    ),
                     "num_speculative_blocks": getattr(
                         manager, "num_speculative_blocks", 0
                     ),
@@ -6531,7 +6537,9 @@ class InstrumentedScheduler(AsyncScheduler):
         return matched >= len(self._kvwarm_state_layer_groups())
 
     def _kvwarm_manager_specs(self, manager) -> list:
-        config = getattr(getattr(self, "kv_cache_manager", None), "kv_cache_config", None)
+        config = getattr(
+            getattr(self, "kv_cache_manager", None), "kv_cache_config", None
+        )
         return _kv_manager_specs(manager, config)
 
     def _kvwarm_shadow_tail_blocks_for(self, ctx_len: int, headroom: int) -> int:
