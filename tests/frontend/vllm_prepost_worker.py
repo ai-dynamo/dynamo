@@ -9,11 +9,14 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import uvloop
 from transformers import AutoTokenizer
+from vllm.config import StructuredOutputsConfig
 
+from dynamo.common.utils.structural_tag import publish_vllm_structural_tag_backend
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -78,6 +81,12 @@ async def main():
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_structural_tag({"scope": "always", "schema": "strict"})
+    publish_vllm_structural_tag_backend(
+        runtime_config,
+        SimpleNamespace(
+            structured_outputs_config=StructuredOutputsConfig(backend="auto")
+        ),
+    )
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,
