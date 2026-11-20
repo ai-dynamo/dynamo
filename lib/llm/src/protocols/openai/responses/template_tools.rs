@@ -28,6 +28,19 @@ pub struct ResponsesToolContext {
 
 const KIMI_BARE_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v2_";
 
+fn kimi_bare_item_id(call_id: &str) -> Option<&str> {
+    let item_id = call_id.strip_prefix(KIMI_BARE_CALL_ID_PREFIX)?;
+    let uuid = item_id.strip_prefix("fc_")?.as_bytes();
+    // Only the compact lowercase UUIDv4 format emitted by Responses is reserved.
+    (uuid.len() == 32
+        && uuid[12] == b'4'
+        && matches!(uuid[16], b'8'..=b'9' | b'a'..=b'b')
+        && uuid
+            .iter()
+            .all(|&b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')))
+    .then_some(item_id)
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct HistoricalToolCall {
     name: String,
@@ -64,18 +77,16 @@ pub(super) fn history_tool_calls(
             }
             _ => continue,
         };
-        // Backend call IDs may repeat across turns. Match spelling to the
-        // original item occurrence and require its paired item ID.
+        // Backend call IDs may repeat across turns. When supplied, the item
+        // ID must agree with the marker for this occurrence.
         history
             .entry(call_id.to_owned())
             .or_default()
             .push(HistoricalToolCall {
                 name: names.encode(namespace, name),
                 kimi_bare: namespace.is_some()
-                    && item_id.is_some_and(|id| {
-                        id.starts_with("fc_")
-                            && call_id.strip_prefix(KIMI_BARE_CALL_ID_PREFIX) == Some(id)
-                    }),
+                    && kimi_bare_item_id(call_id)
+                        .is_some_and(|marked_id| item_id.is_none_or(|id| id == marked_id)),
             });
     }
     history
@@ -659,10 +670,13 @@ impl ResponseParams {
             )?);
         }
         let (name, namespace, custom) = self.tool_identity(emitted);
-        let call_id = if self.preserve_tool_spelling && namespace.is_some() && emitted == name {
-            format!("{KIMI_BARE_CALL_ID_PREFIX}{item_id}")
-        } else {
-            call_id
+        let call_id = match namespace {
+            Some(_) if self.preserve_tool_spelling && emitted == name => {
+                format!("{KIMI_BARE_CALL_ID_PREFIX}{item_id}")
+            }
+            // Derive the replacement from the item so all SSE snapshots agree.
+            Some(_) if kimi_bare_item_id(&call_id).is_some() => format!("call_{item_id}"),
+            _ => call_id,
         };
         if custom {
             let input = if (arguments.is_empty() && status == OutputStatus::InProgress)
