@@ -270,11 +270,8 @@ def plot_decode_3d_surface(
 
     plot_path = f"{work_dir}/decode_itl_interpolation.png"
     logger.info(f"Saving ITL surface plot to {plot_path}")
-    # matplotlib 3.11 pads ragged 3D surface polygons with uninitialized memory
-    # and projects the padding before masking it out, which can overflow:
-    # https://github.com/matplotlib/matplotlib/issues/32272
-    # The padded values are never drawn, so ignoring overflow does not change
-    # the image. Remove once matplotlib ships the fix (matplotlib#32310).
+    # matplotlib 3.11 overflows projecting undrawn 3D padding (matplotlib#32272);
+    # ignoring it leaves the image unchanged. Remove once matplotlib#32310 ships.
     with np.errstate(over="ignore"):
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
     plt.close()
