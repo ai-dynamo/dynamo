@@ -529,6 +529,7 @@ worker_selection:
     type: alpha
     parameters:
       threshold: 1
+    session_affinity: true
   prefill: {type: alpha, parameters: {threshold: 1}}
   decode:
     type: alpha
@@ -563,7 +564,8 @@ worker_selection:
             WorkerType::Decode,
             partition,
         );
-        // Two distinct inline specs: identical ones share a factory.
+        // Two distinct inline specs: identical ones share a factory, whatever the router's
+        // own `session_affinity` key says.
         assert_eq!(provider_calls.load(Ordering::Relaxed), 2);
         assert_eq!(
             *factory_calls.lock().unwrap(),

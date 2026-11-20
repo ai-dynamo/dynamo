@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use dynamo_kv_router::plugins::worker_selection::SessionAffinitySetting;
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
@@ -279,6 +280,8 @@ pub struct PrefillRouter {
     decode_supports_prefill_cancellation: bool,
 
     session_affinity_mode: SessionAffinityMode,
+    /// The `prefill` entry's `session_affinity` in the frontend's policy file.
+    policy_file_session_affinity: Option<SessionAffinitySetting>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
@@ -315,6 +318,7 @@ struct PrefillBuildContext {
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
+    policy_file_session_affinity: Option<SessionAffinitySetting>,
     model_name: String,
     load_thresholds: crate::discovery::LoadThresholdHandle,
     parent_token: CancellationToken,

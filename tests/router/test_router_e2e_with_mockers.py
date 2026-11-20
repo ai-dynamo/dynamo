@@ -1600,6 +1600,57 @@ def test_disagg_per_role_session_affinity(
         )
 
 
+@pytest.mark.parametrize("affine_role", ["prefill", "decode"])
+@pytest.mark.timeout(180)
+def test_disagg_per_role_session_affinity_policy_file(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+    affine_role,
+):
+    """A policy file gives one role session affinity; the other role gets none.
+
+    No worker advertises anything and the frontend takes no affinity flag. The
+    ``decode`` case also checks that the prefill pool, which configures nothing,
+    does not inherit the decode entry.
+    """
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+    roles = {"prefill": "round-robin", "decode": "round-robin"}
+    roles[affine_role] = "{type: round-robin, session_affinity: true}"
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text(
+        "worker_selection:\n"
+        + "".join(f"  {role}: {entry}\n" for role, entry in roles.items())
+    )
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_session_affinity(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+            router_policy_config=str(policy_file),
+            affine_role=affine_role,
+        )
+
+
 @pytest.mark.timeout(180)
 def test_router_decisions_disagg_router_ais(
     request,

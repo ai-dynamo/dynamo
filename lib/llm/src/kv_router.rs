@@ -1681,7 +1681,18 @@ impl KvRouter {
         ttl: std::time::Duration,
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> anyhow::Result<crate::session_affinity::AffinityCoordinator> {
-        self.selection.affinity_coordinator(ttl, mode)
+        self.affinity_coordinator_with(crate::session_affinity::SessionAffinitySpec {
+            ttl,
+            mode,
+            max_entries: None,
+        })
+    }
+
+    pub(crate) fn affinity_coordinator_with(
+        &self,
+        spec: crate::session_affinity::SessionAffinitySpec,
+    ) -> anyhow::Result<crate::session_affinity::AffinityCoordinator> {
+        self.selection.affinity_coordinator(spec)
     }
 
     pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {

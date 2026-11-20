@@ -188,6 +188,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-session-affinity-ttl-secs" type="integer" default="null">
+  **Deprecated; removal in v1.9.** Set `session_affinity` on a role under `worker_selection` in `--router-policy-config`. Keep the flag with `--router-mode direct` or `device-aware-weighted`, which a policy file cannot select yet.
+
   Enable session affinity with this router-local idle TTL in seconds. Bindings synchronize across
   router replicas on a best-effort basis. Valid values are `1` through `31536000`; omit the option
   to disable session affinity. See [Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
@@ -196,6 +198,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-session-affinity-max-entries" type="integer" default="65536">
+  **Deprecated; removal in v1.9.** Set `session_affinity: {max_entries: N}` on a role under `worker_selection` in `--router-policy-config`.
+
   Maximum number of sessions each affinity table holds at once; must be at least `1`. A frontend
   keeps one table per worker set it routes to. A request that would start a new session past the
   limit fails as resource exhausted (HTTP 529 by default) until an idle session expires. Replica

@@ -27,7 +27,10 @@ pub use super::registry::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 pub(crate) use config::RawWorkerSelectionConfig;
-pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
+pub use config::{
+    SessionAffinitySetting, SessionAffinitySpec, WorkerSelectionConfig, WorkerSelectionInstance,
+    WorkerSelectionPolicySelection,
+};
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 pub use dynamo_scheduler::{
     Commitments, KvCopyLocations, KvCopySource, WorkerCapacityExt, WorkerInfoExt,
