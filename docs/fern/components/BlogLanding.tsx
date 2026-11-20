@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Build Tool-Calling Parsers in Rust with AI Agents",
+    description:
+      "Build a Rust tool-calling parser with an AI agent, human-reviewed GOLDEN expectations, and reusable conformance tests.",
+    href: "/dynamo/dev/digest/build-tool-calling-parsers-in-rust-with-ai-agents",
+    date: "November 19, 2026",
+    readTime: "1 min read",
+    category: "Engineering",
+    art: "agents",
+  },
+  {
     title: "Planner Retune: Staying on the Pareto Frontier as Traffic Drifts",
     description:
       "Planner Retune replays recent traffic in AISim and applies better KV-router and Planner settings to a running deployment, with no restart.",
