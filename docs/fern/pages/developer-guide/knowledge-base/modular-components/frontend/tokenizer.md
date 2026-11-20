@@ -128,3 +128,36 @@ In the Rust frontend tokenizer path, when a non-default backend is selected:
 3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file.
 4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
 5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.
+
+## Per-Session Incremental Tokenization
+
+Agent clients resend the whole conversation on every turn, so each turn of a long session
+tokenizes a prompt that is mostly unchanged. The L1 prefix cache can skip the unchanged prefix,
+but it is shared by every session and sized at 64 MiB by default; once many long sessions run at
+once, it rarely still holds a session's previous turn.
+
+Set `DYN_TOKENIZER_SESSION_CACHE=on` on the frontend to keep each session's last prompt and its
+token IDs instead. A request that carries a session ID (`x-dynamo-session-id`, or a supported
+agent session header) reuses the IDs of the part of its prompt that is byte-identical to the
+session's previous prompt, up to the last special token in that part, and tokenizes only the
+rest. The token IDs are the ones a full encode produces, so routing and generation do not change.
+
+- It applies to chat requests on the Rust chat processor (`--dyn-chat-processor dynamo`):
+  Chat Completions, Responses, and Anthropic Messages. Requests without a session ID, and
+  rendered prompts with segmented special-token boundaries, use the normal path.
+- It splits only right after special tokens that the tokenizer matches in the raw text and that
+  do not take the whitespace after them. At startup it checks the tokenizer: if the tokenizer
+  does not support prefix caching, if a special token can overlap another added token, or if
+  encoding a few short probe strings after each special token differs from encoding them
+  together, it logs a warning and stays off for that model.
+- `DYN_TOKENIZER_SESSION_CACHE=verify` also runs the normal encode for every request, returns its
+  IDs, and logs and counts any mismatch. Use it once when you enable the cache for a new model.
+- State is per frontend process. A restarted frontend, or another replica, encodes the next
+  turn in full.
+- Memory is about one copy of the prompt text plus 4 bytes per token for each kept session.
+
+| Env Var | Valid values | Default |
+|---|---|---|
+| `DYN_TOKENIZER_SESSION_CACHE` | `off`, `on`, `verify` | `off` |
+| `DYN_TOKENIZER_SESSION_CACHE_MAX_SESSIONS` | sessions kept, least recently used evicted first | `4096` |
+| `DYN_TOKENIZER_SESSION_CACHE_BYTES` | byte budget for all kept sessions | `2147483648` (2 GiB) |

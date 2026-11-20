@@ -252,6 +252,15 @@ fn instrumented_tokenizer_cache(
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
+/// The tokenizer without the L1 prefix cache, for per-session incremental tokenization.
+pub struct UncachedTokenizerParts {
+    pub tokenizer: crate::tokenizers::Tokenizer,
+    /// Special tokens the prompt can be split right after.
+    pub boundary_tokens: Vec<String>,
+    /// Every token the tokenizer splits out of raw text.
+    pub added_tokens: Vec<String>,
+}
+
 /// Extract the set of atomic special-token strings from a HuggingFace tokenizer.
 ///
 /// "Special" here means `AddedToken { special: true, .. }` — these are the only tokens
@@ -267,6 +276,28 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Split points for per-session incremental tokenization: special tokens matched in the raw
+/// text that neither take the whitespace after them (`rstrip`) nor match only as a whole word
+/// (`single_word`). If any token is `single_word`, a split point must not end in a character
+/// that word check can see (any non-ASCII character counts).
+fn hf_session_boundary_tokens(hf: &HfTokenizer) -> Vec<String> {
+    let added = hf.get_added_tokens_decoder();
+    let has_single_word = added.values().any(|t| t.single_word);
+    added
+        .into_values()
+        .filter(|t| t.special && !t.normalized && !t.rstrip && !t.single_word)
+        .filter(|t| {
+            !has_single_word
+                || !t
+                    .content
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii())
+        })
+        .map(|t| t.content)
+        .collect()
 }
 
 /// Exclusive bound for client token ids: the largest id plus one, added tokens
@@ -1497,6 +1528,23 @@ impl ModelDeploymentCard {
         options: crate::tokenizers::TokenizerOptions,
         force_hugging_face: bool,
     ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        self.build_tokenizer(options, force_hugging_face, false)
+            .map(|parts| parts.tokenizer)
+    }
+
+    /// The tokenizer `tokenizer()` returns, without the L1 prefix cache, and its split points
+    /// for per-session incremental tokenization (`DYN_TOKENIZER_SESSION_CACHE`).
+    pub fn uncached_tokenizer_parts(&self) -> anyhow::Result<UncachedTokenizerParts> {
+        self.build_tokenizer(Default::default(), false, true)
+    }
+
+    /// `uncached`: skip the L1 prefix cache and collect the split points.
+    fn build_tokenizer(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+        force_hugging_face: bool,
+        uncached: bool,
+    ) -> anyhow::Result<UncachedTokenizerParts> {
         let tokenizer_backend = if force_hugging_face {
             TokenizerBackend::Default
         } else {
@@ -1504,8 +1552,10 @@ impl ModelDeploymentCard {
         };
         let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
-        let cache_enabled =
-            tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
+        let cache_enabled = !uncached
+            && tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
+        let mut boundary_tokens = Vec::new();
+        let mut added_tokens = Vec::new();
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1577,6 +1627,14 @@ impl ModelDeploymentCard {
                 } else {
                     Vec::new()
                 };
+                if uncached {
+                    boundary_tokens = hf_session_boundary_tokens(&hf);
+                    added_tokens = hf
+                        .get_added_tokens_decoder()
+                        .values()
+                        .map(|t| t.content.clone())
+                        .collect();
+                }
 
                 // Merge already applied above; just wrap. Embedding
                 // tokenizers use the HF post-processor to apply BOS/EOS when
@@ -1703,6 +1761,10 @@ impl ModelDeploymentCard {
                 self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
+                if uncached {
+                    boundary_tokens = specials.clone();
+                    added_tokens = specials.clone();
+                }
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
                     let shared_cache = shared_tokenizer_cache();
@@ -1737,7 +1799,11 @@ impl ModelDeploymentCard {
             }
         };
 
-        Ok(crate::tokenizers::Tokenizer::from(inner))
+        Ok(UncachedTokenizerParts {
+            tokenizer: crate::tokenizers::Tokenizer::from(inner),
+            boundary_tokens,
+            added_tokens,
+        })
     }
 
     pub(crate) fn set_source_path(&mut self, source_path: PathBuf) {

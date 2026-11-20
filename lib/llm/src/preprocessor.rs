@@ -19,6 +19,7 @@ pub mod mm_routing;
 #[cfg(all(test, feature = "mm-routing"))]
 mod glm5_next_tests;
 pub mod prompt;
+pub mod session_tokens;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub use structural_tag::structural_tag_parser_names;
@@ -2122,6 +2123,8 @@ pub struct OpenAIPreprocessor {
     context_length: u32,
     /// Tracks warmups and cancels them when this preprocessor is retired.
     speculative_prefill_tasks: speculative_prefill::PrefillTasks,
+    /// Per-session incremental tokenization (`DYN_TOKENIZER_SESSION_CACHE`); `None` when off.
+    session_tokens: Option<Arc<session_tokens::SessionTokenCache>>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't supported, or its processor configuration is invalid.
     #[cfg(feature = "mm-routing")]
@@ -3173,6 +3176,11 @@ impl OpenAIPreprocessor {
             .media_decoder
             .as_ref()
             .is_some_and(|decoder| decoder.video.is_some());
+        let session_tokens = if validate_chat_parsers {
+            Self::session_token_cache(&mdc)
+        } else {
+            None
+        };
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -3445,6 +3453,7 @@ impl OpenAIPreprocessor {
             speculative_prefill_tasks: speculative_prefill::PrefillTasks::new(
                 speculative_prefill_cancel.as_ref(),
             ),
+            session_tokens,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -3458,6 +3467,50 @@ impl OpenAIPreprocessor {
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
+    }
+
+    /// The per-session tokenizer cache when `DYN_TOKENIZER_SESSION_CACHE` is `on` or `verify`.
+    /// A tokenizer it cannot split safely leaves it off, with a warning.
+    fn session_token_cache(
+        mdc: &ModelDeploymentCard,
+    ) -> Option<Arc<session_tokens::SessionTokenCache>> {
+        use session_tokens::{SessionTokenCache, SessionTokenizeMode};
+        let mode = SessionTokenizeMode::from_env();
+        if mode == SessionTokenizeMode::Off {
+            return None;
+        }
+        let (max_sessions, max_bytes) = SessionTokenCache::limits_from_env();
+        let built = mdc.uncached_tokenizer_parts().and_then(|parts| {
+            let tokenizer: Arc<dyn Tokenizer> = (*parts.tokenizer).clone();
+            SessionTokenCache::new(
+                tokenizer,
+                parts.boundary_tokens,
+                parts.added_tokens,
+                mode,
+                max_sessions,
+                max_bytes,
+            )
+        });
+        match built {
+            Ok(cache) => {
+                tracing::info!(
+                    model = %mdc.display_name,
+                    ?mode,
+                    max_sessions,
+                    max_bytes,
+                    "tokenizer session cache enabled"
+                );
+                Some(Arc::new(cache))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    model = %mdc.display_name,
+                    %error,
+                    "tokenizer session cache disabled for this model"
+                );
+                None
+            }
+        }
     }
 
     /// Encode a string to it's tokens
@@ -5691,7 +5744,20 @@ impl OpenAIPreprocessor {
             prompt.to_string()
         };
         let tokenizer = self.tokenizer.clone();
-        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        let session = self.session_tokens.as_ref().and_then(|cache| {
+            session_tokens::current_session_key().map(|key| (cache.clone(), key))
+        });
+        let encoding = match session {
+            Some((cache, key)) => {
+                tokio::task::spawn_blocking(move || {
+                    cache
+                        .encode(&key, owned, tokenizer.as_ref())
+                        .map(|(ids, _)| Encoding::Sp(ids))
+                })
+                .await??
+            }
+            None => tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??,
+        };
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -8831,19 +8897,37 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
+        let lora_for_preprocess = context
+            .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .map(|name| name.as_ref().clone());
+        // The tokenizer session cache keys on the session id and the LoRA name.
+        let session_key: Option<Arc<str>> = self.session_tokens.as_ref().and_then(|_| {
+            use crate::protocols::common::extensions::{
+                SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+            };
+            context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .ok()
+                .map(|id| match lora_for_preprocess.as_deref() {
+                    Some(lora) => Arc::from(format!("{lora}\u{1f}{}", id.as_str())),
+                    None => Arc::from(id.as_str()),
+                })
+        });
+        let preprocess = self
             .preprocess_request_with_options(
                 &request,
                 tracker.as_deref(),
                 preprocess_options,
-                context
-                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
-                    .ok()
-                    .flatten()
-                    .map(|name| name.as_ref().clone()),
+                lora_for_preprocess,
             )
-            .instrument(preprocessing.clone())
-            .await?;
+            .instrument(preprocessing.clone());
+        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) =
+            match session_key {
+                Some(key) => session_tokens::SESSION_KEY.scope(key, preprocess).await?,
+                None => preprocess.await?,
+            };
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
