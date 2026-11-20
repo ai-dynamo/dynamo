@@ -192,11 +192,12 @@ _BASE_SECTION_HEADER = """\
 BASE IMAGE — {image}
 {rule}
 
-The packages below come from the base image this container is built on, as
-recorded in its baseline SBOM ({sbom}). {debs}Entries are otherwise listed as
-the base image publishes them, so a package the Dynamo build removes from the
-base may still appear. Canonical SPDX license texts follow the list, once per
-license.
+The packages below are those of the baseline image above, as recorded in its
+SBOM ({sbom}). Everything this container adds on top of that image, including
+any intermediate upstream image, is listed in the sections before this one.
+{debs}Entries are otherwise listed as the baseline publishes them, so a package
+the Dynamo build removes may still appear. Canonical SPDX license texts follow
+the list, once per license.
 
 """
 
@@ -302,6 +303,21 @@ def _split_top_level_and(expr: str) -> list[str]:
     return [p for p in parts if p]
 
 
+_LICENSE_NAME_FILLER = frozenset({"License", "license", "The", "the"})
+
+
+def _bare_license_ids(name: str) -> list[str]:
+    """Resolve a free-text SBOM license name to SPDX IDs, or keep it whole.
+
+    "MIT License" -> ["MIT"]; a name with any unresolved word, such as
+    "Apache-2.0 with LLVM exceptions", stays one unresolved identifier.
+    """
+    words = [w for w in _spdx_ids(name) if w not in _LICENSE_NAME_FILLER]
+    if words and all(spdx_license_text(w) for w in words):
+        return words
+    return [name]
+
+
 def render_base_section(
     sbom_path: Path, components: list[Component], debs_note: str = ""
 ) -> str:
@@ -322,15 +338,14 @@ def render_base_section(
             parts.append("\n```\n" + c.license_text.rstrip() + "\n```\n")
         parts.append("\n")
         for part in _split_top_level_and(c.spdx):
-            # A bare SBOM license name such as "Apache 2.0" is one identifier.
             is_expr = part.startswith("(") or re.search(r" (OR|WITH) ", part)
-            license_ids.update(_spdx_ids(part) if is_expr else [part])
+            license_ids.update(_spdx_ids(part) if is_expr else _bare_license_ids(part))
     license_ids -= {NOASSERTION, UNKNOWN}
     parts.append("# License texts\n\n")
     missing: list[str] = []
     emitted: set[str] = set()
     for lid in sorted(license_ids, key=str.lower):
-        text = spdx_license_text(lid)
+        text = spdx_license_text(lid) if _spdx_ids(lid) == [lid] else None
         if text is None:
             missing.append(lid)
         elif text not in emitted:

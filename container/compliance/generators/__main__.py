@@ -341,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         dpkg_root=args.dpkg_root,
     )
     logger.info(
-        "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",
+        "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) and "
+        "THIRD-PARTY.txt to %s",
         len(all_components),
         args.output_dir,
     )

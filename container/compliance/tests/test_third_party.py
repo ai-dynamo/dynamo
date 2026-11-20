@@ -185,7 +185,12 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     apache = spdx_license_text("Apache-2.0")
     assert apache and text.count(apache) == 1
     missing = text.split("is the reference:\n", 1)[1]
-    assert missing.splitlines() == ["Apache 2.0", NVIDIA_LICENSE_NAME, "Odd)License"]
+    assert missing.splitlines() == [
+        "Apache 2.0",
+        "Apache-2.0 with LLVM exceptions",
+        NVIDIA_LICENSE_NAME,
+        "Odd)License",
+    ]
     assert "\nCUDA\n" not in missing
 
 
