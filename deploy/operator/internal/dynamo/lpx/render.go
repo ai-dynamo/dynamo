@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -30,10 +29,6 @@ type RenderInput struct {
 	MinAvailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
 	Stages map[string]corev1.PodTemplateSpec
-	// Conductor supplies a fresh, independently merged template for the shared LPU
-	// conductor when plan.ConductorTemplate is nonempty. Otherwise it is nil;
-	// hybrid pipelines supply their independently rendered Cyborg clique below.
-	Conductor *corev1.PodTemplateSpec
 	// Cyborg supplies the GPU clique for hybrid pipelines; nil for LPU-only workloads.
 	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
 }
@@ -45,13 +40,12 @@ type WorkloadTemplates struct {
 }
 
 // RenderNodeLocal renders a workload without constructing a PCS. workload
-// and plan must be non-nil and are read without mutation. The function may mutate
+// must be non-nil and is read without mutation. The function may mutate
 // the reference-backed templates in input; callers must pass fresh owned values.
 //
 //nolint:gocyclo // Rendering is one transactional validation-and-materialization pass.
 func RenderNodeLocal(
 	workload *Workload,
-	plan *MaterializationPlan,
 	input RenderInput,
 ) (*WorkloadTemplates, error) {
 	projections := workload.modelProjections
@@ -65,36 +59,21 @@ func RenderNodeLocal(
 	}
 
 	workloadDigest := workload.Digest().String()
-	agentTemplateNames := make([]string, 0, len(plan.Agents))
-	for _, agent := range plan.Agents {
-		if agent.Replicas > 0 {
-			agentTemplateNames = append(agentTemplateNames, agent.TemplateName)
+	agentTemplateNames := make([]string, 0, len(projections))
+	for index, projection := range projections {
+		if projection.agentReplicas > 0 {
+			agentTemplateNames = append(agentTemplateNames, workload.agentTemplate(index))
 		}
 	}
-	conductorTemplateName := plan.ConductorTemplate
-	allocation := strings.Join(agentTemplateNames, ":")
 
-	// The serving component owns conductor metadata and storage independently of model
-	// order. Without a conductor, the serving Agent template owns storage.
-	conductorStage := workload.ServingComponentName()
-	conductorTemplate := input.Conductor
-	storageTemplate := input.Stages[conductorStage]
-	if plan.ConductorTemplate != "" {
-		if conductorTemplate == nil {
-			return nil, fmt.Errorf("LPX rendering requires an explicit conductor template")
-		}
-		storageTemplate = *conductorTemplate
-	}
-	modelStoragePath, err := lpuModelStoragePath(storageTemplate.Spec)
+	// The serving component's Agent template owns storage independently of model order.
+	modelStoragePath, err := lpuModelStoragePath(input.Stages[workload.ServingComponentName()].Spec)
 	if err != nil {
 		return nil, err
 	}
 
 	// Publish model paths to every container before role-specific bindings are prepended.
-	containerLists := make([][]corev1.Container, 0, 2*(len(input.Stages)+2))
-	if conductorTemplate != nil {
-		containerLists = append(containerLists, conductorTemplate.Spec.Containers, conductorTemplate.Spec.InitContainers)
-	}
+	containerLists := make([][]corev1.Container, 0, 2*(len(input.Stages)+1))
 	if hybrid {
 		containerLists = append(containerLists, cyborg.Spec.PodSpec.Containers, cyborg.Spec.PodSpec.InitContainers)
 	}
@@ -105,48 +84,21 @@ func RenderNodeLocal(
 		return nil, err
 	}
 
-	// Consume the independently rendered conductor without copying Agent startup or placement.
-	var conductor *grovev1alpha1.PodCliqueTemplateSpec
-	if conductorTemplateName != "" {
-		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
-		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
-			Name:        conductorTemplateName,
-			Labels:      conductorTemplate.Labels,
-			Annotations: annotations,
-			Spec: grovev1alpha1.PodCliqueSpec{
-				RoleName:     conductorTemplateName,
-				PodSpec:      conductorTemplate.Spec,
-				Replicas:     1,
-				MinAvailable: new(int32(1)),
-				StartsAfter:  agentTemplateNames,
-			},
-		}
-		rendered.Cliques = append(rendered.Cliques, conductor)
-	}
-
 	// Canonical projections keep each component together; consume its last Agent instance.
 	var template corev1.PodTemplateSpec
 	for index, projection := range projections {
 		stage := projection.stage
-		agent := plan.Agents[index]
 		if index == 0 || stage != projections[index-1].stage {
 			template = input.Stages[stage]
-			var conductorSpec *corev1.PodSpec
-			if stage == conductorStage && conductor != nil {
-				conductorSpec = &conductor.Spec.PodSpec
-			}
 
 			// A component's projections share one partition selection. When it
-			// leaves no partition on LPUs, shape only the conductor; the unused
-			// Agent template needs no placement or storage validation.
-			if agent.Replicas == 0 {
-				if conductorSpec != nil {
-					configureNodeLocalConductorRuntime(conductorSpec, allocation)
-				}
+			// leaves no partition on LPUs, the unused Agent template needs no
+			// placement or storage validation.
+			if projection.agentReplicas == 0 {
 				continue
 			}
 
-			// Agent and conductor storage must agree on the published model paths.
+			// Every stage's storage must agree with the serving stage on the published model paths.
 			if !hybrid {
 				storagePath, err := lpuModelStoragePath(template.Spec)
 				if err != nil {
@@ -157,14 +109,11 @@ func RenderNodeLocal(
 				}
 			}
 
-			// Bind the LPX configuration and scheduling to the Agent and any conductor.
+			// Bind the LPX configuration and scheduling to the Agent.
 			applyLocalPartitionIDs(common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName), projection)
 			configureAgentScheduling(&template.Spec, projection.configuredBuild.architecture, projection.configuredBuild.devicesPerNode)
-			if conductorSpec != nil {
-				configureNodeLocalConductorRuntime(conductorSpec, allocation)
-			}
 		}
-		if agent.Replicas == 0 {
+		if projection.agentReplicas == 0 {
 			continue
 		}
 		podSpec := template.Spec
@@ -176,13 +125,13 @@ func RenderNodeLocal(
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
-		replicas := int32(agent.Replicas)
+		replicas := int32(projection.agentReplicas)
 		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
-			Name:        agent.TemplateName,
+			Name:        workload.agentTemplate(index),
 			Labels:      maps.Clone(template.Labels),
 			Annotations: annotations,
 			Spec: grovev1alpha1.PodCliqueSpec{
-				RoleName:     agent.TemplateName,
+				RoleName:     workload.agentTemplate(index),
 				PodSpec:      podSpec,
 				Replicas:     replicas,
 				MinAvailable: new(replicas),
@@ -190,17 +139,7 @@ func RenderNodeLocal(
 		})
 	}
 
-	selectedTemplateNames := agentTemplateNames
-	if conductorTemplateName != "" {
-		selectedTemplateNames = append([]string{conductorTemplateName}, selectedTemplateNames...)
-	}
-
 	if hybrid {
-		// Bound GPU hostnames using the rendered width of the last workload replica.
-		if err := plan.validatePodHostname("Cyborg", plan.CyborgTemplate, int(cyborg.Spec.Replicas)-1); err != nil {
-			return nil, err
-		}
-
 		if err := configureHybridCyborg(
 			cyborg,
 			projections[0],
@@ -215,12 +154,12 @@ func RenderNodeLocal(
 	}
 
 	// Each workload contributes its own scaling group to the shared PCS.
-	members := selectedTemplateNames
+	members := agentTemplateNames
 	if hybrid {
-		members = append(members, plan.CyborgTemplate)
+		members = append(members, workload.CyborgTemplate())
 	}
 	rendered.ScalingGroup = grovev1alpha1.PodCliqueScalingGroupConfig{
-		Name:         plan.ScalingGroupTemplate,
+		Name:         workload.scalingGroupTemplate,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
 		Replicas:     new(ptr.Deref(input.MinAvailable, 1)),

@@ -6,11 +6,11 @@
 package lpx
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -32,28 +32,18 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	for _, projection := range projections {
 		projection.stage = testRenderComponentName
 	}
-	digest, err := workloadSetDigest(projections)
-	if err != nil {
-		return nil, err
-	}
 
-	// Projection-only fixtures model a workload with an authored conductor.
-	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
-		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	// Only a hybrid fixture has a conductor: the Cyborg clique of the test PCS.
+	var cyborgReplicas int32
+	if projections[0].pipeline == PipelineHybrid {
+		input.Cyborg = pcs.Spec.Template.Cliques[0]
+		cyborgReplicas = input.Cyborg.Spec.Replicas
 	}
-	workload := &Workload{
-		modelProjections:     projections,
-		digest:               digest,
-		scalingGroupReplicas: 1,
-	}
-	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name, serving)
+	workload, err := newWorkload(pcs.Name, false, projections, 1, cyborgReplicas)
 	if err != nil {
 		return nil, err
 	}
-	if workload.Pipeline() == PipelineHybrid {
-		input.Cyborg = pcs.Spec.Template.Cliques[0]
-	}
-	templates, err := RenderNodeLocal(workload, plan, input)
+	templates, err := RenderNodeLocal(workload, input)
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +129,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
 			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
-				Conductor: template.DeepCopy(),
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
@@ -165,10 +154,8 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Resolve runtime mounts using the authored storage path")
 			if test.pipeline != PipelineHybrid {
-				conductor := namedClique(t, rendered, "cond")
-				require.Equal(t, "kept", conductor.Annotations["user"])
-				require.Subset(t, conductor.Spec.PodSpec.Volumes, template.Spec.Volumes)
-				require.Equal(t, template.Spec.Containers[0].VolumeMounts, conductor.Spec.PodSpec.Containers[0].VolumeMounts)
+				require.Len(t, rendered.Spec.Template.Cliques, 1)
+				require.Equal(t, "kept", agent.Annotations["user"])
 				require.Equal(t, template.Spec.Containers[0].VolumeMounts, agent.Spec.PodSpec.Containers[0].VolumeMounts)
 			} else {
 				cyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
@@ -192,48 +179,38 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	modelAnnotationSource := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
 		FieldPath: "metadata.annotations['" + lpxv1alpha1.PodModelAnnotation + "']",
 	}}
-	conductorPodSpec := renderTestPodSpec()
-	conductorPodSpec.NodeSelector = map[string]string{"node-pool": "lpu"}
-	conductorPodSpec.Containers[0].Command = []string{"/bin/bash"}
-	conductorPodSpec.Containers[0].Args = []string{"-c", "custom-agent"}
-	conductorPodSpec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+	podSpec := renderTestPodSpec()
+	podSpec.NodeSelector = map[string]string{"node-pool": "lpu"}
+	podSpec.Containers[0].Command = []string{"/bin/bash"}
+	podSpec.Containers[0].Args = []string{"-c", "custom-agent"}
+	podSpec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{
 				Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"lpu-node-a"},
 			}}}},
 		},
 	}}
-	conductorPodSpec.Containers[0].Env = []corev1.EnvVar{{Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource}}
+	podSpec.Containers[0].Env = []corev1.EnvVar{{Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource}}
 
-	t.Log("Render conductor and Agent roles from the base PodSpec")
+	t.Log("Render the Agent role, and no other role, from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
-		Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
-		Conductor: &corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()},
+		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: podSpec}},
 	})
 	require.NoError(t, err)
-
-	t.Log("Verify conductor-owned placement and entrypoint behavior")
-	conductor := namedClique(t, rendered, "cond")
-	require.Equal(t, conductorPodSpec.Affinity, conductor.Spec.PodSpec.Affinity)
-	require.Equal(t, conductorPodSpec.NodeSelector, conductor.Spec.PodSpec.NodeSelector)
-	require.Equal(t, []string{"/bin/bash"}, conductor.Spec.PodSpec.Containers[0].Command)
-	require.Equal(t, []string{"-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[:2])
-	require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource,
-	})
-	require.Equal(t, "agt", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
-	require.Equal(t, []string{"agt"}, conductor.Spec.StartsAfter)
+	require.Len(t, rendered.Spec.Template.Cliques, 1)
+	require.Equal(t, []string{testAgentTemplateName}, rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames)
 
 	t.Log("Verify Agent-owned affinity and logical model binding")
 	agent := namedClique(t, rendered, testAgentTemplateName)
-	require.Equal(t, conductorPodSpec.Affinity, agent.Spec.PodSpec.Affinity)
-	require.Equal(t, conductorPodSpec.NodeSelector, agent.Spec.PodSpec.NodeSelector)
+	require.Equal(t, podSpec.Affinity, agent.Spec.PodSpec.Affinity)
+	require.Equal(t, podSpec.NodeSelector, agent.Spec.PodSpec.NodeSelector)
 	require.Equal(t, []string{"/bin/bash"}, agent.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"-c", "custom-agent"}, agent.Spec.PodSpec.Containers[0].Args)
 	require.Contains(t, agent.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
 		Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource,
 	})
 	require.Equal(t, projection.Model(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
+	require.Empty(t, agent.Spec.StartsAfter)
 }
 
 func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
@@ -247,15 +224,17 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 
 	targetSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, targetFixture))
 
-	t.Log("Keep independent draft, target and conductor templates")
+	t.Log("Keep independent draft and target templates; the target serves through its agent runtime sidecar")
 	draft := testLPXComponent(runtimeModelDraft, "draft-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	draft.Replicas = new(int32(2))
 	target := testLPXComponent(testTargetStageName, "target-build",
-		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
+	target.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+		{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+	}
 	source := newSelectedTestDGD(t, "specdecode", draft, target)
 
 	t.Log("Keep role-named sidecars and explicit main-container references in every template")
@@ -279,7 +258,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		}
 	}
 
-	t.Log("Assign distinct runtime settings to each component and conductor")
+	t.Log("Assign distinct runtime settings to each component")
 	stages := make(map[string]corev1.PodTemplateSpec)
 	for _, component := range source.Spec.Components {
 		template := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
@@ -293,109 +272,63 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/stage", Operator: corev1.TolerationOpEqual, Value: component.ComponentName}}
 		stages[component.ComponentName] = *template.DeepCopy()
 	}
-	conductorTemplate := source.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
-	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
-	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
-	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
-	conductorResources := corev1.ResourceList{
-		v2LPUResourceName: resource.MustParse("3"),
-		v3LPUResourceName: resource.MustParse("5"),
-		corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),
-	}
-	conductorTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-		Requests: conductorResources.DeepCopy(), Limits: conductorResources.DeepCopy(),
-	}
-	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
-		{Name: "CONTAINER_NAME", Value: "main"},
-		{Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}"},
-		{Name: "NOVA_PIPELINE_TYPE", Value: "SpecDecode"},
-		{Name: "NOVA_MAX_SWA_DKVC_BLOCKS_DRAFT", Value: "2"},
-		{Name: "NOVA_AGENT_CONNECT_TIMEOUT", Value: "30s"},
-		{Name: "NOVA_AGENT_SETUP_TIMEOUT", Value: "180s"},
-	}
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
-		"draft-build": draftSnapshot, "target-build": targetSnapshot,
-	})
-	require.NoError(t, err)
 	pcs := renderTestPCS(false)
-	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name, source.GetComponentByName(selected.ServingComponentName()))
+	selected, err := resolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
+		"draft-build": draftSnapshot, "target-build": targetSnapshot,
+	}, pcs.Name, false)
 	require.NoError(t, err)
-	templates, err := RenderNodeLocal(selected, plan, RenderInput{
-		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
-	})
+	require.Empty(t, selected.CyborgTemplate())
+	templates, err := RenderNodeLocal(selected, RenderInput{Stages: stages})
 	require.NoError(t, err)
+	require.Equal(t, before, source)
 
-	t.Log("Preserve companion containers with the workload's model paths before authored references")
-	companions := conductorTemplate.Spec.DeepCopy()
-	for _, containers := range [][]corev1.Container{companions.Containers[1:], companions.InitContainers} {
-		for i := range containers {
-			containers[i].Env = append([]corev1.EnvVar{
-				{Name: "LPX_DRAFT_MODEL_PATH", Value: "/models/draft-build"},
-				{Name: "LPX_TARGET_MODEL_PATH", Value: "/models/target-build"},
-			}, containers[i].Env...)
-		}
-	}
-
-	t.Log("Preserve container identity and references while materializing distinct Pod roles")
-	for _, clique := range templates.Cliques {
-		spec := &clique.Spec.PodSpec
-		require.Equal(t, "main", spec.Containers[0].Name)
-		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
-		require.Equal(t, companions.Containers[1:], spec.Containers[1:])
-		require.Equal(t, companions.InitContainers, spec.InitContainers)
-		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
-		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
-	}
-
-	t.Log("Retain each authored component's image and metadata on its Agent cliques")
+	t.Log("Render one Agent clique for each model, and no conductor")
 	pcs.Spec.Template.Cliques = templates.Cliques
+	require.Len(t, templates.Cliques, 3)
+	require.Equal(t, []string{"agt0", "agt1", "agt2"}, templates.ScalingGroup.CliqueNames)
+
+	t.Log("Retain each authored component's image, metadata, and companion containers on its Agent cliques")
 	for index, stage := range []string{runtimeModelDraft, runtimeModelDraft, testTargetStageName} {
-		agent := namedClique(t, pcs, plan.Agents[index].TemplateName)
-		require.Equal(t, stage+"-runtime", agent.Spec.PodSpec.Containers[0].Image)
+		agent := namedClique(t, pcs, selected.agentTemplate(index))
+		spec := &agent.Spec.PodSpec
+		require.Equal(t, lpxv1alpha1.PodRoleAgent, agent.Annotations[lpxv1alpha1.PodRoleAnnotation])
+		require.Empty(t, agent.Spec.StartsAfter)
+		require.Equal(t, stage+"-runtime", spec.Containers[0].Image)
 		require.Equal(t, stage, agent.Labels["owner"])
 		require.Equal(t, stage, agent.Annotations["owner"])
+		require.Equal(t, "main", spec.Containers[0].Name)
+		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
+
+		// The workload's model paths precede the authored references of every companion container.
+		authored := source.GetComponentByName(stage).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.DeepCopy()
+		for _, containers := range [][]corev1.Container{authored.Containers[1:], authored.InitContainers} {
+			for i := range containers {
+				containers[i].Env = append([]corev1.EnvVar{
+					{Name: "LPX_DRAFT_MODEL_PATH", Value: "/models/draft-build"},
+					{Name: "LPX_TARGET_MODEL_PATH", Value: "/models/target-build"},
+				}, containers[i].Env...)
+			}
+		}
+		require.Equal(t, authored.Containers[1:], spec.Containers[1:])
+		require.Equal(t, authored.InitContainers, spec.InitContainers)
+		require.Contains(t, spec.Volumes, authored.Volumes[len(authored.Volumes)-1])
 	}
 
-	t.Log("Mutate Agent 0 and verify sibling and conductor PodSpecs do not alias it")
-	firstAgent := namedClique(t, pcs, plan.Agents[0].TemplateName)
-	secondAgent := namedClique(t, pcs, plan.Agents[1].TemplateName)
-	conductor := namedClique(t, pcs, plan.ConductorTemplate)
-	require.Equal(t, "conductor-runtime", conductor.Spec.PodSpec.Containers[0].Image)
-	require.Equal(t, "conductor", conductor.Labels["owner"])
-	require.Equal(t, "conductor", conductor.Annotations["owner"])
+	t.Log("Mutate Agent 0 and verify that sibling and target PodSpecs do not alias it")
+	firstAgent := namedClique(t, pcs, selected.agentTemplate(0))
+	secondAgent := namedClique(t, pcs, selected.agentTemplate(1))
+	targetAgent := namedClique(t, pcs, selected.agentTemplate(2))
 	secondAgentBefore := secondAgent.Spec.PodSpec.DeepCopy()
-	conductorBefore := conductor.Spec.PodSpec.DeepCopy()
+	targetAgentBefore := targetAgent.Spec.PodSpec.DeepCopy()
 	require.NotEmpty(t, firstAgent.Spec.PodSpec.Containers[0].Env)
 	require.NotEmpty(t, firstAgent.Spec.PodSpec.Tolerations)
 	firstAgent.Spec.PodSpec.Containers[0].Env[0].Name = "MUTATED_AGENT_ENV"
 	firstAgent.Spec.PodSpec.Tolerations[0].Key = "mutated-agent-toleration"
 	require.Equal(t, secondAgentBefore, &secondAgent.Spec.PodSpec)
-	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
-
-	t.Log("Preserve runtime settings in the conductor template and share only partition data")
-	require.Equal(t, conductorTemplate.Spec.Containers[0].Resources, conductor.Spec.PodSpec.Containers[0].Resources)
-	for _, env := range conductorTemplate.Spec.Containers[0].Env {
-		require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, env)
-	}
-	require.Equal(t, before, source)
-
-	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
-	require.Equal(t, "agt0:agt1:agt2", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
-	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
-	nodeNameTemplate := testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, "NOVA_NODE_NAME_TEMPLATE")
-	for _, agent := range plan.ForReplica(0).Agents {
-		hostname := strings.NewReplacer(
-			"${GROVE_PCSG_NAME}", plan.LPXScalingGroup,
-			"${GROVE_PCSG_INDEX}", "0",
-			"{rack}", agent.TemplateName,
-			"{node}", "0",
-			"${GROVE_HEADLESS_SERVICE}", pcs.Name,
-		).Replace(nodeNameTemplate)
-		require.Equal(t, agent.CliqueName+"-0."+pcs.Name, hostname)
-	}
+	require.Equal(t, targetAgentBefore, &targetAgent.Spec.PodSpec)
 }
 
 func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *ModelProjection {

@@ -280,16 +280,16 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	ctx := t.Context()
 	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
-	require.Empty(t, desired.plan.ConductorTemplate)
-	require.NotEmpty(t, desired.plan.CyborgClique)
+	require.Equal(t, lpx.PipelineHybrid, desired.workload.Pipeline())
+	require.NotEmpty(t, desired.workload.CyborgTemplate())
 
 	objects := lpxMaterializedObjects(t, reconciler, deployment, dgd, desired)
 	for _, object := range objects {
 		require.NotEmpty(t, object.GetName())
 	}
-	pcsg := getResource[*grovev1alpha1.PodCliqueScalingGroup](t, objects, desired.plan.LPXScalingGroup)
+	pcsg := getResource[*grovev1alpha1.PodCliqueScalingGroup](t, objects, desired.workload.ScalingGroup())
 	require.NotContains(t, pcsg.Spec.CliqueNames, "")
-	cyborg := getResource[*grovev1alpha1.PodClique](t, objects, desired.plan.CyborgClique)
+	cyborg := getResource[*grovev1alpha1.PodClique](t, objects, desired.workload.CyborgCliqueName(0))
 	require.NotContains(t, cyborg.Spec.StartsAfter, "")
 	require.Equal(t, v1alpha1.LPXSchedulerName, cyborg.Spec.PodSpec.SchedulerName)
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
@@ -303,7 +303,7 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	require.True(t, *metav1.GetControllerOf(request).BlockOwnerDeletion)
 	require.Empty(t, request.Finalizers)
 	require.NotNil(t, request.Spec.CyborgPodCliqueRef)
-	require.Equal(t, desired.plan.CyborgClique, request.Spec.CyborgPodCliqueRef.Name)
+	require.Equal(t, desired.workload.CyborgCliqueName(0), request.Spec.CyborgPodCliqueRef.Name)
 }
 
 func TestPipelineRequestIdentityDigest(t *testing.T) {
@@ -356,7 +356,7 @@ func TestPipelineRequestName(t *testing.T) {
 func TestResolvePipelineRequestsPreservesImmutableIntent(t *testing.T) {
 	t.Log("Immutable intent compares desired annotations and spec, not scheduler-owned metadata")
 	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
+	_, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), deployment, dgd)
 	for _, test := range []struct {
 		name       string
 		annotation string
@@ -371,7 +371,7 @@ func TestResolvePipelineRequestsPreservesImmutableIntent(t *testing.T) {
 			current := desired.requests[0].DeepCopy()
 			current.Annotations[test.annotation] = test.value
 			require.Equal(t, !test.changed, pipelineRequestMatches(current, &desired.requests[0]))
-			requests, missing := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.plan)
+			requests, missing := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.replicas)
 			if !test.changed {
 				require.Empty(t, missing)
 				require.Equal(t, current, requests[current.Name])
@@ -389,7 +389,7 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
 	require.Len(t, desired.requests, 3)
-	require.Len(t, desired.plan.Agents, 3)
+	require.Len(t, desired.workload.ModelProjections(), 3)
 	objects := lpxMaterializedObjects(t, reconciler, deployment, dgd, desired)
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
 
@@ -409,7 +409,7 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		require.NotContains(t, request.Annotations, "lpx.nvidia.com/deployment-uid")
 		require.NotContains(t, request.Annotations, "scheduling.lpu.nvidia.com/dgd-uid")
 		require.Equal(t, model, request.Spec.NodeLocal.Model)
-		require.Equal(t, desired.plan.LPXScalingGroup, request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name)
+		require.Equal(t, desired.workload.ScalingGroup(), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name)
 	}
 	for _, projection := range desired.requests {
 		request, found := requestByModel[projection.Annotations[pipelineRequestModelAnnotation]]
@@ -418,11 +418,11 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		require.Equal(t, projection.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation], request.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 	}
 
-	for index, expected := range desired.plan.Agents {
+	for index, expected := range desired.workload.ModelProjections() {
 		projection := &desired.requests[index]
-		clique := getResource[*grovev1alpha1.PodClique](t, objects, expected.CliqueName)
-		require.Equal(t, int32(expected.Replicas), clique.Spec.Replicas)
-		require.Equal(t, new(int32(expected.Replicas)), clique.Spec.MinAvailable)
+		clique := getResource[*grovev1alpha1.PodClique](t, objects, lpxTestAgentCliqueName(desired.workload, index, 0))
+		require.Equal(t, int32(expected.AgentReplicas()), clique.Spec.Replicas)
+		require.Equal(t, new(int32(expected.AgentReplicas())), clique.Spec.MinAvailable)
 		require.Equal(t, projection.Annotations[lpx.WorkloadDigestAnnotation], clique.Annotations[lpx.WorkloadDigestAnnotation])
 		require.Equal(t, projection.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation], clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 		require.Equal(t, projection.Annotations[pipelineRequestModelAnnotation], clique.Annotations[lpxv1alpha1.PodModelAnnotation])
@@ -449,13 +449,16 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Resolve two workload replicas with draft0, draft1 and target models")
 			deployment, dgd, registry := newLPXSpecDecodeTestDGD(t)
-			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
-			desired.plan.Replicas = 2
-			_, rendered := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+			_, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), deployment, dgd)
+			desired.replicas = 2
+			_, rendered := resolvePipelineRequests(deployment, nil, desired.workload, desired.replicas)
 			require.Len(t, rendered, 6)
 			for index, request := range rendered {
-				require.Equal(t, int64(index/3), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex)
-				require.Equal(t, []string{"draft0", "draft1", "target"}[index%3], request.Annotations[pipelineRequestModelAnnotation])
+				replica, model := int32(index/3), []string{"draft0", "draft1", "target"}[index%3]
+				require.Equal(t, int64(replica), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex)
+				require.Equal(t, model, request.Annotations[pipelineRequestModelAnnotation])
+				digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, "", model, replica)
+				require.Equal(t, pipelineRequestName(deployment.Name, digest), request.Name, "a sole workload has no group identity")
 			}
 
 			t.Log("Keep observed receipts and collect only absent desired names without sorting")
@@ -469,8 +472,8 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				}
 				observed[request.Name] = request
 			}
-			desired.plan.Replicas = tc.replicas
-			requests, missing := resolvePipelineRequests(deployment, observed, desired.workload, desired.plan)
+			desired.replicas = tc.replicas
+			requests, missing := resolvePipelineRequests(deployment, observed, desired.workload, desired.replicas)
 			require.Len(t, requests, int(tc.replicas)*3)
 			require.Len(t, missing, len(tc.wantMissing))
 			for index, renderedIndex := range tc.wantMissing {
@@ -571,9 +574,9 @@ func TestResolvePipelineRequestsSkipsAllLocalWorkload(t *testing.T) {
 	dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{
 		LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
 	}
-	desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
+	_, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), deployment, dgd)
 
 	t.Log("An all-local workload publishes no LPU placement request")
-	_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+	_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.replicas)
 	require.Empty(t, missing)
 }

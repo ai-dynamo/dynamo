@@ -1183,7 +1183,7 @@ func betaLPXDGDForAdmission(
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
 					{Name: nvidiacomv1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/nova"}}},
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/cyborg"}}},
 					}}},
 				},
 			},
@@ -1209,7 +1209,7 @@ func alphaLPXDGDForAdmission(
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
 					{Name: nvidiacomv1alpha1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/nova"}}},
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/cyborg"}}},
 					}}},
 				},
 			},

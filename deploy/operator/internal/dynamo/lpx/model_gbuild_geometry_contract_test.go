@@ -112,7 +112,7 @@ func TestGBuildGeometryContract(t *testing.T) {
 			projection := projections[0]
 			require.Equal(t, expected.agents, projection.AgentReplicas())
 			require.Equal(t, expected.contentID, projection.CompilerSnapshotDigest())
-			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
+			spec := projection.requestSpec()
 			require.Len(t, spec.Partitions, len(expected.ids))
 			require.Len(t, spec.NodeLocal.PartitionMappings, len(expected.ids))
 			for i, partition := range spec.Partitions {

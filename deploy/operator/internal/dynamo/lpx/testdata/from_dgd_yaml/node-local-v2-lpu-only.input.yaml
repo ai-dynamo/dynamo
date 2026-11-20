@@ -16,59 +16,6 @@ spec:
       lpx:
         buildId: node-local-v2-connected
       roles:
-      - name: conductor
-        podTemplate:
-          spec:
-            containers:
-            - name: main
-              image: example.invalid/quasar:test
-              env:
-              - name: MODEL_PATH
-                value: $(LPX_MODEL_PATH)
-              readinessProbe:
-                httpGet:
-                  path: /readyz
-                  port: 51045
-                  scheme: HTTP
-                failureThreshold: 3
-                initialDelaySeconds: 10
-                periodSeconds: 5
-                successThreshold: 1
-                timeoutSeconds: 1
-              volumeMounts:
-              - name: model-storage
-                mountPath: /nfs
-              - name: single-v2-ssh-key
-                mountPath: /tmp/dynamo-lpu-ssh
-            initContainers:
-            - args:
-              - -m
-              - '0600'
-              - /ssh-pk/private.key
-              - /tmp/dynamo-lpu-ssh/private.key
-              command:
-              - /bin/install
-              image: example.invalid/lpu-runtime:test
-              name: prepare-ssh-key
-              volumeMounts:
-              - mountPath: /tmp/dynamo-lpu-ssh
-                name: single-v2-ssh-key
-              - mountPath: /ssh-pk
-                name: ssh-secret
-                readOnly: true
-            volumes:
-            - name: model-storage
-              persistentVolumeClaim:
-                claimName: model-storage
-            - name: ssh-secret
-              secret:
-                secretName: ssh-secret
-                defaultMode: 384
-            - name: single-v2-ssh-key
-              emptyDir: {}
-            securityContext:
-              fsGroup: 1000
-              fsGroupChangePolicy: OnRootMismatch
       - name: agent
         podTemplate:
           spec:
@@ -107,6 +54,8 @@ spec:
                 readOnly: true
               - name: hugepages
                 mountPath: /dev/hugepages
+              - name: openengine
+                mountPath: /run/openengine
               securityContext:
                 privileged: true
             volumes:
@@ -128,6 +77,8 @@ spec:
               secret:
                 secretName: ssh-secret
                 defaultMode: 420
+            - name: openengine
+              emptyDir: {}
             dnsPolicy: ClusterFirstWithHostNet
             hostIPC: true
             hostNetwork: true
@@ -137,3 +88,28 @@ spec:
             tolerations:
             - key: lpu.nvidia.com/node
               operator: Exists
+            initContainers:
+            - name: runtime
+              image: example.invalid/dynamo-sidecar:test
+              restartPolicy: Always
+              args:
+              - lpx
+              - --grpc-endpoint
+              - unix:///run/openengine/openengine.sock
+              - --model-path
+              - $(LPX_MODEL_PATH)/tokenizer
+              - --node-rank
+              - $(GROVE_PCLQ_POD_INDEX)
+              env:
+              - name: DYN_SYSTEM_PORT
+                value: '18090'
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 18090
+              volumeMounts:
+              - name: model-storage
+                mountPath: /nfs
+                readOnly: true
+              - name: openengine
+                mountPath: /run/openengine

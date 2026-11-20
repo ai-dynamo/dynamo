@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"maps"
 	"math/big"
 	"path"
 	"slices"
@@ -51,69 +50,31 @@ const (
 	identityMountPath = "/etc/lpx/identity"
 )
 
-// resolveWorkloads resolves every component group and finalizes its resource names.
+// resolveWorkloads resolves and names each workload using the selected checkpoint policy.
 // deployment and dgd must be non-nil; dgd must have passed admission.
-// Returned maps share conductor component keys. Inputs are not mutated.
+// Inputs are not mutated.
 func (r *graphReconciler) resolveWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
-) (map[string]*lpx.Workload, map[string]*lpx.MaterializationPlan, error) {
-	var (
-		workloads = make(map[string]*lpx.Workload)
-		plans     = make(map[string]*lpx.MaterializationPlan)
-		groups    = lpx.ComponentGroups(dgd)
-	)
-
+) ([]*lpx.Workload, error) {
 	registry := r.modelRegistry
 	if !adoptBuildCheckpoints(r.config.Infrastructure.ModelExpressURL, deployment) {
 		registry = lpx.WithoutBuildCheckpoints(registry)
 	}
-
-	for _, groupName := range slices.Sorted(maps.Keys(groups)) {
-		workload, err := lpx.ResolveWorkload(ctx, r.Client, dgd, groups[groupName], registry)
-		if err != nil {
-			return nil, nil, err
-		}
-		workloads[groupName] = workload
-
-		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
-		if err != nil {
-			return nil, nil, err
-		}
-
-		// Only independent workloads need additional names within the shared PCS.
-		if len(groups) > 1 {
-			plan, err = plan.WithGroup(groupName)
-			if err != nil {
-				return nil, nil, err
-			}
-		}
-
-		// Compare finalized identities only against previously resolved groups.
-		for previousGroup, previous := range plans {
-			if previous.ScalingGroupTemplate == plan.ScalingGroupTemplate || previous.ResourcePrefix == plan.ResourcePrefix {
-				return nil, nil, fmt.Errorf("LPX components %q and %q resolve to conflicting resource names; rename one component", previousGroup, groupName)
-			}
-		}
-		plans[groupName] = plan
-	}
-
-	return workloads, plans, nil
+	return lpx.ResolveWorkloads(ctx, r.Client, dgd, dynamo.PCSNameForLPX(deployment), registry)
 }
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
 // serving Services for Kubernetes discovery.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.
-// Plans must have finalized names and use the same keys as workloads.
 // Inputs remain read-only.
 func (r *graphReconciler) renderPodCliqueSet(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
-	workloads map[string]*lpx.Workload,
-	plans map[string]*lpx.MaterializationPlan,
+	workloads []*lpx.Workload,
 	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
 	// Shared defaults and queue resolution belong to the single PCS envelope.
@@ -124,23 +85,15 @@ func (r *graphReconciler) renderPodCliqueSet(
 
 	var resources []client.Object
 
-	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
-		workload, plan := workloads[groupName], plans[groupName]
-
+	for _, workload := range workloads {
 		// Render this workload's roles using the full graph for shared defaults.
-		rendered, err := dynamo.RenderLPXWorkloadTemplates(dgd, r.config, r.runtimeConfig, r.dockerSecretRetriever, workload, plan)
+		rendered, err := dynamo.RenderLPXWorkloadTemplates(dgd, r.config, r.runtimeConfig, r.dockerSecretRetriever, workload)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		// Discovery selects only this workload's serving role; all auxiliary roles stay private.
-		serving := plan.ConductorTemplate
-		if serving == "" {
-			serving = plan.CyborgTemplate
-		}
-		if serving == "" {
-			serving = plan.Agents[len(plan.Agents)-1].TemplateName
-		}
+		serving := workload.ServingTemplate()
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {
 				clique.Annotations[consts.RestartAnnotation] = token
@@ -163,7 +116,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {
 			component := dgd.GetComponentByName(workload.ServingComponentName())
 			service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-				ServiceName: plan.ResourcePrefix + "-serve", Namespace: deployment.Namespace,
+				ServiceName: workload.ResourcePrefix() + "-serve", Namespace: deployment.Namespace,
 				ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
 				DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
 				Labels:      dynamo.GetDGDComponentResourceLabels(dgd, component.ComponentName, component),
@@ -237,11 +190,10 @@ func (r *graphReconciler) renderDesiredPodCliqueSet(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
-	workloads map[string]*lpx.Workload,
-	plans map[string]*lpx.MaterializationPlan,
+	workloads []*lpx.Workload,
 	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
-	pcs, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans, existingPCS)
+	pcs, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, existingPCS)
 	if err != nil {
 		return nil, nil, err
 	}

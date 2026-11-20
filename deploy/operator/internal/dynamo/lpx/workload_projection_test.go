@@ -255,7 +255,7 @@ func TestUnitProjection(t *testing.T) {
 			projection := projections[0]
 
 			t.Log("Request one LPX partition per kept reservation with the units' connectors and no compiler envelope")
-			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
+			spec := projection.requestSpec()
 			if test.wantPartitions == nil {
 				test.wantPartitions = []lpxv1alpha1.PartitionRequest{}
 			}

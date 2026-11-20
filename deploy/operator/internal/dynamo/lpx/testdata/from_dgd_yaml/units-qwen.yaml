@@ -22,6 +22,7 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
       labels:
+        lpx.nvidia.com/serving: "true"
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: units-qwen
@@ -37,38 +38,8 @@ spec:
             - name: LPX_LOCAL_PARTITION_IDS
             - name: LPX_MODEL_PATH
               value: /nfs/units-qwen
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-units-qwen
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: units-qwen
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
             - name: MODEL_PATH
               value: $(LPX_MODEL_PATH)
-            - name: NATS_SERVER
-              value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
             image: example.invalid/quasar:test
             name: main
             resources:
@@ -80,41 +51,20 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
+            - mountPath: /run/openengine
+              name: openengine
             - mountPath: /dev/shm
               name: shared-memory
-          restartPolicy: Always
-          schedulerName: lpx-scheduler
-          terminationGracePeriodSeconds: 60
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-        replicas: 2
-        roleName: agt
-    - annotations:
-        lpx.nvidia.com/deployment-name: units-qwen
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:33780178ec56d1592907b7334d91eac5f6815f1ff09b9917ebdda8635f332870
-        scheduling.lpu.nvidia.com/role: conductor
-      labels:
-        lpx.nvidia.com/serving: "true"
-        nvidia.com/dynamo-component: lpu
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: units-qwen
-        nvidia.com/dynamo-namespace: test-units-qwen
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: units-qwen-lpu
-      name: cond
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - env:
-            - name: LPX_ALLOCATION
-              value: agt
+          initContainers:
+          - args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            - --node-rank
+            - $(GROVE_PCLQ_POD_INDEX)
+            env:
             - name: LPX_MODEL_PATH
               value: /nfs/units-qwen
             - name: DYN_COMPONENT
@@ -127,16 +77,14 @@ spec:
               value: units-qwen
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
               value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: MODEL_PATH
-              value: $(LPX_MODEL_PATH)
             - name: NATS_SERVER
               value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -149,14 +97,41 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            image: example.invalid/quasar:test
-            name: main
+            image: example.invalid/dynamo-sidecar:test
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: runtime
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
             resources: {}
+            restartPolicy: Always
+            startupProbe:
+              failureThreshold: 30
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 2
+              timeoutSeconds: 1
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
+              readOnly: true
+            - mountPath: /run/openengine
+              name: openengine
           restartPolicy: Always
           schedulerName: lpx-scheduler
           terminationGracePeriodSeconds: 60
@@ -164,14 +139,14 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - emptyDir: {}
+            name: openengine
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-        replicas: 1
-        roleName: cond
-        startsAfter:
-        - agt
+        replicas: 2
+        roleName: agt
     headlessServiceConfig:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
@@ -179,7 +154,6 @@ spec:
         lpx.nvidia.com/deployment-name: units-qwen
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:33780178ec56d1592907b7334d91eac5f6815f1ff09b9917ebdda8635f332870
       cliqueNames:
-      - cond
       - agt
       minAvailable: 1
       name: lpx

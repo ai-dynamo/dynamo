@@ -20,6 +20,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/testfixture"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -75,6 +76,16 @@ func testLPXPodTemplate(image string) *corev1.PodTemplateSpec {
 	return &corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: image}}},
 	}
+}
+
+// testLPXServingAgentTemplate constructs an independent agent role template that serves
+// through the runtime sidecar, as an LPU-only engine does.
+func testLPXServingAgentTemplate(image string) *corev1.PodTemplateSpec {
+	template := testLPXPodTemplate(image)
+	template.Spec.InitContainers = []corev1.Container{
+		{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+	}
+	return template
 }
 
 func acquireTestSnapshot(t *testing.T, buildDir string) *Build {
