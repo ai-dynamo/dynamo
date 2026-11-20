@@ -259,7 +259,10 @@ def test_main_points_to_the_versioned_ngc_source_archive(
     text = (out / "THIRD-PARTY.txt").read_text(encoding="utf-8")
     assert f"available at:\n{source_location(version)}\n" in text
     if version:
-        assert "dynamo-dependency-source-archive?version=1.7.0\n" in text
+        assert (
+            "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/resources/"
+            "dynamo-dependency-source-archive/1.7.0\n"
+        ) in text
         assert (
             "download-version nvidia/ai-dynamo/dynamo-dependency-source-archive:1.7.0"
             in text

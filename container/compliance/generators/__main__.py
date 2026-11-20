@@ -53,7 +53,7 @@ def _parse_ecosystems(raw: str) -> list[str]:
 # The NGC resource that publishes the corresponding source of every image.
 SOURCE_ARCHIVE = "nvidia/ai-dynamo/dynamo-dependency-source-archive"
 SOURCE_ARCHIVE_URL = (
-    "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/resources/"
+    "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/resources/"
     "dynamo-dependency-source-archive"
 )
 
@@ -66,7 +66,7 @@ def source_location(version: str | None) -> str:
             f"ngc registry resource download-version {SOURCE_ARCHIVE}:<dynamo-version>"
         )
     return (
-        f"{SOURCE_ARCHIVE_URL}?version={version}\n"
+        f"{SOURCE_ARCHIVE_URL}/{version}\n"
         f"ngc registry resource download-version {SOURCE_ARCHIVE}:{version}"
     )
 
