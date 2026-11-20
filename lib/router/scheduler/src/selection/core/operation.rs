@@ -149,4 +149,6 @@ pub struct Selected {
     /// The booking's handle; `Lease` admission only. Dropping it frees the
     /// booking, `commit` hands it to the caller's own cleanup.
     pub booking: Option<BookingHandle>,
+    /// Set by the request classifier for the engine's own admission order.
+    pub backend_priority: Option<i32>,
 }

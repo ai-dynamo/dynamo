@@ -313,8 +313,15 @@ def adapt_engine_generate_request(
             cache_salt=engine_cache_salt,
         )
 
+    # The frontend mirrors the client's priority into routing.priority, negated to Dynamo's
+    # higher-is-sooner scale, and a router request classifier may replace it there.
+    routing_priority = (request.get("routing") or {}).get("priority")
     return EngineGenerateInput(
         prompt=prompt,
         sampling_params=sampling_params,
-        priority=native_request.priority,
+        priority=(
+            native_request.priority
+            if routing_priority is None
+            else -int(routing_priority)
+        ),
     )
