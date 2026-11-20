@@ -126,7 +126,6 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.kv_cache_interface import MambaSpec
 
 try:
     # vLLM <= 0.34.0rc1.dev5xx: one spec class per attention allocation policy.
@@ -146,6 +145,9 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.kv_groups import kv_group_is_state as _kv_group_is_state
+from dynamo.vllm.kv_groups import kv_group_specs as _kv_group_specs
+from dynamo.vllm.kv_groups import kv_spec_is_state as _kv_spec_is_state
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     RANDOM_KDA_BOUND,
@@ -294,25 +296,6 @@ def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, 
     if indexer:
         block["indexer"] = indexer
     return block
-
-
-def _kv_group_specs(group: Any) -> list[Any]:
-    """The distinct layer specs of one KV cache group, on either vLLM KV API."""
-    spec = getattr(group, "kv_cache_spec", None)
-    if spec is not None:
-        return [spec]
-    distinct = getattr(group, "distinct_specs", None)
-    if distinct is not None:
-        return list(distinct)
-    return list(dict.fromkeys((getattr(group, "kv_cache_specs", None) or {}).values()))
-
-
-def _kv_group_is_state(group: Any) -> bool:
-    """Recurrent (Mamba/KDA) state group."""
-    return any(
-        isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
-        for spec in _kv_group_specs(group)
-    )
 
 
 def _kv_group_policy(group: Any) -> str:
@@ -5840,16 +5823,10 @@ class InstrumentedScheduler(AsyncScheduler):
                     next(
                         type(spec).__name__
                         for spec in _kv_group_specs(group)
-                        if "Mamba" in type(spec).__name__
-                        or isinstance(spec, MambaSpec)
+                        if _kv_spec_is_state(spec)
                     )
                 )
         return names
-
-    @staticmethod
-    def _kvwarm_is_state_spec(spec) -> bool:
-        """Recurrent (Mamba/KDA) state group; same predicate as live-state mode."""
-        return isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
 
     def _kvwarm_native_layout(self) -> bool:
         """Layouts whose decode state must come from each point's own prefill.
@@ -6007,6 +5984,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 and not self._bench_hybrid_live_state
             ):
                 reason = "hybrid_state_layers_unsupported"
+            elif self._bench_random_kda and not self._kvwarm_random_state_resolved():
+                reason = "random_state_manager_unresolved"
             else:
                 reason = self._kvwarm_probe_content()
                 eligible = reason is None
@@ -6520,7 +6499,7 @@ class InstrumentedScheduler(AsyncScheduler):
         random mode off).
         """
         # Keyed on the KV-cache spec like the eligibility gate ("Mamba" in the spec
-        # name) and the random-state path (``isinstance(spec, MambaSpec)``), not on
+        # name) and the random-state path (``kv_spec_is_state``), not on
         # manager class names, so a vLLM rename or subclass cannot silently route a
         # recurrent group to the positional path. The k-pool tail is not a recurrent
         # state table; it is served by the circular-table predicate.
@@ -6528,16 +6507,28 @@ class InstrumentedScheduler(AsyncScheduler):
         return (
             self._bench_hybrid_live_state
             and not self._bench_random_kda
-            and any(
-                isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
-                for spec in specs
-            )
+            and any(_kv_spec_is_state(spec) for spec in specs)
         )
 
     def _kvwarm_random_state_manager(self, manager) -> bool:
+        """Recurrent-state managers served by private random-state blocks. The
+        manager's specs resolve through the same group binding (and predicate) that
+        ``_kv_group_is_state`` uses, on either vLLM KV API."""
         return self._bench_random_kda and any(
-            isinstance(spec, MambaSpec) for spec in self._kvwarm_manager_specs(manager)
+            _kv_spec_is_state(spec) for spec in self._kvwarm_manager_specs(manager)
         )
+
+    def _kvwarm_random_state_resolved(self) -> bool:
+        """Every recurrent-state group maps to a manager the random-state path
+        recognizes. Otherwise registration would share chain blocks positionally
+        for an unmatched state manager, which random mode exists to prevent."""
+        managers = getattr(
+            getattr(getattr(self, "kv_cache_manager", None), "coordinator", None),
+            "single_type_managers",
+            (),
+        )
+        matched = sum(1 for m in managers if self._kvwarm_random_state_manager(m))
+        return matched >= len(self._kvwarm_state_layer_groups())
 
     def _kvwarm_manager_specs(self, manager) -> list:
         config = getattr(getattr(self, "kv_cache_manager", None), "kv_cache_config", None)
