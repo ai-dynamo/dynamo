@@ -284,6 +284,7 @@ pub async fn prepare_engine(
             watcher.set_tokenizer_fallback_enabled(
                 local_model.runtime_config().tokenizer_fallback_enabled,
             );
+            watcher.set_native_parser_overrides(local_model.native_parser_overrides().clone());
             let watch_obj = Arc::new(watcher);
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 local_model.namespace(),
