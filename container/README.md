@@ -481,7 +481,7 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 # 3. Editable install of dynamo into the upstream SGLang venv at /opt/venv
 # (local-dev images intentionally skip the dynamo wheel install; see
 #  container/templates/dev.Dockerfile -> "The editable install must be done at runtime")
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
 # Add `--features request-trace-s3` to enable the S3 request-trace sink
 # (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
@@ -544,7 +544,7 @@ nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 
 # 4. Compile code
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 # Add `--features request-trace-s3` to enable the S3 request-trace sink
 # (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -
