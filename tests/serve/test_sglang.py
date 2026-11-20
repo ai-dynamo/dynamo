@@ -64,8 +64,8 @@ from tests.utils.payloads import (
 )
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
-    allocate_ports,
     deallocate_ports,
+    reserved_ports,
 )
 
 logger = logging.getLogger(__name__)
@@ -1250,8 +1250,7 @@ def sglang_config_with_dist_ports(sglang_config_test):
     if sglang_config_test.directory == sglang_dir:
         nccl_workers = _NCCL_PORT_WORKERS.get(sglang_config_test.script_name, 0)
     if nccl_workers:
-        ports = allocate_ports(nccl_workers, DynamoPortRange.NCCL.value)
-        try:
+        with reserved_ports(nccl_workers, DynamoPortRange.NCCL.value) as ports:
             yield dataclasses.replace(
                 sglang_config_test,
                 env={
@@ -1262,8 +1261,6 @@ def sglang_config_with_dist_ports(sglang_config_test):
                     },
                 },
             )
-        finally:
-            deallocate_ports(ports)
         return
 
     if sglang_config_test.name != "disaggregated_dp_attention":
