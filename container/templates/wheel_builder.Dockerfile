@@ -764,7 +764,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:
-#   cargo build --features dynamo-llm/block-manager
+#   cargo build
 #   cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.

@@ -20,9 +20,6 @@ That file is Dynamo's compatibility layer for vLLM KV events:
   `array_like=True` payloads
 - it handles field changes in `BlockStored` / `BlockRemoved` / `EventBatch`
 - it translates upstream `extra_keys` into Dynamo's internal `block_mm_infos`
-
-Only touch consolidator files if we explicitly need the consolidator publisher
-to preserve and republish a new upstream field.
 """
 
 import importlib

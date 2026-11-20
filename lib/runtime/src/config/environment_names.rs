@@ -16,7 +16,6 @@
 //! - **ETCD**: ETCD client connection and authentication
 //! - **TCP Request Callback**: bidirectional request callback listener port and host
 //! - **Event Plane**: Event transport selection (NATS)
-//! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
@@ -276,96 +275,6 @@ pub mod etcd {
 
         /// Path to client key for ETCD TLS
         pub const ETCD_AUTH_CLIENT_KEY: &str = "ETCD_AUTH_CLIENT_KEY";
-    }
-}
-
-/// Key-Value Block Manager (KVBM) environment variables
-pub mod kvbm {
-    /// Enable KVBM metrics endpoint
-    pub const DYN_KVBM_METRICS: &str = "DYN_KVBM_METRICS";
-
-    /// KVBM metrics endpoint port
-    pub const DYN_KVBM_METRICS_PORT: &str = "DYN_KVBM_METRICS_PORT";
-
-    /// Enable KVBM recording for debugging.
-    pub const DYN_KVBM_ENABLE_RECORD: &str = "DYN_KVBM_ENABLE_RECORD";
-
-    /// Disable disk offload filter
-    pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
-
-    /// CPU cache configuration
-    pub mod cpu_cache {
-        /// CPU cache size in GB
-        pub const DYN_KVBM_CPU_CACHE_GB: &str = "DYN_KVBM_CPU_CACHE_GB";
-
-        /// CPU cache size in number of blocks (override)
-        pub const DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS: &str =
-            "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS";
-    }
-
-    /// Disk cache configuration
-    pub mod disk_cache {
-        /// Disk cache size in GB
-        pub const DYN_KVBM_DISK_CACHE_GB: &str = "DYN_KVBM_DISK_CACHE_GB";
-
-        /// Disk cache size in number of blocks (override)
-        pub const DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS: &str =
-            "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
-    }
-
-    /// Object storage configuration
-    pub mod object_storage {
-        /// Enable object storage. Set to "1" to enable.
-        pub const DYN_KVBM_OBJECT_ENABLED: &str = "DYN_KVBM_OBJECT_ENABLED";
-
-        /// Bucket name for object storage cache
-        /// Supports `{worker_id}` template for per-worker buckets
-        /// Example: "kv-cache-{worker_id}"
-        pub const DYN_KVBM_OBJECT_BUCKET: &str = "DYN_KVBM_OBJECT_BUCKET";
-
-        /// Endpoint for object storage
-        pub const DYN_KVBM_OBJECT_ENDPOINT: &str = "DYN_KVBM_OBJECT_ENDPOINT";
-
-        /// Region for object storage
-        pub const DYN_KVBM_OBJECT_REGION: &str = "DYN_KVBM_OBJECT_REGION";
-
-        /// Access key for authentication
-        pub const DYN_KVBM_OBJECT_ACCESS_KEY: &str = "DYN_KVBM_OBJECT_ACCESS_KEY";
-
-        /// Secret key for authentication
-        pub const DYN_KVBM_OBJECT_SECRET_KEY: &str = "DYN_KVBM_OBJECT_SECRET_KEY";
-
-        /// Number of blocks to store in object storage
-        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
-    }
-    /// Transfer configuration
-    pub mod transfer {
-        /// Maximum number of blocks per transfer batch
-        pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
-    }
-
-    /// KVBM leader (distributed mode) configuration
-    pub mod leader {
-        /// Timeout in seconds for KVBM leader and worker initialization
-        pub const DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS: &str =
-            "DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS";
-
-        /// ZMQ host for KVBM leader
-        pub const DYN_KVBM_LEADER_ZMQ_HOST: &str = "DYN_KVBM_LEADER_ZMQ_HOST";
-
-        /// ZMQ publish port for KVBM leader
-        pub const DYN_KVBM_LEADER_ZMQ_PUB_PORT: &str = "DYN_KVBM_LEADER_ZMQ_PUB_PORT";
-
-        /// ZMQ acknowledgment port for KVBM leader
-        pub const DYN_KVBM_LEADER_ZMQ_ACK_PORT: &str = "DYN_KVBM_LEADER_ZMQ_ACK_PORT";
-    }
-
-    /// NIXL backend configuration
-    pub mod nixl {
-        /// Prefix for NIXL backend environment variables
-        /// Pattern: `DYN_KVBM_NIXL_BACKEND_<backend>`=true/false
-        /// Example: DYN_KVBM_NIXL_BACKEND_UCX=true
-        pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
     }
 }
 
@@ -1248,19 +1157,6 @@ mod tests {
             etcd::auth::ETCD_AUTH_CA,
             etcd::auth::ETCD_AUTH_CLIENT_CERT,
             etcd::auth::ETCD_AUTH_CLIENT_KEY,
-            // KVBM
-            kvbm::DYN_KVBM_METRICS,
-            kvbm::DYN_KVBM_METRICS_PORT,
-            kvbm::DYN_KVBM_ENABLE_RECORD,
-            kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
-            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
-            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
-            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_GB,
-            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
-            kvbm::leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
@@ -1443,7 +1339,6 @@ mod tests {
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
         assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
-        assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));
 
         // NATS vars should start with NATS_

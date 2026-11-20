@@ -101,13 +101,12 @@ cat <<EOF
 ✅ Pre-commit hooks configured
 
 Now build the project:
-  cargo build --features dynamo-llm/block-manager
+  cargo build
   cd lib/bindings/python && maturin develop --uv --features mm-routing && cd $WORKSPACE_DIR
   uv pip install --no-deps -e $WORKSPACE_DIR
 
 Optional:
   uv pip install -e lib/gpu_memory_service  # GPU memory manager with C++ extension
-  cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
 
 Verify with:
   $WORKSPACE_DIR/dev/sanity_check.py

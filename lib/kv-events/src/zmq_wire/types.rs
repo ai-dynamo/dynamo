@@ -175,8 +175,7 @@ impl RawKvEvent {
     }
 
     /// Wire `medium` string for store/remove events, if present. Lets the
-    /// normalizer and consolidator ingress gate on the storage tier without
-    /// re-matching every variant.
+    /// normalizer gate on the storage tier without re-matching every variant.
     pub fn medium(&self) -> Option<&str> {
         match self {
             Self::BlockStored { medium, .. } | Self::BlockRemoved { medium, .. } => {

@@ -75,7 +75,7 @@ def _purl_type(purl: str | None) -> str:
     return purl[len("pkg:") :].split("/", 1)[0]
 
 
-# ai-dynamo-owned crates — in-repo (dynamo-/kvbm- + the lib/runtime/examples/*
+# ai-dynamo-owned crates — in-repo (dynamo- + the lib/runtime/examples/*
 # crates) or separate ai-dynamo releases (aisimulate, nixl, velo).
 # They're first-party, not third-party, so they're absent from osrb-deps.csv by
 # design — skip them instead of flagging them as attribution gaps. Keep roughly
@@ -84,7 +84,6 @@ _FIRST_PARTY_PREFIXES = (
     "aisim-",
     "aisimulate-",
     "dynamo-",
-    "kvbm-",
     "nixl-",
     "velo-",
 )
