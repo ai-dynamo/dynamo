@@ -13107,7 +13107,6 @@ responses_tools: None,
         }
         use FinishReason::{Stop, ToolCalls};
 
-        // The tool call is on the second choice of the chunk.
         let both = chunk(&[Some(Stop), Some(ToolCalls)]);
         assert_eq!(recorded(&[both]), Some(true));
         // A choice that stops later does not clear it.
