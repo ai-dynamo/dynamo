@@ -31,7 +31,7 @@ def test_shutdown_failure_preserves_serving_error(
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
-    monkeypatch.setattr(frontend, "parse_args", lambda: (config, None, None))
+    monkeypatch.setattr(frontend, "parse_args", lambda: (config, None, None, None))
     for name in (
         "dump_config",
         "_export_transport_tls_env",
