@@ -81,7 +81,8 @@ fi
 # vLLM-Omni 0.33 registers its experimental Physis pipelines (vllm-omni#9154) eagerly,
 # so every Omni process imports PyAV, which the CUDA image removes under the codec
 # policy, and Qwen3-TTS fails requests when stage 0 uses FlashInfer. Remove those
-# registrations; remove this once vllm-project/vllm-omni#9939 is fixed.
+# registrations. Omni 0.34.0rc1 has the PyAV fix (vllm-omni#9949); remove this once
+# the enterprise variant leaves 0.33.0rc1 and Qwen3-TTS on FlashInfer passes without it.
 if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
   python3 - <<'PY'
 import importlib.util

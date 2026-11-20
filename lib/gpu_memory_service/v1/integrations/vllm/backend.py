@@ -40,10 +40,10 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         # vLLM 0.33 (enterprise image) passes the sleep level instead; remove the
         # int case once it ships 0.34.
         if isinstance(discardable, int):
-            level_1 = discardable == 1
+            is_level_1 = discardable == 1
         else:
-            level_1 = not discardable
-        if not level_1:
+            is_level_1 = not discardable
+        if not is_level_1:
             raise ValueError("GMS V1 supports only whole-engine level 1 suspend")
         self._client.suspend()
         self._state = "SUSPENDED"
