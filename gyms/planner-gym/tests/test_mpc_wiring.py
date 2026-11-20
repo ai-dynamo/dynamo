@@ -389,6 +389,9 @@ def test_mpc_requires_one_cold_start_delay_for_both_pools(tmp_path: Path):
 
     with pytest.raises(MatchConfigError, match="single cold-start delay"):
         load(60, 10)
+    # A null delay hands the startup time to replay's default, unseen here.
+    with pytest.raises(MatchConfigError, match="cold_start_delay_s to a number"):
+        load(None, None)
     (mpc,) = load(45, 45)
     assert mpc.config["cold_start_s"] == 45
 

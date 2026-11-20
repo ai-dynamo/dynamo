@@ -131,7 +131,7 @@ must match the deployed engines, so the controller scores the GPU-seconds
 replay charges. The controller plans with one cold-start delay, so a
 disaggregated match whose prefill and decode engines have different
 `cold_start_delay_s` is rejected, and so is a `cold_start_s` that differs from
-the engine's delay.
+the engine's delay or an engine delay set to `null`.
 `poll_interval_s` must be a multiple of the telemetry interval, and
 `backend.replay.telemetry_sample_interval_s` must be 5; both are checked by
 `--validate-only`.

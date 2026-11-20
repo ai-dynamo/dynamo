@@ -1581,14 +1581,20 @@ def _resolve_mpc_config(
     # Replay starts each worker after its engine's delay. A different delay in
     # the controller would credit new capacity at the wrong time.
     engine_delay = cost_engine.runtime.cold_start_delay_s
-    if engine_delay is not None:
-        if "cold_start_s" in config and config["cold_start_s"] != engine_delay:
-            raise MatchConfigError(
-                f"{path}.cold_start_s: must equal the deployed engine's "
-                f"runtime.cold_start_delay_s ({engine_delay:g} s); omit it to use "
-                "the engine's value"
-            )
-        config.setdefault("cold_start_s", engine_delay)
+    if engine_delay is None:
+        # A null delay leaves the startup time to replay's own default, which
+        # the controller cannot read.
+        raise MatchConfigError(
+            f"{path}: MPC plans with the deployed engine's startup delay; set "
+            "the engine's runtime.cold_start_delay_s to a number, not null"
+        )
+    if "cold_start_s" in config and config["cold_start_s"] != engine_delay:
+        raise MatchConfigError(
+            f"{path}.cold_start_s: must equal the deployed engine's "
+            f"runtime.cold_start_delay_s ({engine_delay:g} s); omit it to use "
+            "the engine's value"
+        )
+    config.setdefault("cold_start_s", engine_delay)
     if topology == "disagg":
         # The prefill pool's GPU cost and KV-transfer parameters.
         config.setdefault("prefill_gpus_per_worker", ttft_engine.num_gpus)
