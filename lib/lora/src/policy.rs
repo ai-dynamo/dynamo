@@ -6,8 +6,8 @@ use std::{
     sync::Arc,
 };
 
-use dynamo_kv_router::{WorkerConfigLike, protocols::RoutingConstraints};
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use dynamo_scheduler::host::{RoutingConstraints, WorkerConfigLike};
 
 use crate::{
     LoadEstimator, LoraFilter,

@@ -7,7 +7,7 @@
   /workspace is bind-mounted from your host. Before running or testing,
   compile the Rust extensions and install the Python packages:
 
-    cargo build --features dynamo-llm/block-manager
+    cargo build
     cd /workspace/lib/bindings/python && maturin develop --uv && cd /workspace
     uv pip install --no-deps -e /workspace
 

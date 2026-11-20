@@ -36,11 +36,14 @@ const SnapshotFileName = "dgdr_run_snapshot.yaml"
 const maxObjectName = 253
 
 // RunStatus is the part of DynamoGraphDeploymentRun.status the publisher owns: the
-// publication condition, ordered candidate references, the number of published candidates
-// (status.progress.candidates.published) and the coarse progress time. CandidateNames is
-// in rank order (best first for scalar searches). Published always equals
-// len(CandidateNames) in a desired status; it is kept separately so a status whose
-// progress block was removed or edited by someone else is noticed and repaired.
+// publication condition, ordered candidate references, the published-candidate count
+// (status.progress.candidates.published), the Pareto-front count
+// (status.progress.candidates.paretoFront), and the coarse progress time.
+// CandidateNames is in rank order (best first for scalar searches). Published always
+// equals len(CandidateNames) in a desired status; it is kept separately so a status
+// whose progress block was removed or edited by someone else is noticed and repaired.
+// ParetoFront is non-zero only for Pareto searches; it equals Published in that case
+// because every published candidate is on the Pareto front.
 // LastProgress is the zero time when the snapshot carries no usable timestamp, in which
 // case the existing value is left untouched.
 //
@@ -49,6 +52,7 @@ const maxObjectName = 253
 // so they are not published rather than guessed.
 type RunStatus struct {
 	Published      int32
+	ParetoFront    int32
 	LastProgress   time.Time
 	CandidateNames []string
 	Publication    *metav1.Condition
@@ -128,6 +132,7 @@ func Desire(runName, runUID string, snap *Snapshot) DesiredState {
 	state.Failed = failed
 	state.Status = RunStatus{
 		Published:      int32(len(names)),
+		ParetoFront:    snap.Progress.ParetoFront,
 		LastProgress:   progressTime(snap),
 		CandidateNames: names,
 	}
@@ -162,6 +167,9 @@ func (desired RunStatus) WithPreservedProgress(known time.Time) RunStatus {
 // "leave the observed value alone".
 func (desired RunStatus) NeedsUpdate(observed RunStatus) bool {
 	if desired.Published != observed.Published {
+		return true
+	}
+	if desired.ParetoFront != observed.ParetoFront {
 		return true
 	}
 	if !desired.LastProgress.IsZero() && !desired.LastProgress.Equal(observed.LastProgress) {

@@ -1,0 +1,12 @@
+{
+  "processor_class": "Glm5NextProcessor",
+  "image_processor": {
+    "image_processor_type": "Glm5NextImageProcessor",
+    "patch_size": 14,
+    "merge_size": 2,
+    "temporal_patch_size": 2,
+    "patch_expand_factor": 1,
+    "min_image_tokens": 16,
+    "max_image_tokens": 8000
+  }
+}

@@ -16,7 +16,6 @@ use nix::unistd::unlink;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 
-const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
 const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
 
 #[cfg(target_os = "linux")]
@@ -43,9 +42,7 @@ impl DiskStorage {
         // We need to open our file with some special flags that aren't supported by the tempfile crate.
         // Instead, we'll use the mkostemp function to create a temporary file with the correct flags.
 
-        let specified_dir =
-            std::env::var(DISK_CACHE_KEY).unwrap_or_else(|_| DEFAULT_DISK_CACHE_DIR.to_string());
-        let file_path = Path::new(&specified_dir).join("dynamo-kvbm-disk-cache-XXXXXX");
+        let file_path = Path::new(DEFAULT_DISK_CACHE_DIR).join("dynamo-disk-cache-XXXXXX");
 
         Self::new_at(file_path, size)
     }

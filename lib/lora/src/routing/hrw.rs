@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::LoraAllocator;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// Rendezvous (HRW) hashing implementation for LoRA allocation
 pub struct RendezvousHasher;

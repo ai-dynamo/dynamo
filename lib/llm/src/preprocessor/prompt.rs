@@ -19,11 +19,13 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, deepseek_formatter_for,
-    kimi_k3_formatter_for, may_be_fix_tool_schema,
+    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, kimi_k3_formatter_for,
+    may_be_fix_tool_schema, native_formatter_for,
 };
 
-use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+use crate::model_card::{
+    ModelDeploymentCard, PromptFormatterArtifact, TekkenMetadata, TokenizerKind,
+};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
@@ -275,6 +277,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         self.native_template_tools()
     }
 
+    fn raw_tools(&self) -> Option<Value> {
+        self.inner.tools.as_ref().map(Value::from_serialize)
+    }
+
     fn tool_choice(&self) -> Option<Value> {
         self.inner
             .tool_choice
@@ -390,11 +396,42 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 
 /// Build a [`PromptFormatter`] from a [`ModelDeploymentCard`].
 ///
-/// Model families whose HF repos ship no Jinja `chat_template` get a native
-/// Rust formatter; everything else loads the
+/// Mistral checkpoints with a `tekken.json` tokenizer, and model families whose
+/// HF repos ship no Jinja `chat_template`, get a native Rust formatter;
+/// everything else loads the
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    // Mistral checkpoints with a tekken.json tokenizer get Mistral's own renderer.
+    // It builds each prompt exactly the way the mistral-common library does, which
+    // is also what stock vLLM uses for these checkpoints by default.
+    //
+    // The public mistralai/Mistral-Large-4-1T-A52B and
+    // mistralai/Mistral-Large-4-1T-A52B-NVFP4 also ship a Hugging Face
+    // chat_template.jinja and tokenizer.json. We don't use them, for two reasons:
+    // - The NVFP4 checkpoint has no config.json, so its card has no Hugging Face
+    //   tokenizer or template to use.
+    // - Their prompts can differ from mistral-common's. The template copies each
+    //   tool exactly as the client sent it, while mistral-common rewrites every
+    //   tool into one fixed shape, so a tool with `"strict": true`, no description,
+    //   or its keys in another order gives different tokens. And tokenizer.json
+    //   reads `[INST]` typed by a user as the real `[INST]` marker, while
+    //   mistral-common keeps it as plain text.
+    //
+    // A checkpoint that has config.json can still use its template: pass it as a
+    // custom chat template, and the card then skips tekken.json.
+    if let Some(checked_file) = mdc.tokenizer.as_ref().and_then(TokenizerKind::tekken_file) {
+        let metadata = TekkenMetadata::from_checked_file(checked_file)?;
+        let version = metadata
+            .version()
+            .context("tekken.json has no numeric version")?;
+        let formatter = dynamo_renderer::mistral::MistralFormatter::new(
+            version,
+            metadata.model_settings_builder(),
+        )?;
+        return Ok(PromptFormatter::OAI(std::sync::Arc::new(formatter)));
+    }
+
     // Prefer the authoritative `model_type` from config.json — it's set by the
     // model author and survives any `--served-model-name` rename. An empty
     // `model_type` carries no signal — normalize to `None` so the display-name
@@ -415,7 +452,7 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         return Ok(formatter);
     }
 
-    if let Some(formatter) = deepseek_formatter_for(&model_type_lower, &display_name_lower) {
+    if let Some(formatter) = native_formatter_for(&model_type_lower, &display_name_lower) {
         return Ok(formatter);
     }
 

@@ -18,7 +18,7 @@ use crate::routing::mcf_allocator::{LoraInput, McfPlacementSolver, McfSolveParam
 use crate::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use crate::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
 use crate::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::protocols::EndpointId;
 
 #[derive(Debug, Clone)]

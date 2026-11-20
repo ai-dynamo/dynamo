@@ -24,6 +24,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	consts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	lpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
@@ -103,7 +104,7 @@ func (r *graphReconciler) resolveWorkloads(
 }
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
-// runtime ConfigMaps and, for Kubernetes discovery, serving Services.
+// serving Services for Kubernetes discovery.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
@@ -158,12 +159,11 @@ func (r *graphReconciler) renderPodCliqueSet(
 		// Keep workload templates in canonical component order.
 		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, rendered.Cliques...)
 		pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, rendered.ScalingGroup)
-		resources = append(resources, rendered.Resources...)
 
 		// Kubernetes discovery exposes only this workload's serving role within its PCS.
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {
 			component := dgd.GetComponentByName(workload.ServingComponentName())
-			service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+			service, err := componentdeployment.RenderService(componentdeployment.ServiceParams{
 				ServiceName: plan.ResourcePrefix + "-serve", Namespace: deployment.Namespace,
 				ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
 				DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
