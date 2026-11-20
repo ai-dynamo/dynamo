@@ -144,6 +144,8 @@ COPY --from=builder /sbom-go-licenses /tmp/go-licenses
 # each platform of this multi-arch image subtracts its own-arch floor. Passed by
 # build-deploy-component/action.yml (go@<digest8> for the distroless-go base).
 ARG BASELINE_SBOM_FILE=""
+# The Dynamo version, from pyproject.toml; picks the NGC source archive version.
+ARG DYNAMO_VERSION=""
 ARG TARGETARCH
 RUN python3 -m compliance.generators \
     --ecosystem go \
@@ -152,6 +154,7 @@ RUN python3 -m compliance.generators \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+    ${DYNAMO_VERSION:+--source-version ${DYNAMO_VERSION}} \
     -v
 # Policy gate on the single unified CSV (its `ecosystem` column scopes each row).
 RUN python3 -m compliance.policy.validate \

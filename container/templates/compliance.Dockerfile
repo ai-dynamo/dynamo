@@ -105,6 +105,8 @@ COPY --from=epp /rust-licenses /tmp/rust-licenses
 # baseline is captured, which leaves the whole base image attributed and fails
 # the policy gate below on any denied license the base carries.
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
+# The Dynamo version, from pyproject.toml; picks the NGC source archive version.
+ARG DYNAMO_VERSION="{{ dynamo_version }}"
 ARG TARGETARCH
 # Resolve where this image's Python packages live at runtime rather than per
 # framework: venv-based images export VIRTUAL_ENV (trtllm, vllm xpu/cpu, dev),
@@ -125,6 +127,7 @@ RUN {% if framework == "sglang" and device != "xpu" %}PKG_ARG="--site-packages $
     --native-yaml /opt/compliance/native_packages.yaml \
     --native-image {{ framework }}-{{ target }}{% if make_efa %}-efa{% endif %} \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+    ${DYNAMO_VERSION:+--source-version ${DYNAMO_VERSION}} \
     -v
 # Policy gate runs on the single unified CSV (its `ecosystem` column scopes each
 # row), replacing the per-ecosystem loop. Non-zero exit fails the build.

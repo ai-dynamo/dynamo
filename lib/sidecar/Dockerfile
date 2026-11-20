@@ -226,6 +226,7 @@ ARG TARGETARCH
 
 USER root
 COPY container/compliance/ /src/container/compliance/
+COPY pyproject.toml /src/pyproject.toml
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
@@ -244,6 +245,7 @@ RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \
         --output-dir /legal \
         --policy /src/container/compliance/policy/licenses.toml \
         --subtract-sbom /src/container/compliance/base_sboms/ubuntu@7291df36-${TARGETARCH}.cdx.json \
+        --source-version "$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' /src/pyproject.toml | head -n1)" \
         --verbose \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \

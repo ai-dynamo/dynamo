@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from compliance.generators import dpkg
-from compliance.generators.__main__ import main
+from compliance.generators.__main__ import main, source_location
 from compliance.generators.common import (
     NOASSERTION,
     Component,
@@ -244,6 +244,26 @@ def test_base_debs_limited_to_shipped_versions(tmp_path: Path) -> None:
     assert comps["zlib1g"].license_text == "zlib1g COPYRIGHT\n"
     assert comps["liba"].license_text is None
     assert "libremoved" not in comps
+
+
+@pytest.mark.parametrize("version", [None, "1.7.0"])
+def test_main_points_to_the_versioned_ngc_source_archive(
+    tmp_path: Path, version: str | None
+) -> None:
+    out = tmp_path / "legal"
+    go_sbom = _write_go_sbom(tmp_path / "sbom-go.cdx.json")
+    args = ["--ecosystem", "go", "--go-sbom", str(go_sbom), "--output-dir", str(out)]
+
+    assert main(args + (["--source-version", version] if version else [])) == 0
+
+    text = (out / "THIRD-PARTY.txt").read_text(encoding="utf-8")
+    assert f"available at:\n{source_location(version)}\n" in text
+    if version:
+        assert "dynamo-dependency-source-archive?version=1.7.0\n" in text
+        assert (
+            "download-version nvidia/ai-dynamo/dynamo-dependency-source-archive:1.7.0"
+            in text
+        )
 
 
 def _run_main(tmp_path: Path, ecosystem: str) -> str:
