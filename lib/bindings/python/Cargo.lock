@@ -1071,9 +1071,9 @@ checksum = "1e4b40c7323adcfc0a41c4b88143ed58346ff65a288fc144329c5c45e05d70c6"
 
 [[package]]
 name = "bitcannon"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f22d5cf2105730b71eee3ddd729acbcbf1e3e860f706a160ab1e5117591aa40"
+checksum = "955b8a074b0d4c9eba61a8f0ef448c70b4847f5a7ed03b5829516678d250f339"
 
 [[package]]
 name = "bitflags"
@@ -1401,7 +1401,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -2616,7 +2616,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "10.0.2"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=008e8bfe2c7e608c55ca4ee53009b88e981236aa#008e8bfe2c7e608c55ca4ee53009b88e981236aa"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1ee437ff751b0ad2ef39a6d1f2b1ae30953b3187#1ee437ff751b0ad2ef39a6d1f2b1ae30953b3187"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2691,7 +2691,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "11.0.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=008e8bfe2c7e608c55ca4ee53009b88e981236aa#008e8bfe2c7e608c55ca4ee53009b88e981236aa"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1ee437ff751b0ad2ef39a6d1f2b1ae30953b3187#1ee437ff751b0ad2ef39a6d1f2b1ae30953b3187"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2981,7 +2981,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "5.0.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=008e8bfe2c7e608c55ca4ee53009b88e981236aa#008e8bfe2c7e608c55ca4ee53009b88e981236aa"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1ee437ff751b0ad2ef39a6d1f2b1ae30953b3187#1ee437ff751b0ad2ef39a6d1f2b1ae30953b3187"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2997,7 +2997,7 @@ dependencies = [
  "serde_json",
  "strum",
  "tiktoken-rs 0.9.1",
- "tokenizers 1.0.0-rc.4",
+ "tokenizers 1.0.0-rc.5",
  "tracing",
 ]
 
@@ -4400,7 +4400,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -7137,7 +7137,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "once_cell",
@@ -7157,7 +7157,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -7178,7 +7178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -7191,7 +7191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -7495,7 +7495,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7533,7 +7533,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -9410,9 +9410,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tk-convert"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7860f1bccf45af43349a96dc9137f325cc5a1c9ccada5641a66348e32e197224"
+checksum = "20c49c95e72539fb9760a46d5a31f988d2761038e05a6e2ee3c06ea7e4e42fea"
 dependencies = [
  "bitcannon",
  "serde_json",
@@ -9421,9 +9421,9 @@ dependencies = [
 
 [[package]]
 name = "tk-encode"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d0b6f0774c6522a835e9528b9fc0f17b273c808952857135161fc353c9cd4c0"
+checksum = "ab962c5c0b7feac8155c3954c0c6b7b063c3ec43ee4aa53efe2c13db0a4f6546"
 dependencies = [
  "ahash",
  "bitcannon",
@@ -9447,32 +9447,13 @@ dependencies = [
 
 [[package]]
 name = "tk-serialize"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "127746cfb2d5f47aba6156866cffbb1aa3fe6602bf9530543185658cc7d8122f"
+checksum = "a9e7eada7a677c21107c91e572cbecfbcce84f9ce744d4fc37ad9d3a8b026286"
 dependencies = [
  "base64 0.22.1",
  "bitcannon",
  "hifijson",
- "tk-encode",
-]
-
-[[package]]
-name = "tk-train"
-version = "0.1.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd7554da217fac68ccd401e0beb62d6bf6529db29bc33cc35ecaad9963221de4"
-dependencies = [
- "ahash",
- "compact_str",
- "dary_heap",
- "esaxx-rs",
- "indicatif 0.18.4",
- "itertools 0.14.0",
- "log",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
  "tk-encode",
 ]
 
@@ -9525,14 +9506,13 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8303b617f840dac1e7ee161fc5ebe0709ff1cdf846136f2b3786a21afec980a0"
+checksum = "8be45240d9a2a882149646784e8e2801439c08b68fe8e1ae8f2c18dd78bae7ed"
 dependencies = [
  "tk-convert",
  "tk-encode",
  "tk-serialize",
- "tk-train",
 ]
 
 [[package]]
@@ -10835,7 +10815,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
