@@ -90,8 +90,8 @@ type OperatorConfiguration struct {
 	// +required
 	LPX LPXConfiguration `json:"lpx"`
 
-	// GlobalDiscovery holds the defaults for the DynamoPoolRelays that register
-	// their pools with a Global Discovery Service.
+	// GlobalDiscovery is where the DynamoPoolRelays with spec.globalDiscovery
+	// register their pools.
 	// +optional
 	GlobalDiscovery GlobalDiscoveryConfiguration `json:"globalDiscovery,omitempty"`
 }

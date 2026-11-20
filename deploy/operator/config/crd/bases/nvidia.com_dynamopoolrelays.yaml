@@ -66,11 +66,11 @@ spec:
                   type: string
                 globalDiscovery:
                   description: |-
-                    GlobalDiscovery registers the pool with a Global Discovery Service as
-                    <clusterId>/<namespace>/<name>, so that Global Routers send it requests.
-                    Unset, the Relay registers nothing. Set, it reserves the env names
-                    DYN_RELAY_GLOBAL_DISCOVERY_URL, DYN_RELAY_ROUTING_POOL,
-                    DYN_RELAY_ROUTING_POOL_REGION and DYN_RELAY_ROUTING_POOL_FRONTENDS.
+                    GlobalDiscovery registers the pool as <clusterId>/<namespace>/<name> with the
+                    operator's Global Discovery Service, so that Global Routers send it requests.
+                    Unset, the Relay registers nothing. Set, it reserves the env names that the
+                    "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
+                    URL and region, the Relay is left as it is and reported unready.
                   properties:
                     frontends:
                       description: |-
@@ -78,18 +78,17 @@ spec:
                         requests to. Only a Global Discovery Service that takes pools from
                         registrations, rather than from MCS, needs them.
                       items:
+                        maxLength: 2048
+                        pattern: ^[^\p{Cc}\p{Z},]+$
                         type: string
+                      maxItems: 16
                       type: array
                       x-kubernetes-list-type: set
-                    region:
-                      description: Region is the region that the pool registers in.
-                      type: string
-                    url:
-                      description: |-
-                        URL is the Global Discovery Service's root, such as
-                        `http://global-discovery.global-router.svc:8080/`.
-                      type: string
                   type: object
+                  x-kubernetes-validations:
+                    - fieldPath: .frontends
+                      message: frontends must be absolute HTTP(S) URLs with a host, and a port of at most 65535
+                      rule: '!has(self.frontends) || self.frontends.all(f, isURL(f) && url(f).getScheme() in [''http'', ''https''] && size(url(f).getHostname()) > 0 && (size(url(f).getPort()) == 0 || (size(url(f).getPort()) <= 5 && int(url(f).getPort()) <= 65535)))'
                 podTemplate:
                   description: |-
                     PodTemplate configures Relay Pods. Its main container needs an image with
@@ -8231,7 +8230,8 @@ spec:
                     Conditions includes Ready for listener availability, not model or KV readiness.
                     Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
                     DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
-                    InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+                    InvalidConfiguration, GlobalDiscoveryNotConfigured, ReconcileFailed, or
+                    ResourceOwnershipConflict.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:

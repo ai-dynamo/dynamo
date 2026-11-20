@@ -6,7 +6,6 @@
 package poolrelay
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -37,7 +36,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/util/csaupgrade"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,12 +56,16 @@ const (
 
 var errOwnershipConflict = errors.New("Relay resource ownership conflict")
 
+// errGlobalDiscoveryNotConfigured holds a relay with spec.globalDiscovery until
+// the operator has its Global Discovery settings.
+var errGlobalDiscoveryNotConfigured = errors.New("the operator has no Global Discovery URL and region: " +
+	"set the Helm values dynamo-operator.dynamo.globalDiscovery.url and region")
+
 type reconciler struct {
 	client.Client
 	scheme         *runtime.Scheme
 	defaultBackend configv1alpha1.DiscoveryBackend
-	// globalDiscovery holds the operator's defaults for relays that register
-	// their pools with a Global Discovery Service.
+	// globalDiscovery is where relays with spec.globalDiscovery register.
 	globalDiscovery configv1alpha1.GlobalDiscoveryConfiguration
 }
 
@@ -145,7 +150,11 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
+	// Missing operator settings hold a relay as it is; an invalid spec withdraws it.
 	resources, desiredDeployment, err := render(&relay, namespaces, r.globalDiscovery)
+	if errors.Is(err, errGlobalDiscoveryNotConfigured) {
+		return ctrl.Result{}, r.reportHeld(ctx, &relay, "GlobalDiscoveryNotConfigured", err)
+	}
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
@@ -163,6 +172,10 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		if errors.Is(err, errOwnershipConflict) {
 			_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
 			return ctrl.Result{}, errors.Join(err, withdrawErr)
+		}
+		// A write that raced a newer Deployment retries without failing the Relay.
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
 	}
@@ -352,6 +365,15 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 	if !current.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("Deployment %s is being deleted", key)
 	}
+	// Create records an Update entry that Apply cannot shrink; move it into the
+	// Apply entry so a later Apply removes what it no longer sets.
+	if patch, err := csaupgrade.UpgradeManagedFieldsPatch(&current, sets.New(fieldManager), fieldManager); err != nil {
+		return nil, fmt.Errorf("move Relay Deployment %s fields to the apply manager: %w", key, err)
+	} else if patch != nil {
+		if err := r.Patch(ctx, &current, client.RawPatch(types.JSONPatchType, patch)); err != nil {
+			return nil, fmt.Errorf("move Relay Deployment %s fields to the apply manager: %w", key, err)
+		}
+	}
 
 	intent := desired.DeepCopy()
 	if err := controllerutil.SetControllerReference(relay, intent, r.scheme); err != nil {
@@ -381,6 +403,21 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 		return nil, fmt.Errorf("decode applied Relay Deployment %s: %w", key, err)
 	}
 	return observed, nil
+}
+
+// reportHeld reports a Relay that the controller leaves as it is while a setting
+// that it needs is missing. The Relay's resources keep running, so its endpoint
+// and available replicas stay as they were.
+func (r *reconciler) reportHeld(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
+	before := relay.DeepCopy()
+	meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
+		Type: "Ready", Status: metav1.ConditionFalse, Reason: reason,
+		Message: problem.Error(), ObservedGeneration: relay.Generation,
+	})
+	if equality.Semantic.DeepEqual(before.Status, relay.Status) {
+		return nil
+	}
+	return r.Status().Update(ctx, relay)
 }
 
 // An apply error makes the current Relay condition unready without claiming
@@ -463,8 +500,8 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 func serviceName(dgdName string) string { return dgdName + "-pool-relay" }
 
 // render returns the Relay's resources and Deployment. A relay with a
-// globalDiscovery block takes its empty fields from globalDiscovery, the
-// operator's defaults.
+// globalDiscovery block registers with globalDiscovery, the operator's settings,
+// and without them render returns errGlobalDiscoveryNotConfigured.
 func render(
 	relay *v1alpha1.DynamoPoolRelay,
 	namespaces []string,
@@ -614,49 +651,29 @@ var registrationEnvNames = []string{
 
 // registrationEnv returns the settings that register the relay's pool as
 // <clusterId>/<namespace>/<name>. relay.Spec.GlobalDiscovery must be set, and
-// its empty URL and region come from defaults.
+// settings, which validation keeps to both fields or neither, must be set.
 func registrationEnv(
 	relay *v1alpha1.DynamoPoolRelay,
-	defaults configv1alpha1.GlobalDiscoveryConfiguration,
+	settings configv1alpha1.GlobalDiscoveryConfiguration,
 ) ([]corev1.EnvVar, error) {
-	settings := relay.Spec.GlobalDiscovery
+	if settings.URL == "" {
+		return nil, errGlobalDiscoveryNotConfigured
+	}
 
 	// The pool key's fields hold no slash or control character, as the Relay checks.
 	clusterID := relay.Spec.ClusterID
 	if strings.Contains(clusterID, "/") || strings.ContainsFunc(clusterID, unicode.IsControl) {
 		return nil, fmt.Errorf("clusterId %q cannot name a routing pool: it holds a slash or a control character", clusterID)
 	}
-
-	// The Relay needs a URL and a region to register at all.
-	discoveryURL := cmp.Or(settings.URL, defaults.URL)
-	if discoveryURL == "" {
-		return nil, errors.New("globalDiscovery.url, or the operator's globalDiscovery.url default, must be set")
-	}
-	if err := configvalidation.CheckHTTPURL(discoveryURL); err != nil {
-		return nil, fmt.Errorf("globalDiscovery.url %w", err)
-	}
-	region := cmp.Or(settings.Region, defaults.Region)
-	if region == "" || configvalidation.HasSurroundingSpace(region) {
-		return nil, errors.New("globalDiscovery.region, or the operator's globalDiscovery.region default, must be set without surrounding whitespace")
-	}
 	env := []corev1.EnvVar{
-		{Name: "DYN_RELAY_GLOBAL_DISCOVERY_URL", Value: discoveryURL},
+		{Name: "DYN_RELAY_GLOBAL_DISCOVERY_URL", Value: settings.URL},
 		{Name: "DYN_RELAY_ROUTING_POOL", Value: clusterID + "/" + relay.Namespace + "/" + relay.Name},
-		{Name: "DYN_RELAY_ROUTING_POOL_REGION", Value: region},
+		{Name: "DYN_RELAY_ROUTING_POOL_REGION", Value: settings.Region},
 	}
 
-	// The Relay splits its frontends at commas, strips each, and refuses a repeated one.
-	for i, frontend := range settings.Frontends {
-		if err := configvalidation.CheckHTTPURL(frontend); err != nil ||
-			strings.Contains(frontend, ",") || configvalidation.HasSurroundingSpace(frontend) {
-			return nil, fmt.Errorf("globalDiscovery.frontends entry %q must be an absolute HTTP(S) URL without commas or surrounding whitespace", frontend)
-		}
-		if slices.Contains(settings.Frontends[:i], frontend) {
-			return nil, fmt.Errorf("globalDiscovery.frontends lists %q twice", frontend)
-		}
-	}
-	if len(settings.Frontends) > 0 {
-		env = append(env, corev1.EnvVar{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: strings.Join(settings.Frontends, ",")})
+	// The schema keeps commas, white space and repeats out of the frontends.
+	if frontends := relay.Spec.GlobalDiscovery.Frontends; len(frontends) > 0 {
+		env = append(env, corev1.EnvVar{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: strings.Join(frontends, ",")})
 	}
 	return env, nil
 }

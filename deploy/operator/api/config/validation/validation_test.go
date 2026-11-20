@@ -179,16 +179,17 @@ func TestValidateOperatorConfiguration_GlobalDiscovery(t *testing.T) {
 	}{
 		{name: "unset", wantErrors: 0},
 		{name: "valid", url: "http://global-discovery.global-router.svc:8080/", region: "us-east-1", wantErrors: 0},
-		{name: "https", url: "https://discovery.example.com/", wantErrors: 0},
-		{name: "not HTTP", url: "grpc://discovery:8080", wantErrors: 1},
-		{name: "relative", url: "discovery:8080", wantErrors: 1},
-		{name: "no host", url: "http:///path", wantErrors: 1},
-		{name: "port above 65535", url: "http://discovery:99999/", wantErrors: 1},
-		{name: "region with whitespace", region: " us-east-1", wantErrors: 1},
-		{name: "region ending in a separator the PoolRelay strips", region: "us-east-1\x1f", wantErrors: 1},
+		{name: "https", url: "https://discovery.example.com/", region: "us-east-1", wantErrors: 0},
+		{name: "a URL without a region", url: "http://discovery:8080/", wantErrors: 1},
+		{name: "a region without a URL", region: "us-east-1", wantErrors: 1},
+		{name: "not HTTP", url: "grpc://discovery:8080", region: "us-east-1", wantErrors: 1},
+		{name: "no host", url: "http:///path", region: "us-east-1", wantErrors: 1},
+		{name: "port above 65535", url: "http://discovery:99999/", region: "us-east-1", wantErrors: 1},
+		{name: "region with whitespace", url: "http://discovery:8080/", region: " us-east-1", wantErrors: 1},
+		{name: "region ending in a separator the PoolRelay strips", url: "http://discovery:8080/", region: "us-east-1\x1f", wantErrors: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Validate the defaults for relays that register with Global Discovery")
+			t.Log("Validate the settings for relays that register with Global Discovery")
 			cfg := validConfig()
 			cfg.GlobalDiscovery = configv1alpha1.GlobalDiscoveryConfiguration{URL: tc.url, Region: tc.region}
 			if errs := ValidateOperatorConfiguration(cfg); len(errs) != tc.wantErrors {

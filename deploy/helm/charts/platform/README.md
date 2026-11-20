@@ -799,8 +799,6 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
 | dynamo-operator.lpx.enabled | bool | `false` | EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API. |
 | dynamo-operator.lpx.modelRegistryURL | string | `""` | Configure the LPU model registry used by the LPX integration. |
-| dynamo-operator.globalDiscovery.url | string | `""` | URL of the Global Discovery Service, for relays that set none. Format: `http://host:8080/` |
-| dynamo-operator.globalDiscovery.region | string | `""` | Region of this cluster, for relays that set none. |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments. |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production. |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace. |
@@ -841,6 +839,8 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.dynamo.serviceMesh.istio.clientCertificate | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS certificate used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
 | dynamo-operator.dynamo.serviceMesh.istio.privateKey | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS private key used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
 | dynamo-operator.dynamo.serviceMesh.istio.caCertificates | string | `""` | Optional path (in the istio-proxy sidecar's filesystem) to CA certificates used to verify the EPP server certificate. Used only when tlsMode is "MUTUAL". |
+| dynamo-operator.dynamo.globalDiscovery.url | string | `""` | Root URL of the Global Discovery Service. Format: `http://host:8080/` |
+| dynamo-operator.dynamo.globalDiscovery.region | string | `""` | This cluster's region, which the pools register in. |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |

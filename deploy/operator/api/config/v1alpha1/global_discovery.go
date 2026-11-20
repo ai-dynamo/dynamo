@@ -3,14 +3,15 @@
 
 package v1alpha1
 
-// GlobalDiscoveryConfiguration holds the defaults for the DynamoPoolRelays that
-// register their pools with a Global Discovery Service.
+// GlobalDiscoveryConfiguration is where the DynamoPoolRelays with
+// spec.globalDiscovery register their pools. Set both fields or neither.
 type GlobalDiscoveryConfiguration struct {
-	// URL is the Global Discovery Service's root, for relays that set none.
+	// URL is the Global Discovery Service's root, such as
+	// `http://global-discovery.global-router.svc:8080/`.
 	// +optional
 	URL string `json:"url,omitempty"`
 
-	// Region is this cluster's region, for relays that set none.
+	// Region is this cluster's region, which the pools register in.
 	// +optional
 	Region string `json:"region,omitempty"`
 }

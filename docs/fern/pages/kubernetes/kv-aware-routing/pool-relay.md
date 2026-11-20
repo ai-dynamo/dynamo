@@ -107,30 +107,34 @@ The Relay then registers the pool with the Global Discovery Service as
 spec:
   clusterId: example-cluster
   globalDiscovery:
-    url: http://global-discovery.global-router.svc:8080/
-    region: us-east-1
     frontends:
       - http://green.example.com:8000
 ```
 
-- `url` and `region` default to the operator's settings, which you set once at install with the Helm
-  values `dynamo-operator.globalDiscovery.url` and `dynamo-operator.globalDiscovery.region`. With
-  both set there, `globalDiscovery: {}` is enough.
+- The Global Discovery Service's URL and the cluster's region are operator settings, the same for
+  every relay. Set both at install with the Helm values
+  `dynamo-operator.dynamo.globalDiscovery.url` and `dynamo-operator.dynamo.globalDiscovery.region`;
+  the operator does not start with only one of them. Until both are set, the operator leaves a relay
+  with `globalDiscovery` as it is, and the relay's `Ready` condition is `False` with reason
+  `GlobalDiscoveryNotConfigured`.
 - `frontends` are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global
   Discovery Service run with `--pool-discovery registrations` needs them; with MCS, it finds the
-  frontends through the imported frontend Services.
+  frontends through the imported frontend Services. The API server rejects a frontend that is not
+  an absolute HTTP(S) URL with a host, has a port above 65535, holds a comma or white space, or is
+  listed twice.
 - With `globalDiscovery` set, `clusterId` cannot contain `/` or control characters, because it
-  becomes the first part of the pool name.
-- If the URL or the region is missing, or a value is not valid, the operator removes the Relay's
-  Deployment and Service, and the relay's `Ready` condition is `False` with reason
-  `InvalidConfiguration`. Fixing the value brings them back.
+  becomes the first part of the pool name. The operator then removes the Relay's Deployment and
+  Service, and the relay's `Ready` condition is `False` with reason `InvalidConfiguration`.
 - With `globalDiscovery` set, `DYN_RELAY_GLOBAL_DISCOVERY_URL`, `DYN_RELAY_ROUTING_POOL`,
   `DYN_RELAY_ROUTING_POOL_REGION`, and `DYN_RELAY_ROUTING_POOL_FRONTENDS` are reserved. Without it,
   the operator sets none of them, so a relay that sets them in its `podTemplate` keeps working. To
   move such a relay to `globalDiscovery`, remove those entries from its `podTemplate` in the same
   change, or the relay is invalid and its Deployment and Service are removed.
-- Changing these settings, or an operator default that a relay uses, restarts the Relay Pods with
-  the new values.
+- Adding, changing, or removing `globalDiscovery`, or changing the operator's URL or region,
+  restarts the Relay Pods that it affects.
+- `Ready` reports the Relay's listeners, not its registration. The Relay's health field
+  `routing_pool_unregistered_reason` says why the pool is not registered; see
+  [Pool Relay Configuration](../../reference/components/pool-relay-configuration.md).
 
 ## Discovery Scope
 

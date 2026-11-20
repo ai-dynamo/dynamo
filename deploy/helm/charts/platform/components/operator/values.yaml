@@ -55,14 +55,6 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
-# Defaults for the DynamoPoolRelays that register their pools with a Global
-# Discovery Service (spec.globalDiscovery). A relay's own values take precedence.
-globalDiscovery:
-  # -- URL of the Global Discovery Service, for relays that set none. Format: `http://host:8080/`
-  url: ""
-  # -- Region of this cluster, for relays that set none.
-  region: ""
-
 dgdrV1Beta2:
   # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
   # Request API with conversion and install the Run and Candidate APIs. Run and
@@ -191,6 +183,14 @@ dynamo:
     password: ""
     existingSecretName: ''
     secure: true
+
+  # Global Discovery Service for the DynamoPoolRelays with spec.globalDiscovery.
+  # Set both values or neither.
+  globalDiscovery:
+    # -- Root URL of the Global Discovery Service. Format: `http://host:8080/`
+    url: ""
+    # -- This cluster's region, which the pools register in.
+    region: ""
 
   metrics:
     prometheusEndpoint: ""

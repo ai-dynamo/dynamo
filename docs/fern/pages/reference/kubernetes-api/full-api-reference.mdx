@@ -1400,26 +1400,16 @@ See [DynamoPoolRelayStatus](#dynamopoolrelaystatus).
 </Accordion>
 
 <Accordion id="dynamopoolrelayglobaldiscovery" title="DynamoPoolRelayGlobalDiscovery">
-DynamoPoolRelayGlobalDiscovery says where a Relay registers its pool. An empty
-URL or region takes the operator's globalDiscovery default.
+DynamoPoolRelayGlobalDiscovery turns on the pool's registration. The Global
+Discovery Service's URL and the region are the operator's settings.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoPoolRelaySpec](#dynamopoolrelayspec)
 
-<ParamField path="url" type="string">
-URL is the Global Discovery Service's root, such as `http://global-discovery.global-router.svc:8080/`.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="region" type="string">
-Region is the region that the pool registers in.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="frontends" type="string array">
 Frontends are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global Discovery Service that takes pools from registrations, rather than from MCS, needs them.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** MaxItems: 16  items:MaxLength: 2048  items:Pattern: `^[^\p\{Cc\}\p\{Z\},]+$`  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1447,7 +1437,7 @@ Replicas sets the number of active Relay Pods. Each watches the DGD.
 </ParamField>
 
 <ParamField path="globalDiscovery" type="DynamoPoolRelayGlobalDiscovery">
-GlobalDiscovery registers the pool with a Global Discovery Service as &lt;clusterId&gt;/&lt;namespace&gt;/&lt;name&gt;, so that Global Routers send it requests. Unset, the Relay registers nothing. Set, it reserves the env names DYN_RELAY_GLOBAL_DISCOVERY_URL, DYN_RELAY_ROUTING_POOL, DYN_RELAY_ROUTING_POOL_REGION and DYN_RELAY_ROUTING_POOL_FRONTENDS.
+GlobalDiscovery registers the pool as &lt;clusterId&gt;/&lt;namespace&gt;/&lt;name&gt; with the operator's Global Discovery Service, so that Global Routers send it requests. Unset, the Relay registers nothing. Set, it reserves the env names that the "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery URL and region, the Relay is left as it is and reported unready.
 See [DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -1476,7 +1466,7 @@ AvailableReplicas is the number of Relay Pods the Deployment reports available.
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, GlobalDiscoveryNotConfigured, ReconcileFailed, or ResourceOwnershipConflict.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5974,20 +5964,20 @@ DiscoveryEnabled indicates whether GPU discovery is enabled
 </Accordion>
 
 <Accordion id="globaldiscoveryconfiguration" title="GlobalDiscoveryConfiguration">
-GlobalDiscoveryConfiguration holds the defaults for the DynamoPoolRelays that
-register their pools with a Global Discovery Service.
+GlobalDiscoveryConfiguration is where the DynamoPoolRelays with
+spec.globalDiscovery register their pools. Set both fields or neither.
 
 
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
 <ParamField path="url" type="string">
-URL is the Global Discovery Service's root, for relays that set none.
+URL is the Global Discovery Service's root, such as `http://global-discovery.global-router.svc:8080/`.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="region" type="string">
-Region is this cluster's region, for relays that set none.
+Region is this cluster's region, which the pools register in.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -6426,7 +6416,7 @@ See [LPXConfiguration](#lpxconfiguration).
 </ParamField>
 
 <ParamField path="globalDiscovery" type="GlobalDiscoveryConfiguration">
-GlobalDiscovery holds the defaults for the DynamoPoolRelays that register their pools with a Global Discovery Service.
+GlobalDiscovery is where the DynamoPoolRelays with spec.globalDiscovery register their pools.
 See [GlobalDiscoveryConfiguration](#globaldiscoveryconfiguration).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

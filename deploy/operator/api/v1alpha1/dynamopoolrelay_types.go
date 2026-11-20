@@ -33,32 +33,27 @@ type DynamoPoolRelaySpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// GlobalDiscovery registers the pool with a Global Discovery Service as
-	// <clusterId>/<namespace>/<name>, so that Global Routers send it requests.
-	// Unset, the Relay registers nothing. Set, it reserves the env names
-	// DYN_RELAY_GLOBAL_DISCOVERY_URL, DYN_RELAY_ROUTING_POOL,
-	// DYN_RELAY_ROUTING_POOL_REGION and DYN_RELAY_ROUTING_POOL_FRONTENDS.
+	// GlobalDiscovery registers the pool as <clusterId>/<namespace>/<name> with the
+	// operator's Global Discovery Service, so that Global Routers send it requests.
+	// Unset, the Relay registers nothing. Set, it reserves the env names that the
+	// "Deploy the Pool Relay" guide lists; until the operator has a Global Discovery
+	// URL and region, the Relay is left as it is and reported unready.
 	// +optional
 	GlobalDiscovery *DynamoPoolRelayGlobalDiscovery `json:"globalDiscovery,omitempty"`
 }
 
-// DynamoPoolRelayGlobalDiscovery says where a Relay registers its pool. An empty
-// URL or region takes the operator's globalDiscovery default.
+// DynamoPoolRelayGlobalDiscovery turns on the pool's registration. The Global
+// Discovery Service's URL and the region are the operator's settings.
+// +kubebuilder:validation:XValidation:rule="!has(self.frontends) || self.frontends.all(f, isURL(f) && url(f).getScheme() in ['http', 'https'] && size(url(f).getHostname()) > 0 && (size(url(f).getPort()) == 0 || (size(url(f).getPort()) <= 5 && int(url(f).getPort()) <= 65535)))",message="frontends must be absolute HTTP(S) URLs with a host, and a port of at most 65535",fieldPath=".frontends"
 type DynamoPoolRelayGlobalDiscovery struct {
-	// URL is the Global Discovery Service's root, such as
-	// `http://global-discovery.global-router.svc:8080/`.
-	// +optional
-	URL string `json:"url,omitempty"`
-
-	// Region is the region that the pool registers in.
-	// +optional
-	Region string `json:"region,omitempty"`
-
 	// Frontends are the HTTP(S) URLs that Global Routers send the pool's
 	// requests to. Only a Global Discovery Service that takes pools from
 	// registrations, rather than from MCS, needs them.
 	// +optional
 	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=2048
+	// +kubebuilder:validation:items:Pattern=`^[^\p{Cc}\p{Z},]+$`
 	Frontends []string `json:"frontends,omitempty"`
 }
 
@@ -77,7 +72,8 @@ type DynamoPoolRelayStatus struct {
 	// Conditions includes Ready for listener availability, not model or KV readiness.
 	// Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
 	// DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
-	// InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+	// InvalidConfiguration, GlobalDiscoveryNotConfigured, ReconcileFailed, or
+	// ResourceOwnershipConflict.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

@@ -50,12 +50,18 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	)
 }
 
-// validateGlobalDiscovery checks the defaults that DynamoPoolRelays take when
-// they register their pools with a Global Discovery Service.
+// validateGlobalDiscovery checks the settings that DynamoPoolRelays with
+// spec.globalDiscovery register their pools with.
 func validateGlobalDiscovery(globalDiscovery *configv1alpha1.GlobalDiscoveryConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// Each default is optional, but must be one that the PoolRelay accepts.
+	// A PoolRelay needs both settings to register, in forms that it accepts.
+	switch {
+	case globalDiscovery.URL == "" && globalDiscovery.Region != "":
+		allErrs = append(allErrs, field.Required(fldPath.Child("url"), "must be set with region"))
+	case globalDiscovery.URL != "" && globalDiscovery.Region == "":
+		allErrs = append(allErrs, field.Required(fldPath.Child("region"), "must be set with url"))
+	}
 	if globalDiscovery.URL != "" {
 		if err := CheckHTTPURL(globalDiscovery.URL); err != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("url"), globalDiscovery.URL, err.Error()))

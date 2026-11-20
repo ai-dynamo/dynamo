@@ -22,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -694,6 +695,101 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 	}
 }
 
+func TestAFieldMoveThatRacesANewerWriteRetriesWithoutFailingTheRelay(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		v1alpha1.AddToScheme, v1beta1.AddToScheme, appsv1.AddToScheme, corev1.AddToScheme, rbacv1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := types.NamespacedName{Namespace: "inference", Name: "green"}
+	relay := &v1alpha1.DynamoPoolRelay{
+		Name: key.Name, Namespace: key.Namespace, UID: "relay-uid",
+		Spec: relaySpec("east"),
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name: key.Name, Namespace: key.Namespace,
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
+		}},
+	}
+	childKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+	// createdEarlier makes reads show the Update entry that a Create leaves, and
+	// conflicts is how many moves of it into the apply manager race a newer write.
+	createdEarlier, conflicts, moves := false, 0, 0
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(relay, dgd, &appsv1.Deployment{}).
+		WithObjects(relay, dgd).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if deployment, ok := obj.(*appsv1.Deployment); ok && createdEarlier {
+				deployment.ManagedFields = []metav1.ManagedFieldsEntry{{
+					Manager: "dynamo-pool-relay", Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "apps/v1",
+					FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{"f:replicas":{}}}`)},
+				}}
+			}
+			return nil
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*appsv1.Deployment); !ok || patch.Type() != types.JSONPatchType {
+				return c.Patch(ctx, obj, patch, opts...)
+			}
+			if conflicts > 0 {
+				conflicts--
+				return apierrors.NewConflict(appsv1.Resource("deployments"), obj.GetName(), errors.New("the object has been modified"))
+			}
+			createdEarlier = false
+			moves++
+			return nil
+		},
+	}).Build()
+	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+
+	t.Log("Publish the Relay with all its listeners available")
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	var published appsv1.Deployment
+	if err := apiClient.Get(ctx, childKey, &published); err != nil {
+		t.Fatal(err)
+	}
+	published.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: published.Generation, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2,
+	}
+	if err := apiClient.Status().Update(ctx, &published); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, key, relay); err != nil {
+		t.Fatal(err)
+	}
+	running := relay.Status.DeepCopy()
+
+	t.Log("Moving an earlier Create's fields races a newer write: the Relay retries and keeps its status")
+	createdEarlier, conflicts = true, 1
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); !apierrors.IsConflict(err) {
+		t.Fatalf("expected the conflict to be retried, got %v", err)
+	}
+	if err := apiClient.Get(ctx, key, relay); err != nil {
+		t.Fatal(err)
+	}
+	if !equality.Semantic.DeepEqual(relay.Status, *running) {
+		t.Fatalf("Relay status changed from %+v to %+v", running, relay.Status)
+	}
+
+	t.Log("The retry moves the fields")
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil || moves != 1 {
+		t.Fatalf("retry: moves=%d, err=%v", moves, err)
+	}
+}
+
 func TestDiscoveryConversionErrorDoesNotWithdrawPublishedRelay(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -776,129 +872,67 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 }
 
 func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
-	defaults := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery.default:8080/", Region: "us-west-2"}
+	settings := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-west-2"}
 	for _, tc := range []struct {
 		name string
 		// clusterID defaults to east.
 		clusterID       string
 		globalDiscovery *v1alpha1.DynamoPoolRelayGlobalDiscovery
-		defaults        configv1alpha1.GlobalDiscoveryConfiguration
+		settings        configv1alpha1.GlobalDiscoveryConfiguration
 		// want are the registration settings that the Relay gets.
 		want    map[string]string
 		wantErr bool
 	}{
 		{
 			name:     "without the block the operator sets nothing",
-			defaults: defaults,
+			settings: settings,
 		},
 		{
 			name:      "without the block, a cluster ID that cannot name a pool still deploys",
 			clusterID: "aws/east",
-			defaults:  defaults,
+			settings:  settings,
 		},
 		{
-			name: "the block's own settings, with the pool named after the relay",
+			name: "the operator's settings and the frontends, with the pool named after the relay",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{
-				URL: "http://discovery.global-router:8080/", Region: "us-east-1",
 				Frontends: []string{"http://green-a.example.com:8000", "https://green-b.example.com"},
 			},
-			defaults: defaults,
+			settings: settings,
 			want: map[string]string{
-				"DYN_RELAY_GLOBAL_DISCOVERY_URL":   "http://discovery.global-router:8080/",
+				"DYN_RELAY_GLOBAL_DISCOVERY_URL":   "http://discovery:8080/",
 				"DYN_RELAY_ROUTING_POOL":           "east/inference/green",
-				"DYN_RELAY_ROUTING_POOL_REGION":    "us-east-1",
+				"DYN_RELAY_ROUTING_POOL_REGION":    "us-west-2",
 				"DYN_RELAY_ROUTING_POOL_FRONTENDS": "http://green-a.example.com:8000,https://green-b.example.com",
 			},
 		},
 		{
-			name:            "an empty block takes the operator's defaults",
+			name:            "no frontends sets no frontends",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
-			defaults:        defaults,
+			settings:        settings,
 			want: map[string]string{
-				"DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://discovery.default:8080/",
+				"DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://discovery:8080/",
 				"DYN_RELAY_ROUTING_POOL":         "east/inference/green",
 				"DYN_RELAY_ROUTING_POOL_REGION":  "us-west-2",
 			},
 		},
 		{
+			name:            "the operator has no settings",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
+			wantErr:         true,
+		},
+		{
 			name:            "a cluster ID with a slash cannot name a pool",
 			clusterID:       "aws/east",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
-			defaults:        defaults,
+			settings:        settings,
 			wantErr:         true,
 		},
 		{
 			name:            "a cluster ID with a control character cannot name a pool",
 			clusterID:       "ea\x01st",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
-			defaults:        defaults,
+			settings:        settings,
 			wantErr:         true,
-		},
-		{
-			name:            "no URL here or in the operator's defaults",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Region: "us-east-1"},
-			wantErr:         true,
-		},
-		{
-			name:            "no region here or in the operator's defaults",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{URL: "http://discovery:8080/"},
-			wantErr:         true,
-		},
-		{
-			name:            "a URL that is not HTTP(S)",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{URL: "grpc://discovery:8080"},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a URL with a port above 65535",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{URL: "http://discovery:99999/"},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a region with surrounding whitespace",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Region: "us-east-1 "},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a region that ends in a separator the Relay strips",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Region: "us-east-1\x1f"},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a frontend that is not an absolute URL",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"green:8000"}},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a frontend with a port above 65535",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"http://green:99999"}},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a frontend with a comma",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"http://green:8000/a,b"}},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name:            "a frontend with trailing whitespace",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"http://green:8000/v1 "}},
-			defaults:        defaults,
-			wantErr:         true,
-		},
-		{
-			name: "a frontend listed twice",
-			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{
-				Frontends: []string{"http://green:8000", "http://green:8000"},
-			},
-			defaults: defaults,
-			wantErr:  true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -908,10 +942,10 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 				Spec: relaySpec(cmp.Or(tc.clusterID, "east")),
 			}
 			relay.Spec.GlobalDiscovery = tc.globalDiscovery
-			_, deployment, err := render(relay, []string{"green-runtime"}, tc.defaults)
+			_, deployment, err := render(relay, []string{"green-runtime"}, tc.settings)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatal("render accepted an invalid globalDiscovery setting")
+					t.Fatal("render accepted a relay that cannot register")
 				}
 				return
 			}
@@ -919,18 +953,8 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 				t.Fatalf("render: %v", err)
 			}
 
-			t.Log("Check the registration settings that the Relay gets, each once")
-			got := map[string]string{}
-			for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
-				if !slices.Contains(registrationEnvNames, item.Name) {
-					continue
-				}
-				if _, twice := got[item.Name]; twice {
-					t.Fatalf("%s is set twice", item.Name)
-				}
-				got[item.Name] = item.Value
-			}
-			if !maps.Equal(got, tc.want) {
+			t.Log("Check the registration settings that the Relay gets")
+			if got := registrationEnvOf(deployment); !maps.Equal(got, tc.want) {
 				t.Fatalf("registration settings = %v, want %v", got, tc.want)
 			}
 		})
@@ -938,7 +962,7 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 }
 
 func TestRegistrationNamesAreReservedOnlyWithTheBlock(t *testing.T) {
-	defaults := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"}
+	settings := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"}
 	for _, name := range registrationEnvNames {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Without the block, a hand-set value reaches the Relay")
@@ -947,7 +971,7 @@ func TestRegistrationNamesAreReservedOnlyWithTheBlock(t *testing.T) {
 				Spec: relaySpec("east"),
 			}
 			relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: name, Value: "hand-set"}}
-			_, deployment, err := render(relay, []string{"green-runtime"}, defaults)
+			_, deployment, err := render(relay, []string{"green-runtime"}, settings)
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}
@@ -959,14 +983,14 @@ func TestRegistrationNamesAreReservedOnlyWithTheBlock(t *testing.T) {
 
 			t.Log("With the block, the operator owns the name and refuses a hand-set value")
 			relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
-			if _, _, err := render(relay, []string{"green-runtime"}, defaults); err == nil || !strings.Contains(err.Error(), "env "+name+" is reserved") {
+			if _, _, err := render(relay, []string{"green-runtime"}, settings); err == nil || !strings.Contains(err.Error(), "env "+name+" is reserved") {
 				t.Fatalf("hand-set %s next to the block was not refused as reserved: %v", name, err)
 			}
 		})
 	}
 }
 
-func TestInvalidRegistrationSettingsWithdrawTheRelay(t *testing.T) {
+func TestARelayThatRegistersWaitsForTheOperatorsSettings(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
@@ -991,26 +1015,34 @@ func TestInvalidRegistrationSettingsWithdrawTheRelay(t *testing.T) {
 	apiClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(relay, dgd, &appsv1.Deployment{}).
 		WithObjects(relay, dgd).Build()
-	r := &reconciler{
-		Client:          apiClient,
-		scheme:          scheme,
-		defaultBackend:  configv1alpha1.DiscoveryBackendKubernetes,
-		globalDiscovery: configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/"},
-	}
+	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
 
-	t.Log("Publish the Relay without the block")
+	t.Log("Publish the Relay without the block, with all its listeners available")
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
-	var deployment appsv1.Deployment
-	if err := apiClient.Get(ctx, childKey, &deployment); err != nil {
+	var published appsv1.Deployment
+	if err := apiClient.Get(ctx, childKey, &published); err != nil {
 		t.Fatalf("Relay Deployment was not published: %v", err)
 	}
-
-	t.Log("A block with no region here or in the operator's defaults withdraws the Relay")
+	published.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: published.Generation, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2,
+	}
+	if err := apiClient.Status().Update(ctx, &published); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
 	if err := apiClient.Get(ctx, key, relay); err != nil {
 		t.Fatal(err)
 	}
+	running := relay.Status.DeepCopy()
+	if running.Endpoint == "" || running.AvailableReplicas != 2 {
+		t.Fatalf("Relay is not running: %+v", running)
+	}
+
+	t.Log("Adding the block while the operator has no settings leaves the Relay as it is, and it reports why")
 	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
 	if err := apiClient.Update(ctx, relay); err != nil {
 		t.Fatal(err)
@@ -1018,40 +1050,49 @@ func TestInvalidRegistrationSettingsWithdrawTheRelay(t *testing.T) {
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
+	var held appsv1.Deployment
+	if err := apiClient.Get(ctx, childKey, &held); err != nil {
+		t.Fatalf("Relay Deployment was removed: %v", err)
+	}
+	if !equality.Semantic.DeepEqual(held.Spec.Template, published.Spec.Template) {
+		t.Fatal("the held Relay's Pods changed")
+	}
+	if err := apiClient.Get(ctx, childKey, &corev1.Service{}); err != nil {
+		t.Fatalf("Relay Service was removed: %v", err)
+	}
 	if err := apiClient.Get(ctx, key, relay); err != nil {
 		t.Fatal(err)
 	}
 	condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready")
-	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "InvalidConfiguration" ||
-		!strings.Contains(condition.Message, "globalDiscovery.region") {
-		t.Fatalf("Relay did not report the missing region: %+v", relay.Status)
-	}
-	if err := apiClient.Get(ctx, childKey, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("Relay Deployment survived an invalid block: %v", err)
-	}
-	if err := apiClient.Get(ctx, childKey, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("Relay Service survived an invalid block: %v", err)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "GlobalDiscoveryNotConfigured" ||
+		relay.Status.Endpoint != running.Endpoint || relay.Status.AvailableReplicas != running.AvailableReplicas {
+		t.Fatalf("held Relay reports %+v", relay.Status)
 	}
 
-	t.Log("Setting the region publishes the Relay again, registered with the default URL")
-	relay.Spec.GlobalDiscovery.Region = "us-east-1"
-	if err := apiClient.Update(ctx, relay); err != nil {
-		t.Fatal(err)
-	}
+	t.Log("Once the operator has its settings, the Relay registers")
+	r.globalDiscovery = configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"}
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
-	deployment = appsv1.Deployment{}
-	if err := apiClient.Get(ctx, childKey, &deployment); err != nil {
-		t.Fatalf("Relay Deployment was not published again: %v", err)
+	var registered appsv1.Deployment
+	if err := apiClient.Get(ctx, childKey, &registered); err != nil {
+		t.Fatal(err)
 	}
-	got := map[string]string{}
+	if got := registrationEnvOf(&registered); got["DYN_RELAY_GLOBAL_DISCOVERY_URL"] != "http://discovery:8080/" ||
+		got["DYN_RELAY_ROUTING_POOL_REGION"] != "us-east-1" {
+		t.Fatalf("the Relay registers with %v", got)
+	}
+}
+
+// registrationEnvOf returns the registration settings of deployment's Relay.
+func registrationEnvOf(deployment *appsv1.Deployment) map[string]string {
+	registered := map[string]string{}
 	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
-		got[item.Name] = item.Value
+		if slices.Contains(registrationEnvNames, item.Name) {
+			registered[item.Name] = item.Value
+		}
 	}
-	if got["DYN_RELAY_ROUTING_POOL_REGION"] != "us-east-1" || got["DYN_RELAY_GLOBAL_DISCOVERY_URL"] != "http://discovery:8080/" {
-		t.Fatalf("published Relay registers with %v", got)
-	}
+	return registered
 }
 
 // connectionRevision returns the DYN_RELAY_CONNECTION_REVISION of the Relay
@@ -1067,40 +1108,34 @@ func connectionRevision(t *testing.T, deployment *appsv1.Deployment) string {
 	return ""
 }
 
-func TestRegistrationSettingsChangeTheConnectionRevision(t *testing.T) {
+func TestRegisteringChangesTheConnectionRevision(t *testing.T) {
 	relay := &v1alpha1.DynamoPoolRelay{
 		Name: "green", Namespace: "inference",
 		Spec: relaySpec("east"),
 	}
-	defaults := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"}
+	settings := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"}
 
-	t.Log("Operator defaults do not roll a relay without the block")
+	t.Log("Operator settings do not roll a relay without the block")
 	_, plain, err := render(relay, []string{"green-runtime"}, configv1alpha1.GlobalDiscoveryConfiguration{})
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	_, withDefaults, err := render(relay, []string{"green-runtime"}, defaults)
+	_, withSettings, err := render(relay, []string{"green-runtime"}, settings)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if connectionRevision(t, plain) != connectionRevision(t, withDefaults) {
-		t.Fatal("operator defaults changed the revision of a relay that does not register")
+	if connectionRevision(t, plain) != connectionRevision(t, withSettings) {
+		t.Fatal("operator settings changed the revision of a relay that does not register")
 	}
 
-	t.Log("Registering, and then changing the region, each roll the Relay's Pods")
+	t.Log("Registering rolls the Relay's Pods")
 	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
-	_, registered, err := render(relay, []string{"green-runtime"}, defaults)
+	_, registered, err := render(relay, []string{"green-runtime"}, settings)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	relay.Spec.GlobalDiscovery.Region = "us-east-2"
-	_, moved, err := render(relay, []string{"green-runtime"}, defaults)
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	revisions := []string{connectionRevision(t, plain), connectionRevision(t, registered), connectionRevision(t, moved)}
-	if distinct := slices.Compact(slices.Sorted(slices.Values(revisions))); len(distinct) != 3 {
-		t.Fatalf("connection revisions %v are not all different", revisions)
+	if connectionRevision(t, registered) == connectionRevision(t, plain) {
+		t.Fatal("registering did not change the connection revision")
 	}
 }
 

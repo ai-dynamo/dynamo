@@ -9,10 +9,10 @@ package poolrelay
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -220,14 +220,21 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 	if err := apiClient.Create(ctx, invalidRelay); !apierrors.IsInvalid(err) {
 		t.Fatalf("expected invalid cluster ID to be rejected, got %v", err)
 	}
-	t.Log("Reject a repeated frontend at API admission")
-	repeatedFrontend := relay.DeepCopy()
-	repeatedFrontend.Name = "repeated-frontend"
-	repeatedFrontend.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{
-		Frontends: []string{"http://green:8000", "http://green:8000"},
-	}
-	if err := apiClient.Create(ctx, repeatedFrontend); !apierrors.IsInvalid(err) {
-		t.Fatalf("expected a repeated frontend to be rejected, got %v", err)
+	t.Log("Reject frontends that the Relay or the Global Discovery Service would refuse")
+	for i, frontends := range [][]string{
+		{"http://green:8000", "http://green:8000"},
+		{"grpc://green:8000"},
+		{"http:///green"},
+		{"http://green:99999"},
+		{"http://green:8000/a,b"},
+		{"http://green:8000/v1 "},
+	} {
+		invalidFrontends := relay.DeepCopy()
+		invalidFrontends.Name = fmt.Sprintf("invalid-frontends-%d", i)
+		invalidFrontends.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: frontends}
+		if err := apiClient.Create(ctx, invalidFrontends); !apierrors.IsInvalid(err) {
+			t.Fatalf("expected frontends %q to be rejected, got %v", frontends, err)
+		}
 	}
 	dgdMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -238,6 +245,11 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 	}
 	if err := apiClient.Create(ctx, dgd); err != nil {
 		t.Fatal(err)
+	}
+
+	t.Log("Create the Relay with a globalDiscovery block")
+	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{
+		Frontends: []string{"http://frontend-a.example.com:8000", "https://frontend-b.example.com"},
 	}
 	if err := apiClient.Create(ctx, &relay); err != nil {
 		t.Fatal(err)
@@ -276,36 +288,35 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		deployment.Spec.Template.Spec.Containers[0].Image != relay.Spec.PodTemplate.Spec.Containers[0].Image {
 		t.Fatalf("Relay Deployment does not match the sample: %+v", deployment.Spec)
 	}
-	t.Log("An empty globalDiscovery block registers the pool with the operator's defaults")
-	unregistered := relay.DeepCopy()
-	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
-	if err := apiClient.Patch(ctx, &relay, client.MergeFrom(unregistered)); err != nil {
+	t.Log("The Relay registers the pool with the operator's settings")
+	want := map[string]string{
+		"DYN_RELAY_GLOBAL_DISCOVERY_URL":   "http://discovery:8080/",
+		"DYN_RELAY_ROUTING_POOL":           relay.Spec.ClusterID + "/" + key.Namespace + "/" + key.Name,
+		"DYN_RELAY_ROUTING_POOL_REGION":    "us-east-1",
+		"DYN_RELAY_ROUTING_POOL_FRONTENDS": "http://frontend-a.example.com:8000,https://frontend-b.example.com",
+	}
+	if got := registrationEnvOf(&deployment); !maps.Equal(got, want) {
+		t.Fatalf("Relay registers with %v, want %v", got, want)
+	}
+
+	t.Log("Removing the block stops the registration of a Relay that had it from creation")
+	registered := relay.DeepCopy()
+	relay.Spec.GlobalDiscovery = nil
+	if err := apiClient.Patch(ctx, &relay, client.MergeFrom(registered)); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://discovery:8080/",
-		"DYN_RELAY_ROUTING_POOL":         relay.Spec.ClusterID + "/" + key.Namespace + "/" + key.Name,
-		"DYN_RELAY_ROUTING_POOL_REGION":  "us-east-1",
-	}
-	registered := map[string]string{}
 	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := apiClient.Get(ctx, serviceKey, &deployment); err != nil {
 			t.Fatal(err)
 		}
-		clear(registered)
-		for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
-			if slices.Contains(registrationEnvNames, item.Name) {
-				registered[item.Name] = item.Value
-			}
-		}
-		if maps.Equal(registered, want) {
+		if len(registrationEnvOf(&deployment)) == 0 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !maps.Equal(registered, want) {
-		t.Fatalf("Relay registers with %v, want %v", registered, want)
+	if got := registrationEnvOf(&deployment); len(got) != 0 {
+		t.Fatalf("the Relay still registers after the block was removed: %v", got)
 	}
 	if err := apiClient.Delete(ctx, dgd); err != nil {
 		t.Fatal(err)
