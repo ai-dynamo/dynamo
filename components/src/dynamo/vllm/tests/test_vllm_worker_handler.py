@@ -212,7 +212,10 @@ def test_lora_discovery_publishes_engine_generate_capability(
     handler.config.engine_args.max_loras = 2
     handler.engine_client = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            lora_config=SimpleNamespace(enable_tower_connector_lora=True)
+            lora_config=SimpleNamespace(enable_tower_connector_lora=True),
+            structured_outputs_config=SimpleNamespace(
+                backend="auto", reasoning_parser="qwen3", enable_in_reasoning=False
+            ),
         )
     )
     runtime_config = MagicMock()
@@ -233,6 +236,16 @@ def test_lora_discovery_publishes_engine_generate_capability(
         patch.object(mod, "register_model", new=AsyncMock()) as register_model,
     ):
         asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
+
+    runtime_config.set_engine_specific.assert_any_call(
+        "vllm_structured_output_backend", '"auto"'
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        "vllm_structural_tag_format_supported", "true"
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        "tool_call_structural_tag_excludes_reasoning", "true"
+    )
 
     if expected_worker_type == mod.WorkerType.Prefill:
         publish_generate.assert_not_called()
