@@ -632,11 +632,21 @@ def _prompt_tail_ends_with(
     tokenizer: TokenizerLike,
 ) -> bool:
     """Whether the prompt, trailing whitespace ignored, ends with ``marker``."""
-    tail = tokenizer.decode(
-        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
-        skip_special_tokens=False,
-    )
-    return tail.rstrip().endswith(marker)
+    tail_tokens = _REASONING_START_TAIL_TOKENS
+    while True:
+        tail = tokenizer.decode(
+            list(prompt_token_ids[-tail_tokens:]),
+            skip_special_tokens=False,
+        ).rstrip()
+        if tail.endswith(marker):
+            return True
+        # Whitespace or a partial marker can fill the initial token window.
+        suffix = tail.lstrip("\ufffd")
+        if tail_tokens >= len(prompt_token_ids) or (
+            suffix and not marker.endswith(suffix)
+        ):
+            return False
+        tail_tokens *= 2
 
 
 def _prompt_leaves_reasoning_open(

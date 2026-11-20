@@ -1139,7 +1139,9 @@ class TestMiniMaxM3DisabledThinking:
 
     @pytest.mark.parametrize("kwargs", _M3_DISABLED_KWARGS)
     @pytest.mark.parametrize(
-        "prompt", [_M3_CLOSED_PROMPT, ""], ids=["closed", "unknown"]
+        "prompt",
+        [_M3_CLOSED_PROMPT, _M3_CLOSED_PROMPT + " \n" * 100, ""],
+        ids=["closed", "closed-long-whitespace", "unknown"],
     )
     def test_closed_or_unknown_prompt_skips_the_parser(
         self, m3_tokenizer, prompt, kwargs
@@ -1187,12 +1189,15 @@ class TestMiniMaxM3DisabledThinking:
         assert metadata.response_reasoning_ended is True
         assert metadata.engine_reasoning_ended is True
 
-    def test_explicit_guidance_after_open_think_keeps_the_parser(self, m3_tokenizer):
+    @pytest.mark.parametrize("whitespace", ["", " \n" * 100])
+    def test_explicit_guidance_after_open_think_keeps_the_parser(
+        self, m3_tokenizer, whitespace
+    ):
         """#18017: explicit guidance follows the reasoning the prompt opened."""
         metadata = self._metadata(
             m3_tokenizer,
             self._request(m3_tokenizer, guided_json={"type": "object"}),
-            _M3_THINK_OPEN_PROMPT,
+            _M3_THINK_OPEN_PROMPT + whitespace,
             {"enable_thinking": False},
         )
 
