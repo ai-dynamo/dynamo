@@ -14,7 +14,7 @@ use dynamo_backend_common::{
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_llm::local_model::runtime_config::{
-    SGLANG_STAGED_IMAGES_V1, TOKEN_BUDGET_RUNTIME_KEY,
+    SGLANG_STAGED_IMAGES_V1, SGLANG_STAGED_VIDEO_V2, TOKEN_BUDGET_RUNTIME_KEY,
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
 use dynamo_sidecar_common::{
@@ -59,6 +59,7 @@ enum NativeService {
 struct StartedState {
     listeners: NodeListeners,
     accepts_encoder_handoff: bool,
+    supports_staged_video: bool,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
 }
@@ -407,6 +408,8 @@ impl LLMEngine for SglangSidecarEngine {
         .await?;
         let infos: Vec<_> = started.iter().map(|(_, info)| info).collect();
         let accepts_encoder_handoff = infos.iter().all(|info| info.accepts_encoder_handoff);
+        let supports_staged_video =
+            accepts_encoder_handoff && infos.iter().all(|info| info.supports_staged_video);
         if self.route_to_encoder && !accepts_encoder_handoff {
             return Err(client::invalid_arg(
                 "native SGLang handoff capability changed during startup",
@@ -428,6 +431,11 @@ impl LLMEngine for SglangSidecarEngine {
             config
                 .runtime_data
                 .insert(SGLANG_STAGED_IMAGES_V1.into(), true.into());
+        }
+        if supports_staged_video {
+            config
+                .runtime_data
+                .insert(SGLANG_STAGED_VIDEO_V2.into(), true.into());
         }
         if native_http.is_some() {
             config
@@ -470,6 +478,7 @@ impl LLMEngine for SglangSidecarEngine {
             .set(StartedState {
                 listeners,
                 accepts_encoder_handoff,
+                supports_staged_video,
                 kv_event_sources,
                 combined_token_limit,
             })
@@ -507,6 +516,7 @@ impl LLMEngine for SglangSidecarEngine {
             &request,
             ctx.id(),
             self.route_to_encoder || state.accepts_encoder_handoff,
+            state.supports_staged_video,
         )?;
         if request.encoder_result.is_some() && !state.accepts_encoder_handoff {
             return Err(client::invalid_request(
@@ -1186,6 +1196,8 @@ mod tests {
             model_path: "native-model".into(),
             tokenizer_path: "native-tokenizer".into(),
             served_model_name: "chat-model".into(),
+            supports_staged_video: false,
+            staged_media_policy: None,
         };
         let (engine, config) =
             SglangSidecarEngine::from_discovered(args(), super::NativeBackend::Encoder(info))

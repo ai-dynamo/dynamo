@@ -36,6 +36,7 @@ pub mod engine;
 mod listeners;
 mod native_http;
 mod node;
+mod staged_media;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
 /// until SGLang publishes its upstream protocol package.

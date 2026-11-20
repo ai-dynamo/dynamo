@@ -1544,6 +1544,14 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
                 }
 
+                // A v2 stage request sent to an older E could drop video_urls
+                // as an unknown protobuf field. Cohorts must agree on support.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0sglang_staged_video_v2\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -4124,22 +4132,25 @@ mod ownership_tests {
     }
 
     #[test]
-    fn json_capability_isolates_opted_in_workers_only() {
-        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
-        let capability = JSON_MULTIMODAL_CAPABILITY;
-        let missing = ModelDeploymentCard::with_name_only("model");
-        let mut disabled = ModelDeploymentCard::with_name_only("model");
-        disabled
-            .runtime_config
-            .runtime_data
-            .insert(capability.into(), false.into());
-        let mut enabled = ModelDeploymentCard::with_name_only("model");
-        enabled
-            .runtime_config
-            .runtime_data
-            .insert(capability.into(), true.into());
-        assert_eq!(missing.mdcsum(), disabled.mdcsum());
-        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    fn media_capabilities_isolate_opted_in_workers_only() {
+        use crate::local_model::runtime_config::{
+            JSON_MULTIMODAL_CAPABILITY, SGLANG_STAGED_VIDEO_V2,
+        };
+        for capability in [JSON_MULTIMODAL_CAPABILITY, SGLANG_STAGED_VIDEO_V2] {
+            let missing = ModelDeploymentCard::with_name_only("model");
+            let mut disabled = ModelDeploymentCard::with_name_only("model");
+            disabled
+                .runtime_config
+                .runtime_data
+                .insert(capability.into(), false.into());
+            let mut enabled = ModelDeploymentCard::with_name_only("model");
+            enabled
+                .runtime_config
+                .runtime_data
+                .insert(capability.into(), true.into());
+            assert_eq!(missing.mdcsum(), disabled.mdcsum());
+            assert_ne!(missing.mdcsum(), enabled.mdcsum());
+        }
     }
 
     #[test]

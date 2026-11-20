@@ -92,6 +92,7 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
     pub(crate) sglang_staged_images: bool,
+    pub(crate) sglang_staged_video: bool,
 }
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
@@ -802,6 +803,9 @@ impl Model {
                     lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
                     sglang_staged_images: ws.supports_runtime_capability(
                         crate::local_model::runtime_config::SGLANG_STAGED_IMAGES_V1,
+                    ),
+                    sglang_staged_video: ws.supports_runtime_capability(
+                        crate::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2,
                     ),
                     tower_connector_lora_enabled: ws
                         .card()

@@ -3,11 +3,11 @@
 
 //! Native encoder service discovery and the Dynamo encode terminal.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, MultimodalData,
-    PreprocessedRequest,
+    DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
@@ -23,6 +23,7 @@ use crate::client;
 use crate::discovery::EngineInfo;
 use crate::proto::encoder as pb;
 use crate::protocol;
+use crate::staged_media::{self, StagedMedia};
 
 type EncoderClient = pb::sglang_encoder_client::SglangEncoderClient<Channel>;
 
@@ -67,24 +68,27 @@ struct Handoff {
 }
 
 impl Handoff {
-    fn validate(&self, request_id: &str, count: usize) -> Result<(), DynamoError> {
+    fn validate(&self, request_id: &str, images: usize, videos: usize) -> Result<(), DynamoError> {
         let t = &self.transfer;
-        if t.version != 1
+        let expected_version = if videos == 0 { 1 } else { 2 };
+        if t.version != expected_version
             || request_id.is_empty()
             || t.request_id != request_id
             || !is_lower_hex(&t.transfer_id, 32)
             || t.part_id != format!("{}_local_part_0", t.transfer_id)
             || t.part_idx != 0
             || t.num_parts != 1
-            || count == 0
-            || t.image_count as usize != count
-            || t.images.len() != count
+            || (images == 0 && videos == 0)
+            || t.image_count as usize != images
+            || t.images.len() != images
+            || t.videos.len() != videos
+            || !t.videos.iter().all(valid_video_layout)
             || t.images
                 .iter()
                 .any(|i| i.t == 0 || i.h == 0 || i.w == 0 || !is_lower_hex(&i.identity, 64))
         {
             return Err(client::invalid_request(
-                "invalid SGLang encoder_result version, identity, part, or image layout",
+                "invalid SGLang encoder_result version, identity, part, or media layout",
             ));
         }
         if advertised_peer(&self.peer)? != self.peer {
@@ -94,6 +98,27 @@ impl Handoff {
         }
         Ok(())
     }
+}
+
+fn valid_video_layout(layout: &pb::VideoLayout) -> bool {
+    let frames = layout.t as usize;
+    frames > 0
+        && layout.h > 0
+        && layout.w > 0
+        && (layout.identities.len() == 1 || layout.identities.len() == frames)
+        && layout
+            .identities
+            .iter()
+            .all(|value| is_lower_hex(value, 64))
+        && (layout.timestamps.is_empty() || layout.timestamps.len() == frames)
+        && layout
+            .timestamps
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+        && layout.timestamps.is_sorted()
+        && layout
+            .second_per_grid_ts
+            .is_none_or(|value| value.is_finite() && value >= 0.0)
 }
 
 fn is_lower_hex(value: &str, len: usize) -> bool {
@@ -125,37 +150,50 @@ fn advertised_peer(raw: &str) -> Result<String, DynamoError> {
     Ok(format!("grpc://{}:{port}", endpoint.authority_host()))
 }
 
-fn images(request: &PreprocessedRequest) -> Result<&[MultimodalData], DynamoError> {
+/// Count original source items, including one item per video regardless of its
+/// temporal grid size. Each source list preserves its own placeholder order.
+fn media_counts(request: &PreprocessedRequest) -> Result<(usize, usize), DynamoError> {
     let Some(media) = &request.multi_modal_data else {
-        return Ok(&[]);
+        return Ok((0, 0));
     };
     if media
         .iter()
-        .any(|(key, items)| key != "image_url" && !items.is_empty())
+        .any(|(key, items)| !matches!(key.as_str(), "image_url" | "video_url") && !items.is_empty())
     {
         return Err(client::invalid_request(
-            "staged SGLang encoders accept images only",
+            "staged SGLang encoders accept images and videos only",
         ));
     }
-    Ok(media.get("image_url").map_or(&[], Vec::as_slice))
+    Ok((
+        media.get("image_url").map_or(0, Vec::len),
+        media.get("video_url").map_or(0, Vec::len),
+    ))
 }
 
 pub(crate) fn validate_consumer(
     request: &PreprocessedRequest,
     request_id: &str,
     required: bool,
+    supports_staged_video: bool,
 ) -> Result<(), DynamoError> {
     if let Some(result) = &request.encoder_result {
         let handoff = Handoff::deserialize(result)
             .map_err(|e| client::invalid_arg(format!("invalid SGLang encoder_result: {e}")))?;
         // The native consumer counts placeholders in the original token IDs.
-        // Raw images need not accompany the descriptor. If Dynamo retained
-        // the media for routing/retries, check the two counts agree here too.
-        let count = match &request.multi_modal_data {
-            Some(_) => images(request)?.len(),
-            None => handoff.transfer.image_count as usize,
+        // When Dynamo retains sources for retries, also check both modality counts.
+        let (images, videos) = match &request.multi_modal_data {
+            Some(_) => media_counts(request)?,
+            None => (
+                handoff.transfer.image_count as usize,
+                handoff.transfer.videos.len(),
+            ),
         };
-        handoff.validate(request_id, count)?;
+        if videos > 0 && !supports_staged_video {
+            return Err(client::invalid_request(
+                "the selected SGLang language worker does not support staged video",
+            ));
+        }
+        handoff.validate(request_id, images, videos)?;
     } else if required
         && (request
             .multi_modal_data
@@ -179,16 +217,55 @@ pub(crate) fn validate_consumer(
         // EncoderRouter also reaches here when no E is live or its RPC failed.
         // Under the required topology this must never issue a second encode.
         return Err(client::invalid_request(
-            "image request requires a successful Dynamo encoder_result",
+            "multimodal request requires a successful Dynamo encoder_result",
         ));
     }
     Ok(())
+}
+
+pub(crate) fn stage_request(
+    request: PreprocessedRequest,
+    request_id: String,
+    supports_video: bool,
+) -> Result<pb::StageRequest, DynamoError> {
+    let (images, videos) = media_counts(&request)?;
+    if (images == 0 && videos == 0) || request.encoder_result.is_some() {
+        return Err(client::invalid_request(
+            "SGLang Stage requires unencoded media",
+        ));
+    }
+    if videos > 0 && !supports_video {
+        return Err(client::invalid_request(
+            "the selected SGLang encoder does not support staged video",
+        ));
+    }
+    protocol::validate_request(&request)?;
+    if request.media_io_kwargs.is_some() {
+        return Err(client::invalid_request(
+            "SGLang Stage cannot apply media_io_kwargs",
+        ));
+    }
+    let mut media = request.multi_modal_data.unwrap_or_default();
+    let mut sources = |key: &str| {
+        media
+            .remove(key)
+            .unwrap_or_default()
+            .into_iter()
+            .map(protocol::into_media_source)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    Ok(pb::StageRequest {
+        request_id,
+        mm_items: sources("image_url")?,
+        video_urls: sources("video_url")?,
+    })
 }
 
 pub(crate) struct Encoder {
     info: pb::GetEncoderInfoResponse,
     peer: String,
     pool: OnceCell<GrpcChannelPool>,
+    media: Option<Arc<StagedMedia>>,
 }
 
 impl Encoder {
@@ -202,8 +279,15 @@ impl Encoder {
                 "GetEncoderInfo returned an empty model_path",
             ));
         }
+        let media = info
+            .staged_media_policy
+            .as_ref()
+            .map(StagedMedia::new)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             info,
+            media,
             peer: advertised_peer(advertised.unwrap_or(endpoint.as_str()))?,
             pool: OnceCell::new(),
         })
@@ -238,12 +322,19 @@ impl Encoder {
         self.pool
             .set(pool)
             .map_err(|_| client::engine_shutdown("encoder already started"))?;
-        Ok(EngineConfig {
+        let mut config = EngineConfig {
             model: self.info.model_path.clone(),
             served_model_name: self.served_name(),
             llm: Some(Default::default()),
             ..Default::default()
-        })
+        };
+        if self.info.supports_staged_video {
+            config.runtime_data.insert(
+                dynamo_llm::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2.into(),
+                true.into(),
+            );
+        }
+        Ok(config)
     }
 
     fn rpc(&self) -> Result<EncoderClient, DynamoError> {
@@ -285,47 +376,32 @@ impl Encoder {
         ctx: GenerateContext,
         stop: CancellationToken,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        if images(&request)?.is_empty() || request.encoder_result.is_some() {
-            return Err(client::invalid_request(
-                "SGLang Stage requires unencoded images",
-            ));
-        }
-        protocol::validate_request(&request)?;
-        if request.media_io_kwargs.is_some() {
-            return Err(client::invalid_request(
-                "SGLang Stage cannot apply media_io_kwargs",
-            ));
-        }
-        let mm_items = request
-            .multi_modal_data
-            .and_then(|mut media| media.remove("image_url"))
-            .unwrap_or_default()
-            .into_iter()
-            .map(protocol::into_media_source)
-            .collect::<Result<Vec<_>, _>>()?;
-        let count = mm_items.len();
         let request_id = ctx.id().to_string();
-        let message = pb::StageRequest {
-            request_id: request_id.clone(),
-            mm_items,
-        };
+        let mut message =
+            stage_request(request, request_id.clone(), self.info.supports_staged_video)?;
+        let images = message.mm_items.len();
+        let videos = message.video_urls.len();
         let mut rpc = self.rpc()?;
         let peer = self.peer.clone();
+        let media = self.media.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let response = tokio::select! {
                 biased;
                 _ = stop.cancelled() => None,
                 _ = ctx.stopped() => None,
-                res = rpc.stage(message) => Some(res),
+                res = async {
+                    staged_media::prepare(&mut message, media.as_deref()).await?;
+                    rpc.stage(message).await.map_err(|e| client::status_to_dynamo("Stage", e))
+                } => Some(res),
             };
             let Some(response) = response else {
                 yield LLMEngineOutput::cancelled();
                 return;
             };
-            let transfer = response.map_err(|e| client::status_to_dynamo("Stage", e))?
+            let transfer = response?
                 .into_inner().transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
             let handoff = Handoff { peer, transfer };
-            if let Err(error) = handoff.validate(&request_id, count) {
+            if let Err(error) = handoff.validate(&request_id, images, videos) {
                 let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
                     transfer_id: handoff.transfer.transfer_id.clone(),
                 })).await;
@@ -335,8 +411,9 @@ impl Encoder {
                 peer = %handoff.peer,
                 request_id = %request_id,
                 part_id = %handoff.transfer.part_id,
-                image_count = count,
-                "native SGLang encoder staged images"
+                image_count = images,
+                video_count = videos,
+                "native SGLang encoder staged media"
             );
             let result = serde_json::to_value(&handoff).map_err(|e| client::protocol_error(e.to_string()))?;
             let serde_json::Value::Object(object) = result else {
@@ -344,5 +421,22 @@ impl Encoder {
             };
             yield LLMEngineOutput::encode_terminal(object);
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_handoff_json_is_unchanged_for_legacy_consumers() {
+        let descriptor = serde_json::json!({
+            "version": 1, "peer": "grpc://e:9100", "request_id": "r",
+            "transfer_id":"10".repeat(16), "part_id":format!("{}_local_part_0","10".repeat(16)),
+            "num_parts":1,"part_idx":0,"image_count":1,"images":[{"t":1,"h":4,"w":4,"identity":"c".repeat(64)}]
+        });
+        let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
+        handoff.validate("r", 1, 0).unwrap();
+        assert_eq!(serde_json::to_value(handoff).unwrap(), descriptor);
     }
 }

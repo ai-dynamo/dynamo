@@ -25,6 +25,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".sglang.grpc.encoder",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
+        .field_attribute(
+            ".sglang.grpc.encoder.StagedImageTransfer.videos",
+            r#"#[serde(default, skip_serializing_if = "Vec::is_empty")]"#,
+        )
+        .field_attribute(
+            ".sglang.grpc.encoder.VideoLayout.timestamps",
+            "#[serde(default)]",
+        )
         .compile_protos(
             &[proto_path.as_path(), encoder.as_path()],
             &[proto_dir.as_path()],

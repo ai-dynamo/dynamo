@@ -148,6 +148,10 @@ fn codec_extends_native_field_rules_and_joins_structured_sequences() {
 }
 
 fn bind_native(body: &Value, staged: bool) -> Result<Bound, ClientError> {
+    bind_media(body, staged, false)
+}
+
+fn bind_media(body: &Value, images: bool, videos: bool) -> Result<Bound, ClientError> {
     let opened = SglangFormat::native().open(ClientRequest {
         body: &serde_json::to_vec(body).unwrap(),
         headers: &HeaderMap::from_iter([(
@@ -158,7 +162,8 @@ fn bind_native(body: &Value, staged: bool) -> Result<Bound, ClientError> {
     })?;
     opened.validation?;
     (opened.bind)(&Worker {
-        sglang_staged_images: staged,
+        sglang_staged_images: images,
+        sglang_staged_video: videos,
         ..crate::testkit::worker()
     })
 }
@@ -224,4 +229,44 @@ fn staged_generate_rejects_unsupported_media_before_encoding() {
         body["input_ids"] = json!([1]);
         assert!(bind_native(&body, true).is_err(), "{body}");
     }
+}
+
+#[test]
+fn staged_video_preserves_clip_order_and_interleaved_prompt() {
+    let clip = "data:video/mp4;base64,AA==";
+    let clip2 = "data:video/mp4;base64,Ag==";
+    let image = "data:image/png;base64,AQ==";
+    let body = json!({
+        "input_ids": [7, 151656, 8, 151655, 9, 151656],
+        "video_data": [clip, clip2], "image_data": image,
+        "mm_hashes": ["a1","a2","a3"],
+    });
+    assert!(bind_media(&body, true, false).is_err());
+    let req = bind_media(&body, true, true).unwrap().request;
+    assert_eq!(req.token_ids.as_slice(), [7, 151656, 8, 151655, 9, 151656]);
+    assert_eq!(
+        serde_json::to_value(req.multi_modal_data.unwrap()).unwrap(),
+        json!({
+            "video_url":[{"Url":clip},{"Url":clip2}], "image_url":[{"Url":image}]
+        })
+    );
+    let native = &req.extra_args.unwrap()[crate::PAYLOAD_KEY];
+    assert_eq!(native["mm_hashes"], body["mm_hashes"]);
+    assert!(native.get("video_data").is_none() && native.get("image_data").is_none());
+    assert!(
+        bind_media(
+            &json!({"input_ids":[151656], "video_data":clip}),
+            true,
+            true
+        )
+        .is_ok()
+    );
+    assert!(
+        bind_media(
+            &json!({"input_ids":[151656], "video_data":clip, "audio_data":"x"}),
+            true,
+            true
+        )
+        .is_err()
+    );
 }

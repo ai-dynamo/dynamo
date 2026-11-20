@@ -13,6 +13,7 @@ fn routing_metadata(
         kv_cache_block_size,
         tower_connector_lora_enabled,
         sglang_staged_images: false,
+        sglang_staged_video: false,
         lora_name,
     }
 }

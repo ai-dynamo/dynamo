@@ -127,6 +127,8 @@ pub struct Worker<'a> {
     pub tower_connector_lora_enabled: bool,
     /// Native image URLs move into Dynamo's encoder pipeline for this worker set.
     pub sglang_staged_images: bool,
+    /// The selected language worker accepts v2 descriptors containing video.
+    pub sglang_staged_video: bool,
 }
 
 /// A started client request.

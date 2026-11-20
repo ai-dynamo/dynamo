@@ -63,6 +63,10 @@ def png(rgb):
 IMAGES = [png((255, 0, 0)), png((0, 0, 255))]
 
 
+# The fixture tests byte delivery and ordering, independent of video decoding.
+VIDEOS = ["data:video/mp4;base64,AA==", "data:video/mp4;base64,AQ=="]
+
+
 class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
     def __init__(self, model, sockets):
         self.sockets = sockets
@@ -77,24 +81,40 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
             release=self.release,
             make_part_id=lambda key, i: f"{key}_local_part_{i}",
             info=encoder_pb2.GetEncoderInfoResponse(
-                model_path=model, served_model_name="vision"
+                model_path=model, served_model_name="vision", supports_staged_video=True
             ),
             capacity=4,
             ttl=30,
             stage_timeout=5,
         )
 
-    async def encode(self, part, images):
-        assert images == IMAGES, "ordered images changed before native encoding"
+    async def encode(self, part, images, videos):
+        assert images == IMAGES[: len(images)]
+        assert videos == VIDEOS[: len(videos)]
         self.encodes.append(part)
         if self.fail:
             raise ValueError("injected encode failure")
-        payload = [hashlib.sha256(image.encode()).digest() for image in images]
-        self.parts[part] = payload
-        return [
-            encoder_pb2.ImageLayout(t=1, h=2, w=2, identity=data.hex())
-            for data in payload
-        ]
+
+        def digest(source):
+            return hashlib.sha256(source.encode()).digest()
+
+        self.parts[part] = [digest(source) for source in (*images, *videos)]
+        return (
+            [
+                encoder_pb2.ImageLayout(t=1, h=2, w=2, identity=digest(image).hex())
+                for image in images
+            ],
+            [
+                encoder_pb2.VideoLayout(
+                    t=2,
+                    h=2,
+                    w=2,
+                    identities=[digest(video).hex()],
+                    second_per_grid_ts=0.5,
+                )
+                for video in videos
+            ],
+        )
 
     async def send(self, part, url):
         self.sends.append((part, url))
@@ -131,6 +151,7 @@ async def run(args, tmp, stack):
     model = str(args.model.resolve())
     config = json.loads((args.model / "config.json").read_text())
     image_token = config["image_token_id"]
+    video_token = config["video_token_id"]
     sockets = zmq.asyncio.Context()
     stack.callback(sockets.destroy, 0)
     requests = []
@@ -156,6 +177,7 @@ async def run(args, tmp, stack):
                 incremental_streaming_output=True,
                 disaggregation_mode=self.role,
                 accepts_encoder_handoff=True,
+                supports_staged_video=True,
                 host="127.0.0.1",
                 port=self.http_port,
                 max_context_length=4096,
@@ -180,21 +202,25 @@ async def run(args, tmp, stack):
             return service_pb2.HealthCheckResponse(healthy=True)
 
         async def consume(self, ids, handoff, room, host, port):
-            count = ids.count(image_token)
+            images = ids.count(image_token)
+            videos = ids.count(video_token)
             if args.split:
                 assert port == languages[0].receiver_port
                 assert host == "127.0.0.1"
             transfer = None
-            if count:
-                transfer = EncoderHandoff.parse(handoff, count)
-                assert count == len(IMAGES)
+            if images or videos:
+                transfer = EncoderHandoff.parse(handoff, images, videos)
+                assert transfer.version == (2 if videos else 1)
                 if self.role != "decode":
                     await asyncio.sleep(0.05)
                     await transfer.deliver(f"127.0.0.1:{self.receiver_port}", 5)
                     frames = await asyncio.wait_for(self.receiver.recv_multipart(), 5)
                     assert frames == [
                         transfer.part_id.encode(),
-                        *(hashlib.sha256(i.encode()).digest() for i in IMAGES),
+                        *(
+                            hashlib.sha256(i.encode()).digest()
+                            for i in IMAGES[:images] + VIDEOS[:videos]
+                        ),
                     ]
                     self.receives.append(transfer.part_id)
             else:
@@ -202,9 +228,7 @@ async def run(args, tmp, stack):
             requests.append((self.role, room, transfer, ids))
 
         async def Generate(self, req, ctx):
-            assert not req.HasField("image_data"), (
-                "received raw images after routing through E"
-            )
+            assert not req.HasField("image_data") and not req.HasField("video_data")
             ids = list(req.input_ids.one.ids)
             await self.consume(
                 ids,
@@ -233,9 +257,13 @@ async def run(args, tmp, stack):
             async def generate(request):
                 self.http_requests += 1
                 body = await request.json()
-                assert "image_data" not in body
+                assert "image_data" not in body and "video_data" not in body
                 assert body["stream"]
-                assert body["mm_hashes"] == ["0xa1", "0xb2"]
+                assert body["mm_hashes"] == (
+                    ["0xc1", "0xa1", "0xc2"]
+                    if video_token in body["input_ids"]
+                    else ["0xa1", "0xb2"]
+                )
                 ids = body["input_ids"]
                 await self.consume(
                     ids,
@@ -382,10 +410,11 @@ async def run(args, tmp, stack):
     else:
         raise TimeoutError(f"model discovery; see {args.logs}")
 
-    def payload(images):
+    def payload(media):
         content = [{"type": "text", "text": "Describe in order."}]
-        for image in images:
-            content.append({"type": "image_url", "image_url": {"url": image}})
+        for source in media:
+            key = "video_url" if source.startswith("data:video/") else "image_url"
+            content.append({"type": key, key: {"url": source}})
             content.append({"type": "text", "text": "Next."})
         return {
             "model": "vision",
@@ -407,9 +436,9 @@ async def run(args, tmp, stack):
             assert room is not None and ("decode", room, transfer, ids) in requests
         assert not languages[1].receives
     else:
-        assert all(language.receives for language in languages), (
-            "exercise both destination schedulers"
-        )
+        assert all(
+            language.receives for language in languages
+        ), "exercise both destination schedulers"
 
     await chat([])
     assert sum(len(e.encodes) for e in encoders) == 8
@@ -418,7 +447,9 @@ async def run(args, tmp, stack):
     for _ in range(4):
         await chat(IMAGES)
     assert len(encoders[0].encodes) == removed
-    image_requests = 12
+    await chat([VIDEOS[0]])
+    await chat([VIDEOS[0], IMAGES[0], VIDEOS[1]])
+    media_requests = 14
     if args.native_generate:
         start, end = config["vision_start_token_id"], config["vision_end_token_id"]
         native_ids = [10, start, image_token, end, 11, start, image_token, end, 12]
@@ -438,7 +469,7 @@ async def run(args, tmp, stack):
         else:
             raise AssertionError("public /generate accepted private encoder_handoff")
         assert len(requests) == before
-        assert sum(len(e.encodes) for e in encoders) == image_requests
+        assert sum(len(e.encodes) for e in encoders) == media_requests
         assert all(language.http_requests == 0 for language in languages)
 
         result = await exchange("/generate", body)
@@ -453,13 +484,38 @@ async def run(args, tmp, stack):
         if args.split:
             assert {h[0] for h in hops} == {"prefill", "decode"}
             assert hops[0][1] is not None and hops[0][1:3] == hops[1][1:3]
-        image_requests += 1
+        mixed = {
+            **body,
+            "rid": "client-native-mixed",
+            "input_ids": [
+                10,
+                start,
+                video_token,
+                end,
+                start,
+                image_token,
+                end,
+                start,
+                video_token,
+                end,
+            ],
+            "image_data": IMAGES[0],
+            "video_data": VIDEOS,
+            "mm_hashes": ["0xc1", "0xa1", "0xc2"],
+        }
+        before = len(requests)
+        result = await exchange("/generate", mixed)
+        assert result["meta_info"]["id"] == mixed["rid"]
+        hops = requests[before:]
+        assert len(hops) == (2 if args.split else 1)
+        assert all(hop[3] == mixed["input_ids"] and hop[2].version == 2 for hop in hops)
+        media_requests += 2
         print(
-            "PASS public /generate routed images and rejected private encoder_handoff"
+            "PASS public /generate routed images and interleaved video, and rejected private encoder_handoff"
         )
 
-    assert sum(len(e.encodes) for e in encoders) == image_requests
-    assert sum(len(language.receives) for language in languages) == image_requests
+    assert sum(len(e.encodes) for e in encoders) == media_requests
+    assert sum(len(language.receives) for language in languages) == media_requests
     for e in encoders:
         assert sorted(e.encodes) == sorted(e.releases)
         assert sorted(e.encodes) == sorted(part for part, _ in e.sends)
@@ -475,10 +531,10 @@ async def run(args, tmp, stack):
     else:
         raise AssertionError("injected Stage failure should fail the image request")
     assert len(requests) == before, "native Generate ran after Stage failed"
-    assert sum(len(e.encodes) for e in encoders) == image_requests + 1
+    assert sum(len(e.encodes) for e in encoders) == media_requests + 1
     assert len(encoders[1].encodes) == len(encoders[1].releases)
     print(
-        f"PASS ({roles}): {image_requests} image requests, {image_requests} transfers, "
+        f"PASS ({roles}): {media_requests} media requests, {media_requests} transfers, "
         "text bypass, replica withdrawal and failed Stage."
     )
     print(

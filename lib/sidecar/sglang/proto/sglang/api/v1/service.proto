@@ -157,6 +157,8 @@ message GetServerInfoResponse {
 
   // The native language server accepts staged encoder descriptors.
   bool accepts_encoder_handoff = 17;
+  // Accepts version-2 encoder handoffs containing video layouts.
+  bool supports_staged_video = 18;
 }
 
 message DeploymentInfo {

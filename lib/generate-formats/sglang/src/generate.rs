@@ -5,8 +5,8 @@
 //!
 //! Dynamo exposes the token-input subset of SGLang's endpoint. The public
 //! request keeps SGLang's field names and preserves `sampling_params`
-//! opaquely for the version-matched worker. For an external image encoder the
-//! format also accepts an ordered image URL list with unexpanded token IDs.
+//! opaquely for the version-matched worker. For an external encoder the
+//! format projects ordered image and video URL lists alongside unexpanded token IDs.
 
 use serde::Deserialize;
 use serde_json::{Map, Value};

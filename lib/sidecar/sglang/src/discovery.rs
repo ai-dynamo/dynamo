@@ -98,6 +98,7 @@ pub(crate) struct EngineInfo {
     pub context_length: Option<u32>,
     pub disaggregation_mode: DisaggregationMode,
     pub accepts_encoder_handoff: bool,
+    pub supports_staged_video: bool,
     /// Reported prefill bootstrap port, validated only for prefill workers.
     pub disaggregation_bootstrap_port: Option<u64>,
     /// Server host, the preferred prefill bootstrap host when routable.
@@ -256,6 +257,7 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         context_length: max_model_len,
         disaggregation_mode,
         accepts_encoder_handoff: server_info.accepts_encoder_handoff,
+        supports_staged_video: server_info.supports_staged_video,
         disaggregation_bootstrap_port: deployment.disaggregation_bootstrap_port.map(u64::from),
         host: Some(server_info.host.clone()).filter(|host| !host.is_empty()),
         // The rendezvous names node 0. A Rust-server prefill listener on any
