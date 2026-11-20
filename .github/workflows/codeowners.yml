@@ -78,9 +78,8 @@ jobs:
 
       - name: Validate team CODEOWNERS
         if: github.event_name == 'pull_request'
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: python .github/codeowners/team_codeowners.py --base "$BASE"
+        # Checkout uses the PR merge commit; its first parent is the tested base.
+        run: python .github/codeowners/team_codeowners.py --base HEAD^1
 
       # Regenerate, then fail if CODEOWNERS, its team files or CONTRIBUTORS.md
       # drifted from what the sources produce. emit_codeowners.py is a PURE

@@ -225,6 +225,36 @@ def test_new_team_must_be_registered_before_receiving_code(policy):
         validate(policy, after)
 
 
+@pytest.mark.unit
+def test_owner_without_team_file_cannot_gain_paths(policy):
+    after = proposal(
+        policy, "/Cargo.toml @org/ops", "/Cargo.toml @org/ops @org/unregistered"
+    )
+    with pytest.raises(ValueError, match="must update"):
+        validate(policy, after)
+
+
+@pytest.mark.unit
+def test_regenerated_policy_cannot_drop_a_team_file(policy):
+    path = team_path("@org/docs")
+    after = deepcopy(policy)
+    after["CODEOWNERS"] = after["CODEOWNERS"].replace(f"/{path} @org/docs\n", "")
+    del after[path]
+    generate(after)
+    with pytest.raises(ValueError, match="cannot be deleted"):
+        validate(policy, after)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", POLICY)
+def test_regenerated_policy_cannot_own_delegated_paths(policy, path):
+    after = deepcopy(policy)
+    after["CODEOWNERS"] += f"/{path} @org/ops\n"
+    generate(after)
+    with pytest.raises(ValueError, match="ownerless"):
+        validate(policy, after)
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("symlink", [False, True])
 def test_generator_and_validator_use_real_git_trees(tmp_path, symlink):
