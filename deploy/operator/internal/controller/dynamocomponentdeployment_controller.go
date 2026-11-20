@@ -936,7 +936,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
-	kubeDeployment = componentdeployment.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy)
+	kubeDeployment = componentdeployment.Render(opt.dynamoComponentDeployment, metav1.ObjectMeta{Labels: dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment), Annotations: annotations}, podTemplateSpec, strategy, dynamo.DCDSelectorLabelValue(opt.dynamoComponentDeployment.Name))
 
 	return
 }

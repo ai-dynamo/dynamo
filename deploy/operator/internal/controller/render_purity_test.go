@@ -32,7 +32,7 @@ func TestResourceRenderersOwnGeneratedMetadata(t *testing.T) {
 	originalMetadata, originalTemplate := metadata.DeepCopy(), template.DeepCopy()
 
 	t.Log("Render Deployment and Grove identities without modifying authored metadata")
-	deployment := componentdeployment.Render(dcd, metadata, template, appsv1.DeploymentStrategy{})
+	deployment := componentdeployment.Render(dcd, metadata, template, appsv1.DeploymentStrategy{}, dcd.Name)
 	groveMetadata := grove.RenderPodMetadata(dgd.Name, dcd.Name, metadata)
 	require.EqualValues(t, 3, *deployment.Spec.Replicas)
 	require.Equal(t, dcd.Name, deployment.Spec.Template.Labels[consts.KubeLabelDynamoSelector])
@@ -64,6 +64,6 @@ func TestResourceRenderersOwnGeneratedMetadata(t *testing.T) {
 
 	t.Log("Preserve unspecified replicas for Kubernetes defaulting")
 	dcd.Spec.Replicas = nil
-	deployment = componentdeployment.Render(dcd, metadata, template, appsv1.DeploymentStrategy{})
+	deployment = componentdeployment.Render(dcd, metadata, template, appsv1.DeploymentStrategy{}, dcd.Name)
 	require.Nil(t, deployment.Spec.Replicas)
 }

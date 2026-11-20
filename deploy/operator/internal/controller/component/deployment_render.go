@@ -6,15 +6,15 @@ package component
 import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Render constructs the desired Deployment from a resolved Pod template and update strategy.
+// Render constructs the desired Deployment from a resolved Pod template, selector and update strategy.
 // dcd and template must be non-nil. Inputs are not modified.
-func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, template *corev1.PodTemplateSpec, strategy appsv1.DeploymentStrategy) *appsv1.Deployment {
+// selector must be the bounded DCD selector label value.
+func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, template *corev1.PodTemplateSpec, strategy appsv1.DeploymentStrategy, selector string) *appsv1.Deployment {
 	metadata = *metadata.DeepCopy()
 	metadata.Name = dcd.Name
 	metadata.Namespace = dcd.Namespace
@@ -24,7 +24,6 @@ func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, 
 	}
 
 	// Keep the Pod label and immutable Deployment selector on the same bounded identity.
-	selector := dynamo.DCDSelectorLabelValue(dcd.Name)
 	template.Labels[consts.KubeLabelDynamoSelector] = selector
 
 	// Own the replica value while preserving Kubernetes defaulting when unspecified.
