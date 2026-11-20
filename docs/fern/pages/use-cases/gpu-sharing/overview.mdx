@@ -22,8 +22,8 @@ GPU fractions is experimental. It depends on KAI-Scheduler and node agents built
 | Decide whether my models should share a GPU, or use MIG or dedicated GPUs instead | A four-question checklist | [Decide Whether to Share a GPU](decide-whether-to-share.mdx) |
 | Work out how much compute and memory each model needs | Two budgets per GPU | [Size Each Model's Share](size-each-models-share.mdx) |
 | See MPS limits work before touching a cluster | MPS v3 on one GPU, no Kubernetes | [Try MPS on One GPU](try-mps-on-one-gpu.mdx) |
-| Set up a cluster that gives pods a share of a GPU | KAI-Scheduler and the GPU fractioning agents | [Install GPU Fractions on Kubernetes](install-gpu-fractions.mdx) |
-| Run Dynamo models on GPU fractions | Fraction annotations on the worker | [Deploy Models on GPU Fractions](deploy-models-on-gpu-fractions.mdx) |
+| Set up a cluster that gives pods a share of a GPU | GPU fractions, or HAMi | [Enable GPU Sharing](enable-gpu-sharing.mdx) |
+| Run Dynamo models on a share of a GPU | GPU fractions annotations, or HAMi resource limits, on the worker | [Deploy Models with GPU Sharing](deploy-models-with-gpu-sharing.mdx) |
 | Measure what sharing costs in throughput and latency | A concurrency sweep with every model loaded | [Benchmark GPU Fractions](benchmark-gpu-fractions.mdx) |
 | See how many more models fit when shares are sized from targets | Sized shares against an even split, on one GPU | [Benchmark Sized Shares](benchmark-sized-shares.mdx) |
 | Plan for faults, resize models, and fix common problems | Placement rules and troubleshooting | [Operate Shared GPUs](operate-shared-gpus.md) |
@@ -49,7 +49,7 @@ A worker asks for its share with annotations on its pod template. This worker ge
         runAsNonRoot: true
 ```
 
-KAI-Scheduler finds a GPU with half its compute and memory free, and the node agents put the worker in its own MPS namespace capped at 50% of the SMs. A second worker with the same request lands on the same GPU, and the two run side by side. [Deploy Models on GPU Fractions](deploy-models-on-gpu-fractions.mdx) walks through every field.
+KAI-Scheduler finds a GPU with half its compute and memory free, and the node agents put the worker in its own MPS namespace capped at 50% of the SMs. A second worker with the same request lands on the same GPU, and the two run side by side. [Deploy Models with GPU Sharing](deploy-models-with-gpu-sharing.mdx) walks through every field.
 
 ## How It Works
 
@@ -86,8 +86,8 @@ In a benchmark of 16 Qwen3-4B models on one 8× A100 node, two models per GPU:
 1. Follow [Decide Whether to Share a GPU](decide-whether-to-share.mdx). If the answer is no, it tells you what to use instead.
 2. [Size each model's share](size-each-models-share.mdx) and check that the shares pack onto your GPUs.
 3. [Try MPS on one GPU](try-mps-on-one-gpu.mdx) to see the limits work on a single machine.
-4. [Install GPU fractions](install-gpu-fractions.mdx) on your cluster and run the smoke test.
-5. [Deploy your models](deploy-models-on-gpu-fractions.mdx) and send them requests.
+4. [Enable GPU sharing](enable-gpu-sharing.mdx) on your cluster and run the smoke test.
+5. [Deploy your models](deploy-models-with-gpu-sharing.mdx) and send them requests.
 6. [Benchmark them](benchmark-gpu-fractions.mdx) with every model loaded, and adjust the shares. [Benchmark Sized Shares](benchmark-sized-shares.mdx) shows what sizing each share from its targets saves.
 7. Read [Operate Shared GPUs](operate-shared-gpus.md) before you run them in production.
 

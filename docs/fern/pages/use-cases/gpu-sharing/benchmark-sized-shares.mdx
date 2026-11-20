@@ -13,7 +13,7 @@ Any performance results on this page are purely illustrative and are not indicat
 
 ## Setup
 
-All runs use one NVIDIA RTX PRO 6000 Blackwell Workstation Edition (188 SMs, 96 GiB) under KAI-Scheduler with GPU fractions in `sm-sharing` mode, the stack from [Install GPU Fractions on Kubernetes](install-gpu-fractions.mdx). Each model is `Qwen/Qwen3-4B`, served by one Dynamo frontend and one aggregated vLLM worker, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens.
+All runs use one NVIDIA RTX PRO 6000 Blackwell Workstation Edition (188 SMs, 96 GiB) under KAI-Scheduler with GPU fractions in `sm-sharing` mode, the stack from [Enable GPU Sharing](enable-gpu-sharing.mdx). Each model is `Qwen/Qwen3-4B`, served by one Dynamo frontend and one aggregated vLLM worker, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens.
 
 The results are pessimistic in the same way as the A100 benchmark: prefix caching is off, so every request computes its full 2048-token input.
 
