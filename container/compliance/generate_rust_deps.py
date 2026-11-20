@@ -34,7 +34,6 @@ FIELDNAMES = ["dependency_type", "package_name", "version", "spdx_license", "rep
 DEFAULT_MANIFEST_PATHS = [
     "Cargo.toml",
     "lib/bindings/python/Cargo.toml",
-    "lib/bindings/kvbm/Cargo.toml",
 ]
 
 _LICENSE_NAMES = [

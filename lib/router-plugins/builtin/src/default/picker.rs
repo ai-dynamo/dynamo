@@ -3,10 +3,7 @@
 
 //! Minimum-cost selection, tie-breaking, and temperature sampling of scored candidates.
 
-use dynamo_kv_router::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerInputView, WorkerPicker, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 use parking_lot::Mutex;
 use std::cell::Cell;
 use std::sync::Arc;

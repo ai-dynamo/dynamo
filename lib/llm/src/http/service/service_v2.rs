@@ -4,16 +4,19 @@
 use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
+use http_body::{Frame, SizeHint};
 
 use super::Metrics;
 use super::RouteDoc;
@@ -29,7 +32,6 @@ use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
-use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -176,7 +178,6 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
     let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
@@ -196,11 +197,39 @@ async fn track_inflight_inference(
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
     // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(
+        parts,
+        Body::new(InflightResponseBody {
+            body,
+            _permit: permit,
+        }),
+    )
+}
+
+/// Preserve framing metadata and trailers while holding the response's admission.
+struct InflightResponseBody {
+    body: Body,
+    _permit: InflightPermit,
+}
+
+impl HttpBody for InflightResponseBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
 }
 
 /// HTTP service shared state
@@ -1601,16 +1630,10 @@ impl HttpServiceConfigBuilder {
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let systemone_enabled = frontend_api_config.systemone_enabled();
         let generate_routes = configured_generate_routes(config.enable_engine_apis)?;
-        let mut generate_engine_capabilities = generate_routes
+        let generate_engine_capabilities = generate_routes
             .iter()
             .map(|(_, format)| format.capability())
             .collect::<Vec<_>>();
-        // System One scores through SGLang's native format without mounting `/generate`.
-        if systemone_enabled && !generate_engine_capabilities.contains(&SGLANG_GENERATE_CAPABILITY)
-        {
-            generate_engine_capabilities.push(SGLANG_GENERATE_CAPABILITY);
-        }
-
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
@@ -3070,6 +3093,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inflight_body_preserves_trailers_and_holds_admission() {
+        use http_body_util::{BodyExt, StreamBody};
+
+        let observer = Arc::new(ServiceObserver::default());
+        let trailers = axum::http::HeaderMap::from_iter([(
+            header::HeaderName::from_static("x-checksum"),
+            header::HeaderValue::from_static("done"),
+        )]);
+        let frames = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
+            Ok(Frame::trailers(trailers.clone())),
+        ]);
+        let mut body = InflightResponseBody {
+            body: Body::new(StreamBody::new(frames)),
+            _permit: observer.acquire_inflight(),
+        };
+
+        assert_eq!(body.size_hint().exact(), None);
+        assert!(!body.is_end_stream());
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), "data");
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_trailers().unwrap(), trailers);
+        assert!(body.frame().await.is_none());
+        assert_eq!(observer.inflight_count(), 1);
+        drop(body);
+        assert_eq!(observer.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn track_inflight_inference_preserves_length() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let service = HttpService::builder().build().unwrap();
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { Body::from("data") }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(InferenceReadinessState {
+                    state: service.state_clone(),
+                    mounted_protocols: HashMap::new(),
+                }),
+                track_inflight_inference,
+            ));
+
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body();
+        assert_eq!(body.size_hint().exact(), Some(4));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "data");
+    }
+
+    #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
         // Off by default, and bound to loopback when enabled.
         assert!(HttpService::builder().build().unwrap().admin.is_none());
@@ -4205,7 +4286,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn decisions_mount_both_routes_and_internal_sglang_capability() {
+    fn decisions_mount_both_routes_without_enabling_public_generate_capabilities() {
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -4221,10 +4302,7 @@ mod tests {
                     .build()
                     .unwrap();
 
-                assert_eq!(
-                    service.generate_engine_capabilities(),
-                    vec![SGLANG_GENERATE_CAPABILITY]
-                );
+                assert!(service.generate_engine_capabilities().is_empty());
                 assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
                 assert!(!service.model_endpoint_enabled(EndpointType::Generate));
                 let routes = service
@@ -4445,6 +4523,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn systemone_does_not_bypass_disabled_public_generate_route() {
+        crate::generate_format::test_formats::install();
         let mut api = FrontendApiConfig::default();
         api.set_systemone_enabled(true);
         let service = HttpService::builder()

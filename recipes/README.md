@@ -15,6 +15,9 @@ and ask it to author or adapt one; the repo's agent skills guide the process.
 
 ## Available Recipes
 
+For recipes that run only on Dynamo Enterprise Support images, see
+[Dynamo Enterprise Certified Recipes](certified/README.md).
+
 ### Feature Comparison Recipes
 
 These recipes compare Dynamo performance features with benchmark results, each including both baseline and optimized deployment configurations:

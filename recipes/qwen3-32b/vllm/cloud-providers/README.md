@@ -28,7 +28,7 @@ list:
 - `GPU_MEMORY_UTILIZATION`
 - `HF_HOME`
 - transport-specific environment variables such as `UCX_NET_DEVICES` or
-  `DYN_KVBM_NIXL_BACKEND_LIBFABRIC`
+  `FI_PROVIDER`
 
 This avoids replacing the full `args` list in each overlay.
 
