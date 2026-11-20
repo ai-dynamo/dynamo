@@ -18,8 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestPlannerOwnedEnvironmentContract(t *testing.T) {
-	t.Log("Load the same ownership cases consumed by Python's pure projection tests")
+func TestOperatorOwnedEnvironmentContract(t *testing.T) {
+	t.Log("Load ownership cases for the rendered main-container environment")
 	data, err := os.ReadFile("testdata/operator_environment.json")
 	require.NoError(t, err)
 	var cases []struct {
