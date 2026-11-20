@@ -238,8 +238,11 @@ def load_base_components(
     shipped_debs is the (name, version) set the dpkg generator found in the
     shipped filesystem at dpkg_root: a Debian package outside it is dropped, and
     one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
-    as license text.
+    as license text. An empty set means the scan found nothing: no filter.
     """
+    from .dpkg import _normalize_debian_license
+
+    shipped_debs = shipped_debs or None
     doc = json.loads(sbom_path.read_text(encoding="utf-8"))
     by_key: dict[tuple[str, str], Component] = {}
     for c in doc.get("components", []) or []:
@@ -247,10 +250,14 @@ def load_base_components(
         if c.get("type") not in ("library", "application") or not name or not version:
             continue
         version = str(version)
+        is_deb = (c.get("purl") or "").startswith("pkg:deb/")
         ids: list[str] = []
         for entry in c.get("licenses") or []:
             lic = entry.get("license") or {}
             ident = lic.get("id") or lic.get("name")
+            if is_deb and not lic.get("id") and ident:
+                # Debian spellings such as "Expat" have SPDX names.
+                ident = _normalize_debian_license(ident) or ident
             if not ident and entry.get("expression"):
                 ident = entry["expression"]
             if ident and re.search(r" (AND|OR|WITH) ", ident):
@@ -259,7 +266,7 @@ def load_base_components(
             if ident and not ident.startswith("sha256:") and ident not in ids:
                 ids.append(ident)
         text = None
-        if shipped_debs is not None and (c.get("purl") or "").startswith("pkg:deb/"):
+        if shipped_debs is not None and is_deb:
             if (name, version) not in shipped_debs:
                 continue
             copyright_path = dpkg_root / DEB_COPYRIGHT_DIR / name / "copyright"
@@ -338,7 +345,7 @@ def render_base_section(
             parts.append("\n```\n" + c.license_text.rstrip() + "\n```\n")
         parts.append("\n")
         for part in _split_top_level_and(c.spdx):
-            is_expr = part.startswith("(") or re.search(r" (OR|WITH) ", part)
+            is_expr = re.search(r" (AND|OR|WITH) ", part)
             license_ids.update(_spdx_ids(part) if is_expr else _bare_license_ids(part))
     license_ids -= {NOASSERTION, UNKNOWN}
     parts.append("# License texts\n\n")
@@ -383,7 +390,7 @@ def write_third_party(
     if base_sbom is not None:
         base = load_base_components(base_sbom, shipped_debs, dpkg_root)
         section = render_base_section(
-            base_sbom, base, _BASE_DEBS_FILTERED if shipped_debs is not None else ""
+            base_sbom, base, _BASE_DEBS_FILTERED if shipped_debs else ""
         )
         parts.append(section.rstrip() + "\n")
     output_dir.mkdir(parents=True, exist_ok=True)

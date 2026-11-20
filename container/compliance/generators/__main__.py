@@ -245,8 +245,8 @@ def main(argv: list[str] | None = None) -> int:
                 from . import dpkg as gen  # type: ignore[no-redef]
 
                 collected = gen.collect_components(args.dpkg_root)
-                shipped_debs = {(c.name, c.version) for c in collected} or None
-                if shipped_debs is None and args.subtract_sbom is not None:
+                shipped_debs = {(c.name, c.version) for c in collected}
+                if not shipped_debs and args.subtract_sbom is not None:
                     logger.warning(
                         "no dpkg packages under %s; THIRD-PARTY.txt lists every "
                         "base Debian package unfiltered",

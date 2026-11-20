@@ -38,7 +38,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
             "name": "zlib1g",
             "version": "1.3",
             "purl": "pkg:deb/ubuntu/zlib1g@1.3",
-            "licenses": [{"license": {"id": "Zlib"}}],
+            "licenses": [{"license": {"id": "Zlib"}}, {"license": {"name": "Expat"}}],
         },
         {
             "type": "library",
@@ -164,6 +164,8 @@ def test_base_components_parsed(tmp_path: Path) -> None:
         " AND (MIT OR Zlib) AND UNKNOWN AND (MIT AND Apache-2.0 with LLVM exceptions"
     )
     assert comps["libnolicense"].spdx == NOASSERTION
+    assert comps["zlib1g"].spdx == "Zlib AND MIT"
+    assert "libremoved" in {c.name for c in load_base_components(sbom, set())}
 
 
 def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
