@@ -7,6 +7,9 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
 - `offline_replay_bench` — Rust-native replay loop using the mocker's perf
   model, for profiling replay overhead.
 - `kv_router/{mooncake,active_sequences,approximate_lru}_bench` — kv-router microbenchmarks.
+- `kv_router/selection_replay_bench` — the selection core under a deployment-shaped
+  replay; the benchmark for selection, queue-actor and default-policy changes
+  (`kv_router/SELECTION_BENCH.md`).
 - `claude_trace_export` — converts local Claude sessions into canonical Dynamo
   request traces for direct replay.
 - `codex_trace_export` — converts local Codex rollouts into canonical Dynamo
