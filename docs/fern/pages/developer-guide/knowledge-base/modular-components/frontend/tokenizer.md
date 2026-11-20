@@ -69,7 +69,7 @@ flowchart TD
 - The HuggingFace backend rejects a `tokenizer.json` that it cannot serve with the token IDs and text the file describes, and model initialization fails. `fastokens` decodes through the same backend, so it rejects the same files. The rejected configurations are:
   - an added token with `normalized: true` whose normalized form differs from its content, for example an uppercase token under a lowercase normalizer;
   - a byte-level BPE model whose decoder is anything other than `ByteLevel` alone;
-  - a byte-fallback BPE vocabulary that lacks any of the 256 `<0xNN>` byte tokens;
+  - a byte-fallback BPE vocabulary that lacks an `<0xNN>` byte token, unless the missing byte is an ASCII character that is itself in the vocabulary;
   - a `ByteLevel` pre-tokenizer with `add_prefix_space: true`.
 - A `truncation` or `padding` block in `tokenizer.json` is ignored by the HuggingFace and `fastokens` backends. Prompts are never clipped or padded by the tokenizer.
 - Special tokens declared only in a sibling `tokenizer_config.json` are merged into the
