@@ -2608,6 +2608,146 @@ async def test_guided_json_follows_worker_grammar_scheduling(
         assert choice["finish_reason"] == "tool_calls"
 
 
+@pytest.mark.asyncio
+@pytest.mark.core
+@pytest.mark.parametrize("tool_choice_kind", ["named", "required"])
+@pytest.mark.parametrize(
+    ("prompt_text", "backend_defers_grammar", "worker_output", "terminal_reasons"),
+    [
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            False,
+            ("{answer}",),
+            ("stop", "tool_calls"),
+            id="json-before-finish",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            False,
+            ("{answer_start}", "{answer_end}"),
+            ("stop", "tool_calls"),
+            id="split-json-before-finish",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            False,
+            ("{answer_start}", "{answer_end}"),
+            ("stop", "tool_calls"),
+            id="closed-prompt-split-json",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            True,
+            ("{hidden_reasoning}", "</think>", "{answer}"),
+            ("stop", "tool_calls"),
+            id="tool-shaped-hidden-reasoning",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            True,
+            ("{hidden_reasoning}", "</think>{answer_start}", "{answer_end}"),
+            ("stop", "tool_calls"),
+            id="split-json-starts-with-reasoning-close",
+        ),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            True,
+            ("{hidden_reasoning}",),
+            ("length", "length"),
+            id="length-limit-before-reasoning-close",
+        ),
+    ],
+)
+@pytest.mark.filterwarnings(
+    "ignore:max_tokens is deprecated in favor of the max_completion_tokens field:DeprecationWarning"
+)
+async def test_glm_hidden_reasoning_replays_scripted_worker_chunks(
+    vllm_processor_module,
+    monkeypatch,
+    tokenizer,
+    tool_choice_kind,
+    prompt_text,
+    backend_defers_grammar,
+    worker_output,
+    terminal_reasons,
+):
+    """Replay forced tool streams with JSON on either side of the reasoning boundary."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "tools": TOOL_REQUEST["tools"],
+        "tool_choice": (
+            "required"
+            if tool_choice_kind == "required"
+            else {"type": "function", "function": {"name": "get_weather"}}
+        ),
+        "chat_template_kwargs": {"enable_thinking": False},
+        "include_reasoning": False,
+        "stream": True,
+    }
+    metadata, post = await _capture_rendered_reasoning_processors(
+        vllm_processor_module,
+        monkeypatch,
+        tokenizer,
+        request,
+        prompt_text,
+        "glm45",
+        backend_defers_grammar,
+    )
+    assert metadata["sampling_options"]["guided_decoding"]["json"]
+    assert metadata["reasoning_ended"] is (not backend_defers_grammar)
+
+    arguments = '{"city":"Paris"}'
+    answer = (
+        '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+        if tool_choice_kind == "required"
+        else arguments
+    )
+    boundary = answer.index("Paris") + len("Pa")
+    chunks = [
+        piece.format(
+            answer=answer,
+            answer_start=answer[:boundary],
+            answer_end=answer[boundary:],
+            hidden_reasoning=answer.replace("Paris", "Rome"),
+        )
+        for piece in worker_output
+    ]
+    chunks.append("")
+
+    worker_finish_reason, expected_finish_reason = terminal_reasons
+    deltas = []
+    for index, text in enumerate(chunks):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                finish_reason=worker_finish_reason if index == len(chunks) - 1 else None,
+                logprobs=None,
+            )
+        )
+        if choice is not None:
+            if index < len(chunks) - 1:
+                assert choice["finish_reason"] is None
+            deltas.append(choice["delta"])
+
+    assert not any(
+        delta.get("content") or delta.get("reasoning_content") for delta in deltas
+    )
+    calls = [
+        (call["function"]["name"], json.loads(call["function"]["arguments"]))
+        for delta in deltas
+        for call in delta.get("tool_calls", [])
+    ]
+    expected_calls = (
+        [("get_weather", {"city": "Paris"})] if expected_finish_reason == "tool_calls" else []
+    )
+    assert calls == expected_calls
+    assert choice is not None
+    assert choice["finish_reason"] == expected_finish_reason
+
+
 def _make_processor(module, routed_engine):
     processor = module.VllmProcessor.__new__(module.VllmProcessor)
     processor.routed_engine = routed_engine
