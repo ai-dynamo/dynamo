@@ -178,10 +178,12 @@ impl HintPolicyRegistry {
     ///
     /// A role runs the hints its entry lists, of any registered type. A role whose entry lists no
     /// `hints` runs the hints whose hosts include its worker-selection type, in registration order,
-    /// each built from empty parameters.
+    /// each built from empty parameters. `every_role_runs` names the worker-selection type every
+    /// role runs when the router mode, not `config`, selected it.
     pub(crate) fn resolve(
         &self,
         config: &KvRouterConfig,
+        every_role_runs: Option<&str>,
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
         let selected = config
             .selected_worker_selection_policy_instances()
@@ -202,7 +204,8 @@ impl HintPolicyRegistry {
                 WorkerType::Decode => &selected.decode,
                 WorkerType::Encode => &selected.encode,
             };
-            let host = host_type(worker_selection, selection.as_ref());
+            let host =
+                every_role_runs.unwrap_or_else(|| host_type(worker_selection, selection.as_ref()));
             roles.push(
                 match selection
                     .as_ref()

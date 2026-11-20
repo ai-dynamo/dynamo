@@ -16,8 +16,12 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import (
+    build_router_config,
+    parse_worker_router_config,
+)
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+from dynamo.llm import RouterConfig, RouterMode
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -445,6 +449,12 @@ def _frontend_config(argv: list[str]) -> FrontendConfig:
         pytest.param(
             ["--router-mode", "least-loaded"], False, "least-loaded", id="other-mode"
         ),
+        pytest.param(
+            ["--router-mode", "dynamo-two-tier-cost-fn"],
+            False,
+            "dynamo-two-tier-cost-fn",
+            id="policy-type",
+        ),
     ],
 )
 def test_frontend_routes_by_a_router_mode_or_a_policy_file(
@@ -468,7 +478,9 @@ def test_frontend_routes_by_a_router_mode_or_a_policy_file(
     assert (kwargs["router_policy_config"] is not None) == policy_file
 
 
-@pytest.mark.parametrize("router_mode", ["round-robin", "direct"])
+@pytest.mark.parametrize(
+    "router_mode", ["round-robin", "direct", "dynamo-two-tier-cost-fn"]
+)
 def test_frontend_rejects_a_policy_file_with_a_router_mode_other_than_kv(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, router_mode: str
 ) -> None:
@@ -502,6 +514,44 @@ def test_load_aware_does_not_hide_a_router_mode_that_conflicts_with_a_policy_fil
                 str(path),
             ]
         )
+
+
+def test_frontend_router_mode_names_a_policy_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    policy_type = "dynamo-two-tier-cost-fn"
+
+    # The KV-only flags hold for a policy type as they do for kv, and the type
+    # reaches the router as the mode itself, with the KV configuration.
+    kv_flags = ["--serve-indexer", "--router-conditional-disagg"]
+    config = _frontend_config(["--router-mode", policy_type, *kv_flags])
+    router_config = build_router_config(config, allow_policy_type=True)
+    assert router_config.router_mode == policy_type
+    kv = build_router_config(_frontend_config(["--router-mode", "kv", *kv_flags]))
+    assert router_config.kv_router_config.to_json() == kv.kv_router_config.to_json()
+
+    # A string that names a router mode is that mode, not a policy type.
+    router_config.router_mode = "kv"
+    assert router_config.router_mode == RouterMode.KV
+    assert RouterConfig("round-robin").router_mode == RouterMode.RoundRobin
+
+    # A model card carries a router mode only, so a worker takes nothing else.
+    with pytest.raises(SystemExit):
+        parse_worker_router_config(["--router-mode", policy_type])
+    with pytest.raises(ValueError, match="unknown router mode"):
+        build_router_config(config)
+
+    # --load-aware routes with kv, which would replace the type silently.
+    with (
+        pytest.warns(FutureWarning, match="deprecated"),
+        pytest.raises(ValueError, match="--load-aware routes with kv"),
+    ):
+        _frontend_config(["--load-aware", "--router-mode", policy_type])
+
+    monkeypatch.setenv("DYN_ROUTER_MODE", " ")
+    with pytest.raises(ValueError, match="--router-mode is empty"):
+        _frontend_config([])
 
 
 def test_load_aware_frontend_implies_kv_router_mode() -> None:

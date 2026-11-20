@@ -153,6 +153,20 @@ The file selects each role's policy, so the frontend takes no `--router-mode`. T
 rejects a policy file passed with any `--router-mode` other than `kv`; `--router-mode kv` may
 still accompany one.
 
+To run one policy type on every role with its default parameters, name the type with
+`--router-mode` and pass no file:
+
+```bash
+python3 -m dynamo.frontend --router-mode dynamo-two-tier-cost-fn
+```
+
+A value that is neither a router mode nor a registered type fails at startup, with an error that
+lists both. A type named this way is the whole selection: it is an error together with a policy
+file, `DYN_ROUTER_WORKER_SELECTION_POLICY`, `--router-prefill-policy`, `--router-decode-policy` or
+`--load-aware`.
+`--router-mode kv` selects the default policy. `direct` and `device-aware-weighted` are router
+modes, not policy types, so only `--router-mode` selects them.
+
 #### Configure the Default Policy
 
 Set the default policy’s scoring parameters in the YAML passed to `--router-policy-config`:

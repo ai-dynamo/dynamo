@@ -1915,12 +1915,12 @@ class RouterMode:
 
 class RouterConfig:
     """How to route the request"""
-    router_mode: RouterMode
+    router_mode: RouterMode | str
     kv_router_config: KvRouterConfig
 
     def __init__(
         self,
-        mode: RouterMode,
+        mode: RouterMode | str,
         config: Optional[KvRouterConfig] = None,
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
@@ -1933,8 +1933,12 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, KV, Direct, LeastLoaded, or DeviceAwareWeighted)
-            config: Optional KV router configuration (used when mode is KV)
+            mode: The router mode (RoundRobin, Random, KV, Direct, LeastLoaded, or
+                DeviceAwareWeighted). On a frontend it may instead be the name of a registered
+                worker-selection policy type, which every worker role then runs with its
+                default parameters. A string that names a router mode, such as "kv", is
+                stored as that RouterMode. A worker's model card carries a RouterMode only.
+            config: Optional KV router configuration (used when mode is KV or a policy type)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection

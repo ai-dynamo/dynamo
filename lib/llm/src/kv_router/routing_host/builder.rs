@@ -194,12 +194,12 @@ impl PolicyInputs {
             }
             policy => policy,
         };
-        let mode = policy.transport_mode();
+        let name = policy.name();
         if candidate_policy.is_some() && policy.hosted_without_occupancy().is_none() {
-            anyhow::bail!("candidate policy is unsupported with {mode:?} routing");
+            anyhow::bail!("candidate policy is unsupported with {name} routing");
         }
         let Some(load_context) = load_context else {
-            anyhow::bail!("{mode:?} routing requires a RoutingLoadContext");
+            anyhow::bail!("{name} routing requires a RoutingLoadContext");
         };
         if has_affinity && candidate_policy.is_some() {
             anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");

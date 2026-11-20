@@ -15,7 +15,7 @@ use std::sync::Arc;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 use dynamo_scheduler::host::PrefillLoadEstimator;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     admission_gate::WorkerAdmissionGate, backend::ExecutionContext, discovery::LoadThresholdConfig,
@@ -43,9 +43,106 @@ pub type ChatEngineFactoryCallback = Arc<
         + Sync,
 >;
 
+/// What `--router-mode` selects: one of the fixed router modes, or a registered
+/// worker-selection policy type, which every worker role then runs with its default
+/// parameters.
+///
+/// A model card carries a fixed mode only. A fixed mode serializes exactly as [`RouterMode`]
+/// does, so card bytes and checksums are unchanged, and a policy type refuses to serialize,
+/// so one can never reach a card.
+#[derive(Clone, PartialEq)]
+pub enum RouterModeSetting {
+    Mode(RouterMode),
+    PolicyType(String),
+}
+
+impl RouterModeSetting {
+    /// The fixed modes `--router-mode` takes by name.
+    pub const MODES: [RouterMode; 6] = [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::KV,
+        RouterMode::Direct,
+        RouterMode::LeastLoaded,
+        RouterMode::DeviceAwareWeighted,
+    ];
+
+    /// Read a `--router-mode` value: the name of a fixed mode, else a policy type.
+    pub fn from_name(name: &str) -> Self {
+        Self::MODES
+            .into_iter()
+            .find(|mode| mode.telemetry_label() == name)
+            .map_or_else(|| Self::PolicyType(name.to_owned()), Self::Mode)
+    }
+
+    /// The policy type, when the setting names one.
+    pub fn policy_type(&self) -> Option<&str> {
+        match self {
+            Self::Mode(_) => None,
+            Self::PolicyType(policy_type) => Some(policy_type),
+        }
+    }
+
+    /// The fixed mode the setting stands for where only a fixed mode will do: its own, or
+    /// `KV` for a policy type. Those places are the transport of the pipelines no routing
+    /// host serves, and the checks that single out `kv` or `direct`.
+    pub fn fixed_mode(&self) -> RouterMode {
+        match self {
+            Self::Mode(mode) => *mode,
+            Self::PolicyType(_) => RouterMode::KV,
+        }
+    }
+}
+
+impl Default for RouterModeSetting {
+    fn default() -> Self {
+        Self::Mode(RouterMode::default())
+    }
+}
+
+impl From<RouterMode> for RouterModeSetting {
+    fn from(mode: RouterMode) -> Self {
+        Self::Mode(mode)
+    }
+}
+
+impl PartialEq<RouterMode> for RouterModeSetting {
+    fn eq(&self, mode: &RouterMode) -> bool {
+        matches!(self, Self::Mode(own) if own == mode)
+    }
+}
+
+/// A fixed mode prints as [`RouterMode`] does, so logs keep their values.
+impl std::fmt::Debug for RouterModeSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mode(mode) => mode.fmt(f),
+            Self::PolicyType(policy_type) => f.write_str(policy_type),
+        }
+    }
+}
+
+impl Serialize for RouterModeSetting {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Mode(mode) => mode.serialize(serializer),
+            Self::PolicyType(policy_type) => Err(serde::ser::Error::custom(format!(
+                "router mode names the worker-selection policy type {policy_type:?}; a model \
+                 card carries a fixed router mode only"
+            ))),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RouterModeSetting {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        RouterMode::deserialize(deserializer).map(Self::Mode)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouterConfig {
-    pub router_mode: RouterMode,
+    pub router_mode: RouterModeSetting,
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
@@ -59,9 +156,12 @@ pub struct RouterConfig {
 }
 
 impl RouterConfig {
-    pub fn new(router_mode: RouterMode, kv_router_config: KvRouterConfig) -> Self {
+    pub fn new(
+        router_mode: impl Into<RouterModeSetting>,
+        kv_router_config: KvRouterConfig,
+    ) -> Self {
         Self {
-            router_mode,
+            router_mode: router_mode.into(),
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,

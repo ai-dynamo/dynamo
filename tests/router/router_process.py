@@ -41,7 +41,7 @@ class FrontendRouterProcess(ManagedProcess):
     router_policy_config and router_mode=None, the policy file alone selects
     each role's policy.
     block_size is only sent to the CLI when the KV router runs: router_mode is
-    "kv", or a policy file is given.
+    "kv" or a policy type, or a policy file is given.
     """
 
     def __init__(
@@ -84,7 +84,14 @@ class FrontendRouterProcess(ManagedProcess):
         if router_policy_config is not None:
             command.extend(["--router-policy-config", router_policy_config])
 
-        if router_mode == "kv" or router_policy_config is not None:
+        if router_policy_config is not None or router_mode not in (
+            None,
+            "round-robin",
+            "random",
+            "direct",
+            "least-loaded",
+            "device-aware-weighted",
+        ):
             command.extend(["--kv-cache-block-size", str(block_size)])
 
         if blocks_threshold is not None:

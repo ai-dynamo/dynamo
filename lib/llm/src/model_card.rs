@@ -3986,7 +3986,7 @@ mod ownership_tests {
         for mode in [RouterMode::KV, RouterMode::RoundRobin] {
             let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
             let mut router = RouterConfig {
-                router_mode: mode,
+                router_mode: mode.into(),
                 ..Default::default()
             };
             router.kv_router_config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
@@ -4024,6 +4024,51 @@ mod ownership_tests {
         let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
         assert!(parsed.router_config.is_none());
         assert_eq!(parsed.mdcsum(), card.mdcsum());
+    }
+
+    #[test]
+    fn a_card_carries_a_fixed_router_mode_as_before_and_never_a_policy_type() {
+        use crate::entrypoint::{RouterConfig, RouterModeSetting};
+        use dynamo_runtime::pipeline::RouterMode;
+
+        // The card checksum hashes these bytes, so they must be what `RouterMode` wrote.
+        for mode in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::KV,
+            RouterMode::Direct,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            let config = RouterConfig::new(mode, Default::default());
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["router_mode"], serde_json::to_value(mode).unwrap());
+            let parsed: RouterConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(parsed.router_mode, mode);
+        }
+
+        let policy_type = RouterModeSetting::PolicyType("dynamo-two-tier-cost-fn".to_owned());
+        let mut card = ModelDeploymentCard::with_name_only("policy-type");
+        card.router_config = Some(RouterConfig::new(policy_type, Default::default()));
+        let error = card.to_json().unwrap_err().to_string();
+        assert!(
+            error.contains("carries a fixed router mode only"),
+            "{error}"
+        );
+
+        // A card that names anything but a fixed mode still fails to decode.
+        assert!(serde_json::from_str::<RouterModeSetting>(r#""dynamo-two-tier-cost-fn""#).is_err());
+
+        // On the command line a fixed mode's name is that mode, and any other name a type.
+        assert_eq!(
+            RouterModeSetting::from_name("least-loaded"),
+            RouterMode::LeastLoaded
+        );
+        assert_eq!(
+            RouterModeSetting::from_name("dynamo-two-tier-cost-fn").policy_type(),
+            Some("dynamo-two-tier-cost-fn")
+        );
     }
 
     #[test]

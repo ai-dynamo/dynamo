@@ -88,11 +88,24 @@ pub fn push_router_options<T, U>() -> PushRouterOptions<T, U> {
 #[derive(Clone, Default)]
 pub struct RouterPluginBuilder {
     plugins: RouterPlugins,
+    /// Replaces the bundle's worker selection, for a role whose router mode named its own.
+    selection: Option<SelectionPolicySource>,
 }
 
 impl RouterPluginBuilder {
     pub fn new(plugins: RouterPlugins) -> Self {
-        Self { plugins }
+        Self {
+            plugins,
+            selection: None,
+        }
+    }
+
+    /// These plugins, with `selection` as the worker-selection policy.
+    pub(crate) fn with_selection_policy(&self, selection: SelectionPolicySource) -> Self {
+        Self {
+            plugins: self.plugins.clone(),
+            selection: Some(selection),
+        }
     }
 
     pub(crate) fn validate_config(
@@ -114,6 +127,9 @@ impl RouterPluginBuilder {
     }
 
     pub(crate) fn selection_policy(&self) -> SelectionPolicySource {
+        if let Some(selection) = &self.selection {
+            return selection.clone();
+        }
         self.plugins.worker_selection().cloned().map_or(
             SelectionPolicySource::Registry,
             SelectionPolicySource::Factory,
