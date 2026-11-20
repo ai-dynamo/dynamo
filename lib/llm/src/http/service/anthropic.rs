@@ -615,14 +615,14 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    let (orig_request, context) = request.into_parts();
+    let (mut orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
     // Looked up after the media refusal so a refused request gets the
     // configured status, not this lookup's 404/503.
-    let (engine, parsing_options) = state
+    let (engine, parsing_options, input_policy) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_input_policy(&model)
         .map_err(|e| match e {
             // Registered but not ready to serve yet → retryable 503 (mapped to
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
@@ -645,6 +645,8 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard),
         })?;
+
+    input_policy.prepare_anthropic(&mut orig_request);
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same

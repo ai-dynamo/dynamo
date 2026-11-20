@@ -35,7 +35,6 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     ais_perf_model_role_config,
 )
-from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
     EngineCapacityRequest,
@@ -52,6 +51,22 @@ _ENGINE_MODEL_INIT_EXCEPTIONS = (ImportError, RuntimeError)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
 DEFAULT_MAX_KV_TOKENS = 2_000_000
+
+# Upper bound on the applied KV hit rate discount. A full 1.0 reading would
+# zero out queued/avg prefill tokens and could mask a genuine backlog; cap
+# at 0.95 so the planner always sees *some* work ahead.
+_MAX_KV_HIT_RATE_DISCOUNT = 0.95
+
+
+def _clamp_kv_hit_rate(kv_hit_rate: Optional[float]) -> float:
+    """Clamp a raw hit rate into the usable discount range.
+
+    Returns 0.0 for ``None`` / NaN (no discount), otherwise clamps into
+    ``[0.0, _MAX_KV_HIT_RATE_DISCOUNT]``.
+    """
+    if kv_hit_rate is None or math.isnan(kv_hit_rate):
+        return 0.0
+    return max(0.0, min(_MAX_KV_HIT_RATE_DISCOUNT, float(kv_hit_rate)))
 
 
 @dataclass(frozen=True)

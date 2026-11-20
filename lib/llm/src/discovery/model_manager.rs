@@ -1645,6 +1645,25 @@ impl ModelManager {
             .get_chat_engine_with_parsing_for_capability(capability)
     }
 
+    pub(crate) fn get_chat_completions_engine_with_input_policy(
+        &self,
+        model: &str,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        ),
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_input_policy()
+    }
+
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
@@ -1717,6 +1736,8 @@ impl ModelManager {
     /// the parsing options the HTTP handlers read (tool-call / reasoning parser, structural
     /// tag, ...) reflect that card instead of the defaults. The card is still stamped as a
     /// synthetic aggregated in-process worker.
+    ///
+    /// In-process inputs register the default card; Mistral v11+ needs discovered workers.
     pub fn add_chat_completions_model_with_card(
         &self,
         model: &str,
@@ -1726,6 +1747,7 @@ impl ModelManager {
     ) -> Result<(), ModelManagerError> {
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
+        let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card);
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1734,6 +1756,7 @@ impl ModelManager {
         }
         let namespace = format!("__local_chat_{}", model);
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
+        ws.set_input_policy(input_policy);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();

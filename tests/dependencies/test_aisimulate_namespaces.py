@@ -36,7 +36,6 @@ LEGACY_DISTRIBUTIONS = {
 CARGO_LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
-    ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
 
 
