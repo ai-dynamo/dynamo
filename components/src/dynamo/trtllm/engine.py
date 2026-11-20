@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextvars
 import enum
 import logging
 import time
 from collections.abc import AsyncGenerator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -26,6 +28,15 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_STANDALONE_ENCODER_ARCHS = {"Llama4ForConditionalGeneration"}
 
 
+def _release_preprocessed_inputs(future: Future[Any]) -> None:
+    """Release the shared tensors of preprocessed inputs that will not be submitted."""
+    if future.cancelled() or future.exception() is not None:
+        return
+    multimodal_params = future.result().multimodal_params
+    if multimodal_params is not None:
+        multimodal_params.release_handles()
+
+
 class Backend(str, enum.Enum):
     """Supported TensorRT-LLM backend types."""
 
@@ -41,6 +52,10 @@ class TensorRTLLMEngine:
         self._llm: Optional[LLM] = None
         self._health_monitor: Optional[TrtllmEngineMonitor] = None
         self._preprocess_pool: Optional[PreprocessPool] = None
+        # Threads that run multimodal input preprocessing: one per pool process, or
+        # one without a pool. The executor is created on first use.
+        self._preprocess_threads = 1
+        self._preprocess_executor: Optional[ThreadPoolExecutor] = None
         self.disaggregation_mode = (
             disaggregation_mode
             if disaggregation_mode is not None
@@ -108,12 +123,46 @@ class TensorRTLLMEngine:
         self._preprocess_pool = await asyncio.to_thread(
             PreprocessPool.start, trtllm_llm_module, self.llm, num_processes
         )
+        self._preprocess_threads = num_processes
+
+    async def preprocess(
+        self, inputs: Any, sampling_params: Any, disaggregated_params: Any
+    ) -> Any:
+        """Run the LLM's input preprocessing for one request off the event loop.
+
+        Requests are preprocessed one at a time, or one per process when a
+        preprocessing pool runs.
+        """
+        if self._preprocess_executor is None:
+            self._preprocess_executor = ThreadPoolExecutor(
+                max_workers=self._preprocess_threads,
+                thread_name_prefix="mm-preprocess",
+            )
+        # Run it in a copy of the caller's context, as asyncio.to_thread does.
+        future = self._preprocess_executor.submit(
+            contextvars.copy_context().run,
+            self.llm.preprocess,
+            inputs,
+            sampling_params,
+            disaggregated_params,
+        )
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            # Preprocessing that already started still finishes, and its result
+            # holds shared tensors until they are released.
+            if not future.cancel():
+                future.add_done_callback(_release_preprocessed_inputs)
+            raise
 
     async def cleanup(self) -> None:
         await self.stop_health_monitor()
         self.shutdown()
 
     def shutdown(self) -> None:
+        if self._preprocess_executor is not None:
+            self._preprocess_executor.shutdown(wait=False, cancel_futures=True)
+            self._preprocess_executor = None
         if self._preprocess_pool is not None:
             self._preprocess_pool.close()
             self._preprocess_pool = None
