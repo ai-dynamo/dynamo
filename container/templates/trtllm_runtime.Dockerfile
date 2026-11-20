@@ -287,9 +287,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         perl-base \
         perl-modules-5.38 \
         zlib1g \
-        zlib1g-dev
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+        zlib1g-dev && \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
