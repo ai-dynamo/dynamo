@@ -102,11 +102,9 @@ disabled one that always passes requests through. Prefill worker sets, and Encod
 that serve no model type of their own, build no pipeline: they are reached only through these
 hops.
 
-Encode workers can advertise `encoder_supported_modalities` using Dynamo media keys such as
-`image_url`. Unsupported optional requests stay inline as a whole. This is an optimization
-hint; required requests are validated by the selected producer. Missing metadata preserves
-legacy encoding. Failed Encode or downstream attempts try bounded disposal of unconsumed
-exports before retry or inline fallback. Successful consumption adds no cleanup wait.
+Native Encode validates media against the configured E/P pairing. Failed Encode or
+downstream attempts try bounded disposal of unconsumed exports before retry or
+inline fallback. Successful consumption adds no cleanup wait.
 
 ## Per-stage roles
 

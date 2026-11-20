@@ -3,7 +3,6 @@
 
 //! Optional multimodal encoder hop for token-serving pipelines.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -25,7 +24,6 @@ use dynamo_runtime::{
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
-use crate::local_model::runtime_config::ENCODER_SUPPORTED_MODALITIES;
 use crate::protocols::common::{
     FinishReason,
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -40,7 +38,6 @@ type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutpu
 pub(crate) struct EncoderResultReleaseSupported(pub(crate) bool);
 
 struct EncoderBinding {
-    supported_modalities: Option<HashSet<String>>,
     target_id: WorkerSetTargetId,
     router: Arc<EncodePushRouter>,
 }
@@ -202,17 +199,6 @@ impl EncoderRouter {
         cancel_token: CancellationToken,
     ) -> Result<EncoderBinding> {
         let target_id = target.id();
-        let supported_modalities = match &target {
-            WorkerSetTarget::Committed(target) => target
-                .card
-                .runtime_config
-                .runtime_data
-                .get(ENCODER_SUPPORTED_MODALITIES)
-                .map(|value| serde_json::from_value(value.clone()))
-                .transpose()
-                .context("invalid encoder supported modalities")?,
-            WorkerSetTarget::Legacy(_) => None,
-        };
         let client = target.client(cancel_token).await?;
         let router = EncodePushRouter::from_client_with_options(
             client,
@@ -221,7 +207,6 @@ impl EncoderRouter {
         )
         .await?;
         Ok(EncoderBinding {
-            supported_modalities,
             target_id,
             router: Arc::new(router),
         })
@@ -458,18 +443,6 @@ impl
             return next.generate(context.map(|_| request)).await;
         }
         let binding = self.binding.load_full();
-        if !required
-            && let Some(modalities) = binding
-                .as_ref()
-                .and_then(|b| b.supported_modalities.as_ref())
-            && request.multi_modal_data.as_ref().is_some_and(|media| {
-                media
-                    .iter()
-                    .any(|(kind, items)| !items.is_empty() && !modalities.contains(kind))
-            })
-        {
-            return next.generate(context.map(|_| request)).await;
-        }
         crate::routing_policy::check_stage(
             &request,
             crate::routing_policy::ExecutionStage::Encoder,
