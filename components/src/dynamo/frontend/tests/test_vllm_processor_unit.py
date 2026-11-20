@@ -29,6 +29,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
 from dynamo._core import _raise_routed_http_error
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -2773,18 +2774,33 @@ class TestRoutedEnginePath:
         assert routed_engine.yielded == 1
 
     @pytest.mark.asyncio
-    async def test_worker_unavailable_is_raised_not_enveloped(
-        self, vllm_processor_module
+    @pytest.mark.parametrize(
+        "status,from_stream", [(None, False), (403, False), (404, True), (503, True)]
+    )
+    async def test_routed_error_is_raised_not_enveloped(
+        self, vllm_processor_module, status, from_stream
     ):
-        rejection = WorkerUnavailable("prefill routing is still activating")
+        if status is None:
+            rejection = WorkerUnavailable("prefill routing is still activating")
+        else:
+            message = IMAGE_FETCH_ERROR_MESSAGES.get(status, "worker unavailable")
+            with pytest.raises(RoutedEngineError) as backend:
+                _raise_routed_http_error(status, message)
+            rejection = backend.value
 
         class _RejectingRoutedEngine(_FakeRoutedEngine):
             async def generate(self, preprocessed, **kwargs):
-                raise rejection
+                if not from_stream:
+                    raise rejection
+
+                async def stream():
+                    raise rejection
+                    yield  # pragma: no cover
+
+                return stream()
 
         processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
-
-        with pytest.raises(WorkerUnavailable) as caught:
+        with pytest.raises(type(rejection)) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 

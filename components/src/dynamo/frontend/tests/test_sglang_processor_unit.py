@@ -41,11 +41,13 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
 import dynamo.frontend.sglang_prompt_renderer as sglang_prompt_renderer_module
+from dynamo._core import _raise_routed_http_error
 from dynamo.common.backend.logprobs import (
     build_sglang_logprob_kwargs,
     extract_from_sglang_meta,
     extract_prompt_logprobs_from_sglang_meta,
 )
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -1310,19 +1312,43 @@ def _qwen_guided_request_without_separation(tool_choice):
 
 
 @pytest.mark.parametrize(
-    ("routed_error", "expected"),
+    "failure,from_stream",
     [
-        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
-        (RoutedEngineError("worker pool at capacity"), RoutedEngineError),
-        (RuntimeError("worker crashed"), Unknown),
+        ("unavailable", False),
+        ("capacity", False),
+        ("internal", False),
+        (403, False),
+        (404, True),
     ],
 )
-def test_routed_engine_rejection_keeps_worker_unavailable(
-    tokenizer, routed_error, expected
+def test_routed_engine_rejection_keeps_its_semantic_error(
+    tokenizer, failure, from_stream
 ):
+    if failure == "unavailable":
+        routed_error = WorkerUnavailable("prefill routing is still activating")
+        expected = WorkerUnavailable
+    elif failure == "capacity":
+        routed_error = RoutedEngineError("worker pool at capacity")
+        expected = RoutedEngineError
+    elif failure == "internal":
+        routed_error = RuntimeError("worker crashed")
+        expected = Unknown
+    else:
+        with pytest.raises(RoutedEngineError) as backend:
+            _raise_routed_http_error(failure, IMAGE_FETCH_ERROR_MESSAGES[failure])
+        routed_error = backend.value
+        expected = RoutedEngineError
+
     class RejectingRoutedEngine(FakeRoutedEngine):
         async def generate(self, preprocessed, **kwargs):
-            raise routed_error
+            if not from_stream:
+                raise routed_error
+
+            async def stream():
+                raise routed_error
+                yield  # pragma: no cover
+
+            return stream()
 
     processor = SglangProcessor(
         tokenizer=tokenizer,
