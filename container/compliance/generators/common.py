@@ -216,14 +216,13 @@ def _base_image_label(sbom_path: Path) -> str:
     """Return "<image>:<tag>" for a baseline SBOM from manifest.json, else its filename."""
     manifest = sbom_path.parent / "manifest.json"
     try:
-        entries = json.loads(manifest.read_text(encoding="utf-8")).get("entries", [])
-    except (OSError, ValueError, AttributeError):
-        return sbom_path.name
-    for entry in entries:
-        if entry.get("baseline_sbom") == sbom_path.name:
-            image, tag = entry.get("baseline_image"), entry.get("baseline_tag")
-            if image and tag:
-                return f"{image}:{tag}"
+        for entry in json.loads(manifest.read_text(encoding="utf-8"))["entries"]:
+            if entry.get("baseline_sbom") == sbom_path.name:
+                image, tag = entry.get("baseline_image"), entry.get("baseline_tag")
+                if image and tag:
+                    return f"{image}:{tag}"
+    except (OSError, ValueError, LookupError, TypeError, AttributeError):
+        pass
     return sbom_path.name
 
 
@@ -253,7 +252,7 @@ def load_base_components(
             ident = lic.get("id") or lic.get("name")
             if not ident and entry.get("expression"):
                 ident = entry["expression"]
-            if ident and re.search(r" (AND|OR|WITH) ", ident, re.IGNORECASE):
+            if ident and re.search(r" (AND|OR|WITH) ", ident):
                 ident = f"({ident})"
             # syft names an unidentified license file by its content hash.
             if ident and not ident.startswith("sha256:") and ident not in ids:
@@ -282,12 +281,21 @@ def load_base_components(
 
 def _split_top_level_and(expr: str) -> list[str]:
     """Split on " AND " outside parentheses: "A AND (B WITH C)" -> ["A", "(B WITH C)"]."""
+    # Only paired parentheses group: SBOM names such as "(MIT" or "Odd)License"
+    # carry stray ones.
+    opens: list[int] = []
+    paired: set[int] = set()
+    for i, ch in enumerate(expr):
+        if ch == "(":
+            opens.append(i)
+        elif ch == ")" and opens:
+            paired.update((opens.pop(), i))
     parts: list[str] = []
     depth = start = 0
     for i, ch in enumerate(expr):
-        # Clamped: a bare SBOM license name may carry a stray ")".
-        depth = max(0, depth + {"(": 1, ")": -1}.get(ch, 0))
-        if depth == 0 and expr.startswith(" AND ", i):
+        if i in paired:
+            depth += 1 if ch == "(" else -1
+        elif depth == 0 and expr.startswith(" AND ", i):
             parts.append(expr[start:i])
             start = i + len(" AND ")
     parts.append(expr[start:])
@@ -315,9 +323,7 @@ def render_base_section(
         parts.append("\n")
         for part in _split_top_level_and(c.spdx):
             # A bare SBOM license name such as "Apache 2.0" is one identifier.
-            is_expr = part.startswith("(") or re.search(
-                r" (OR|WITH) ", part, re.IGNORECASE
-            )
+            is_expr = part.startswith("(") or re.search(r" (OR|WITH) ", part)
             license_ids.update(_spdx_ids(part) if is_expr else [part])
     license_ids -= {NOASSERTION, UNKNOWN}
     parts.append("# License texts\n\n")
@@ -365,6 +371,7 @@ def write_third_party(
             base_sbom, base, _BASE_DEBS_FILTERED if shipped_debs is not None else ""
         )
         parts.append(section.rstrip() + "\n")
+    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "THIRD-PARTY.txt"
     path.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")
     return path

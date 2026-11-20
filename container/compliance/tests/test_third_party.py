@@ -25,6 +25,9 @@ from compliance.generators.common import (
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
+# A free-text name from the cuda baselines: its lowercase "and" is not an operator.
+NVIDIA_LICENSE_NAME = "NVIDIA Software License Agreement and CUDA Supplement to Software License Agreement"
+
 
 def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") -> Path:
     """A baseline SBOM with two MIT libraries, an unlicensed one, a duplicate and a file."""
@@ -54,6 +57,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
                 {"license": {"name": "MIT OR Zlib"}},
                 {"license": {"name": "UNKNOWN"}},
                 {"license": {"name": "(MIT"}},
+                {"license": {"name": "Apache-2.0 with LLVM exceptions"}},
             ],
         },
         {
@@ -70,6 +74,12 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
                 {"license": {"name": "MIT License"}},
                 {"license": {"name": "Apache 2.0"}},
             ],
+        },
+        {
+            "type": "library",
+            "name": "cuda-libs",
+            "version": "13.0",
+            "licenses": [{"license": {"name": NVIDIA_LICENSE_NAME}}],
         },
         {"type": "library", "name": "libnolicense", "version": "0.1"},
         {
@@ -140,6 +150,7 @@ def test_base_components_parsed(tmp_path: Path) -> None:
     comps = {c.name: c for c in load_base_components(sbom)}
 
     assert sorted(comps) == [
+        "cuda-libs",
         "liba",
         "libb",
         "libexpr",
@@ -150,7 +161,7 @@ def test_base_components_parsed(tmp_path: Path) -> None:
     assert comps["libb"].spdx == "MIT License AND Apache 2.0"
     assert comps["libexpr"].spdx == (
         "(Apache-2.0 AND Apache-2.0 WITH LLVM-exception) AND Odd)License"
-        " AND (MIT OR Zlib) AND UNKNOWN AND (MIT"
+        " AND (MIT OR Zlib) AND UNKNOWN AND (MIT AND Apache-2.0 with LLVM exceptions"
     )
     assert comps["libnolicense"].spdx == NOASSERTION
 
@@ -174,7 +185,8 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     apache = spdx_license_text("Apache-2.0")
     assert apache and text.count(apache) == 1
     missing = text.split("is the reference:\n", 1)[1]
-    assert missing.splitlines() == ["Apache 2.0", "Odd)License"]
+    assert missing.splitlines() == ["Apache 2.0", NVIDIA_LICENSE_NAME, "Odd)License"]
+    assert "\nCUDA\n" not in missing
 
 
 def test_base_debs_limited_to_shipped_versions(tmp_path: Path) -> None:
