@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -23,7 +24,9 @@ class MockerConfig:
     preemption_mode: str | None = None
     dp_size: int | None = None
     planner_profile_data: str | Path | None = None
-    ais_perf_model: bool = False
+    # An AIS perf model value: a config or a file path. True is the old switch
+    # without a value, which takes the ais_* fields below.
+    ais_perf_model: bool | str | Path | Mapping[str, Any] = False
     ais_system: str | None = None
     ais_backend_version: str | None = None
     ais_tp_size: int | None = None
@@ -95,6 +98,10 @@ class MockerConfig:
             if enabled is not None:
                 args.append(positive_flag if enabled else negative_flag)
 
-        if self.ais_perf_model:
+        if self.ais_perf_model is True:
             args.append("--ais-perf-model")
+        elif isinstance(self.ais_perf_model, Mapping):
+            args.extend(["--ais-perf-model", json.dumps(dict(self.ais_perf_model))])
+        elif self.ais_perf_model:
+            args.extend(["--ais-perf-model", str(self.ais_perf_model)])
         return args

@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 219 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 220 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
-<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">40 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">41 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -4993,6 +4993,12 @@ See [RecommendationSpec](#recommendationspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="rerun" type="RerunSpec">
+Rerun intentionally creates a new Request generation when the search inputs otherwise remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry the same immutable Run.
+See [RerunSpec](#rerunspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="overrides" type="OverridesSpec">
 Overrides customizes the generated DGD without changing AISimulate execution.
 See [OverridesSpec](#v1beta2-overridesspec).
@@ -5078,6 +5084,12 @@ See [AISimSpec](#aisimspec).
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="rerun" type="RerunSpec">
+Rerun intentionally creates a new Request generation when the search inputs otherwise remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry the same immutable Run.
+See [RerunSpec](#rerunspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -5213,6 +5225,12 @@ See [AISimSpec](#aisimspec).
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="rerun" type="RerunSpec">
+Rerun intentionally creates a new Request generation when the search inputs otherwise remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry the same immutable Run.
+See [RerunSpec](#rerunspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -5466,6 +5484,12 @@ See [RecommendationSpec](#recommendationspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="rerun" type="RerunSpec">
+Rerun intentionally creates a new Request generation when the search inputs otherwise remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry the same immutable Run.
+See [RerunSpec](#rerunspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="overrides" type="OverridesSpec">
 Overrides customizes the generated DGD without changing AISimulate execution.
 See [OverridesSpec](#v1beta2-overridesspec).
@@ -5579,6 +5603,19 @@ RecommendationSpec controls bounded projection into DGDC resources.
 <ParamField path="maxCandidates" type="integer">
 MaxCandidates is the maximum number of DGDCs owned by one run. Scalar candidates are ordered best first. This field does not limit internal trials.
 **Validation:** Maximum: 100  Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="rerunspec" title="RerunSpec">
+RerunSpec records explicit intent to create another Run without changing search inputs.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="reason" type="string" required={true}>
+Reason records why the user requested another Run. Changing this value creates a new Request generation and the value is frozen into that generation's immutable Run.
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -6070,6 +6107,11 @@ KaiSchedulerConfiguration holds Kai-scheduler settings.
 
 **Kind:** `type`
 **Appears in:** [OrchestratorConfiguration](#orchestratorconfiguration)
+
+<ParamField path="schedulerName" type="string" default="kai-scheduler">
+SchedulerName is the pod scheduler name used by the KAI integration. Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection. nil = auto-detect.

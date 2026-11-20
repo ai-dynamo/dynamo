@@ -16,6 +16,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -78,7 +79,7 @@ func TestDisaggregatedSetRestartAppliedRequiresEveryTemplate(t *testing.T) {
 				ds.Object["spec"] = map[string]any{"roles": "invalid"}
 			}
 			original := ds.DeepCopy()
-			selection := disaggregatedSetSelection{componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"}}
+			selection := disaggregatedset.Selection{ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"}}
 
 			t.Log("Require both templates to observe the requested restart without mutating the snapshot")
 			applied, err := disaggregatedSetRestartApplied(ds, selection, "requested")
@@ -155,7 +156,7 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 		Name: "demo", Namespace: "default", UID: "demo-uid",
 	}
 	current := newDisaggregatedSetObject()
-	current.SetName(disaggregatedSetName(dgd))
+	current.SetName(disaggregatedset.Name(dgd))
 	current.SetNamespace(dgd.Namespace)
 	current.SetLabels(map[string]string{"example.com/keep": "label"})
 	current.SetAnnotations(map[string]string{"example.com/keep": "annotation"})
@@ -367,7 +368,7 @@ func TestSingleNodeStableServiceSelectsDeploymentPod(t *testing.T) {
 	)
 	stableResources := newDisaggregatedSetStableResourcesReconciler(kubeClient, renderer)
 	_, err = stableResources.Reconcile(
-		t.Context(), dgd, dcds, normalized, disaggregatedSetSelection{}, "", false, rollingUpdateCtx,
+		t.Context(), dgd, dcds, normalized, disaggregatedset.Selection{}, "", false, rollingUpdateCtx,
 	)
 	require.NoError(t, err)
 	service := &corev1.Service{}
@@ -461,7 +462,7 @@ func TestDeleteOwnedSelectedDCDsUsesOwnerReference(t *testing.T) {
 	ownedByDGD := dgdControllerOwnerReference(dgd)
 	foreignOwner := ownedByDGD.DeepCopy()
 	foreignOwner.UID = "other-dgd-uid"
-	selected := disaggregatedSetSelection{componentToRole: map[string]string{"prefill": "prefill"}}
+	selected := disaggregatedset.Selection{ComponentToRole: map[string]string{"prefill": "prefill"}}
 	ownedWithoutGraphLabel := owned("owned-without-graph-label", nil, ownedByDGD)
 	ownedWithStaleGraphLabel := owned("owned-with-stale-graph-label", map[string]string{
 		consts.KubeLabelDynamoGraphDeploymentName: "other-graph",
@@ -511,11 +512,11 @@ func TestSelectDisaggregatedSetComponents(t *testing.T) {
 			},
 		}
 
-		selection, reason := selectDisaggregatedSetComponents(dgd)
+		selection, reason := disaggregatedset.Select(dgd)
 		require.Empty(t, reason)
-		require.Equal(t, "prefill", selection.componentToRole["prefill"])
-		require.Equal(t, "decode", selection.componentToRole["decode"])
-		require.Len(t, selection.componentToRole, 2)
+		require.Equal(t, "prefill", selection.ComponentToRole["prefill"])
+		require.Equal(t, "decode", selection.ComponentToRole["decode"])
+		require.Len(t, selection.ComponentToRole, 2)
 	})
 
 	t.Run("rejects scaling adapter", func(t *testing.T) {
@@ -539,7 +540,7 @@ func TestSelectDisaggregatedSetComponents(t *testing.T) {
 			},
 		}
 
-		_, reason := selectDisaggregatedSetComponents(dgd)
+		_, reason := disaggregatedset.Select(dgd)
 		require.Contains(t, reason, "scalingAdapter")
 	})
 }
@@ -731,23 +732,23 @@ func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
 		},
 	}
 
-	selection, reason := selectDisaggregatedSetComponents(dgd)
+	selection, reason := disaggregatedset.Select(dgd)
 	require.Empty(t, reason)
-	require.Len(t, selection.componentToRole, 2)
-	setName := disaggregatedSetName(dgd)
-	require.LessOrEqual(t, len(setName), maxDisaggregatedSetNameLength)
-	revisionHash := strings.Repeat("h", maxDisaggregatedSetWorkerRevisionHashLength)
+	require.Len(t, selection.ComponentToRole, 2)
+	setName := disaggregatedset.Name(dgd)
+	require.LessOrEqual(t, len(setName), 18)
+	revisionHash := strings.Repeat("h", 10)
 	groupIndexes := []string{"9", "10", strconv.Itoa(maxInt32GroupIndex)}
-	for _, roleName := range selection.componentToRole {
-		require.LessOrEqual(t, len(roleName), maxDisaggregatedSetRoleNameLength)
+	for _, roleName := range selection.ComponentToRole {
+		require.LessOrEqual(t, len(roleName), 10)
 		require.Empty(t, validation.IsDNS1123Label(roleName), "role name %q must be a DNS label", roleName)
-		childName := disaggregatedsetutils.GenerateName(setName, 99, strings.Repeat("a", disaggregatedSetRevisionLength), roleName)
-		require.LessOrEqual(t, len(childName), maxDisaggregatedSetGeneratedNameLength)
+		childName := disaggregatedsetutils.GenerateName(setName, 99, strings.Repeat("a", 8), roleName)
+		require.LessOrEqual(t, len(childName), 63)
 		serviceName := childName + "-prv"
-		require.LessOrEqual(t, len(serviceName), maxDisaggregatedSetGeneratedNameLength)
+		require.LessOrEqual(t, len(serviceName), 63)
 		for _, groupIndex := range groupIndexes {
 			workerRevisionLabel := childName + "-" + groupIndex + "-" + revisionHash
-			require.LessOrEqual(t, len(workerRevisionLabel), maxDisaggregatedSetGeneratedNameLength,
+			require.LessOrEqual(t, len(workerRevisionLabel), 63,
 				"worker StatefulSet revision label for group index %s must fit", groupIndex)
 		}
 	}
@@ -775,21 +776,21 @@ func TestDisaggregatedSetNamesRemainStableWhenRoleScalesAcrossTenReplicas(t *tes
 	}
 
 	t.Log("Resolve DS, role, and child names at ten replicas")
-	nameAtTen := disaggregatedSetName(dgd)
-	selectionAtTen, reason := selectDisaggregatedSetComponents(dgd)
+	nameAtTen := disaggregatedset.Name(dgd)
+	selectionAtTen, reason := disaggregatedset.Select(dgd)
 	require.Empty(t, reason)
-	roleAtTen := selectionAtTen.componentToRole["prefill-worker"]
-	revision := strings.Repeat("a", disaggregatedSetRevisionLength)
+	roleAtTen := selectionAtTen.ComponentToRole["prefill-worker"]
+	revision := strings.Repeat("a", 8)
 	lwsNameAtTen := disaggregatedsetutils.GenerateName(nameAtTen, 0, revision, roleAtTen)
 
 	t.Log("Scale to eleven replicas and verify the workload identity is unchanged")
 	dgd.Spec.Components[0].Replicas = new(int32(11))
-	selectionAtEleven, reason := selectDisaggregatedSetComponents(dgd)
+	selectionAtEleven, reason := disaggregatedset.Select(dgd)
 	require.Empty(t, reason)
-	roleAtEleven := selectionAtEleven.componentToRole["prefill-worker"]
-	require.Equal(t, nameAtTen, disaggregatedSetName(dgd))
+	roleAtEleven := selectionAtEleven.ComponentToRole["prefill-worker"]
+	require.Equal(t, nameAtTen, disaggregatedset.Name(dgd))
 	require.Equal(t, roleAtTen, roleAtEleven)
-	require.Equal(t, lwsNameAtTen, disaggregatedsetutils.GenerateName(disaggregatedSetName(dgd), 0, revision, roleAtEleven))
+	require.Equal(t, lwsNameAtTen, disaggregatedsetutils.GenerateName(disaggregatedset.Name(dgd), 0, revision, roleAtEleven))
 }
 
 func TestCheckDisaggregatedSetReadiness(t *testing.T) {
@@ -803,9 +804,9 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 			map[string]any{"name": "decode", "replicas": int64(2), "updatedReplicas": int64(2), "readyReplicas": int64(1)},
 		},
 	}
-	selection := disaggregatedSetSelection{
-		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
-		desiredReplicas: map[string]int32{"prefill": 2, "decode": 2},
+	selection := disaggregatedset.Selection{
+		ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		DesiredReplicas: map[string]int32{"prefill": 2, "decode": 2},
 	}
 
 	t.Log("stale observedGeneration keeps the DisaggregatedSet unready")
@@ -831,9 +832,9 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 }
 
 func TestCheckDisaggregatedSetChildLWSReadinessWaitsForRemovedRoles(t *testing.T) {
-	selection := disaggregatedSetSelection{
-		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
-		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	selection := disaggregatedset.Selection{
+		ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		DesiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 	readyChild := func(name string) *leaderworkersetv1.LeaderWorkerSet {
 		return &leaderworkersetv1.LeaderWorkerSet{
@@ -927,9 +928,9 @@ func TestCheckDisaggregatedSetReadinessTracksEverySlice(t *testing.T) {
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(children...).Build()
 	resolver := newDisaggregatedSetReadinessResolver(k8sClient)
-	selection := disaggregatedSetSelection{
-		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
-		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	selection := disaggregatedset.Selection{
+		ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		DesiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
 	readiness, err := resolver.Resolve(t.Context(), ds, selection)
@@ -970,7 +971,7 @@ func TestDisaggregatedSetPathwayObservesWorkerHash(t *testing.T) {
 			},
 		},
 	}
-	selection := disaggregatedSetSelection{componentToRole: map[string]string{
+	selection := disaggregatedset.Selection{ComponentToRole: map[string]string{
 		"prefill": "prefill",
 		"decode":  "decode",
 	}}
@@ -1070,9 +1071,9 @@ func TestDisaggregatedSetReadinessDiscoversOwnedChildrenByOwnerReference(t *test
 		foreignUnlabeled,
 	}
 	resolver := newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build())
-	selection := disaggregatedSetSelection{
-		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
-		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	selection := disaggregatedset.Selection{
+		ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		DesiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
 	readiness, err := resolver.Resolve(t.Context(), ds, selection)
@@ -1133,9 +1134,9 @@ func TestDisaggregatedSetReadinessDoesNotTrustChildIdentityLabels(t *testing.T) 
 		decode,
 		forgedPrefill,
 	).Build())
-	selection := disaggregatedSetSelection{
-		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
-		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	selection := disaggregatedset.Selection{
+		ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		DesiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
 	readiness, err := resolver.Resolve(t.Context(), ds, selection)
@@ -1217,9 +1218,9 @@ func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T
 	scheme := runtime.NewScheme()
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
 	resolver := newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(removed).Build())
-	selection := disaggregatedSetSelection{
-		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
-		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	selection := disaggregatedset.Selection{
+		ComponentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		DesiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
 	readiness, err := resolver.Resolve(t.Context(), ds, selection)

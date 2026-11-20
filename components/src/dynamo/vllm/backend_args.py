@@ -143,6 +143,19 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--systemone-serial",
+            env_var="DYN_VLLM_SYSTEMONE_SERIAL",
+            default=False,
+            env_value_type=parse_bool,
+            help=(
+                "Opt in to decision scoring on a qualified serialized worker. "
+                "Requires --max-num-seqs=1 and --logprobs-mode=raw_logprobs; "
+                "does not change engine scheduling settings."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--use-vllm-tokenizer",
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
@@ -615,6 +628,7 @@ class DynamoVllmConfig(ConfigBase):
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
     artifact_router_profile: Optional[str] = None
+    systemone_serial: bool = False
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -692,6 +706,7 @@ class DynamoVllmConfig(ConfigBase):
         _configured_artifact_router_profile(self.artifact_router_profile)
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
+        self._validate_systemone_serial()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
@@ -704,6 +719,30 @@ class DynamoVllmConfig(ConfigBase):
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
+
+    def _validate_systemone_serial(self) -> None:
+        if not self.systemone_serial:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError("--systemone-serial requires --disaggregation-mode=agg")
+        incompatible = (
+            "use_vllm_tokenizer",
+            "enable_rl",
+            "enable_multimodal",
+            "route_to_encoder",
+            "custom_encoder_class",
+            "embedding_worker",
+            "transcription_worker",
+            "classify_worker",
+            "realtime",
+            "headless",
+            "benchmark_mode",
+        )
+        for name in incompatible:
+            if getattr(self, name):
+                raise ValueError(
+                    f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
+                )
 
     def _load_explicit_benchmark_points(self) -> None:
         self._benchmark_points = None

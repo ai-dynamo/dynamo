@@ -231,7 +231,7 @@ impl ConcurrentRadixTreeCompressed {
                     block_hash = ?block_hash,
                     "Block not found during remove; skipping"
                 );
-                self.remove_lookup_hashes(lookup, worker, &[block_hash]);
+                lookup.remove_all(worker, &[block_hash], |_| {});
                 index += 1;
                 continue;
             };
@@ -256,7 +256,7 @@ impl ConcurrentRadixTreeCompressed {
                 if let Some((consumed, stale_hashes, became_dead)) =
                     node.remove_worker_for_leading_hashes(worker, &block_hashes[index..run_end])
                 {
-                    self.remove_lookup_hashes(lookup, worker, &stale_hashes);
+                    lookup.remove_all(worker, &stale_hashes, |_| {});
                     if became_dead {
                         died = true;
                         self.queue_dead_leaf(lookup, worker, &node);
@@ -285,7 +285,7 @@ impl ConcurrentRadixTreeCompressed {
                 // happens when the hash's node was split off and the split child was
                 // later dropped by clear_children_if_unreachable; without this scrub
                 // the entry (and the per-worker tracked-block count) leaks permanently.
-                self.remove_lookup_hashes(lookup, worker, &[block_hash]);
+                lookup.remove_all(worker, &[block_hash], |_| {});
                 index += 1;
                 break;
             }
@@ -300,31 +300,13 @@ impl ConcurrentRadixTreeCompressed {
         Ok(())
     }
 
-    fn remove_lookup_hashes(
-        &self,
-        lookup: &mut LaneLookup,
-        worker: WorkerWithDpRank,
-        hashes: &[ExternalSequenceBlockHash],
-    ) {
-        // Check the lifecycle once per run, not once per hash: `release_hash` is not
-        // inlined, and a call per evicted block is a measurable share of writer time.
-        if self.lifecycle.is_enabled() {
-            lookup.remove_all(worker, hashes, |hash| self.release_hash(worker, hash));
-        } else {
-            lookup.remove_all(worker, hashes, |_| {});
-        }
-    }
-
     pub(super) fn erase_worker_coverage(
         &self,
         lookup: &mut LaneLookup,
         target: WorkerRemovalTarget,
         sweep_tree: bool,
     ) {
-        lookup.remove_workers(
-            |worker| target.matches(worker),
-            |worker, hash| self.release_hash(worker, hash),
-        );
+        lookup.remove_workers(|worker| target.matches(worker), |_, _| {});
         if !sweep_tree {
             return;
         }
