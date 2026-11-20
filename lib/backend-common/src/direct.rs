@@ -34,7 +34,6 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::Instrument;
 
 use crate::adapter::EngineAdapter;
 use crate::disagg::DisaggregationMode;
@@ -68,10 +67,9 @@ pub type DirectEngineFactory =
 pub struct DirectDispatch {
     adapters: parking_lot::RwLock<HashMap<u64, Arc<EngineAdapter>>>,
     /// One supervisor per engine; on runtime shutdown each withdraws its engine
-    /// and releases it, or, if the engine is still starting, leaves it to be
-    /// released once that start returns. Nothing waits for them: an engine's
-    /// cleanup releases only this process's client, not the engine, which
-    /// runs elsewhere.
+    /// and releases it, after any start still running returns. Nothing waits
+    /// for them: an engine's cleanup releases only this process's client, not
+    /// the engine, which runs elsewhere.
     supervisors: TaskTracker,
     /// Held while an engine's model files are fetched, so engines that start
     /// together download a model once and then read the local copy.
@@ -79,9 +77,7 @@ pub struct DirectDispatch {
 }
 
 impl DirectDispatch {
-    /// Resolves once runtime shutdown has withdrawn every engine and released
-    /// each that was serving; an engine still starting is released later,
-    /// once its start returns.
+    /// Resolves once runtime shutdown has withdrawn and released every engine.
     #[cfg(test)]
     async fn stopped(&self) {
         self.supervisors.wait().await;
@@ -133,9 +129,9 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 }
 
 /// Probe and register every listed engine, then keep each registered while it
-/// serves. Engines start concurrently. Returns once every engine serves; fails
-/// as soon as any cannot be started, releasing the others (an engine still
-/// starting is released once its start returns).
+/// serves. Engines start concurrently. Returns once every engine serves. If any
+/// cannot be started, waits for the other starts to return, releases every
+/// engine that started, and fails.
 ///
 /// `config` is the worker configuration a sidecar for these engines would run
 /// with. Each engine's role comes from its spec, not from `config`.
@@ -195,23 +191,15 @@ pub async fn serve_direct_engines(
             dispatch: dispatch.clone(),
         })
         .collect();
-    // Start every engine at once. The first that fails aborts the starts still
-    // running, and every engine started so far is released.
-    let abort = CancellationToken::new();
-    let started = futures::future::join_all(hosts.iter().map(|host| async {
-        let started = host.start(&abort).await;
-        if started.is_err() {
-            abort.cancel();
-        }
-        started
-    }))
-    .await;
+    // Start every engine at once. A start is never cancelled (as in `Worker`:
+    // `cleanup` is only safe once `start` has returned), so a failure waits for
+    // the other starts, then releases every engine that started.
+    let started = futures::future::join_all(hosts.iter().map(DirectEngineHost::start)).await;
     let mut serving = Vec::with_capacity(hosts.len());
     let mut start_error = None;
     for (host, started) in hosts.into_iter().zip(started) {
         match started {
-            Ok(Some(hosted)) => serving.push((host, hosted)),
-            Ok(None) => {}
+            Ok(hosted) => serving.push((host, hosted)),
             Err(failed) => {
                 start_error.get_or_insert(failed);
             }
@@ -263,56 +251,20 @@ struct HostedEngine {
 }
 
 impl DirectEngineHost {
-    /// Start the engine, make it dispatchable, then publish it. Returns `None`
-    /// when `abort` fires first. `engine.start()` runs in its own task and is
-    /// never dropped mid-flight (as in `Worker`, since `cleanup` is only safe
-    /// once `start` has returned): an abort stops waiting for it, and the
-    /// engine is released when it returns.
-    async fn start(&self, abort: &CancellationToken) -> Result<Option<HostedEngine>, DynamoError> {
+    /// Start the engine, make it dispatchable, then publish it. Nothing cancels
+    /// `engine.start()`: the `LLMEngine` contract makes `cleanup` safe only once
+    /// `start` has returned, and `Worker` never cancels it either.
+    async fn start(&self) -> Result<HostedEngine, DynamoError> {
         let engine = (self.factory)(&self.spec)?;
-        let mut engine_start = tokio::spawn(
-            {
-                let engine = engine.clone();
-                let instance_id = self.instance_id;
-                async move { engine.start(instance_id).await }
-            }
-            .in_current_span(),
-        );
-        let started = tokio::select! {
-            _ = abort.cancelled() => None,
-            started = &mut engine_start => Some(started),
-        };
-        let Some(started) = started else {
-            let url = self.spec.url.clone();
-            tokio::spawn(
-                async move {
-                    let _ = engine_start.await;
-                    cleanup_engine(&url, &engine).await;
-                }
-                .in_current_span(),
-            );
-            return Ok(None);
-        };
-        let records = match started {
-            Ok(Ok(engine_config)) => tokio::select! {
-                _ = abort.cancelled() => None,
-                records = self.discovery_records(&engine, &engine_config) => Some(records),
-            },
-            Ok(Err(start_error)) => Some(Err(start_error)),
-            Err(join_error) => Some(Err(error(
-                ErrorType::Backend(BackendError::EngineShutdown),
-                format!("engine {} start: {join_error}", self.spec.url),
-            ))),
+        let records = match engine.start(self.instance_id).await {
+            Ok(engine_config) => self.discovery_records(&engine, &engine_config).await,
+            Err(start_error) => Err(start_error),
         };
         let (endpoint, model) = match records {
-            Some(Ok(records)) => records,
-            Some(Err(start_error)) => {
+            Ok(records) => records,
+            Err(start_error) => {
                 self.cleanup(&engine).await;
                 return Err(start_error);
-            }
-            None => {
-                self.cleanup(&engine).await;
-                return Ok(None);
             }
         };
 
@@ -349,7 +301,7 @@ impl DirectEngineHost {
             mode = ?self.spec.mode,
             "serving engine directly"
         );
-        Ok(Some(hosted))
+        Ok(hosted)
     }
 
     /// Withdraw the engine from discovery and dispatch, then release it.
@@ -365,7 +317,9 @@ impl DirectEngineHost {
     }
 
     async fn cleanup(&self, engine: &Arc<dyn LLMEngine>) {
-        cleanup_engine(&self.spec.url, engine).await;
+        if let Err(cleanup_error) = engine.cleanup().await {
+            tracing::warn!(url = %self.spec.url, %cleanup_error, "engine cleanup failed");
+        }
     }
 
     /// Keep the engine published while it serves; when it stops, withdraw it
@@ -394,9 +348,10 @@ impl DirectEngineHost {
                     _ = shutdown.cancelled() => return,
                     _ = tokio::time::sleep(delay) => {}
                 }
-                match self.start(&shutdown).await {
-                    Ok(Some(hosted)) => break hosted,
-                    Ok(None) => return,
+                // A probe's start runs to completion even on shutdown; the
+                // next turn of the outer loop then releases the engine.
+                match self.start().await {
+                    Ok(hosted) => break hosted,
                     Err(probe_error) => {
                         tracing::debug!(url = %self.spec.url, %probe_error, "engine is not serving yet");
                         delay = (delay * 2).min(REPROBE_MAX_DELAY);
@@ -463,12 +418,6 @@ impl DirectEngineHost {
             )
         })?;
         Ok((endpoint, model))
-    }
-}
-
-async fn cleanup_engine(url: &str, engine: &Arc<dyn LLMEngine>) {
-    if let Err(cleanup_error) = engine.cleanup().await {
-        tracing::warn!(url, %cleanup_error, "engine cleanup failed");
     }
 }
 
@@ -860,7 +809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_ends_a_reprobe_whose_start_does_not_return() {
+    async fn shutdown_waits_for_a_reprobe_start_then_releases_the_engine() {
         let frontend = Frontend::start("direct-reprobe-shutdown", 0).await;
         let a = frontend.states[A].clone();
         let starts = a.starts.load(Ordering::SeqCst);
@@ -874,39 +823,33 @@ mod tests {
         .await
         .expect("the lost engine must be probed again");
 
+        // The probe's start is never cancelled: shutdown waits for it, and the
+        // engine is released only once it returns.
         let cleanups = a.cleanups.load(Ordering::SeqCst);
         frontend.drt.primary_token().cancel();
-        tokio::time::timeout(Duration::from_secs(10), frontend.dispatch.stopped())
-            .await
-            .expect("shutdown must end the probe");
-        // The probe's start is never dropped mid-flight: the engine is
-        // released only once that start returns.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), frontend.dispatch.stopped())
+                .await
+                .is_err(),
+            "shutdown must not cancel a start still running"
+        );
         assert_eq!(a.cleanups.load(Ordering::SeqCst), cleanups);
         a.start_released.notify_one();
-        released(&a, cleanups).await;
+        tokio::time::timeout(Duration::from_secs(10), frontend.dispatch.stopped())
+            .await
+            .expect("shutdown must release the engine once its start returns");
         assert_eq!(a.cleanups.load(Ordering::SeqCst), cleanups + 1);
     }
 
-    /// Wait until `state`'s engine has been cleaned up more than `cleanups` times.
-    async fn released(state: &EngineState, cleanups: usize) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while state.cleanups.load(Ordering::SeqCst) == cleanups {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("an engine must be released once its start returns");
-    }
-
     #[tokio::test]
-    async fn an_engine_that_fails_to_start_fails_the_call_without_waiting_for_the_others() {
+    async fn an_engine_that_fails_to_start_waits_for_the_others_then_releases_them() {
         let drt = DistributedRuntime::new(
             Runtime::from_current().unwrap(),
             DistributedConfig::process_local(),
         )
         .await
         .unwrap();
-        // `A` never finishes starting; `B` is down, so its start fails.
+        // `A` finishes starting only when released; `B` is down, so its start fails.
         let states: HashMap<&'static str, Arc<EngineState>> = HashMap::from([
             (
                 A,
@@ -933,20 +876,27 @@ mod tests {
                 mode: DisaggregationMode::Aggregated,
             })
             .to_vec();
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            serve_direct_engines(&drt, WorkerConfig::default(), specs, factory),
-        )
-        .await
-        .expect("a failed start must not wait for the other engines");
-        assert!(result.is_err());
-        // `B` is released after its failed start. `A` is still starting, and
-        // is released only once that start returns, never while it runs.
+        let serve = serve_direct_engines(&drt, WorkerConfig::default(), specs, factory);
+        tokio::pin!(serve);
+        // `B` has failed and been released, but `A`'s start is never
+        // cancelled: the call waits for it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut serve)
+                .await
+                .is_err(),
+            "a failed start must not cancel the starts still running"
+        );
         assert_eq!(states[B].cleanups.load(Ordering::SeqCst), 1);
         assert_eq!(states[A].cleanups.load(Ordering::SeqCst), 0);
+        // Once `A` has started, it is released and the call fails.
         states[A].start_released.notify_one();
-        released(&states[A], 0).await;
-        assert_eq!(states[A].cleanups.load(Ordering::SeqCst), 1);
+        let result = tokio::time::timeout(Duration::from_secs(10), &mut serve)
+            .await
+            .expect("startup must fail once every start has returned");
+        assert!(result.is_err());
+        for url in [A, B] {
+            assert_eq!(states[url].cleanups.load(Ordering::SeqCst), 1, "{url}");
+        }
         drt.shutdown();
     }
 
