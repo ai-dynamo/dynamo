@@ -397,7 +397,7 @@ async fn run_watcher(
             if let Err(error) = update_http_endpoints(http_service.clone(), model_update.clone()) {
                 tracing::error!(%error, "failed to update HTTP endpoints");
             }
-            update_model_metrics(model_update, metrics.clone());
+            update_model_metrics(model_update, metrics.clone(), migration_limit);
         }
     });
 
@@ -449,11 +449,12 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
 fn update_model_metrics(
     model_type: ModelUpdate,
     metrics: Arc<crate::http::service::metrics::Metrics>,
+    migration_limit: u32,
 ) {
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
-            if let Err(err) = metrics.update_metrics_from_mdc(&card) {
+            if let Err(err) = metrics.update_metrics_from_mdc(&card, migration_limit) {
                 tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
             }
         }
