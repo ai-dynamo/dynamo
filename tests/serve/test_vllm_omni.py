@@ -270,6 +270,8 @@ vllm_omni_configs = {
                 repeat_count=1,
                 expected_response=[],
                 expected_log=[r"Warming up FlashInfer attention"],
+                min_duration_s=1.0,
+                min_rms=0.01,
             ),
         ],
     ),
