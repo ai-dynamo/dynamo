@@ -28,7 +28,7 @@ on:
         type: string
         default: '0'
       containers:
-        description: 'Containers to stage: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,sidecar.'
+        description: 'Containers to stage: all | none | csv of vllm[:runtime|:efa|:enterprise],sglang[...],trtllm[...],frontend,operator,planner,sidecar. A bare vllm means runtime and efa; all also includes the enterprise image when the branch builds it.'
         required: false
         type: string
         default: all
@@ -226,6 +226,9 @@ jobs:
                   if tok in COMPONENTS:
                       out.append(tok)
                       continue
+                  if tok == "vllm:enterprise":
+                      out.append("vllm-enterprise")
+                      continue
                   fw, _, var = tok.partition(":")
                   if fw not in FRAMEWORKS:
                       fail(f"unknown container token '{tok}'")
@@ -234,7 +237,7 @@ jobs:
                   elif var in VARIANTS:
                       out.append(f"{fw}-{var}")
                   else:
-                      fail(f"unknown variant in '{tok}' (use runtime|efa)")
+                      fail(f"unknown variant in '{tok}' (use runtime|efa, or vllm:enterprise)")
               # A separators-only spec (e.g. ',') is an empty selection, not 'all'.
               return ",".join(dedupe(out)) or "none"
 
@@ -343,6 +346,17 @@ jobs:
           for tok in "${!CTR[@]}"; do
             if ctr_selected "${tok}"; then TAGS+=("${SHA}-${CTR[$tok]}"); fi
           done
+          # The enterprise vLLM image comes from enterprise-ci.yml, which builds on
+          # release-branch pushes only once the branch carries that trigger. Wait
+          # for it when selected by name, or under "all" when the branch builds it.
+          ENTERPRISE_ON_BRANCH=false
+          if gh api "repos/${REPO}/contents/.github/workflows/enterprise-ci.yml?ref=${SHA}" --jq .content 2>/dev/null \
+              | base64 -d 2>/dev/null | grep -q "release/\*\.\*\.\*"; then
+            ENTERPRISE_ON_BRANCH=true
+          fi
+          if ctr_selected vllm-enterprise && { [ "${CSET}" != "all" ] || [ "${ENTERPRISE_ON_BRANCH}" = "true" ]; }; then
+            TAGS+=("${SHA}-vllm-runtime-enterprise")
+          fi
           if [ "${WHEELS:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime"); fi
           if [ "${CRATES:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime-test"); fi
 
