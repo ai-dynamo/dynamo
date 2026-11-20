@@ -10,6 +10,7 @@ import pathlib
 from dataclasses import dataclass, field, replace
 
 import pytest
+from huggingface_hub import snapshot_download
 
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
@@ -466,7 +467,7 @@ sidecar_configs = {
             health_check_worker_count=3 if topology == "e_p_d" else 2,
             env={
                 **TRTLLM_MULTI_ENGINE_ENV,
-                "MODEL_REVISION": "89644892e4d85e24eaac8bacfd4f463576704203",
+                "MODEL_REVISION": _MEDIA_MODELS["vision"][1],
                 "TRTLLM_CONTEXT_LENGTH": "2048",
                 "DYN_REQUEST_PLANE": "tcp",
                 "DYN_EVENT_PLANE": "zmq",
@@ -763,8 +764,6 @@ sidecar_configs = {
 
 
 def _prepare_media_config(config, request, tmp_path, ports):
-    from huggingface_hub import snapshot_download
-
     scenario = config.env["TRTLLM_TEST_MEDIA"]
     options = {
         "max_batch_size": 1,
@@ -832,13 +831,18 @@ def sidecar_config_test(
     if "TRTLLM_TEST_MEDIA" in config.env:
         config = _prepare_media_config(config, request, tmp_path, dynamo_dynamic_ports)
     elif config.name in ("trtllm_image_e_pd", "trtllm_image_e_p_d"):
+        common_options = {
+            "max_batch_size": 1,
+            "max_num_tokens": 2048,
+            "multimodal_config": {"encoder_cache_max_bytes": 0},
+        }
+        encoder_options = tmp_path / "native-encoder.json"
+        encoder_options.write_text(json.dumps(common_options))
         options = tmp_path / "native-epd.json"
         options.write_text(
             json.dumps(
                 {
-                    "max_batch_size": 1,
-                    "max_num_tokens": 2048,
-                    "multimodal_config": {"encoder_cache_max_bytes": 0},
+                    **common_options,
                     "kv_cache_config": {
                         "max_tokens": 2048,
                         "free_gpu_memory_fraction": 0.10,
@@ -847,7 +851,14 @@ def sidecar_config_test(
                 }
             )
         )
-        config = replace(config, env={**config.env, "EPD_ENGINE_ARGS": str(options)})
+        config = replace(
+            config,
+            env={
+                **config.env,
+                "EPD_ENCODER_ARGS": str(encoder_options),
+                "EPD_ENGINE_ARGS": str(options),
+            },
+        )
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
@@ -913,8 +924,6 @@ def test_serve_deployment(
     )
     config = sidecar_config_test
     if isinstance(config.request_payloads[0], EncoderImagePayload):
-        from huggingface_hub import snapshot_download
-
         payloads = [
             replace(payload, baseline_path=tmp_path / f"{payload.color}-baseline.json")
             for payload in config.request_payloads

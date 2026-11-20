@@ -18,7 +18,8 @@ if [[ "${1:-}" == "--help" ]]; then
     echo "MODEL_REVISION: required full checkpoint commit SHA; NIXL/UCX must be available."
     echo "EPD_MODE: e_pd (default) or e_p_d."
     echo "In E+P+D, image encoder handoffs stay on P; text can use conditional prefill bypass."
-    echo "TRTLLM_PYTHON: engine Python. EPD_ENGINE_ARGS: optional native YAML/JSON options."
+    echo "TRTLLM_PYTHON: engine Python."
+    echo "EPD_ENCODER_ARGS/EPD_ENGINE_ARGS: optional native YAML/JSON options for E/consumers."
     echo "ENCODER_GPU/PD_GPU/PREFILL_GPU/DECODE_GPU: explicit CUDA device IDs."
     echo "Defaults use the first inherited CUDA_VISIBLE_DEVICES entry; otherwise E/PD=0, P=1, D=2."
     echo "ENCODER_BIND_HOST: engine interface; ENCODER_CONNECT_HOST: local sidecar destination."
@@ -120,7 +121,7 @@ export TRTLLM_OPENENGINE_ENCODER_TRANSFER=nixl
 export TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION="$MODEL_REVISION"
 
 CONTEXT="${TRTLLM_CONTEXT_LENGTH:-4096}"
-trtllm_write_merged_config "${EPD_ENGINE_ARGS:-}" \
+trtllm_write_merged_config "${EPD_ENCODER_ARGS:-}" \
     '{"mm_encoder_only":true,"max_batch_size":1,"dtype":"bfloat16"}' \
     "$RUN_DIR/encode.yaml" "$TRTLLM_PYTHON"
 CONSUMER_OPTIONS='{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16"}'
