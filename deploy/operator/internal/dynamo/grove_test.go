@@ -127,6 +127,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		name               string
 		runtimeConfig      *controller_common.RuntimeConfig
 		validatedQueueName string
+		schedulerName      string
 		initialClique      *grovev1alpha1.PodCliqueTemplateSpec
 		expectedScheduler  string
 		expectedQueueLabel string
@@ -184,7 +185,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 					PodSpec: corev1.PodSpec{},
 				},
 			},
-			expectedScheduler:  commonconsts.KaiSchedulerName,
+			expectedScheduler:  configv1alpha1.DefaultKaiSchedulerName,
 			expectedQueueLabel: "test-queue",
 			shouldInject:       true,
 		},
@@ -202,9 +203,89 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 					PodSpec: corev1.PodSpec{},
 				},
 			},
-			expectedScheduler:  commonconsts.KaiSchedulerName,
+			expectedScheduler:  configv1alpha1.DefaultKaiSchedulerName,
 			expectedQueueLabel: "custom-queue",
 			shouldInject:       true,
+		},
+		{
+			name: "custom KAI scheduler injects scheduler and queue",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
+			},
+			validatedQueueName: "runai-queue",
+			schedulerName:      "runai-scheduler",
+			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
+				Spec: grovev1alpha1.PodCliqueSpec{
+					PodSpec: corev1.PodSpec{SchedulerName: ""},
+				},
+			},
+			expectedScheduler:  "runai-scheduler",
+			expectedQueueLabel: "runai-queue",
+			shouldInject:       true,
+		},
+		{
+			name: "explicit custom KAI scheduler still receives queue",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
+			},
+			validatedQueueName: "runai-queue",
+			schedulerName:      "runai-scheduler",
+			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
+				Spec: grovev1alpha1.PodCliqueSpec{
+					PodSpec: corev1.PodSpec{SchedulerName: "runai-scheduler"},
+				},
+			},
+			expectedScheduler:  "runai-scheduler",
+			expectedQueueLabel: "runai-queue",
+			shouldInject:       true,
+		},
+		{
+			name: "explicit default KAI scheduler still receives queue",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
+			},
+			validatedQueueName: "test-queue",
+			schedulerName:      "",
+			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
+				Spec: grovev1alpha1.PodCliqueSpec{
+					PodSpec: corev1.PodSpec{SchedulerName: "kai-scheduler"},
+				},
+			},
+			expectedScheduler:  "kai-scheduler",
+			expectedQueueLabel: "test-queue",
+			shouldInject:       true,
+		},
+		{
+			name: "different override with custom KAI scheduler is preserved",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
+			},
+			validatedQueueName: "test-queue",
+			schedulerName:      "runai-scheduler",
+			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
+				Spec: grovev1alpha1.PodCliqueSpec{
+					PodSpec: corev1.PodSpec{SchedulerName: "other-scheduler"},
+				},
+			},
+			expectedScheduler:  "runai-scheduler",
+			expectedQueueLabel: "test-queue",
+			shouldInject:       false,
+		},
+		{
+			name: "old default is an unrelated override after changing KAI identity",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
+			},
+			validatedQueueName: "test-queue",
+			schedulerName:      "runai-scheduler",
+			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
+				Spec: grovev1alpha1.PodCliqueSpec{
+					PodSpec: corev1.PodSpec{SchedulerName: "kai-scheduler"},
+				},
+			},
+			expectedScheduler:  "runai-scheduler",
+			expectedQueueLabel: "test-queue",
+			shouldInject:       false,
 		},
 	}
 
@@ -214,7 +295,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 			clique := tt.initialClique.DeepCopy()
 
 			// Call the function
-			injectKaiSchedulerIfEnabled(clique, tt.runtimeConfig, tt.validatedQueueName)
+			injectKaiSchedulerIfEnabled(clique, tt.runtimeConfig, tt.validatedQueueName, tt.schedulerName)
 
 			if tt.shouldInject {
 				// Verify scheduler name is injected
@@ -2334,4 +2415,45 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 		// the error is what callers must act on.
 		g.Expect(readiness.Ready).To(gomega.BeFalse())
 	})
+}
+
+func TestBuildCliqueForRoleCustomKaiScheduler(t *testing.T) {
+	for _, backend := range []BackendFramework{BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM} {
+		for _, nodes := range []int32{1, 2} {
+			t.Run(fmt.Sprintf("%s/nodes=%d", backend, nodes), func(t *testing.T) {
+				t.Log("Configure a custom KAI identity and expand the component's serving roles")
+				cfg := &configv1alpha1.OperatorConfiguration{}
+				cfg.Orchestrators.KaiScheduler.SchedulerName = "runai-scheduler"
+				component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas: new(int32(1)),
+				}
+				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default"}
+				runtimeConfig := &controller_common.RuntimeConfig{
+					Gate: features.Gates{Grove: true, KaiScheduler: true},
+				}
+
+				t.Log("Render every role and verify the operator configuration reaches each clique")
+				for _, role := range expandRolesForComponent("Worker", component.Replicas, nodes, component) {
+					clique, err := buildCliqueForRole(cliqueParams{
+						ctx: t.Context(), r: role, component: component,
+						backendFramework: backend, secretsRetriever: &mockSecretsRetriever{},
+						dynamoDeployment: dgd, numberOfNodes: nodes, componentName: "Worker",
+						operatorConfig: cfg, runtimeConfig: runtimeConfig,
+						isMultinode: nodes > 1, usesPCSG: nodes > 1,
+						validatedQueueName: "runai-queue",
+					})
+					if err != nil {
+						t.Fatalf("render role %s: %v", role.Name, err)
+					}
+					if got := clique.Spec.PodSpec.SchedulerName; got != "runai-scheduler" {
+						t.Errorf("role %s schedulerName = %q", role.Name, got)
+					}
+					if got := clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue]; got != "runai-queue" {
+						t.Errorf("role %s queue label = %q", role.Name, got)
+					}
+				}
+			})
+		}
+	}
 }

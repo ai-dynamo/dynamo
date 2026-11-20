@@ -80,11 +80,12 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 
 /// Build the error returned when the worker fails before any response bytes.
 ///
-/// A typed [`ErrorClass::InvalidRequest`] refusal from the worker's prologue is
-/// returned as the worker's own error. The worker is reachable and refused the
-/// request itself, so a [`ErrorType::CannotConnect`] ancestor would make fault
-/// detection quarantine a healthy worker and make migration resend the request
-/// to every other worker, which would refuse it too.
+/// A typed [`ErrorClass::InvalidRequest`] or [`ErrorClass::NotImplemented`]
+/// refusal from the worker's prologue is returned as the worker's own error.
+/// The worker is reachable and refused the request itself, so a
+/// [`ErrorType::CannotConnect`] ancestor would make fault detection quarantine
+/// a healthy worker and make migration resend a request every worker would
+/// refuse.
 ///
 /// Every other failure keeps the outer [`ErrorType::CannotConnect`], so retry
 /// classification of the outer error is unchanged. A typed error from the
@@ -104,13 +105,22 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
 
     match error.typed_error {
         Some(typed)
-            if !is_migration_sensitive(&typed) && typed.class() == ErrorClass::InvalidRequest =>
+            if !is_migration_sensitive(&typed) && is_worker_request_rejection(typed.class()) =>
         {
             typed
         }
         Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
         _ => builder.build(),
     }
+}
+
+/// Worker prologue statuses that reject only this request rather than indicate
+/// a worker or transport fault.
+fn is_worker_request_rejection(class: ErrorClass) -> bool {
+    matches!(
+        class,
+        ErrorClass::InvalidRequest | ErrorClass::NotImplemented
+    )
 }
 
 /// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a

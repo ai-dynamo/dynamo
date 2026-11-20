@@ -25,6 +25,8 @@ from aisim.sweeper.replay import (
     ReplaySpec,
 )
 
+from dynamo.llm import AisPerfConfig
+from dynamo.mocker.config import performance_config
 from dynamo.replay import (
     PlannerReplayDetails,
     ReplayReport,
@@ -33,6 +35,7 @@ from dynamo.replay import (
 )
 from dynamo.replay import api as replay_api
 from dynamo.replay import run_trace_replay, simulation
+from tests.utils.ais_perf_model import AGGREGATED_ENTRY, IDENTITY
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -852,7 +855,9 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
         supports_agentic_host_offload=supported,
         supports_agentic_snapshots=supported,
         supports_agentic_warmup=supported,
+        supports_agentic_live_warmup=supported,
         supports_agentic_profile=supported,
+        supports_state_cache=supported,
     )
     monkeypatch.setattr(
         simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
@@ -862,7 +867,9 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
     assert capabilities.supports_agentic_host_offload is supported
     assert capabilities.supports_agentic_snapshots is supported
     assert capabilities.supports_agentic_warmup is supported
+    assert capabilities.supports_agentic_live_warmup is supported
     assert capabilities.supports_agentic_profile is supported
+    assert capabilities.supports_state_cache is supported
     # Dynamo's composed runtime retains its pre-existing HBM speculation support.
     assert capabilities.supports_agentic_speculative_decoding
 
@@ -963,6 +970,117 @@ def test_hbm_agentic_speculation_runs_through_native_replay(tmp_path, speculatio
     assert accelerated.metrics["completed_requests"] == 1
     assert accelerated.metrics["total_output_tokens"] == 7
     assert accelerated.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+
+
+def _write_weka_trace(path, block_size):
+    """Three short plays; the first spawns a subagent that its next turn joins."""
+
+    def request(t, hashes, out=2):
+        return {
+            "t": t,
+            "type": "s",
+            "model": "source-model",
+            "in": block_size * len(hashes),
+            "out": out,
+            "api_time": 0.5,
+            "hash_ids": hashes,
+        }
+
+    subagent = {
+        "t": 3.0,
+        "type": "subagent",
+        "agent_id": "worker",
+        "subagent_type": "Explore",
+        "duration_ms": 2000,
+        "status": "completed",
+        "requests": [request(3.5, [10, 11]), request(4.5, [10, 11, 12])],
+    }
+    plays = {
+        "alpha": [request(0.0, [1, 2]), request(2.0, [1, 2, 3]), subagent],
+        "beta": [request(0.0, [20, 21, 22], 3), request(1.5, [20, 21, 22, 23], 3)],
+        "gamma": [request(0.0, [30]), request(0.8, [30, 31])],
+    }
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": play,
+                    "block_size": block_size,
+                    "hash_id_scope": "local",
+                    "requests": requests,
+                }
+            )
+            + "\n"
+            for play, requests in plays.items()
+        )
+    )
+
+
+@pytest.mark.timeout(30)
+def test_agentic_replay_matches_the_engine_stack(tmp_path):
+    """Live warmup on a hybrid (state-cache) engine replays as on the engine stack."""
+
+    block_size = 64
+    trace = tmp_path / "agentic.jsonl"
+    _write_weka_trace(trace, block_size)
+    engine_args = {
+        "engine_type": "vllm",
+        "block_size": block_size,
+        "num_gpu_blocks": 64,
+        "kv_cache_bytes_per_token": 128,
+        "prefix_match_unit": block_size,
+        "state_cache": {"bytes_per_request": 196608},
+        "max_num_batched_tokens": 512,
+        "max_num_seqs": 8,
+        "timing_model": {"type": "fixed", "prefill_ms": 2, "decode_ms": 8},
+    }
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(), num_workers=1, agg_engine_args=engine_args
+        ),
+        workload={
+            "source_type": "trace",
+            "load_type": "trace_timestamps",
+            "trace_format": "weka",
+            "trace_path": str(trace),
+            "agentic_lanes": 8,
+            "agentic_snapshot": {"seed": 42},
+            "agentic_warmup": True,
+            "agentic_warmup_policy": "live_trajectory_v1",
+            # At 1 s the global cap makes the primer idle cap bind; a different
+            # tree cap catches reading the wrong field.
+            "agentic_profile": {
+                "duration_seconds": 20.0,
+                "tree_idle_cap_seconds": 5.0,
+                "global_idle_cap_seconds": 1.0,
+            },
+        },
+        goal={"target": "throughput"},
+    )
+    requirements = ReplayOutputRequirements(capture_per_request=True)
+    dynamo, engine = (
+        factory().create(0).run(spec, output_requirements=requirements)
+        for factory in (
+            simulation.DynamoReplayRunnerFactory,
+            simulation.EngineReplayRunnerFactory,
+        )
+    )
+
+    records = dynamo.metadata["native_report"]["per_request"]
+    assert records == engine.metadata["native_report"]["per_request"]
+    assert len(records) > 100
+    assert dynamo.metadata["agentic_phases"] == engine.metadata["agentic_phases"]
+    assert dynamo.metadata["agentic_phases"]["warmup_policy"] == "live_trajectory_v1"
+    # Wall-clock rates differ between the runs.
+    shared = dynamo.metrics.keys() & engine.metrics.keys()
+    shared -= {
+        "wall_time_ms",
+        "processed_tokens_per_s",
+        "processed_output_tokens_per_s",
+    }
+    assert {k: dynamo.metrics[k] for k in shared} == {
+        k: engine.metrics[k] for k in shared
+    }
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
@@ -1265,3 +1383,136 @@ def test_shared_g2_launch_rejects_unsupported_backend(backend):
                 "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
             }
         )
+
+
+@pytest.fixture
+def native_calls(monkeypatch) -> list[dict]:
+    """The keyword arguments of each native replay call; the stand-in raises."""
+    calls: list[dict] = []
+
+    def record(*_args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", record)
+    return calls
+
+
+def _replay_with_router_hook(deployment, **hook_config) -> ReplaySpec:
+    config = {
+        "router_mode": "kv_router",
+        "router_config": {"router_prefill_load_model": "ais"},
+        **hook_config,
+    }
+    hook = RuntimeHookSpec(
+        provider="dynamo.router", kind="placement_policy", api_version=1, config=config
+    )
+    return ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+        adapters={"dynamo.router": AdapterReplaySpec(runtime_hooks=(hook,))},
+    )
+
+
+def _with_ais_perf_model(deployment, role: str) -> BackendDeploymentSpec:
+    """Return ``deployment`` with an AIS perf model on the engine of ``role``."""
+    name = "agg_engine_args" if role == "aggregated" else f"{role}_engine_args"
+    engine_args = {
+        **getattr(deployment, name),
+        # Given so that the launch config needs no model lookup.
+        "num_gpu_blocks": 1024,
+        "timing_model": {
+            "type": "external",
+            "provider": "ais",
+            "config": {**IDENTITY, "worker_type": role},
+        },
+    }
+    return replace(deployment, **{name: engine_args})
+
+
+# The engine whose perf model the router reads, in each deployment mode.
+_ROUTED_ENGINES = pytest.mark.parametrize(
+    ("deployment", "role"),
+    [(_agg_deployment(), "aggregated"), (_disagg_deployment(), "prefill")],
+    ids=["agg", "disagg"],
+)
+
+
+def test_router_hook_mapping_reaches_native_trace_call(native_calls) -> None:
+    replay = _replay_with_router_hook(
+        _agg_deployment(), ais_perf_config=AGGREGATED_ENTRY
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    (call,) = native_calls
+    assert (
+        call["ais_perf_config"].to_dict()
+        == AisPerfConfig(config=AGGREGATED_ENTRY).to_dict()
+    )
+
+
+@_ROUTED_ENGINES
+def test_use_engine_marker_fills_router_config_from_engine(
+    deployment, role, native_calls
+) -> None:
+    deployment = _with_ais_perf_model(deployment, role)
+    replay = _replay_with_router_hook(
+        deployment, ais_perf_config=None, ais_perf_config_from_engine=True
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    (call,) = native_calls
+    router_config = call["ais_perf_config"].to_dict()
+    # What the deployment writes for the engine of that role.
+    written = {**IDENTITY, "worker_type": role}
+    assert {key: router_config[key] for key in written} == written
+    # The rest is the engine's config too.
+    engine_config = performance_config(
+        simulation.DynamoReplayRunner._engine_args(deployment, role)
+    )
+    assert router_config == AisPerfConfig(config=engine_config).to_dict()
+
+
+@_ROUTED_ENGINES
+def test_use_engine_marker_without_engine_perf_model_error(
+    deployment, role, native_calls
+) -> None:
+    replay = _replay_with_router_hook(deployment, ais_perf_config_from_engine=True)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^router\.ais_perf_model: \{use: engine\} needs an AIS perf model on "
+        f"the {role} engine; it has none$",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_calls == []
+
+
+@pytest.mark.parametrize(
+    ("hook_config", "error", "message"),
+    [
+        ({"ais_perf_config_from_engine": False}, TypeError, "must be true or absent"),
+        ({"ais_perf_config_from_engine": 1}, TypeError, "must be true or absent"),
+        (
+            {"ais_perf_config": AGGREGATED_ENTRY, "ais_perf_config_from_engine": True},
+            ValueError,
+            "has both ais_perf_config and ais_perf_config_from_engine",
+        ),
+    ],
+    ids=["false", "one", "with mapping"],
+)
+def test_use_engine_marker_must_be_true_and_without_mapping(
+    hook_config, error, message, native_calls
+) -> None:
+    replay = _replay_with_router_hook(_agg_deployment(), **hook_config)
+
+    with pytest.raises(error, match=message):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_calls == []

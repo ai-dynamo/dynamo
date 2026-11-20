@@ -27,7 +27,6 @@ jev = ["httpx>=0.27,<1"]
 # Match Planner's forecasting dependencies in container/deps/requirements.planner.txt.
 # Install Dynamo itself from this checkout with scripts/setup_simulation_env.sh.
 sim = [
-    "scikit-learn==1.7.2",
     "pmdarima==2.1.1",
     "filterpy==1.4.5",
     "prophet==1.2.1",

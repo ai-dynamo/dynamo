@@ -37,6 +37,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -55,7 +56,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -938,162 +938,6 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-// ComponentServiceParams contains all the fields needed to generate a Kubernetes
-// Service for a Dynamo component, independent of whether the caller is the DGD
-// (Grove) or DCD controller.
-type ComponentServiceParams struct {
-	ServiceName     string
-	Namespace       string
-	ComponentType   string
-	DynamoNamespace string
-	ComponentName   string // original user-provided name, used in selector
-	Labels          map[string]string
-	Annotations     map[string]string
-	IsK8sDiscovery  bool
-}
-
-func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
-	var servicePort corev1.ServicePort
-	switch params.ComponentType {
-	case commonconsts.ComponentTypeFrontend:
-		servicePort = corev1.ServicePort{
-			Name:       commonconsts.DynamoServicePortName,
-			Port:       commonconsts.DynamoServicePort,
-			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-			Protocol:   corev1.ProtocolTCP,
-		}
-	case commonconsts.ComponentTypeEPP:
-		servicePort = corev1.ServicePort{
-			Name:        commonconsts.EPPGRPCPortName,
-			Port:        commonconsts.EPPGRPCPort,
-			TargetPort:  intstr.FromInt(commonconsts.EPPGRPCPort),
-			Protocol:    corev1.ProtocolTCP,
-			AppProtocol: new("http2"),
-		}
-	default:
-		servicePort = corev1.ServicePort{
-			Name:       commonconsts.DynamoSystemPortName,
-			Port:       commonconsts.DynamoSystemPort,
-			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
-			Protocol:   corev1.ProtocolTCP,
-		}
-	}
-
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
-	if params.IsK8sDiscovery {
-		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
-		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
-	}
-
-	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
-		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
-	}
-
-	annotations := make(map[string]string)
-	maps.Copy(annotations, params.Annotations)
-
-	service := &corev1.Service{
-		// Service names must be DNS-1035 labels (no dots). Replace dots with
-		// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
-		Name:        NormalizeKubeResourceName(params.ServiceName),
-		Namespace:   params.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-		Spec: corev1.ServiceSpec{
-			Selector: selector,
-			Ports:    []corev1.ServicePort{servicePort},
-		},
-	}
-	return service, nil
-}
-
-// maxServiceNameLength is the Kubernetes limit on a Service name, which must be a
-// DNS-1035 label.
-const maxServiceNameLength = 63
-
-// ElasticEPLeaderServiceName returns the name a single-pod elastic-EP leader is
-// reachable at: its component service name plus a "-ray" suffix.
-//
-// That suffix can push a long name past the DNS-1035 limit, which the API server
-// rejects, failing the whole stable-resources reconcile. Truncate with a hash suffix
-// instead, as PCSNameForDGD does. The hash must be deterministic because the follower
-// derives this name independently rather than reading it back from the Service.
-func ElasticEPLeaderServiceName(componentServiceName string) string {
-	name := NormalizeKubeResourceName(componentServiceName + "-ray")
-	if len(name) <= maxServiceNameLength {
-		return name
-	}
-
-	hash := fnv.New32a()
-	hash.Write([]byte(name))
-	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
-	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
-}
-
-// GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
-// elastic-EP leader a stable address its followers join with
-// `ray start --address=<service>:6379` (see injectElasticEPRayLaunchFlags).
-//
-// Two spec choices are deliberate:
-//
-//   - clusterIP: None, because a load-balanced ClusterIP cannot carry Ray's multi-port
-//     head<->worker traffic.
-//   - PublishNotReadyAddresses, because the leader's engine only starts once its
-//     data-parallel ranks join, so gating the address on readiness would deadlock.
-//
-// The selector matches every pod carrying the component labels, so the caller must emit
-// this only while the component renders as one pod. A follower clique sharing that label
-// would have to narrow the selector to the leader role.
-func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
-	// Copy the caller's metadata so the Service carries the component's labels and
-	// annotations without aliasing the caller's maps.
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
-
-	annotations := make(map[string]string)
-	maps.Copy(annotations, params.Annotations)
-
-	// Select the elastic-EP component itself; the caller's single-pod gate is what makes
-	// this resolve to the one leader pod.
-	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
-		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
-	}
-
-	return &corev1.Service{
-		Name:        ElasticEPLeaderServiceName(params.ServiceName),
-		Namespace:   params.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-		Spec: corev1.ServiceSpec{
-			ClusterIP:                corev1.ClusterIPNone,
-			PublishNotReadyAddresses: true,
-			Selector:                 selector,
-			Ports: []corev1.ServicePort{
-				{
-					// Ray GCS head port (VLLMPort). Followers connect their raylet
-					// here via `ray start --address=<svc>:6379`.
-					Name:       "ray-gcs",
-					Port:       6379,
-					TargetPort: intstr.FromInt(6379),
-					Protocol:   corev1.ProtocolTCP,
-				},
-				{
-					// Leader system/health port; the follower's /live gate polls it.
-					Name:       commonconsts.DynamoSystemPortName,
-					Port:       commonconsts.DynamoSystemPort,
-					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-		},
-	}
-}
-
 func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1.Ingress {
 	resourceName := NormalizeKubeResourceName(componentName)
 	ingress := &networkingv1.Ingress{
@@ -1190,7 +1034,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 // This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
 // avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
 func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
-	// Normalize the service name the same way GenerateComponentService does
+	// Normalize the service name the same way componentdeployment.RenderService does
 	// so the DestinationRule host matches the actual Service DNS name.
 	normalizedName := NormalizeKubeResourceName(serviceName)
 
@@ -2799,7 +2643,7 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 
-	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName, p.operatorConfig.Orchestrators.KaiScheduler.SchedulerName)
 	injectVolcanoSchedulerIfEnabled(clique, p.runtimeConfig)
 	return clique, nil
 }
@@ -3247,8 +3091,6 @@ func generatePodMetadata(
 	maps.Copy(labels, GetPodTemplateLabels(component))
 	maps.Copy(annotations, GetPodTemplateAnnotations(component))
 	// Apply system labels after user merge to prevent override
-	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
-	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
@@ -3276,7 +3118,7 @@ func generatePodMetadata(
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
-	return metav1.ObjectMeta{Labels: labels, Annotations: annotations}
+	return grove.RenderPodMetadata(dynamoDeployment.Name, GetDCDResourceName(dynamoDeployment, componentName, ""), metav1.ObjectMeta{Labels: labels, Annotations: annotations})
 }
 
 func getDGDComponentAlphaLabels(dgd *v1beta1.DynamoGraphDeployment, componentName string) map[string]string {

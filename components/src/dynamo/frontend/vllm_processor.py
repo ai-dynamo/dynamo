@@ -49,8 +49,13 @@ from dynamo.llm.exceptions import (
 )
 from dynamo.vllm.errors import vllm_client_error_to_public_error
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    _glm_prompt_reasoning_open,
+    preprocess_chat_request,
+)
 from .structural_tag_policy import (
+    runtime_backend_defers_grammar,
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
 )
@@ -64,7 +69,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
+    request_id_from_context,
     resolve_chat_template,
 )
 
@@ -597,11 +602,40 @@ def _build_reasoning_parser_metadata(
     request_for_sampling: Any,
     prompt_token_ids: list[int],
     model_config: Any = None,
+    guided_decoding: dict[str, Any] | None = None,
+    backend_defers_grammar: bool = False,
 ) -> _ReasoningParserMetadata:
+    """Choose worker and response reasoning controls from request and prompt state."""
     if reasoning_parser_class is None:
         return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
+    # A known GLM prompt state overrides the thinking flags. vLLM's GLM parser
+    # reads every marker as content when both flags are false, so its kwargs follow.
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        # Bare JSON starts immediately unless the worker advertises that it
+        # delays the grammar. Display preferences do not decide that boundary.
+        bare_json = guided_decoding is not None and (
+            "json" in guided_decoding or "regex" in guided_decoding
+        )
+        reasoning_ended = not glm_open or (bare_json and not backend_defers_grammar)
+        return _ReasoningParserMetadata(
+            reasoning_ended,
+            reasoning_ended,
+            {
+                "chat_template_kwargs": {
+                    **chat_template_kwargs,
+                    "thinking": glm_open,
+                    "enable_thinking": glm_open,
+                }
+            },
+        )
     if chat_template_kwargs.get("enable_thinking") is False:
         return _ReasoningParserMetadata(True, True, parser_kwargs)
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
@@ -755,6 +789,7 @@ class VllmProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         structural_tag_excludes_reasoning: bool = False,
+        backend_defers_grammar: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -770,6 +805,7 @@ class VllmProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.structural_tag_excludes_reasoning = structural_tag_excludes_reasoning
+        self.backend_defers_grammar = backend_defers_grammar
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -984,7 +1020,7 @@ class VllmProcessor:
         Local vLLM processing handles tokenization and response assembly, while
         routing metadata and worker arguments carry request settings to inference.
         """
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         _reject_unsupported_chat_logprobs(
             request.get("logprobs"),
@@ -1113,6 +1149,8 @@ class VllmProcessor:
             request_for_sampling,
             tokens,
             self.input_processor.model_config,
+            guided_decoding=guided_decoding,
+            backend_defers_grammar=self.backend_defers_grammar,
         )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
@@ -1216,10 +1254,19 @@ class VllmProcessor:
                     "mm_processor_kwargs"
                 ] = request_for_sampling.mm_processor_kwargs
 
+            tool_catalog_names = None
+            if pre.uses_dynamo_json_tool_call_fallback and (
+                catalog := request.get("chat_template_tools")
+            ):
+                tool_catalog_names = frozenset(
+                    tool["function"]["name"] for tool in catalog
+                )
+
             def new_post_processor() -> StreamingPostProcessor:
                 # vLLM tool parsers keep mutable streaming state. Give every
                 # n>1 choice its own parser instead of reusing the parser that
                 # adjusted the shared request during preprocessing.
+                """Create independent parser state for one response choice."""
                 choice_tool_parser = (
                     self.tool_parser_class(self.tokenizer, request_for_sampling.tools)
                     if tool_parser is not None and self.tool_parser_class is not None
@@ -1232,7 +1279,13 @@ class VllmProcessor:
                     prompt_token_ids=tokens,
                     tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
-                    chat_template_kwargs=chat_template_kwargs,
+                    # Same kwargs as the worker's parser, which may follow
+                    # the rendered prompt rather than the request (GLM).
+                    chat_template_kwargs=(
+                        reasoning_metadata.parser_kwargs["chat_template_kwargs"]
+                        if reasoning_metadata.parser_kwargs is not None
+                        else chat_template_kwargs
+                    ),
                     model_config=self.input_processor.model_config,
                     response_reasoning_ended=(
                         reasoning_metadata.response_reasoning_ended
@@ -1241,6 +1294,7 @@ class VllmProcessor:
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
                     ),
+                    tool_catalog_names=tool_catalog_names,
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
@@ -1555,7 +1609,7 @@ class VllmProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": choices,
                         "created": int(time.time()),
                         "model": request["model"],
@@ -1844,6 +1898,7 @@ class EngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
+            backend_defers_grammar=runtime_backend_defers_grammar(runtime_config),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

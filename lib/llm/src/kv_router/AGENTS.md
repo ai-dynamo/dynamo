@@ -20,6 +20,8 @@ and the booking lifecycle these rules protect.
 - `sequence.rs`, `sequence/`: runtime glue for active-sequence tracking and its replica sync.
 - `request_lease.rs`: one request-liveness coordinator and reaper per `KvRouter`. Holds booking
   leases and releases them on completion or expiry.
+- `role_routing.rs`: the routing settings each worker role runs with: how a serving set's or
+  prefill pool's advertised `router_config` combines with the frontend's.
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.
@@ -31,7 +33,8 @@ and the booking lifecycle these rules protect.
     booking.
   - `routing_host/cancellation.rs`: what a client disconnect cancels, and the cleanup budget.
 - `prefill_router/`: `PrefillRouter`, the optional prefill hop in front of decode.
-  - `activation.rs`: target and binding lifecycle; how the prefill hop's routing mode is chosen.
+  - `activation.rs`: target and binding lifecycle; it asks `role_routing.rs` for the prefill
+    hop's routing settings.
   - `admission.rs`: consumes the prefill stream, in the foreground or as a background task.
   - `handoff.rs`: keeps prefill running while decode runs and reports prefill failures.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.
