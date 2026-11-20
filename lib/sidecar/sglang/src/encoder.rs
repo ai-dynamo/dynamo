@@ -68,10 +68,15 @@ struct Handoff {
 }
 
 impl Handoff {
-    fn validate(&self, request_id: &str, images: usize, videos: usize) -> Result<(), DynamoError> {
+    fn validate(
+        &self,
+        request_id: &str,
+        images: usize,
+        videos: usize,
+        native_model_type: &str,
+    ) -> Result<(), DynamoError> {
         let t = &self.transfer;
-        let expected_version = if videos == 0 { 1 } else { 2 };
-        if t.version != expected_version
+        if !matches_layout_contract(t, videos, native_model_type)
             || request_id.is_empty()
             || t.request_id != request_id
             || !is_lower_hex(&t.transfer_id, 32)
@@ -82,7 +87,7 @@ impl Handoff {
             || t.image_count as usize != images
             || t.images.len() != images
             || t.videos.len() != videos
-            || !t.videos.iter().all(valid_video_layout)
+            || !t.videos.iter().all(|v| valid_video_layout(v, t.version))
             || t.images
                 .iter()
                 .any(|i| i.t == 0 || i.h == 0 || i.w == 0 || !is_lower_hex(&i.identity, 64))
@@ -100,17 +105,61 @@ impl Handoff {
     }
 }
 
-fn valid_video_layout(layout: &pb::VideoLayout) -> bool {
-    let frames = layout.t as usize;
-    frames > 0
+// E and the selected language worker both validate against their own native
+// service's advertisement. An absent model type means that peer speaks v1/v2.
+fn matches_layout_contract(
+    transfer: &pb::StagedImageTransfer,
+    videos: usize,
+    native_model_type: &str,
+) -> bool {
+    if transfer.native_model_type != native_model_type {
+        return false;
+    }
+    if native_model_type.is_empty() {
+        return transfer.version == (if videos == 0 { 1 } else { 2 })
+            && transfer.embedding_width == 0
+            && transfer
+                .images
+                .iter()
+                .all(|layout| layout.embedding_rows == 0 && layout.original_size.is_empty())
+            && transfer
+                .videos
+                .iter()
+                .all(|layout| layout.embedding_rows == 0);
+    }
+    transfer.version == 3
+        && transfer.embedding_width > 0
+        && transfer.images.iter().all(|layout| {
+            layout.embedding_rows > 0
+                && (layout.original_size.is_empty()
+                    || matches!(layout.original_size.as_slice(), [w, h] if *w > 0 && *h > 0))
+        })
+        && transfer
+            .videos
+            .iter()
+            .all(|layout| layout.embedding_rows > 0)
+}
+
+fn valid_video_layout(layout: &pb::VideoLayout, version: u32) -> bool {
+    let temporal_grid = layout.t as usize;
+    // The v3 processor may compress several temporal patches into one frame
+    // embedding. Its timestamps and per-frame identities refer to those groups.
+    let groups = if version == 3 && !layout.timestamps.is_empty() {
+        layout.timestamps.len()
+    } else {
+        temporal_grid
+    };
+    groups > 0
+        && temporal_grid > 0
+        && temporal_grid.is_multiple_of(groups)
         && layout.h > 0
         && layout.w > 0
-        && (layout.identities.len() == 1 || layout.identities.len() == frames)
+        && (layout.identities.len() == 1 || layout.identities.len() == groups)
         && layout
             .identities
             .iter()
             .all(|value| is_lower_hex(value, 64))
-        && (layout.timestamps.is_empty() || layout.timestamps.len() == frames)
+        && (layout.timestamps.is_empty() || layout.timestamps.len() == groups)
         && layout
             .timestamps
             .iter()
@@ -175,6 +224,7 @@ pub(crate) fn validate_consumer(
     request_id: &str,
     required: bool,
     supports_staged_video: bool,
+    native_model_type: &str,
 ) -> Result<(), DynamoError> {
     if let Some(result) = &request.encoder_result {
         let handoff = Handoff::deserialize(result)
@@ -193,7 +243,7 @@ pub(crate) fn validate_consumer(
                 "the selected SGLang language worker does not support staged video",
             ));
         }
-        handoff.validate(request_id, images, videos)?;
+        handoff.validate(request_id, images, videos, native_model_type)?;
     } else if required
         && (request
             .multi_modal_data
@@ -334,6 +384,12 @@ impl Encoder {
                 true.into(),
             );
         }
+        if !self.info.native_model_type.is_empty() {
+            config.runtime_data.insert(
+                dynamo_llm::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3.into(),
+                self.info.native_model_type.clone().into(),
+            );
+        }
         Ok(config)
     }
 
@@ -383,6 +439,7 @@ impl Encoder {
         let videos = message.video_urls.len();
         let mut rpc = self.rpc()?;
         let peer = self.peer.clone();
+        let native_model_type = self.info.native_model_type.clone();
         let media = self.media.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let response = tokio::select! {
@@ -401,7 +458,7 @@ impl Encoder {
             let transfer = response?
                 .into_inner().transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
             let handoff = Handoff { peer, transfer };
-            if let Err(error) = handoff.validate(&request_id, images, videos) {
+            if let Err(error) = handoff.validate(&request_id, images, videos, &native_model_type) {
                 let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
                     transfer_id: handoff.transfer.transfer_id.clone(),
                 })).await;
@@ -436,7 +493,39 @@ mod tests {
             "num_parts":1,"part_idx":0,"image_count":1,"images":[{"t":1,"h":4,"w":4,"identity":"c".repeat(64)}]
         });
         let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
-        handoff.validate("r", 1, 0).unwrap();
+        handoff.validate("r", 1, 0, "").unwrap();
         assert_eq!(serde_json::to_value(handoff).unwrap(), descriptor);
+    }
+
+    #[test]
+    fn native_handoff_checks_the_advertised_model_and_item_shapes() {
+        let key = "10".repeat(16);
+        let descriptor = serde_json::json!({
+            "version": 3, "peer": "grpc://e:9100", "request_id": "r",
+            "transfer_id": key, "part_id": format!("{key}_local_part_0"),
+            "part_idx": 0, "num_parts": 1, "image_count": 1,
+            "native_model_type": "kimi_vl", "embedding_width": 1536,
+            "images": [{
+                "t": 1, "h": 4, "w": 6, "identity": "bb".repeat(32),
+                "embedding_rows": 6, "original_size": [96, 64]
+            }]
+        });
+        let handoff: Handoff = serde_json::from_value(descriptor.clone()).unwrap();
+        handoff.validate("r", 1, 0, "kimi_vl").unwrap();
+        assert_eq!(serde_json::to_value(&handoff).unwrap(), descriptor);
+        assert!(handoff.validate("r", 1, 0, "").is_err());
+        assert!(handoff.validate("r", 1, 0, "glm4v").is_err());
+        for (field, value) in [
+            ("/version", serde_json::json!(1)),
+            ("/embedding_width", serde_json::json!(0)),
+            ("/images/0/embedding_rows", serde_json::json!(0)),
+            ("/images/0/original_size", serde_json::json!([96])),
+            ("/images/0/original_size", serde_json::json!([0, 64])),
+        ] {
+            let mut malformed = descriptor.clone();
+            *malformed.pointer_mut(field).unwrap() = value;
+            let handoff: Handoff = serde_json::from_value(malformed).unwrap();
+            assert!(handoff.validate("r", 1, 0, "kimi_vl").is_err(), "{field}");
+        }
     }
 }

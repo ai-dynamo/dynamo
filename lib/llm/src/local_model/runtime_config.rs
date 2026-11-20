@@ -186,6 +186,9 @@ pub const SGLANG_STAGED_IMAGES_V1: &str = "sglang_staged_images_v1";
 /// The SGLang worker supports staged video and mixed image/video handoffs.
 pub const SGLANG_STAGED_VIDEO_V2: &str = "sglang_staged_video_v2";
 
+/// The native processor model type advertised for version 3 staged handoffs.
+pub const SGLANG_STAGED_NATIVE_V3: &str = "sglang_staged_native_v3";
+
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///

@@ -12,7 +12,7 @@ the crate instead.
 
 The language service is based on SGLang `37f3b2730bca1cc875126f8b94c4487ec1331a95`.
 The staged-encoder extension adds the encoder service, GenerateRequest field 41,
-and GetServerInfoResponse fields 17 and 18. Unrelated newer SGLang service methods are
+and GetServerInfoResponse fields 17 through 19. Unrelated newer SGLang service methods are
 omitted from this snapshot. The SHA-256 digests of the vendored files follow.
 
 | File | SHA-256 |
@@ -22,8 +22,8 @@ omitted from this snapshot. The SHA-256 digests of the vendored files follow.
 | `sglang/api/v1/generate.proto` | `ffc9ee7f071e883d3226c30122ff7afaa867847646bf424b3b0058343c4d93d0` |
 | `sglang/api/v1/hicache.proto` | `3224ff3d64234d23678d1a6f899c35b131ebc73eddeabf4a6b25fa983852e736` |
 | `sglang/api/v1/sampling.proto` | `64621faa7bc31835a52973db9ce8e961c14e66c7d95b21282399d5049531fa6f` |
-| `sglang/api/v1/service.proto` | `e5c50fe91503c59a2a5f69d797c26ed05510088cb0f598d14a597551d941ab37` |
-| `sglang/encoder/v1/encoder.proto` | `be953f7e784d1a3f550deeea00fd7e1767b57ea5660e4fced41e91e42ee6a945` |
+| `sglang/api/v1/service.proto` | `966acf166da7fe066cfb44374421c2a7fcae44bcde98c9da47077b31eec9d70a` |
+| `sglang/encoder/v1/encoder.proto` | `34da87f071eea874eae5d6c44b892cb6b352caf2e4bbc0e4a18f122e006b97b6` |
 | `sglang/json/v1/options.proto` | `d1aa73d1a5ee39b180ccc5967dae55d061a4e6e10f9a01d4c116d3a269b111fe` |
 
 All of them are excluded from Dynamo's formatting and copyright-header checks.

@@ -14,8 +14,8 @@ use dynamo_backend_common::{
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_llm::local_model::runtime_config::{
-    SGLANG_STAGED_IMAGES_V1, SGLANG_STAGED_VIDEO_V2, TOKEN_BUDGET_RUNTIME_KEY,
-    TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+    SGLANG_STAGED_IMAGES_V1, SGLANG_STAGED_NATIVE_V3, SGLANG_STAGED_VIDEO_V2,
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
@@ -60,6 +60,7 @@ struct StartedState {
     listeners: NodeListeners,
     accepts_encoder_handoff: bool,
     supports_staged_video: bool,
+    native_model_type: String,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
 }
@@ -437,6 +438,12 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert(SGLANG_STAGED_VIDEO_V2.into(), true.into());
         }
+        if accepts_encoder_handoff && !node.engine.native_model_type.is_empty() {
+            config.runtime_data.insert(
+                SGLANG_STAGED_NATIVE_V3.into(),
+                node.engine.native_model_type.clone().into(),
+            );
+        }
         if native_http.is_some() {
             config
                 .runtime_data
@@ -479,6 +486,7 @@ impl LLMEngine for SglangSidecarEngine {
                 listeners,
                 accepts_encoder_handoff,
                 supports_staged_video,
+                native_model_type: node.engine.native_model_type,
                 kv_event_sources,
                 combined_token_limit,
             })
@@ -517,6 +525,7 @@ impl LLMEngine for SglangSidecarEngine {
             ctx.id(),
             self.route_to_encoder || state.accepts_encoder_handoff,
             state.supports_staged_video,
+            &state.native_model_type,
         )?;
         if request.encoder_result.is_some() && !state.accepts_encoder_handoff {
             return Err(client::invalid_request(
@@ -1197,7 +1206,7 @@ mod tests {
             tokenizer_path: "native-tokenizer".into(),
             served_model_name: "chat-model".into(),
             supports_staged_video: false,
-            staged_media_policy: None,
+            ..Default::default()
         };
         let (engine, config) =
             SglangSidecarEngine::from_discovered(args(), super::NativeBackend::Encoder(info))

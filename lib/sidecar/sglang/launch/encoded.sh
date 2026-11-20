@@ -13,6 +13,9 @@ source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 model="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 encoders=1
+tp=1
+encoder_tp=
+single_gpu=false
 encoder_transfer_backend="${SGLANG_ENCODER_TRANSFER_BACKEND:-nixl}"
 split=false
 packed=false
@@ -20,20 +23,34 @@ engine_args=()
 while (($#)); do
     case "$1" in
         --model|--model-path) model="${2:?missing model}"; shift 2 ;;
+        --tp-size) tp="${2:?missing tensor parallel size}"; shift 2 ;;
+        --encoder-tp-size) encoder_tp="${2:?missing encoder tensor parallel size}"; shift 2 ;;
         --encoders) encoders="${2:?missing number of encoders}"; shift 2 ;;
         --encoder-transfer-backend) encoder_transfer_backend="${2:?missing encoder transfer backend}"; shift 2 ;;
         --split-pd) split=true; shift ;;
-        --single-gpu) packed=true; shift ;;
-        --) shift; engine_args=("$@"); break ;;
+        --colocate) packed=true; shift ;;
+        --single-gpu) packed=true; single_gpu=true; shift ;;
+        --)
+            shift
+            while (($#)); do
+                case "$1" in
+                    --tp|--tp-size|--tensor-parallel-size) tp="${2:?missing tensor parallel size}"; shift 2 ;;
+                    --tp=*|--tp-size=*|--tensor-parallel-size=*) tp="${1#*=}"; shift ;;
+                    *) engine_args+=("$1"); shift ;;
+                esac
+            done
+            ;;
         -h|--help)
             cat <<'HELP'
-Usage: encoded.sh [--model MODEL] [--encoders N] [--encoder-transfer-backend BACKEND] [--split-pd] [--single-gpu] [-- SGLANG_OPTIONS...]
+Usage: encoded.sh [--model MODEL] [--encoders N] [--encoder-transfer-backend BACKEND] [--split-pd] [--tp-size N] [--encoder-tp-size N] [--colocate | --single-gpu] [-- SGLANG_OPTIONS...]
 
 Starts Dynamo, N independently registered native encoder/sidecar pairs, and
 a native language engine/sidecar. --split-pd starts separate prefill and decode
-pairs using SGLang's native P/D bootstrap. --single-gpu packs all roles onto
-the first visible GPU with bounded token pools and CUDA graphs disabled.
-Otherwise assign one visible GPU per engine, encoders first, then P/PD, then D.
+pairs using SGLang's native P/D bootstrap. --tp-size sets the TP degree for all
+roles. --encoder-tp-size overrides it for E. By default each role takes its own
+contiguous group from CUDA_VISIBLE_DEVICES, encoders first, then P/PD, then D.
+--colocate shares the first visible group across all roles, bounds token pools,
+and disables CUDA graphs. --single-gpu selects colocation with TP=1.
 
 Use a patched SGLang installation (SGLANG_PYTHON) and a patched native sidecar
 (DYNAMO_SIDECAR_BIN). DYN_DISCOVERY_BACKEND=file needs no external services.
@@ -50,6 +67,15 @@ HELP
     esac
 done
 [[ "$encoders" =~ ^[1-9][0-9]*$ ]] || { echo "--encoders needs a positive integer" >&2; exit 2; }
+encoder_tp=${encoder_tp:-$tp}
+if ! [[ "$tp" =~ ^[1-9][0-9]*$ && "$encoder_tp" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--tp-size and --encoder-tp-size need positive integers" >&2
+    exit 2
+fi
+if $single_gpu && (( tp > 1 || encoder_tp > 1 )); then
+    echo "--single-gpu requires TP=1. Use --colocate to share a TP group." >&2
+    exit 2
+fi
 case "$encoder_transfer_backend" in
     nixl|zmq_to_scheduler) ;;
     *) echo "Unsupported encoder transfer backend '$encoder_transfer_backend'. Choose nixl or zmq_to_scheduler." >&2; exit 2 ;;
@@ -68,8 +94,12 @@ fi
 IFS=',' read -r -a devices <<< "${CUDA_VISIBLE_DEVICES:-}"
 roles=$(( encoders + 1 ))
 if $split; then roles=$((roles + 1)); fi
-if ! $packed && (( ${#devices[@]} > 0 && ${#devices[@]} < roles )); then
-    echo "Need $roles visible GPUs. Use --single-gpu to share one." >&2
+needed_gpus=$((encoders * encoder_tp + (roles - encoders) * tp))
+if $packed; then needed_gpus=$((encoder_tp > tp ? encoder_tp : tp)); fi
+if (( ${#devices[@]} == 0 )); then
+    for ((i=0; i<needed_gpus; i++)); do devices+=("$i"); done
+elif (( ${#devices[@]} < needed_gpus )); then
+    echo "Need $needed_gpus visible GPUs for this placement, got ${#devices[@]}." >&2
     exit 2
 fi
 
@@ -88,14 +118,18 @@ print_launch_banner --multimodal "SGLang native sidecars ($encoders encoders, sp
     "$model" "${DYN_HTTP_PORT:-8000}"
 "$frontend_py" -m dynamo.frontend &
 
+offset=0
 for ((i=1; i<=roles; i++)); do
-    gpu_idx=$((i - 1))
-    if $packed; then gpu_idx=0; fi
-    gpu="${devices[$gpu_idx]:-$gpu_idx}"
+    role_tp=$tp
+    if ((i <= encoders)); then role_tp=$encoder_tp; fi
+    group=("${devices[@]:offset:role_tp}")
+    # Preserve the caller's device order and identifiers (ordinals or GPU UUIDs).
+    gpu=$(IFS=,; echo "${group[*]}")
+    if ! $packed; then offset=$((offset + role_tp)); fi
     grpc_port=$(dyn_port DYN_ENGINE_GRPC_PORT "$i" "$((30000 + 3*i + 1))")
     nccl_port=$(dyn_port DYN_NCCL_PORT "$i" "$((29500 + i))")
     system_port=$(dyn_port DYN_SYSTEM_PORT "$i" "$((8080 + i))")
-    args=(--model-path "$model" --host "$host" --tp-size 1 --dp-size 1
+    args=(--model-path "$model" --host "$host" --tp-size "$role_tp" --dp-size 1
         --encoder-transfer-backend "$encoder_transfer_backend" --nccl-port "$nccl_port" "${engine_args[@]}")
     sidecar_args=(--grpc-endpoint "$host:$grpc_port")
     if ((i <= encoders)); then

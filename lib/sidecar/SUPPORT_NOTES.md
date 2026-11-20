@@ -22,9 +22,21 @@ If an output stream closes early without an error, the sidecar treats the closur
 
 The standard gRPC generation path requires one completion per request (`n=1`). It accepts image, video, and audio input as `http://`, `https://`, or `data:` URLs. The sidecar rejects per-request `mm_processor_kwargs` on media inputs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
 
-Run one Dynamo sidecar per native SGLang encoder. Enable `--route-to-encoder` on the prefill or aggregated sidecar and set `SGLANG_EXTERNAL_ENCODER_HANDOFF=1` on each language server. Set `--encoder-advertise-endpoint` if the language server reaches E at a different address from its sidecar. The staged path supports Qwen2-VL, Qwen2.5-VL and Qwen3-VL (including MoE) with TP=PP=DP=1.
+Run one Dynamo sidecar per native SGLang encoder. Enable `--route-to-encoder` on the prefill or aggregated sidecar and set `SGLANG_EXTERNAL_ENCODER_HANDOFF=1` on each language server. Set `--encoder-advertise-endpoint` if the language server reaches E at a different address from its sidecar. The launcher uses DP=PP=1. Set `--tp-size N` for tensor parallelism or `--encoder-tp-size N` for a different encoder degree. Each role takes a separate GPU group by default. Use `--colocate` to put E and the language workers on the same GPUs.
 
-Dynamo sends all images and videos in a request to one encoder. Text requests bypass E. Chat accepts `image_url` and `video_url`. Native `/generate` accepts a URL string or flat list for each of `image_data` and `video_data`. The original `input_ids` determine their order. Image-only requests retain the v1 handoff.
+Dynamo sends all images and videos in a request to one encoder. Text requests bypass E. Chat accepts `image_url` and `video_url`. Native `/generate` accepts a URL string or flat list for each of `image_data` and `video_data`. The original `input_ids` determine their order. SGLang advertises the staged media capabilities of the loaded model. Dynamo forwards the descriptor to P/PD and D with the original token IDs.
+
+| SGLang model family | Staged image | Staged video |
+|---|---|---|
+| Qwen2-VL, Qwen2.5-VL, Qwen3-VL/MoE, Qwen3.5/MoE, Intern-S2 Preview, Qwen3-Omni-MoE | Yes | Yes |
+| GLM-5-Next (GLM-5.3-Flash), GLM-4V/MoE, MiniMax-M3, Muse Spark | Yes | Yes |
+| MiMo-V2 with a vision encoder | Yes | Clips without an audio track |
+| Kimi-VL, Kimi K2.5, K3, K3.1, Dots3-Note, Inkling2 | Yes | Image items only |
+| Qwen2-Audio, Qwen2.5-Omni | No | No |
+
+These entries describe the image and video paths in [SGLang #51754](https://github.com/sgl-project/sglang/pull/51754). Qwen2-Audio requires audio encoding. The paired SGLang revision lists Qwen2.5-Omni in its native EPD launch check but has no registered vision model/processor for that architecture. Workflows that convert video into image or audio items before encoding have separate input requirements. Qwen-family handoffs use v1 for images and v2 for video. The other visual processors use v3, which carries the native model type, the embedding width and the row count of each item.
+
+Chat also requires a compatible frontend tokenizer and chat template. For `moonshotai/Kimi-VL-A3B-Instruct`, the pinned Dynamo Rust tokenizer does not recognize the checkpoint's `kimi_vl` tiktoken configuration. Set `DYN_CHAT_PROCESSOR=sglang`, `DYN_ENDPOINT_TYPES=chat` and `DYN_TRUST_REMOTE_CODE=true` to use the checkpoint tokenizer with the SGLang chat processor in a frontend environment with SGLang installed. Pass `-- --trust-remote-code` to the launcher for the native servers. Native `/generate` accepts pretokenized input when enabled with `DYN_SGLANG_ENABLE_GENERATE=1`.
 
 The launcher defaults to NIXL/UCX. P or PD registers host memory for the encoder to write into. Install NIXL with its UCX plugin on both ends, or select ZMQ with `--encoder-transfer-backend zmq_to_scheduler`. In E/P/D, D receives the layout and video timing to reconstruct token positions. The P→D KV transfer backend is configured separately. See the [E/PD and E/P/D launcher](sglang/launch/encoded.sh).
 

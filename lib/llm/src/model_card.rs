@@ -1552,6 +1552,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0sglang_staged_video_v2\0true");
                 }
 
+                // A v3 descriptor is consumed by the advertised native processor.
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3,
+                );
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -4151,6 +4158,23 @@ mod ownership_tests {
             assert_eq!(missing.mdcsum(), disabled.mdcsum());
             assert_ne!(missing.mdcsum(), enabled.mdcsum());
         }
+    }
+
+    #[test]
+    fn staged_native_processor_contract_isolates_worker_sets() {
+        use crate::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3;
+        let card = |model_type: Option<&str>| {
+            let mut card = ModelDeploymentCard::with_name_only("vision");
+            if let Some(model_type) = model_type {
+                card.runtime_config
+                    .runtime_data
+                    .insert(SGLANG_STAGED_NATIVE_V3.into(), model_type.into());
+            }
+            card
+        };
+        let glm = card(Some("glm4v"));
+        assert_ne!(glm.mdcsum(), card(None).mdcsum());
+        assert_ne!(glm.mdcsum(), card(Some("kimi_vl")).mdcsum());
     }
 
     #[test]

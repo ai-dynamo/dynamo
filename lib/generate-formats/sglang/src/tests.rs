@@ -191,7 +191,14 @@ fn staged_generate_projects_ordered_images_and_retains_token_ids_and_hashes() {
     assert!(payload.get("image_data").is_none());
     assert_eq!(payload["mm_hashes"], json!(["A", "B"]));
     assert_eq!(payload["sampling_params"]["max_new_tokens"], 5);
-    let one = bind_native(&json!({"input_ids":[151655], "image_data":first}), true).unwrap();
+    // One image as rendered by moonshotai/Kimi-VL-A3B-Instruct.
+    let kimi_media_ids = [163602, 4017, 163603, 163605, 163604];
+    let one = bind_native(
+        &json!({"input_ids":kimi_media_ids, "image_data":first}),
+        true,
+    )
+    .unwrap();
+    assert_eq!(one.request.token_ids.as_slice(), kimi_media_ids);
     assert_eq!(one.request.multi_modal_data.unwrap()["image_url"].len(), 1);
 }
 

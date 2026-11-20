@@ -138,6 +138,14 @@ impl NodeInfo {
             )));
         }
         let start = infos[0];
+        if infos
+            .iter()
+            .any(|info| info.native_model_type != start.native_model_type)
+        {
+            return Err(client::protocol_error(
+                "SGLang listeners disagree on the staged native model type",
+            ));
+        }
         let mut engine = start.clone();
         engine.max_total_num_tokens = min_present(infos, |info| info.max_total_num_tokens);
         engine.native_offloading_capacity =
