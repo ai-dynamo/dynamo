@@ -169,7 +169,7 @@ func TestPodCliquePredicateRoles(t *testing.T) {
 		want bool
 	}{
 		{lpxv1alpha1.PodRoleAgent, true},
-		{lpxv1alpha1.PodRoleConductor, true},
+		{lpxv1alpha1.PodRoleConductor, false},
 		{lpxv1alpha1.PodRoleCyborgWorker, true},
 		{"ordinary", false},
 	} {

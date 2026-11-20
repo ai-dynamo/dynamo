@@ -22,6 +22,7 @@ import (
 const (
 	gbuildManifestPathEnv = "GBUILD_MANIFEST_PATH"
 	cyborgWeightsPathEnv  = "CYBORG_WEIGHTS_PATH"
+	allocationEnvVar      = "LPX_ALLOCATION"
 )
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
@@ -48,7 +49,8 @@ func configureHybridCyborg(
 		return err
 	}
 
-	// Publish the manifest, the local selection and the checkpoint ahead of authored bindings.
+	// Kubernetes expands environment references in order; publish the manifest, the local selection,
+	// the checkpoint and the allocation ahead of authored bindings.
 	buildRoot, err := projection.buildRuntimePath(modelStoragePath)
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
@@ -58,13 +60,13 @@ func configureHybridCyborg(
 	if projection.checkpoint != nil {
 		environment.Prepend(container, "operator.lpx.weights", []corev1.EnvVar{{Name: cyborgWeightsPathEnv, Value: projection.checkpoint.SnapshotPath(modelStoragePath)}})
 	}
+	environment.Prepend(container, "operator.lpx.allocation", []corev1.EnvVar{{Name: allocationEnvVar, Value: strings.Join(agentTemplateNames, ":")}})
 
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	configureNodeLocalConductorRuntime(&cyborg.Spec.PodSpec, strings.Join(agentTemplateNames, ":"), environment)
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

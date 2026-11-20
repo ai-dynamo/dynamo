@@ -29,7 +29,7 @@ func projectModels(intent ModelProjectionInput) ([]*ModelProjection, error) {
 	build := intent.Build
 	hybrid := intent.Pipeline == PipelineHybrid
 
-	// The LPU-only conductor can launch only one unit per model.
+	// LPU-only execution supports only one unit per model.
 	if !hybrid && build.lpuUnits.Len() != 1 {
 		return nil, fmt.Errorf("%w: LPU-only workloads require exactly one lpuUnits entry per model; this bundle has %d",
 			ErrUnsupportedRuntime, build.lpuUnits.Len())

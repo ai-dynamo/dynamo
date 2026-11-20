@@ -111,14 +111,3 @@ func TestComponentGroups(t *testing.T) {
 		})
 	}
 }
-
-// singleGroupComponents reads the one admitted workload in a test fixture.
-func singleGroupComponents(t *testing.T, dgd *dynamov1beta1.DynamoGraphDeployment) []string {
-	t.Helper()
-	groups := ComponentGroups(dgd)
-	require.Len(t, groups, 1)
-	for _, components := range groups {
-		return components
-	}
-	return nil
-}

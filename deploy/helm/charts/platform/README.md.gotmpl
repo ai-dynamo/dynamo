@@ -133,7 +133,8 @@ Enable experimental live retune per deployment with `retune.executor: dgdr` in t
 
 **Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
 The operator no longer reads `manifest.v2.capnp.bin` or legacy placement fields,
-and it no longer generates placement ConfigMaps under `/configs`.
+and it no longer generates placement ConfigMaps under `/configs`. Only a hybrid LPX build has a
+conductor role: an LPU-only build serves from a `runtime` init container in its agent template.
 
 **Affected:** Every existing LPX deployment must be deployed again. Bundles that have no
 `deployment.v1.capnp.bin` or no `lpuUnits`, including bundles that have only
@@ -156,12 +157,17 @@ and it no longer generates placement ConfigMaps under `/configs`.
    ```
 
 4. Update each DGD manifest: set the new `buildId`, use runtime images that read placement from
-   `lpuUnits`, and remove each `/configs` mount and its volume.
+   `lpuUnits`, and remove each `/configs` mount and its volume. For an LPU-only build, also
+   remove the conductor role and add the `runtime` init container to the agent template, as
+   [Hybrid LPX conductors require the runtime sidecar](#hybrid-lpx-conductors-require-the-runtime-sidecar)
+   describes for a conductor. Add `--node-rank $(GROVE_PCLQ_POD_INDEX)` to its arguments: each
+   Agent Pod runs the sidecar, and without a rank every sidecar serves as rank 0.
 5. Apply the DGD manifests.
 
 A bundle that has no `lpuUnits` fails reconciliation with a message that contains
 `config.lpuUnits is empty; recompile the model with LPU units`. The operator creates no
-workload for that bundle.
+workload for that bundle. A conductor role on an LPU-only build fails reconciliation with a
+message that contains `conductor requires a hybrid build`.
 
 > [!WARNING]
 > Remove `/configs` mounts and their volumes before you create the workloads again. The operator

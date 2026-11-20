@@ -7,76 +7,13 @@ package lpx
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 )
-
-func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
-	fixture := newV3CompilerFixture()
-
-	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	projection.stage = testRenderComponentName
-	projection.configuredBuild.ioFPGACount = 1
-	projection.configuredBuild.ioFanoutFactor = 1
-	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
-		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
-	}
-	workload := &Workload{
-		modelProjections:     []*ModelProjection{projection},
-		scalingGroupReplicas: 2496,
-	}
-	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
-	plan, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
-	require.NoError(t, err)
-	plan, err = plan.WithGroup("target")
-	require.NoError(t, err)
-
-	t.Log("Validate actual GPU widths rather than assuming the largest int32 pod index")
-	for _, test := range []struct {
-		name      string
-		replicas  int32
-		wantError bool
-	}{
-		{name: "one GPU per engine", replicas: 1},
-		{name: "hostname at DNS limit", replicas: 100_000_000},
-		{name: "hostname over DNS limit", replicas: 100_000_001, wantError: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Render the GPU width beneath the same readable PCS name")
-			pcs := renderTestPCS(true)
-			pcs.Name = pcsName
-			cyborg := namedClique(t, pcs, "cond")
-			cyborg.Name, cyborg.Spec.RoleName = plan.CyborgTemplate, plan.CyborgTemplate
-			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = new(test.replicas)
-			_, err := RenderNodeLocal(workload, plan, RenderInput{
-				Cyborg: &CliqueTemplate{Template: cyborg},
-				Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
-			})
-			if test.wantError {
-				require.ErrorContains(t, err, "materialized Cyborg Pod hostname")
-				require.ErrorContains(t, err, "must be no more than 63 characters")
-				return
-			}
-			require.NoError(t, err)
-			hostname := materializedPodHostname(plan.ForReplica(plan.Replicas-1).CyborgClique, int(test.replicas)-1)
-			require.Empty(t, validation.IsDNS1123Label(hostname))
-			if test.replicas > 1 {
-				require.Len(t, hostname, validation.DNS1123LabelMaxLength)
-			}
-		})
-	}
-}
 
 func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Parallel()
@@ -197,16 +134,21 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 func TestHybridCyborgBindingsPrecedeAuthoredReferences(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Define authored bindings that depend on the manifest and checkpoint locations")
+	t.Log("Define authored bindings that depend on the manifest, the checkpoint and the allocation")
 	checkpoint := &Checkpoint{Model: "openai/gpt-oss-20b", Revision: "6cee5e81ee83917806bbde320786a8fb61efebee"}
 	authored := []corev1.EnvVar{
 		{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},
 		{Name: "CYBORG_ARGS", Value: "--weights-path $(CYBORG_WEIGHTS_PATH)"},
+		{Name: "CYBORG_ALLOCATION", Value: "$(LPX_ALLOCATION)"},
 		{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 	}
 	staleManifest := corev1.EnvVar{Name: gbuildManifestPathEnv, Value: "/stale/manifest"}
 	authoredWeights := corev1.EnvVar{Name: cyborgWeightsPathEnv, Value: "/models/authored"}
 	allocation := corev1.EnvVar{Name: allocationEnvVar, Value: testAgentTemplateName}
+	staleAllocations := []corev1.EnvVar{
+		{Name: allocationEnvVar, Value: "stale"},
+		{Name: allocationEnvVar, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+	}
 	weights := corev1.EnvVar{
 		Name:  cyborgWeightsPathEnv,
 		Value: "/models/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee",
@@ -228,7 +170,7 @@ func TestHybridCyborgBindingsPrecedeAuthoredReferences(t *testing.T) {
 		},
 		{
 			name: "stale bindings after references", checkpoint: checkpoint,
-			env:  slices.Concat(authored, []corev1.EnvVar{staleManifest, authoredWeights}),
+			env:  slices.Concat(authored, []corev1.EnvVar{staleManifest, authoredWeights}, staleAllocations),
 			want: slices.Concat([]corev1.EnvVar{allocation, weights}, manifest, authored),
 		},
 		{
