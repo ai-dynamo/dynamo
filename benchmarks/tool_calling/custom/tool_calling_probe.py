@@ -190,6 +190,7 @@ ERROR_KIND_SUBCATEGORIES = {
     "unexpected_reasoning_tokens": "reasoning_routing",
     "reasoning_dropped": "reasoning_routing",
     "reasoning_text_in_content": "reasoning_routing",
+    "reasoning_leaked_when_hidden": "reasoning_routing",
     "reasoning_mismatch": "reasoning_routing",
     "reasoning_mangled_function_text": "reasoning_routing",
     "reasoning_only_response": "reasoning_routing",
@@ -261,6 +262,7 @@ DYNAMO_API_ERROR_KINDS = frozenset(
         "unexpected_reasoning_tokens",
         "reasoning_dropped",
         "reasoning_text_in_content",
+        "reasoning_leaked_when_hidden",
         "wrong_tool_type",
     }
 )
@@ -1002,6 +1004,9 @@ class Case:
     expected_json: dict[str, Any] | None = None
     expect_content: bool = False
     expect_reasoning: bool | None = None
+    # include_reasoning=false: the model may think, but no reasoning may reach the
+    # response (reasoning_content / reasoning fields, stream deltas included).
+    expect_reasoning_hidden: bool = False
     forbidden_output_fragments: tuple[str, ...] = ()
     validate_schema: bool = True
     # This is deliberately opt-in. Typed values and exact-string cases retain
@@ -1053,6 +1058,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     update_counter = TOOLS["update_counter"]
     markup_description_weather = TOOLS["get_weather_markup_description"]
     ping_service = TOOLS["ping_service"]
+    server_time = TOOLS["get_server_time"]
     truncation_literal = "customer-eof-" + ("x" * 512)
     london_weather_history = (
         {"role": "user", "content": "What is the weather in London?"},
@@ -1380,6 +1386,60 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             expected_arg_fragments=("937", "18"),
             request_overrides=thinking_disabled,
             expect_reasoning=disabled_reasoning_expectation,
+        ),
+        # include_reasoning=false with a forced call (dynamo #18491): the frontend
+        # tells the worker reasoning has ended, so the grammar can start at the
+        # first token while a template such as GLM's still has <think> open. The
+        # call must survive and no reasoning may reach the response. Stream mode
+        # covers the JSON arriving split across chunks.
+        Case(
+            case_id="named_include_reasoning_false_hides_reasoning",
+            description=(
+                "named tool choice with include_reasoning=false: one call, no reasoning "
+                "in the response, finish_reason tool_calls"
+            ),
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Use the calculator tool for 937 * 18 + 42.",
+                },
+            ),
+            tools=(weather, calculate),
+            tool_choice={"type": "function", "function": {"name": "calculate"}},
+            exact_tool_calls=1,
+            expected_tool_names=("calculate",),
+            expected_arg_fragments=("937", "18"),
+            request_overrides={"include_reasoning": False},
+            expect_reasoning_hidden=True,
+        ),
+        Case(
+            case_id="required_include_reasoning_false_hides_reasoning",
+            description=(
+                "tool_choice required with include_reasoning=false: one call, no "
+                "reasoning in the response, finish_reason tool_calls"
+            ),
+            messages=({"role": "user", "content": "Say hello briefly."},),
+            tools=(weather,),
+            tool_choice="required",
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            request_overrides={"include_reasoning": False},
+            expect_reasoning_hidden=True,
+        ),
+        Case(
+            case_id="named_include_reasoning_false_zero_arg_tool",
+            description=(
+                "named zero-argument tool with include_reasoning=false: the {} call "
+                "is not swallowed as reasoning (SGLang separate_reasoning=false shape)"
+            ),
+            messages=({"role": "user", "content": "What time is it on the server?"},),
+            tools=(server_time,),
+            tool_choice={"type": "function", "function": {"name": "get_server_time"}},
+            exact_tool_calls=1,
+            expected_tool_names=("get_server_time",),
+            expected_tool_calls=({"name": "get_server_time", "arguments": {}},),
+            request_overrides={"include_reasoning": False},
+            expect_reasoning_hidden=True,
         ),
         Case(
             case_id="auto_multi_distinct_tools",
@@ -4679,12 +4739,24 @@ def validate_result(
                 "thinking is disabled but reasoning_content is non-empty",
             )
         )
-    # Thinking disabled plus a forced call: the model has nothing to say in
-    # content. Reasoning-looking prose there means the template ignored the
-    # flag and the frontend folded the reasoning into content
-    # (dynamo #17521 / #17578).
+    # include_reasoning=false hides reasoning from the response; the model may
+    # still think (a GLM template can keep <think> open regardless of the flag).
+    # Any reasoning field in the response, streamed or not, is a projection
+    # bug in the frontend (dynamo #18491, Raytorin's CPU replay).
+    if case.expect_reasoning_hidden and (result.reasoning_content or "").strip():
+        errors.append(
+            error(
+                "reasoning_leaked_when_hidden",
+                "include_reasoning is false but the response carries reasoning",
+                reasoning_chars=len(result.reasoning_content or ""),
+            )
+        )
+    # Thinking disabled (or hidden) plus a forced call: the model has nothing
+    # to say in content. Reasoning-looking prose there means the template
+    # ignored the flag and the frontend folded the reasoning into content
+    # (dynamo #17521 / #17578), or dropped the hidden reasoning into content.
     if (
-        case.expect_reasoning is False
+        (case.expect_reasoning is False or case.expect_reasoning_hidden)
         and _tool_choice_requires_call(case)
         and result.tool_calls
         and looks_like_reasoning(result.content or "")
