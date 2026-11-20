@@ -329,9 +329,6 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
-    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-        await initialize_configured_artifact_runtime()
-
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
     state_agent_lifecycle = StateAgentLifecycle()
@@ -358,9 +355,6 @@ async def worker(argv: list[str] | None = None) -> None:
         prefill=config.disaggregation_mode == DisaggregationMode.PREFILL,
         pre_shutdown=close_worker_resources,
     )
-    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-        shutdown.post_shutdown = close_configured_artifact_runtime
-
     # Use WorkerFactory to appropriate initialize worker based on config flags
     factory = WorkerFactory(
         setup_vllm_engine_fn=setup_vllm_engine,
@@ -372,6 +366,16 @@ async def worker(argv: list[str] | None = None) -> None:
         state_agent_lifecycle=state_agent_lifecycle,
         shutdown=shutdown,
     )
+    if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+        await initialize_configured_artifact_runtime()
+
+        async def close_artifacts() -> None:
+            # A request can still be finalizing its upload after engine cleanup.
+            await shutdown.idle.wait()
+            await close_configured_artifact_runtime()
+
+        shutdown.finalize_worker = close_artifacts
+
     await shutdown.run(
         factory.create(
             runtime,

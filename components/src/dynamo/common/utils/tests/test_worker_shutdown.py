@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import subprocess
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -408,6 +408,8 @@ def test_unregister_failure_is_observed_without_stopping_teardown(
 
         shutdown = ws.WorkerShutdown(Runtime(), [Endpoint()], asyncio.Event())
         shutdown._metrics = Mock()
+        shutdown.finalize_worker = AsyncMock()
+        shutdown.post_shutdown = AsyncMock()
 
         async def worker():
             await asyncio.Event().wait()
@@ -426,11 +428,14 @@ def test_unregister_failure_is_observed_without_stopping_teardown(
         ]
         assert ("unregister", "failed") in outcomes
         assert ("unregister", "completed") not in outcomes
+        shutdown.finalize_worker.assert_awaited_once_with()
         if runtime_fails:
+            shutdown.post_shutdown.assert_not_awaited()
             assert ("runtime", "failed") in outcomes
             assert ("runtime", "completed") not in outcomes
             shutdown_env.finish.assert_not_called()
         else:
+            shutdown.post_shutdown.assert_awaited_once_with()
             assert ("runtime", "completed") in outcomes
             shutdown_env.finish.assert_called_once()
 

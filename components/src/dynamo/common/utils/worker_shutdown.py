@@ -93,6 +93,7 @@ class WorkerShutdown:
         self.shutdown_event = shutdown_event
         self.prefill = prefill
         self.pre_shutdown = pre_shutdown
+        self.finalize_worker: Callable[[], Awaitable[None]] | None = None
         self.post_shutdown: Callable[[], Awaitable[None]] | None = None
         self.pre_unregister: Callable[[], Awaitable[None]] | None = None
         # Gateway parents delegate discovery and request draining to children.
@@ -371,6 +372,11 @@ class WorkerShutdown:
             self.runtime.shutdown_and_wait(timeout_secs=runtime_budget),
             runtime_budget,
         )
+        if self._worker.done() and self.finalize_worker is not None:
+            finalized = await self._stage(
+                "worker_resources", self.finalize_worker(), self.cleanup_remaining()
+            )
+            runtime_clean = runtime_clean and finalized
         if clean and runtime_clean and self.post_shutdown is not None:
             runtime_clean = (
                 await self._stage(
