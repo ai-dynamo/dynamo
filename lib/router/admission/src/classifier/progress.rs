@@ -4,13 +4,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-const REPLY_END_UNKNOWN: u8 = 0;
-const REPLY_END_OTHER: u8 = 1;
-const REPLY_END_TOOL_CALL: u8 = 2;
-
 #[derive(Debug)]
 struct Observed {
     context_tokens: AtomicUsize,
+    /// 0 until a choice of the reply finishes, then 1, or 2 once one finished with a tool call.
     reply_end: AtomicU8,
 }
 
@@ -23,7 +20,7 @@ pub struct RequestProgress {
 
 /// Write capability paired with [`RequestProgress`].
 ///
-/// Context updates are monotonic so concurrent or delayed observations cannot move a
+/// Updates are monotonic so concurrent or delayed observations cannot move a
 /// request's logical context backwards.
 #[derive(Debug, Clone)]
 pub struct RequestProgressUpdater {
@@ -34,7 +31,7 @@ impl RequestProgress {
     pub fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
         let observed = Arc::new(Observed {
             context_tokens: AtomicUsize::new(initial_context_tokens),
-            reply_end: AtomicU8::new(REPLY_END_UNKNOWN),
+            reply_end: AtomicU8::new(0),
         });
         (
             Self {
@@ -50,20 +47,22 @@ impl RequestProgress {
     }
 
     /// Whether the reply ended in a tool call: `finish_reason: tool_calls` on any choice of
-    /// the chat response stream. A non-streaming response is aggregated from that stream
-    /// afterwards and can, rarely, end differently.
+    /// the chat response stream.
     ///
-    /// `None` until the frontend has relayed the end of the reply, which is shortly after
-    /// the request's terminal event, so a plugin keeps this handle past that event to read
-    /// it. It stays `None` when the frontend did not see how the reply ended: an error, a
-    /// client disconnect, `/v1/completions`, a Python chat processor, or a router running
-    /// outside the frontend process.
+    /// `None` until a choice finishes, which can be shortly after the request's terminal
+    /// event, so a plugin keeps this handle past that event to read it. With several choices,
+    /// `Some(false)` becomes `Some(true)` if a later one ends in a tool call. It stays `None`
+    /// when the reply did not finish, for `/v1/completions`, with a Python chat processor,
+    /// and when the router runs outside the frontend process.
+    ///
+    /// It describes the streamed reply, not its delivery: the client can be gone, or the
+    /// endpoint can still fail the request, after the value is set. A non-streaming response
+    /// is aggregated from that stream afterwards and can, rarely, end differently.
     #[inline]
     pub fn reply_tool_call(&self) -> Option<bool> {
         match self.observed.reply_end.load(Ordering::Relaxed) {
-            REPLY_END_TOOL_CALL => Some(true),
-            REPLY_END_OTHER => Some(false),
-            _ => None,
+            0 => None,
+            reply_end => Some(reply_end == 2),
         }
     }
 }
@@ -76,16 +75,12 @@ impl RequestProgressUpdater {
             .fetch_max(context_tokens, Ordering::Relaxed);
     }
 
-    /// Record how the reply ended. The host calls this once per request, after the
-    /// frontend has relayed the end of the reply.
+    /// Record how one choice of the reply ended. A tool call on any choice wins.
     #[inline]
     pub fn record_reply_end(&self, tool_call: bool) {
-        let reply_end = if tool_call {
-            REPLY_END_TOOL_CALL
-        } else {
-            REPLY_END_OTHER
-        };
-        self.observed.reply_end.store(reply_end, Ordering::Relaxed);
+        self.observed
+            .reply_end
+            .fetch_max(1 + u8::from(tool_call), Ordering::Relaxed);
     }
 }
 #[cfg(test)]

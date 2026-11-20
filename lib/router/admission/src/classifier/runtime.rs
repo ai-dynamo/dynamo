@@ -467,8 +467,7 @@ impl RequestLifecycle {
     }
 
     /// Write capability for this request's [`RequestProgress`], for what the host observes
-    /// after the lifecycle has ended: the frontend learns how the reply ended only once the
-    /// router's response stream is finished.
+    /// after the lifecycle has ended.
     pub fn progress_updater(&self) -> RequestProgressUpdater {
         self.progress_updater.clone()
     }

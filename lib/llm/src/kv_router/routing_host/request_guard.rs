@@ -786,8 +786,7 @@ impl RequestGuard {
             let worker = cleanup.worker;
             if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
                 lifecycle.sent(worker);
-                // The frontend learns how the reply ended after this guard is gone, so it
-                // records that through the tracker.
+                // The frontend records how the reply ended through the tracker.
                 if let Some(tracker) = self.observability.tracker.as_deref() {
                     tracker.set_classifier_progress(lifecycle.progress_updater());
                 }

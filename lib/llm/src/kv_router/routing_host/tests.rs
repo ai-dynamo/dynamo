@@ -15,7 +15,7 @@ use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
-    DispatchRecheck, RequestClassifier, RequestProgress, WorkerView,
+    DispatchRecheck, RequestClassifier, WorkerView,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -2891,44 +2891,40 @@ async fn dispatch_keeps_the_request_priority_without_a_classifier_override() {
     );
 }
 
-/// Keeps the progress handle of each request it classifies, as a plugin would.
-struct KeepsProgress(mpsc::UnboundedSender<RequestProgress>);
-
-impl RequestClassifier for KeepsProgress {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: &dyn WorkerView,
-    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
-        self.0.send(request.progress().clone()).unwrap();
-        Ok(request)
-    }
-}
-
 #[tokio::test]
 #[serial_test::serial]
 async fn classifier_reads_the_reply_end_recorded_through_the_requests_tracker() {
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let (classified, mut progress_rx) = mpsc::unbounded_channel();
+    let (completed, _completed_rx) = mpsc::unbounded_channel();
+    // It keeps the progress handle of each request it classifies, as a plugin would.
     let (router, _dispatch, _, runtime) = router_with_recorded_dispatch_affinity_and_classifier(
         "kv-classifier-reply-end",
         None,
-        Some(KeepsProgress(progress_tx)),
+        Some(TokenContractClassifier {
+            classified,
+            completed,
+        }),
     )
     .await;
     let tracker = Arc::new(RequestTracker::new());
-    let mut input = request();
-    input.tracker = Some(Arc::clone(&tracker));
+    // Twice on one tracker: a retry can begin a new classifier lifecycle.
+    for _ in 0..2 {
+        let mut input = request();
+        input.tracker = Some(Arc::clone(&tracker));
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        // The frontend looks for the handle as soon as dispatch returns.
+        assert!(tracker.classifier_progress().is_some());
+        while stream.next().await.is_some() {}
+    }
+    let (_, first) = progress_rx.try_recv().unwrap();
+    let (_, retry) = progress_rx.try_recv().unwrap();
 
-    let mut stream = router.generate(Context::new(input)).await.unwrap();
-    // The frontend adds its stage only when dispatch has left the handle.
-    assert!(tracker.has_classifier_progress());
-    while stream.next().await.is_some() {}
-    let progress = progress_rx.try_recv().unwrap();
-    assert_eq!(progress.reply_tool_call(), None);
-
-    // The frontend sees the reply end after the router's stream, and its lifecycle, are done.
-    tracker.record_reply_end(true);
-    assert_eq!(progress.reply_tool_call(), Some(true));
+    // The frontend can see the reply end after the router's stream, and its lifecycle, are
+    // done. The lifecycle dispatched last gets it.
+    let progress = tracker.classifier_progress().unwrap();
+    progress.record_reply_end(true);
+    assert_eq!(first.reply_tool_call(), None);
+    assert_eq!(retry.reply_tool_call(), Some(true));
 
     drop(router);
     runtime.shutdown();
