@@ -1616,9 +1616,6 @@ impl Worker {
         if shutdown.is_cancelled() {
             self.begin_engine_route_shutdown().await;
             set_worker_health(&endpoint, HealthStatus::NotReady);
-            if let Err(error) = primary_endpoint.shutdown().await {
-                tracing::warn!(%error, "primary endpoint shutdown failed");
-            }
             self.orchestrator_steps(&endpoint, Some(&request_tracker))
                 .await;
             return Ok(());
@@ -1634,9 +1631,6 @@ impl Worker {
                 Err(error) => {
                     self.begin_engine_route_shutdown().await;
                     set_worker_health(&endpoint, HealthStatus::NotReady);
-                    if let Err(shutdown_error) = primary_endpoint.shutdown().await {
-                        tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
-                    }
                     self.orchestrator_steps(&endpoint, Some(&request_tracker))
                         .await;
                     return Err(err(
@@ -1662,9 +1656,6 @@ impl Worker {
                 && let Err(error) = rl_endpoint.shutdown().await
             {
                 tracing::warn!(%error, "RL discovery endpoint shutdown failed");
-            }
-            if let Err(error) = primary_endpoint.shutdown().await {
-                tracing::warn!(%error, "primary endpoint shutdown failed");
             }
             // The local engine can already serve canary requests even before
             // readiness is published. Close its admission gate as well.
