@@ -208,6 +208,7 @@ type DynamoGraphDeploymentRunStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+// Available without a feature gate. This API is not feature complete.
 type DynamoGraphDeploymentRun struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

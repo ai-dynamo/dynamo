@@ -172,7 +172,6 @@ webhooks:
     - dynamographdeploymentrequests
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
-{{- if .Values.dgdrV1Beta2.enabled }}
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -238,7 +237,7 @@ webhooks:
     resources: [dynamographdeploymentcandidates]
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
-{{- end }}
+
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
