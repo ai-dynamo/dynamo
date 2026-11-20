@@ -185,7 +185,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
                 async for output in _translate_vllm_client_errors(
-                    self.engine_client.encode(**encode_kwargs)
+                    self.engine_client.encode(**encode_kwargs), request
                 ):
                     final_output = output
 

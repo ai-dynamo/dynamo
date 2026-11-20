@@ -121,6 +121,45 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+<ParamField path="DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS" type="integer" default="0">
+  Maximum pre-commit wait in milliseconds for streaming chat completions, completions, Responses,
+  and Anthropic messages. Unset or `0` disables the wait; an invalid value also disables it and logs
+  `ignoring invalid pre-commit error peek window`. Set a positive value, for example `500`, to let
+  early backend errors return an HTTP error status before HTTP 200 is committed. The wait can delay
+  the first streamed byte by up to this many milliseconds. The value is read once when the HTTP
+  service is created; set it before startup and restart the frontend to change it.
+
+  The wait ends when the first non-annotation backend event arrives or the window expires.
+  Annotation frames, such as the request ID, do not end the wait. The frontend buffers at most 16 of
+  them; a 17th ends the wait early. For how clients see errors after the wait, see
+  [Streaming errors](#streaming-errors).
+</ParamField>
+
+### Streaming errors
+
+By default, the frontend commits a streaming response's HTTP 200 status immediately,
+without waiting for a backend event. Enable a [bounded pre-commit wait](#http-and-networking)
+to let early failures return an HTTP error status. Once headers are committed, later
+failures arrive as error events in the stream, even when the HTTP status is 200.
+Clients must check these events rather than treating HTTP 200 as successful completion.
+An error ends the current stream; any retry is a new request.
+
+Image-fetch failures caused by an origin HTTP 403 or 404 return API HTTP 400
+before headers are committed. In OpenAI chat-completion and completion streams,
+late failures carry error code 400 under HTTP 200; other streaming APIs use their
+own error-event formats. The fixed public message identifies the origin status
+and gives recovery advice without exposing the origin response or URL credentials:
+
+| Message the client receives | When | What to do |
+| --- | --- | --- |
+| `Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.` | The image origin returned 403. | Refresh the URL or access permissions, or send the image inline. |
+| `Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.` | The image origin returned 404. | Fix the URL, or send the image inline. |
+| `Cached image is unavailable on this worker. Resend the request with the image URL or inline image data and the same UUID; UUID-only reuse requires the image to be cached on every worker that processes the image.` | vLLM only: a UUID-only image is missing from a worker's processor cache. | Resend with the URL or inline data and the same UUID. Resending only the UUID does not restore a missing entry. |
+
+An ordinary URL-based image-cache miss is handled internally; the worker fetches
+the image if needed. In vLLM, UUID-only reuse requires an existing entry on every worker
+that processes the image. See [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded
@@ -132,6 +171,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 <ParamField path="--router-mode" type="string" default="round-robin">
   Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
   fallback path.
+
+  When neither this flag nor `--router-policy-config` is set, the mode is `round-robin`. When only
+  a policy file is set, the mode is `kv` and the file selects each role's policy. A policy file
+  with any mode other than `kv` is an error.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
@@ -384,7 +427,9 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies.
+  The file selects each role's policy, so pass it without `--router-mode`; any `--router-mode` other
+  than `kv` alongside it is an error. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 

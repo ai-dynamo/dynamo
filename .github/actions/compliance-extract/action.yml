@@ -438,6 +438,7 @@ runs:
         # it already encodes the cuda variant, and the artifact holds both arches as
         # linux_<arch>/ subdirs, so no cuda/arch suffix is needed.
         name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}
+        overwrite: true
         path: /tmp/compliance/
         retention-days: ${{ inputs.artifact_retention_days }}
 
@@ -446,5 +447,6 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
+        overwrite: true
         path: /tmp/sources/sources.zip
         retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

@@ -61,7 +61,7 @@ dynamo:
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.13.5"
-  go_version: "1.27.3"
+  go_version: "1.27.4"
 
   nats_version: v2.14.9
   nats_commit: 9ece5884153a3e39a3904d53210b9b8b26dd7364
@@ -85,7 +85,7 @@ dynamo:
   # wheel vendors. Keep in sync with native_packages.yaml's ffmpeg entry and with
   # the ffmpeg-next/video-rs pins in lib/llm/Cargo.toml, which track the FFmpeg
   # major.
-  ffmpeg_version: "9.0.1"
+  ffmpeg_version: "9.0.2"
   # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"

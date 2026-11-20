@@ -44,7 +44,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
     ));
 }
 
-fn system_message_content(content: &AnthropicMessageContent) -> String {
+pub(crate) fn system_message_content(content: &AnthropicMessageContent) -> String {
     match content {
         AnthropicMessageContent::Text { content } => content.clone(),
         AnthropicMessageContent::Blocks { content } => content
@@ -57,6 +57,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
             .join("\n"),
     }
 }
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -177,6 +178,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         Ok(NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,

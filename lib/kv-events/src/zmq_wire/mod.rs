@@ -19,6 +19,9 @@ use crate::residency::StorageTier;
 use dynamo_router_protocol::worker::{DpRank, WorkerWithDpRank};
 
 mod convert;
+mod dedup;
+#[cfg(test)]
+mod dedup_tests;
 mod deserialize;
 mod extra_keys;
 mod filter;
@@ -32,6 +35,7 @@ pub use convert::{
     StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
     normalize_mm_placeholder_runs, normalize_mm_token_runs,
 };
+pub use dedup::{EventDedupFilter, EventDedupPolicy};
 pub use extra_keys::{
     DYNAMO_CACHE_SALT_PREFIX, extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace,
 };
@@ -422,6 +426,16 @@ impl ZmqEventNormalizer {
         raw: &mut RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<(), ZmqEventFilterReason> {
+        // vLLM's CPU offload tier republishes device hashes without their salt
+        // (#18052). Its stores and evictions refer to a lower-tier copy of the
+        // device block, so they must not demote or drop the device namespace.
+        // Limit the removal skip to Framework: KVCR events also reach this
+        // function through the cache-owner normalizer, and every KVCR event is
+        // HostPinned or lower, so that map never sees a device store. Skipping
+        // a salted KVCR removal would leak the entry until AllBlocksCleared.
+        let host_pinned = storage_tier_of(raw) == Some(StorageTier::HostPinned);
+        let skip_host_pinned_removal =
+            host_pinned && matches!(raw.ownership(), Ok(KvEventOwnership::Framework));
         match raw {
             RawKvEvent::BlockStored {
                 block_hashes,
@@ -483,7 +497,7 @@ impl ZmqEventNormalizer {
                             })
                             .or_insert_with(|| state.clone());
                     }
-                } else {
+                } else if !host_pinned {
                     // Do not retain every unsalted block. If this hash already
                     // belongs to a namespace, however, fail closed on future
                     // propagation because the external hash is now ambiguous.
@@ -497,6 +511,7 @@ impl ZmqEventNormalizer {
                     }
                 }
             }
+            RawKvEvent::BlockRemoved { .. } if skip_host_pinned_removal => {}
             RawKvEvent::BlockRemoved { block_hashes, .. } => {
                 for block_hash in block_hashes.iter() {
                     let key = (worker, (*block_hash).into_u64());

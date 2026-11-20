@@ -24,6 +24,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	consts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	lpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
@@ -162,7 +163,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 		// Kubernetes discovery exposes only this workload's serving role within its PCS.
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {
 			component := dgd.GetComponentByName(workload.ServingComponentName())
-			service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+			service, err := componentdeployment.RenderService(componentdeployment.ServiceParams{
 				ServiceName: plan.ResourcePrefix + "-serve", Namespace: deployment.Namespace,
 				ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
 				DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,

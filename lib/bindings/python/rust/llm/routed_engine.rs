@@ -82,9 +82,23 @@ fn copy_session_affinity(
     }
 }
 
+/// Give the routed request its parent request's agent context, unless it carries its own. The
+/// router and workers read the session only from this field.
+fn inherit_agent_context(
+    parent_context: &crate::context::Context,
+    request: &mut PreprocessedRequest,
+) {
+    if request.agent_context.is_none() {
+        request.agent_context = parent_context.agent_context().cloned();
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
+    ///
+    /// With `context`, the routed request inherits the parent request's session affinity and,
+    /// unless `preprocessed` sets `agent_context`, its agent context.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -99,6 +113,7 @@ impl RoutedEngine {
             request.tracker = Some(Arc::new(RequestTracker::new()));
         }
         let request_context = if let Some(parent_context) = context.as_ref() {
+            inherit_agent_context(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
             let mut child_context = SingleIn::with_id_and_metadata(
@@ -202,7 +217,7 @@ fn dispatch_span(
 mod tests {
     use super::*;
     use dynamo_llm::protocols::common::extensions::{
-        SessionAffinityId, session_affinity_from_headers,
+        AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SessionAffinityId, session_affinity_from_headers,
     };
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
@@ -234,6 +249,27 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity restored after Python boundary");
         assert_eq!(session_affinity.as_str(), "session-123");
+    }
+
+    #[test]
+    fn processor_agent_context_is_not_overwritten() {
+        let agent_context = |session_id: &str| -> AgentContext {
+            serde_json::from_value(serde_json::json!({ "session_id": session_id })).unwrap()
+        };
+        let mut source = SingleIn::new(());
+        source.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context("from-headers"));
+        let python_context =
+            crate::context::Context::new(source.context(), None, None, Default::default())
+                .with_agent_context_from(&source)
+                .expect("pipeline context converts to Python binding context");
+
+        let mut request = preprocessed_request();
+        inherit_agent_context(&python_context, &mut request);
+        assert_eq!(request.agent_context, Some(agent_context("from-headers")));
+
+        request.agent_context = Some(agent_context("from-processor"));
+        inherit_agent_context(&python_context, &mut request);
+        assert_eq!(request.agent_context, Some(agent_context("from-processor")));
     }
 
     fn make_trace_context(
