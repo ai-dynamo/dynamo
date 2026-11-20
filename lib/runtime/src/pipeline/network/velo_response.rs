@@ -124,6 +124,10 @@ fn response_mux_config() -> Result<MuxConfig> {
         flush_policy: FlushPolicy::Auto(AutoFlush {
             on_admission: batch_ms == 0,
             max_linger: (batch_ms != 0).then(|| Duration::from_millis(batch_ms)),
+            // Write as soon as every live slot on the lane has a record, so a
+            // lone stream's first token does not wait out the whole window.
+            on_complete: batch_ms != 0,
+            ..Default::default()
         }),
         ..Default::default()
     })
@@ -574,13 +578,10 @@ impl VeloResponseService {
         );
         // Item 0 is the JSON prologue; later items are response data. The
         // ticket carries the heartbeat interval to the worker.
-        let anchor = self
-            .velo
-            .anchor_manager()
-            .create_anchor_with_config::<Bytes>(AnchorConfig {
-                heartbeat_interval: Some(self.heartbeat),
-                ..Default::default()
-            });
+        let anchor = self.velo.create_anchor_with_config::<Bytes>(AnchorConfig {
+            heartbeat_interval: Some(self.heartbeat),
+            ..Default::default()
+        });
         let ticket = self
             .velo
             .prebind_anchor(anchor.handle())
@@ -1050,10 +1051,14 @@ mod tests {
         {
             return;
         }
-        for (value, on_admission, max_linger) in [
-            (None, false, Some(Duration::from_millis(2))),
-            (Some("0"), true, None),
-            (Some("12"), false, Some(Duration::from_millis(12))),
+        // A window also writes early once every live slot has a record, so a
+        // stream alone on its lane does not wait out the window. Without it,
+        // each request's first token waited the whole window: +3.1 ms TTFT
+        // against the tcp plane at sparse token spacing.
+        for (value, on_admission, max_linger, on_complete) in [
+            (None, false, Some(Duration::from_millis(2)), true),
+            (Some("0"), true, None, false),
+            (Some("12"), false, Some(Duration::from_millis(12)), true),
         ] {
             temp_env::with_var(DYN_VELO_RESPONSE_BATCH_MS, value, || {
                 let config = response_mux_config().unwrap();
@@ -1061,7 +1066,9 @@ mod tests {
                     config.flush_policy,
                     FlushPolicy::Auto(AutoFlush {
                         on_admission,
-                        max_linger
+                        max_linger,
+                        on_complete,
+                        ..Default::default()
                     })
                 );
             });
@@ -1656,7 +1663,7 @@ mod tests {
         assert!(receiver.rx.next().await.unwrap().is_ok());
         consumer
             .velo
-            .graceful_shutdown(velo::ShutdownPolicy::Timeout(Duration::from_secs(1)))
+            .shutdown(velo::ShutdownPolicy::Timeout(Duration::from_secs(1)))
             .await;
         tokio::time::timeout(Duration::from_secs(30), engine.killed())
             .await
