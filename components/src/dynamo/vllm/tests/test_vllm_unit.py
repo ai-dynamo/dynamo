@@ -614,6 +614,105 @@ def test_muse_grammar_owns_reasoning_before_engine_launch(
 
 
 @pytest.mark.parametrize(
+    ("backend", "expected"),
+    [("auto", False), ("guidance", True), ("xgrammar", False), ("outlines", False)],
+)
+def test_vllm_publishes_llguidance_lark_grammar(backend: str, expected: bool) -> None:
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(backend=backend)
+    )
+
+    vllm_main.publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, json.dumps(expected)
+    )
+
+
+_MOCK_TEKKEN_DIR = (
+    Path(__file__).resolve().parents[5]
+    / "lib/llm/tests/data/sample-models/mock-mistral-tekken"
+)
+
+
+def _tekken_vllm_config(tokenizer: Path, outputs: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(tokenizer=str(tokenizer), tokenizer_revision=None),
+        structured_outputs_config=outputs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("files", "backend", "expected"),
+    [
+        (["tekken.json"], "auto", "guidance"),
+        (["tekken.json", "tokenizer.json"], "auto", "guidance"),
+        (["tekken.json"], "xgrammar", "xgrammar"),
+        (["tokenizer.json"], "auto", "auto"),
+    ],
+)
+def test_tekken_checkpoints_pin_guidance(
+    tmp_path: Path, files: list[str], backend: str, expected: str
+) -> None:
+    from vllm.transformers_utils.repo_utils import list_repo_files
+
+    vllm_main = _load_vllm_main()
+    for name in files:
+        (tmp_path / name).write_text("{}")
+    # vLLM caches each path's file listing for the whole process, and pytest
+    # reuses this `tmp_path` name once an earlier passing case has deleted it.
+    list_repo_files.cache_clear()
+    outputs = SimpleNamespace(backend=backend)
+
+    vllm_main.pin_guidance_for_tekken_checkpoints(
+        _tekken_vllm_config(tmp_path, outputs)
+    )
+
+    assert outputs.backend == expected
+
+
+def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
+    """A regex, a JSON schema and a lark grammar resolve to one backend.
+
+    Under `auto`, vLLM resolves the lark grammar to a different backend than
+    the others, and the engine rejects whichever kind arrives second.
+    """
+    from vllm.config import StructuredOutputsConfig
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    vllm_main = _load_vllm_main()
+    tokenizer = MistralTokenizer.from_pretrained(str(_MOCK_TEKKEN_DIR))
+
+    def resolved_backends(config: StructuredOutputsConfig) -> list[str]:
+        backends = []
+        for constraint in (
+            StructuredOutputsParams(regex="yes|no"),
+            StructuredOutputsParams(json={"type": "object"}),
+            StructuredOutputsParams(grammar='start: "yes" | "no"'),
+        ):
+            params = SamplingParams(structured_outputs=constraint)
+            params._validate_structured_outputs(
+                SimpleNamespace(is_diffusion=False), config, tokenizer
+            )
+            backends.append(params.structured_outputs._backend)
+        return backends
+
+    assert resolved_backends(StructuredOutputsConfig(backend="auto")) == [
+        "xgrammar",
+        "xgrammar",
+        "guidance",
+    ]
+    pinned = StructuredOutputsConfig(backend="auto")
+    vllm_main.pin_guidance_for_tekken_checkpoints(
+        _tekken_vllm_config(_MOCK_TEKKEN_DIR, pinned)
+    )
+    assert resolved_backends(pinned) == ["guidance", "guidance", "guidance"]
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
@@ -741,6 +840,7 @@ def test_setup_vllm_engine_qualifies_resolved_config_before_factory(
         additional_config={},
         cache_config=SimpleNamespace(block_size=None),
         model_config=FakeModelConfig(),
+        structured_outputs_config=SimpleNamespace(backend="xgrammar"),
         scheduler_config=SimpleNamespace(
             max_num_seqs=1, scheduler_cls=None, async_scheduling=False
         ),
