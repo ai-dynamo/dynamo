@@ -454,32 +454,6 @@ pub(crate) fn generate_status_to_dynamo(status: tonic::Status) -> DynamoError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generate_context_overflow_is_an_invalid_request_without_invented_bounds() {
-        for diagnostic in [
-            "Input length (100) exceeds max_seq_len (64).",
-            "This model's maximum context length is 64 tokens.",
-            "Prompt length (100) exceeds maximum input length (64).",
-        ] {
-            let error = generate_status_to_dynamo(tonic::Status::invalid_argument(diagnostic));
-            assert_eq!(error.class(), ErrorType::InvalidRequest);
-            assert_eq!(error.reason().as_str(), "backend.invalid_argument");
-            assert!(error.is_context_length_exceeded());
-            assert!(error.public_details().is_none());
-            assert!(error.message().contains(diagnostic));
-            let disconnected = generate_status_to_dynamo(tonic::Status::unavailable(diagnostic));
-            assert!(!disconnected.is_context_length_exceeded());
-        }
-        let other =
-            generate_status_to_dynamo(tonic::Status::invalid_argument("invalid temperature"));
-        assert!(!other.is_context_length_exceeded());
-    }
-}
-
 /// These model/configuration/authentication errors cannot recover by waiting.
 fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
@@ -543,4 +517,30 @@ pub(crate) fn engine_error(message: impl Into<String>) -> DynamoError {
         .error_type(ErrorType::Backend(BackendError::Unknown))
         .message(message)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_context_overflow_is_an_invalid_request_without_invented_bounds() {
+        for diagnostic in [
+            "Input length (100) exceeds max_seq_len (64).",
+            "This model's maximum context length is 64 tokens.",
+            "Prompt length (100) exceeds maximum input length (64).",
+        ] {
+            let error = generate_status_to_dynamo(tonic::Status::invalid_argument(diagnostic));
+            assert_eq!(error.class(), ErrorType::InvalidRequest);
+            assert_eq!(error.reason().as_str(), "backend.invalid_argument");
+            assert!(error.is_context_length_exceeded());
+            assert!(error.public_details().is_none());
+            assert!(error.message().contains(diagnostic));
+            let disconnected = generate_status_to_dynamo(tonic::Status::unavailable(diagnostic));
+            assert!(!disconnected.is_context_length_exceeded());
+        }
+        let other =
+            generate_status_to_dynamo(tonic::Status::invalid_argument("invalid temperature"));
+        assert!(!other.is_context_length_exceeded());
+    }
 }

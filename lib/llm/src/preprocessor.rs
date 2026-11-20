@@ -10399,7 +10399,9 @@ mod tests {
                         .is_some_and(|calls| calls.iter().any(|call| call.index == 0))
                 }));
                 assert_eq!(
-                    choices.filter_map(|choice| choice.finish_reason).last(),
+                    choices
+                        .filter_map(|choice| choice.finish_reason)
+                        .next_back(),
                     Some(FinishReason::ToolCalls)
                 );
             }
