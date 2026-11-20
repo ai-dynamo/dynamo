@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+};
 
 use dynamo_backend_common::{DynamoError, LLMEngine, RuntimeConfig, Worker, WorkerConfig};
 use dynamo_runtime::system_status_server::SystemProbePolicy;
 use dynamo_runtime::{DistributedRuntime, Runtime, logging};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::SidecarStartupError;
@@ -61,6 +65,9 @@ where
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let total = dynamo_runtime::worker::graceful_shutdown_timeout();
+        let deadline = Arc::new(OnceLock::new());
+        let signal_deadline = deadline.clone();
         let signal_token = shutdown.clone();
         let signal_runtime = runtime.clone();
         let signal_handle = tokio::spawn(async move {
@@ -68,22 +75,29 @@ where
                 _ = sigterm.recv() => tracing::info!("SIGTERM received"),
                 _ = sigint.recv() => tracing::info!("SIGINT received"),
             }
+            let deadline = *signal_deadline.get_or_init(|| Instant::now() + total);
             signal_token.cancel();
             signal_runtime.mark_shutting_down();
             tokio::select! {
-                _ = sigterm.recv() => {}
-                _ = sigint.recv() => {}
+                _ = sigterm.recv() => tracing::warn!("Second shutdown signal received; exiting immediately"),
+                _ = sigint.recv() => tracing::warn!("Second shutdown signal received; exiting immediately"),
+                _ = tokio::time::sleep_until(deadline) => tracing::error!("Sidecar shutdown deadline exceeded"),
             }
-            tracing::warn!("Second shutdown signal received; exiting immediately");
             std::process::exit(dynamo_runtime::worker::EXIT_CODE_SHUTDOWN_TIMEOUT);
         });
 
         let result = task(runtime.clone(), shutdown.clone()).await;
+        let deadline = *deadline.get_or_init(|| Instant::now() + total);
         shutdown.cancel();
+        // A serving Worker may already have joined teardown. Bootstrap failures
+        // and telemetry-only tasks leave it to this process owner.
+        let teardown = runtime.shutdown_with_budget(deadline.saturating_duration_since(Instant::now())).await;
         signal_handle.abort();
         let _ = signal_handle.await;
-        runtime.shutdown();
-        result
+        if let (Err(task_error), Err(teardown_error)) = (&result, &teardown) {
+            tracing::error!(%task_error, %teardown_error, "Sidecar task and runtime teardown both failed");
+        }
+        result.and(teardown)
     })
 }
 
@@ -192,6 +206,74 @@ mod tests {
         async fn cleanup(&self) -> Result<(), DynamoError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_sidecar_without_a_worker_joins_teardown_on_success_and_error() {
+        for failed in [false, true] {
+            let cleanup = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cleaned = cleanup.clone();
+            let result = run_task(|runtime, _shutdown| async move {
+                let drt = DistributedRuntime::new(
+                    runtime.clone(),
+                    dynamo_runtime::distributed::DistributedConfig::process_local(),
+                )
+                .await?;
+                let guard = drt.register_graceful_task();
+                let stopping = runtime.child_token();
+                tokio::spawn(async move {
+                    stopping.cancelled().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    cleaned.store(true, std::sync::atomic::Ordering::Release);
+                    drop(guard);
+                });
+                anyhow::ensure!(!failed, "sidecar task failed");
+                Ok(())
+            });
+            assert!(cleanup.load(std::sync::atomic::Ordering::Acquire));
+            if failed {
+                assert_eq!(result.unwrap_err().to_string(), "sidecar task failed");
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn sidecar_returns_an_error_when_teardown_exhausts_the_deadline() {
+        use dynamo_runtime::engine::AsyncEngineContextProvider;
+        use dynamo_runtime::pipeline::Context;
+
+        temp_env::with_vars(
+            [
+                ("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Some("1")),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+            ],
+            || {
+                // An open response keeps the last runtime's Velo service draining.
+                let mut response = None;
+                let result = run_task(|runtime, _shutdown| async {
+                    let drt = DistributedRuntime::new(
+                        runtime,
+                        dynamo_runtime::distributed::DistributedConfig::process_local(),
+                    )
+                    .await?;
+                    response = Some(
+                        drt.velo_response_service()
+                            .await?
+                            .register_response(Context::new(()).context(), false)?,
+                    );
+                    Ok(())
+                });
+                assert!(response.is_some());
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("shutdown deadline")
+                );
+            },
+        );
     }
 
     // Cancellation and bootstrap completion may occur in the same poll. A
