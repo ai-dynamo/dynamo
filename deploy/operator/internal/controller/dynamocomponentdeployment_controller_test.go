@@ -34,6 +34,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	leaderworkerset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/leaderworkerset"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -809,7 +810,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
-	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
+	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderworkerset.Name(dcd.Name))
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
@@ -897,10 +898,10 @@ func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetR
 			dcd := multinodeLWSTestDCD(t, tt.dcdName)
 			r := multinodeLWSTestReconciler(dcd)
 
-			lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
+			lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderworkerset.Name(dcd.Name))
 			require.NoError(t, err)
 			require.False(t, toDelete)
-			again, _, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
+			again, _, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderworkerset.Name(dcd.Name))
 			require.NoError(t, err)
 			require.Equal(t, lws.Name, again.Name, "LWS name must be deterministic")
 			require.NotEqual(t, tt.dcdName, lws.Name, "LWS name must not collide with the component Service name")
@@ -983,7 +984,7 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 					*metav1.NewControllerRef(other, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
 				}
 			}
-			replacement := &leaderworkersetv1.LeaderWorkerSet{Name: leaderWorkerSetName(dcd), Namespace: "default"}
+			replacement := &leaderworkersetv1.LeaderWorkerSet{Name: leaderworkerset.Name(dcd.Name), Namespace: "default"}
 			replacement.OwnerReferences = []metav1.OwnerReference{
 				*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
 			}
@@ -1023,7 +1024,7 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 
 			t.Log("Reconcile without deleting serving or previously supported legacy workers")
 			result, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
-			boundedName := leaderWorkerSetName(dcd)
+			boundedName := leaderworkerset.Name(dcd.Name)
 			require.NotEqual(t, legacyName, boundedName)
 			if tt.failReplacementLWS {
 				require.Error(t, err)
@@ -1881,7 +1882,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
-			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt, leaderWorkerSetName(tt.args.opt.dynamoComponentDeployment))
+			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt, leaderworkerset.Name(tt.args.opt.dynamoComponentDeployment.Name))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoComponentDeploymentReconciler.generateLeaderWorkerSet() error = %v, wantErr %v", err, tt.wantErr)
 				return

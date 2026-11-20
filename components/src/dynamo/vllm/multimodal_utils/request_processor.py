@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
+from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import TokensPrompt
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import convert_image_mode, normalize_image
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
@@ -44,6 +46,7 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
+from .models.mistral import MistralImagePlaceholders
 from .models.qwen import (
     QwenGridParams,
     build_qwen_embedding_params,
@@ -122,6 +125,11 @@ def _build_forwarded_mm_uuids(
     return None
 
 
+def _vllm_rgb(image: Image.Image) -> Image.Image:
+    """Apply EXIF orientation, then composite transparency, as vLLM's loader does."""
+    return convert_image_mode(normalize_image(image), "RGB")
+
+
 def _video_media_io_kwargs(request: dict) -> dict:
     """Request-level video decode options, shape-checked the way vLLM does.
 
@@ -155,7 +163,7 @@ def _build_user_mm_uuids(
 ) -> Optional[dict[str, list[str | None]]]:
     """Map Dynamo media keys to vLLM cache identities."""
     if use_audio_in_video and (explicit_audio_count is None or video_count is None):
-        raise InvalidArgument(
+        raise ValueError(
             "explicit_audio_count and video_count are required when "
             "use_audio_in_video is enabled"
         )
@@ -231,7 +239,7 @@ def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
             else torch.as_tensor(is_embed_raw, dtype=torch.bool)
         )
         if is_embed is not None and is_embed.numel() != length:
-            raise InvalidArgument(
+            raise ValueError(
                 "forwarded mm placeholder is_embed length "
                 f"{is_embed.numel()} does not match placeholder length {length}"
             )
@@ -256,7 +264,7 @@ def compute_mm_uuids(
         if not isinstance(chunks, list):
             chunks = [chunks]
         if not all(chunk is None or isinstance(chunk, dict) for chunk in chunks):
-            raise InvalidArgument("vision_chunk entries must be objects or null")
+            raise ValueError("vision_chunk entries must be objects or null")
         images = [None if chunk is None else chunk.get("image") for chunk in chunks]
     elif isinstance(images, dict):
         # Pre-computed embedding dictionaries do not have a stable raw-image
@@ -278,6 +286,24 @@ def compute_mm_uuids(
     return {modality: uuids}
 
 
+def _split_multimodal_data(
+    request: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    custom_data: dict[str, Any] = {}
+    media_data: dict[str, Any] = {}
+    for modality, items in (request.get("multi_modal_data") or {}).items():
+        if (
+            isinstance(items, list)
+            and items
+            and all(isinstance(item, dict) and set(item) == {"Json"} for item in items)
+        ):
+            values = [item["Json"] for item in items]
+            custom_data[modality] = values[0] if len(values) == 1 else values
+        else:
+            media_data[modality] = items
+    return custom_data, media_data
+
+
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Read processor kwargs from the canonical or router-compatible location."""
     value = request.get("mm_processor_kwargs")
@@ -296,6 +322,8 @@ class PreparedMultimodalInput:
     multi_modal_data: Optional[dict[str, Any]]
     mm_processor_kwargs: Optional[dict[str, Any]]
     pre_rendered_prompt: Any = None
+    # Custom JSON by engine modality; kept apart so media policy never reads it.
+    custom_data: Optional[dict[str, Any]] = None
 
 
 class MissingMultimodalHandoffError(ValueError):
@@ -365,7 +393,7 @@ class VllmMultimodalRequestProcessor:
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding, to_rgb=_vllm_rgb
         )
         self.video_loader = video_loader or VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
@@ -379,6 +407,8 @@ class VllmMultimodalRequestProcessor:
         self._qwen_grid_params: Optional[QwenGridParams] = None
         self._k3_expansion: Optional[tuple[int, list[int]]] = None
         self._k3_expansion_cached = False
+        self._mistral_placeholders: Optional[MistralImagePlaceholders] = None
+        self._mistral_placeholders_cached = False
 
         if use_unified_vision_chunk is None:
             model_config = getattr(
@@ -419,7 +449,7 @@ class VllmMultimodalRequestProcessor:
         model_type = getattr(hf_config, "model_type", None)
         if model_type is None:
             return None
-        if model_type != "kimi_k3":
+        if model_type not in {"kimi_k3", "kimi_k31"}:
             self._k3_expansion_cached = True
             return None
 
@@ -532,6 +562,50 @@ class VllmMultimodalRequestProcessor:
 
         self._cached_supported_modalities = modalities
         return modalities
+
+    def _mistral_image_placeholders(self) -> Optional[MistralImagePlaceholders]:
+        """Return the image placeholders of a Mistral-format model.
+
+        Tokenizers without a mistral-common image encoder are cached as
+        ``None``. A missing tokenizer is not cached because it may become
+        available later during startup.
+        """
+        if self._mistral_placeholders_cached:
+            return self._mistral_placeholders
+        get_tokenizer = getattr(self.engine_client, "get_tokenizer", None)
+        if get_tokenizer is None:
+            return None
+        tokenizer = get_tokenizer()
+        if tokenizer is None:
+            return None
+        self._mistral_placeholders = MistralImagePlaceholders.from_tokenizer(tokenizer)
+        self._mistral_placeholders_cached = True
+        return self._mistral_placeholders
+
+    def _adapt_image_placeholders(
+        self, token_ids: list[int], multi_modal_data: Optional[dict[str, Any]]
+    ) -> list[int]:
+        """Adapt the frontend's image placeholders for this model's vLLM processor.
+
+        The frontend emits one placeholder per image. Kimi K3 renames it to the
+        token vLLM expands. vLLM never expands Mistral-format placeholders, so
+        the worker expands them. Other models take the placeholder as is.
+        """
+        if not multi_modal_data:
+            return token_ids
+        # Route on the expansion's own model-type check, so every Kimi K3
+        # variant it accepts skips the Mistral path.
+        if self._kimi_k3_pad_expansion() is not None:
+            return self._expand_kimi_k3_pads(token_ids, multi_modal_data)
+        mistral = self._mistral_image_placeholders()
+        if mistral is None:
+            return token_ids
+        images = multi_modal_data.get("image")
+        if images is None or isinstance(images, dict):
+            return token_ids
+        if not isinstance(images, (list, tuple)):
+            images = [images]
+        return mistral.expand(token_ids, images)
 
     @staticmethod
     def _multimodal_disabled_error() -> InvalidArgument:
@@ -909,6 +983,8 @@ class VllmMultimodalRequestProcessor:
         request: dict[str, Any],
         multi_modal_data: Optional[dict[str, Any]],
         mm_processor_kwargs: Optional[dict[str, Any]],
+        *,
+        custom_data: Optional[dict[str, Any]] = None,
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
@@ -937,7 +1013,7 @@ class VllmMultimodalRequestProcessor:
                 )
 
         prompt_kwargs: dict[str, Any] = {
-            "prompt_token_ids": self._expand_kimi_k3_pads(
+            "prompt_token_ids": self._adapt_image_placeholders(
                 request["token_ids"],
                 multi_modal_data,
             ),
@@ -947,6 +1023,13 @@ class VllmMultimodalRequestProcessor:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
         if mm_processor_kwargs is not None:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        if custom_data:
+            media = multi_modal_data or {}
+            if media.keys() & custom_data.keys():
+                raise InvalidArgument(
+                    "Custom JSON and media inputs target the same engine modality"
+                )
+            prompt_kwargs["multi_modal_data"] = {**media, **custom_data}
         return TokensPrompt(**prompt_kwargs)
 
     async def prepare_input(
@@ -962,6 +1045,17 @@ class VllmMultimodalRequestProcessor:
         request before invoking this transformation. The handler validates at
         ``generate`` so text and token modes share the same security boundary.
         """
+        custom_data, media_data = _split_multimodal_data(request)
+        if custom_data:
+            if mode is not DisaggregationMode.AGGREGATED:
+                raise InvalidArgument(
+                    "Custom JSON content is supported only in aggregated serving; "
+                    "disaggregated payload cache identity is not supported"
+                )
+            request = {k: v for k, v in request.items() if k != "multi_modal_data"}
+            if media_data:
+                request["multi_modal_data"] = media_data
+
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         has_mm_data = request.get("multi_modal_data") is not None
@@ -1083,9 +1177,14 @@ class VllmMultimodalRequestProcessor:
                     ),
                 )
 
+        if custom_data and pre_rendered is not None:
+            raise InvalidArgument(
+                "Custom JSON cannot be merged into frontend-processed multimodal kwargs"
+            )
         return PreparedMultimodalInput(
             request=request_for_prompt,
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             pre_rendered_prompt=pre_rendered,
+            custom_data=custom_data or None,
         )

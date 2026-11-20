@@ -139,6 +139,17 @@ impl<'a> WorkerCandidate<'a> {
             .resident_blocks
             .and_then(|counts| counts.resident_blocks(self.data.worker))
     }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocks::cache_owner_blocks`: the attached
+    /// cache owner's count, under the same gate as [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks?
+            .cache_owner_blocks(self.data.worker)
+    }
 }
 
 /// Borrowed candidate batch restricted to one scorer's declared inputs.
@@ -226,6 +237,10 @@ pub trait ResidentBlockSource {
     /// Blocks held for `worker` as of the host's last event for it, or `None` when the host has
     /// no count for the rank.
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
+
+    /// Host-pinned blocks the host's index holds for the cache owner (KVCR instance) attached
+    /// to `worker`, or `None` when no owner is attached or the host has no count for it.
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
 }
 
 /// Request-wide facts borrowed once for all cache views in a selection.
@@ -415,6 +430,7 @@ pub struct WorkerInputView<'a> {
     load: Option<&'a [WorkerLoadInput]>,
     // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
     resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    decode_progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
 }
 
 /// Where a picker's rows come from.
@@ -505,7 +521,8 @@ impl ScoredWorkerCandidate {
 impl<'a> WorkerCacheInput<'a> {
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
-    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    /// Use `loadable_beyond(prefix)` for the blocks the engine can load after a worker's local
+    /// prefix; `hits_beyond(prefix)` also counts hits after a gap, which the engine cannot load.
     #[inline]
     pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
         self.snapshot.shared_hits
@@ -550,7 +567,7 @@ impl<'a> WorkerCacheInput<'a> {
     }
 }
 
-impl dynamo_slot_tracker::busy::RankLoad for WorkerLoadInput {
+impl dynamo_slot_tracker::RankLoad for WorkerLoadInput {
     #[inline]
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
@@ -637,6 +654,7 @@ impl<'a> WorkerInputView<'a> {
             cache,
             load,
             resident_blocks,
+            decode_progress: None,
         }
     }
 
@@ -656,7 +674,27 @@ impl<'a> WorkerInputView<'a> {
             cache: None,
             load: None,
             resident_blocks: None,
+            decode_progress: None,
         }
+    }
+
+    pub(crate) fn with_decode_progress(
+        mut self,
+        progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
+        self
+    }
+
+    pub(crate) fn decode_progress_for_row(
+        self,
+        row: usize,
+    ) -> Option<dynamo_slot_tracker::host::DecodeProgress> {
+        let lookup = self.decode_progress?;
+        let PickerRows::Materialized { candidates, .. } = self.rows else {
+            return None;
+        };
+        lookup(candidates.get(row)?.worker)
     }
 
     /// Number of rows, equal to the length of [`Self::candidates`].
@@ -762,5 +800,13 @@ impl<'a> WorkerInputView<'a> {
         self.candidates()
             .get(row)
             .and_then(|candidate| counts.resident_blocks(candidate.worker))
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocksByRow::cache_owner_blocks`: the
+    /// attached cache owner's count for candidate `row`, under the same gate as
+    /// [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self, row: usize) -> Option<u64> {
+        let counts = self.resident_blocks?;
+        counts.cache_owner_blocks(self.candidates().get(row)?.worker)
     }
 }

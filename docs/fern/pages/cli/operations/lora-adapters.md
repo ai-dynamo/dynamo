@@ -375,7 +375,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     ./agg_lora.sh
     ```
 
-    The script starts `dynamo.sglang` with `--enable-lora`, `--max-lora-rank 64`, and `--lora-target-modules all`. It also sets `DYN_LORA_ENABLED`, `DYN_LORA_PATH`, and the worker system port.
+    The script starts `dynamo.sglang` with `--enable-lora`, `--max-lora-rank 64`, and the example adapter's target modules (`--lora-target-modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj`). It also sets `DYN_LORA_ENABLED`, `DYN_LORA_PATH`, and the worker system port.
   </Step>
 
   <Step title="Load and query the adapter">
@@ -424,7 +424,7 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
     - **Prefix sharing within the same adapter**: Requests targeting the same LoRA adapter reuse KV prefix blocks like base-model requests.
     - **No extra configuration**: The LoRA name propagates through KV events (`BlockStored`) from the engine to the router. The router uses the `lora_name` field to route requests to workers with matching cached blocks.
 
-    This works across the publisher pipeline, the KV consolidator, and the routing query path.
+    This works across the publisher pipeline and the routing query path.
 
     For a local two-worker demo with KV-aware routing, run [`agg_lora_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_router.sh) and load the adapter on both worker system ports.
   </Accordion>

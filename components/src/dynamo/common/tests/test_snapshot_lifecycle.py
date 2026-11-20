@@ -14,6 +14,10 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_CONTROL_DIR_ENV,
 )
 from dynamo.common.snapshot.lifecycle import SnapshotConfig, elect_and_wake
+from dynamo.common.snapshot.restore_context import (
+    refresh_snapshot_restore_config,
+    write_snapshot_restore_context,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -39,6 +43,7 @@ async def test_snapshot_lifecycle_returns_paused_after_restore_sentinel(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     controller = _PauseController()
     config = SnapshotConfig.from_env()
     assert config is not None
@@ -66,34 +71,32 @@ async def test_snapshot_lifecycle_returns_paused_after_restore_sentinel(
                 await lifecycle
 
 
-async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("destination_policy", ["1", None])
+async def test_snapshot_lifecycle_applies_destination_offline_policy(
+    monkeypatch, tmp_path, destination_policy
 ):
+    """Clear the capture override, then apply the destination policy before parsing."""
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    if destination_policy is None:
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    else:
+        monkeypatch.setenv("HF_HUB_OFFLINE", destination_policy)
+    write_snapshot_restore_context()
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    assert os.environ["HF_HUB_OFFLINE"] == "1"
-
+    (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
     controller = _PauseController()
     config = SnapshotConfig.from_env()
     assert config is not None
 
-    lifecycle = asyncio.create_task(config.run_lifecycle(controller))
-    try:
-        for _ in range(100):
-            if (tmp_path / READY_FOR_SNAPSHOT_FILE).exists():
-                break
-            await asyncio.sleep(0.01)
+    assert await asyncio.wait_for(config.run_lifecycle(controller), timeout=1) is True
+    assert "HF_HUB_OFFLINE" not in os.environ
 
-        (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
+    def parse_config():
+        assert os.environ.get("HF_HUB_OFFLINE") == destination_policy
+        return SimpleNamespace(discovery_backend="file")
 
-        assert await lifecycle is True
-        assert controller.resumed is False
-        assert "HF_HUB_OFFLINE" not in os.environ
-    finally:
-        if not lifecycle.done():
-            lifecycle.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await lifecycle
+    await refresh_snapshot_restore_config(SimpleNamespace(), parse_config)
+    assert controller.resumed is False
 
 
 async def test_elect_and_wake_resumes_without_lock(monkeypatch):
