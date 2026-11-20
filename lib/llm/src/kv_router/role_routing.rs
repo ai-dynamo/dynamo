@@ -239,19 +239,23 @@ pub(crate) struct PrefillRouting {
 /// `policy_file` is the `prefill` entry's `session_affinity` in the frontend's policy file.
 /// When the file sets it, it replaces the session affinity of either case above.
 ///
-/// An advertised KV configuration has `router_track_active_blocks` turned off: prefill routing
-/// is prompt-side, and crediting decode blocks here would double-count load. The caller turns
-/// it off in the configuration a silent prefill pool inherits.
+/// Whichever KV configuration the hop gets, it tracks neither active nor output blocks: prefill
+/// routing is prompt-side, and crediting decode blocks here would double-count load. The policy
+/// file's `router` settings are finalized first, because the KV router applies them again and
+/// would turn both back on. An unreadable policy file is the error.
 pub(crate) fn prefill_routing(
     advertised: Option<RouterConfig>,
     decode: DecodeRouting,
     policy_file: Option<SessionAffinitySetting>,
-) -> PrefillRouting {
+) -> Result<PrefillRouting, String> {
     let policy_file = policy_file.map(RoleSessionAffinity::from_policy_file);
     let Some(advertised) = advertised else {
-        return PrefillRouting {
+        return Ok(PrefillRouting {
             router_mode: decode.router_mode,
-            kv_router_config: decode.kv_router_config,
+            kv_router_config: decode
+                .kv_router_config
+                .map(without_block_tracking)
+                .transpose()?,
             session_affinity: policy_file.unwrap_or_else(|| {
                 RoleSessionAffinity::from_ttl(
                     decode.session_affinity_ttl,
@@ -260,14 +264,12 @@ pub(crate) fn prefill_routing(
                 )
             }),
             is_advertised: false,
-        };
+        });
     };
 
-    let mut kv_router_config = advertised.kv_router_config;
-    kv_router_config.router_track_active_blocks = false;
-    PrefillRouting {
+    Ok(PrefillRouting {
         router_mode: advertised.router_mode,
-        kv_router_config: Some(kv_router_config),
+        kv_router_config: Some(without_block_tracking(advertised.kv_router_config)?),
         session_affinity: policy_file.unwrap_or_else(|| {
             RoleSessionAffinity::from_ttl(
                 advertised
@@ -278,7 +280,14 @@ pub(crate) fn prefill_routing(
             )
         }),
         is_advertised: true,
-    }
+    })
+}
+
+fn without_block_tracking(mut config: KvRouterConfig) -> Result<KvRouterConfig, String> {
+    config.finalize_policy_config()?;
+    config.router_track_active_blocks = false;
+    config.router_track_output_blocks = false;
+    Ok(config)
 }
 
 /// Log the settings a serving worker set routes with, each time its pipeline is built.
@@ -388,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn silent_prefill_pool_inherits_the_decode_set_unchanged() {
+    fn silent_prefill_pool_inherits_the_decode_set() {
         let mut decode = decode(RouterMode::RoundRobin, None);
         decode.kv_router_config = Some(KvRouterConfig {
             router_temperature: 0.5,
@@ -396,12 +405,12 @@ mod tests {
             ..Default::default()
         });
 
-        let resolved = prefill_routing(None, decode, None);
+        let resolved = prefill_routing(None, decode, None).unwrap();
 
         assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
         let kv_router_config = resolved.kv_router_config.expect("decode KV config");
         assert_eq!(kv_router_config.router_temperature, 0.5);
-        assert!(kv_router_config.router_track_active_blocks);
+        assert!(!kv_router_config.router_track_active_blocks);
         assert!(!resolved.is_advertised);
     }
 
@@ -414,6 +423,7 @@ mod tests {
         let advertised = RouterConfig::new(RouterMode::KV, KvRouterConfig::default());
         assert_eq!(
             prefill_routing(Some(advertised), decode(RouterMode::KV, decode_ttl), None)
+                .unwrap()
                 .session_affinity,
             RoleSessionAffinity {
                 spec: None,
@@ -421,7 +431,9 @@ mod tests {
             },
         );
         assert_eq!(
-            prefill_routing(None, decode(RouterMode::KV, decode_ttl), None).session_affinity,
+            prefill_routing(None, decode(RouterMode::KV, decode_ttl), None)
+                .unwrap()
+                .session_affinity,
             RoleSessionAffinity {
                 spec: Some(spec(300, SessionAffinityMode::Hard)),
                 source: SessionAffinitySource::DecodeSet,
@@ -520,11 +532,13 @@ worker_selection:
                 decode(RouterMode::KV, decode_ttl),
                 Some(policy_file)
             )
+            .unwrap()
             .session_affinity,
             from_file,
         );
         assert_eq!(
             prefill_routing(None, decode(RouterMode::KV, decode_ttl), Some(policy_file))
+                .unwrap()
                 .session_affinity,
             from_file,
         );
@@ -534,6 +548,7 @@ worker_selection:
                 decode(RouterMode::KV, decode_ttl),
                 Some(SessionAffinitySetting::Disabled)
             )
+            .unwrap()
             .session_affinity
             .spec,
             None,
@@ -568,7 +583,8 @@ worker_selection:
                 session_affinity_mode: inherited_mode,
             },
             policy_file_session_affinity(&frontend, WorkerType::Prefill).unwrap(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             resolved.session_affinity,
@@ -639,11 +655,61 @@ worker_selection:
         advertised.kv_router_config.router_temperature = 0.5;
 
         let resolved =
-            prefill_routing(Some(advertised), decode(RouterMode::RoundRobin, None), None);
+            prefill_routing(Some(advertised), decode(RouterMode::RoundRobin, None), None).unwrap();
 
         assert_eq!(resolved.router_mode, RouterMode::KV);
         let kv_router_config = resolved.kv_router_config.expect("advertised KV config");
         assert!(!kv_router_config.router_track_active_blocks);
         assert_eq!(kv_router_config.router_temperature, 0.5);
+    }
+
+    #[test]
+    fn prefill_hop_never_tracks_output_blocks() {
+        let by_flag = KvRouterConfig {
+            router_track_output_blocks: true,
+            ..Default::default()
+        };
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut by_policy_file = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        by_policy_file.apply_policy_config().unwrap();
+        // A silent pool gets the frontend's config with active blocks already off.
+        let handed_down = |frontend: &KvRouterConfig| KvRouterConfig {
+            router_track_active_blocks: false,
+            ..frontend.clone()
+        };
+        for (case, advertised, inherited) in [
+            ("inherited, set by flag", None, Some(handed_down(&by_flag))),
+            (
+                "inherited, set in the policy file",
+                None,
+                Some(handed_down(&by_policy_file)),
+            ),
+            (
+                "advertised",
+                Some(RouterConfig::new(RouterMode::KV, by_flag)),
+                None,
+            ),
+        ] {
+            let mut decode = decode(RouterMode::KV, None);
+            decode.kv_router_config = inherited;
+            let mut resolved = prefill_routing(advertised, decode, None)
+                .unwrap()
+                .kv_router_config
+                .expect("KV config");
+            // The KV router applies the policy file again, then validates. An
+            // invalid config keeps the hop from ever activating.
+            resolved.apply_policy_config().unwrap();
+            assert_eq!(resolved.validate(), Ok(()), "{case}");
+            assert!(!resolved.router_track_active_blocks, "{case}");
+            assert!(!resolved.router_track_output_blocks, "{case}");
+        }
     }
 }
