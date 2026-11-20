@@ -181,7 +181,10 @@ class RouterArgGroup(ArgGroup):
         include_frontend_only: Whether to register arguments the frontend alone
             consumes. ``--router-min-initial-workers`` gates frontend startup
             and is not carried on the model card, so a worker registering it
-            would ship a flag that does nothing.
+            would ship a flag that does nothing. The frontend's
+            ``--router-mode`` also takes any worker-selection policy type; a
+            worker's takes the router modes only, because its model card
+            carries nothing else.
         env: Another process's env (see ``ArgEnv``); the removed and
             deprecated flags then parse without their notices.
     """
@@ -259,12 +262,23 @@ class RouterArgGroup(ArgGroup):
                 env=self.env,
             )
 
-        mode_help = (
-            "How to route the request. least-loaded routes to the worker with the "
-            "fewest active requests. device-aware-weighted routes based on worker "
-            "device type (CPU/CUDA). In disaggregated prefill mode, least-loaded "
-            "skips bootstrap optimization and falls back to the synchronous prefill "
-            "path."
+        mode_help = "How to route the request."
+        mode_choices: Optional[list[str]] = list(ROUTER_MODE_MAP)
+        if self.include_frontend_only:
+            # argparse lists no choices here: the router checks a policy type
+            # against its registry at startup.
+            mode_help += (
+                f" One of the router modes {', '.join(mode_choices)}, or the name "
+                "of a registered worker-selection policy type, such as "
+                "dynamo-two-tier-cost-fn, which every worker role then uses with "
+                "the type's default parameters. Any other value fails at startup."
+            )
+            mode_choices = None
+        mode_help += (
+            " least-loaded routes to the worker with the fewest active requests. "
+            "device-aware-weighted routes based on worker device type (CPU/CUDA). "
+            "In disaggregated prefill mode, least-loaded skips bootstrap "
+            "optimization and falls back to the synchronous prefill path."
         )
         if self.include_frontend_only:
             mode_help += (
@@ -277,14 +291,7 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default=self.default_router_mode,
             help=mode_help,
-            choices=[
-                "round-robin",
-                "random",
-                "kv",
-                "direct",
-                "least-loaded",
-                "device-aware-weighted",
-            ],
+            choices=mode_choices,
             env=self.env,
         )
         add_argument(
@@ -395,33 +402,55 @@ ROUTER_MODE_MAP: dict[str, str] = {
 }
 
 
+def is_policy_type(router_mode: str) -> bool:
+    """Whether a ``--router-mode`` value names a worker-selection policy type."""
+    return router_mode not in ROUTER_MODE_MAP
+
+
 def resolve_router_mode(
-    router_mode: Optional[str], router_policy_config: Optional[str]
+    router_mode: Optional[str],
+    router_policy_config: Optional[str],
+    *,
+    load_aware: bool = False,
 ) -> str:
     """Resolve the frontend's ``--router-mode`` against ``--router-policy-config``.
 
     - No mode: ``kv`` when a policy file is given, so the file selects each
       role's policy; otherwise ``round-robin``.
     - ``kv``: a policy file may accompany it.
-    - Any other routing mode: a policy file is an error, because only the KV
-      router reads it.
+    - Any other value, a router mode or a policy type: a policy file is an
+      error, because the file selects each role's policy.
 
-    A value that is not a routing mode is returned as it is, for
-    ``build_router_config`` to reject.
+    A value that is not a router mode names a policy type. The router rejects
+    an unregistered one at startup.
+
+    ``load_aware`` is the ``--load-aware`` preset, which routes with ``kv``
+    whatever router mode is given. What was asked for is checked first, so a
+    policy file with a conflicting mode still fails, and a policy type beside
+    the preset is an error: ``kv`` would replace it silently.
     """
     if router_mode is None:
-        return "kv" if router_policy_config is not None else "round-robin"
-    if (
-        router_policy_config is not None
-        and router_mode != "kv"
-        and router_mode in ROUTER_MODE_MAP
-    ):
+        router_mode = "kv" if router_policy_config is not None else "round-robin"
+    router_mode = router_mode.strip()
+    if not router_mode:
+        raise ValueError(
+            "--router-mode is empty: name a router mode or a policy type, or "
+            "leave it unset"
+        )
+    if router_policy_config is not None and router_mode != "kv":
         raise ValueError(
             f"--router-mode {router_mode} and --router-policy-config are mutually "
             "exclusive: the policy file selects each role's policy. Remove "
             "--router-mode, or name the type under worker_selection in the file"
         )
-    return router_mode
+    if not load_aware:
+        return router_mode
+    if is_policy_type(router_mode):
+        raise ValueError(
+            f"--load-aware routes with kv and its default policy, so it cannot run "
+            f"--router-mode {router_mode}; remove one of them"
+        )
+    return "kv"
 
 
 class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
@@ -503,7 +532,7 @@ class RouterConfigSource(Protocol):
 
 
 def build_router_config(
-    config: Optional[RouterConfigSource],
+    config: Optional[RouterConfigSource], *, allow_policy_type: bool = False
 ) -> Optional["RouterConfig"]:
     """Build the ``RouterConfig`` a worker set advertises in its model card.
 
@@ -511,7 +540,9 @@ def build_router_config(
     so the worker inherits the frontend's configuration. A ``None`` config means
     the same thing, so a backend can pass its optional advertisement directly.
     The frontend passes its own config here too, after ``resolve_router_mode``
-    has given it a mode, so it never gets ``None`` back.
+    has given it a mode, so it never gets ``None`` back. Only the frontend sets
+    ``allow_policy_type``: a model card carries a router mode, never a policy
+    type.
     """
     if config is None:
         return None
@@ -532,15 +563,18 @@ def build_router_config(
     # not pull in the compiled bindings.
     from dynamo.llm import KvRouterConfig, RouterConfig, RouterMode
 
-    try:
-        mode_attr = ROUTER_MODE_MAP[router_mode]
-    except KeyError as error:
-        raise ValueError(
-            f"unknown router mode {router_mode!r}; expected one of "
-            f"{', '.join(sorted(ROUTER_MODE_MAP))}"
-        ) from error
+    if is_policy_type(router_mode):
+        if not allow_policy_type:
+            raise ValueError(
+                f"unknown router mode {router_mode!r}; expected one of "
+                f"{', '.join(sorted(ROUTER_MODE_MAP))}"
+            )
+        # A policy type takes the KV configuration, as `kv` does.
+        return RouterConfig(
+            router_mode, KvRouterConfig(**config.kv_router_kwargs()), **router_kwargs
+        )
 
-    mode = getattr(RouterMode, mode_attr)
+    mode = getattr(RouterMode, ROUTER_MODE_MAP[router_mode])
     if mode != RouterMode.KV and (roles := config.hint_policy_roles()):
         # Hints run when the KV path books a worker; other modes would drop them.
         raise ValueError(

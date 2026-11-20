@@ -35,7 +35,7 @@ impl PrefillRouter {
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         // Conditional disagg chooses a cache-hot decode worker, so it only
         // applies to a KV-routed decode set.
-        if !self.decode_router_mode.is_kv_routing() {
+        if !self.decode_router_mode.fixed_mode().is_kv_routing() {
             return Ok(None);
         }
 

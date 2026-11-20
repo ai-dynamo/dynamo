@@ -25,6 +25,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
+    entrypoint::RouterModeSetting,
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
@@ -274,7 +275,7 @@ pub struct PrefillRouter {
     /// Mode of the decode set that owns this router. Governs decode-side
     /// decisions, and is the fallback for the prefill hop -- not its mode. That
     /// lives on [`PrefillBinding::prefill_router_mode`].
-    decode_router_mode: RouterMode,
+    decode_router_mode: RouterModeSetting,
     session_affinity_ttl: Option<std::time::Duration>,
     decode_supports_prefill_cancellation: bool,
 
@@ -310,7 +311,7 @@ struct PrefillBinding {
 struct PrefillBuildContext {
     model_manager: Arc<ModelManager>,
     /// Fallback mode for the prefill hop when the prefill card advertises none.
-    decode_router_mode: RouterMode,
+    decode_router_mode: RouterModeSetting,
     selection_policy: SelectionPolicySource,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,

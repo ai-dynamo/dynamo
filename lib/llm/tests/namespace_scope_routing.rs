@@ -207,7 +207,7 @@ impl Frontend {
             drt,
             manager.clone(),
             RouterConfig {
-                router_mode: dynamo_runtime::pipeline::RouterMode::RoundRobin,
+                router_mode: dynamo_runtime::pipeline::RouterMode::RoundRobin.into(),
                 ..Default::default()
             },
             0,

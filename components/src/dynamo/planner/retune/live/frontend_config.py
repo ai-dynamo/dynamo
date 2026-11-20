@@ -66,6 +66,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterConfigBase,
     add_worker_router_arguments,
+    is_policy_type,
     resolve_router_mode,
 )
 from dynamo.common.configuration.utils import ArgEnv
@@ -718,11 +719,6 @@ def _parse(
         )
 
     view = _RouterView.from_cli_args(namespace)
-    # FrontendConfig.validate: an omitted --router-mode is round-robin, and the
-    # load-aware preset implies KV routing.
-    view.router_mode = resolve_router_mode(view.router_mode, None)
-    if view.load_aware:
-        view.router_mode = "kv"
     if view.router_policy_config is not None:
         raise FrontendParseError(
             "P4: the frontend sets --router-policy-config "
@@ -730,6 +726,12 @@ def _parse(
             "and live retune needs the builtin default policy"
         )
     try:
+        # FrontendConfig.validate: an omitted --router-mode is round-robin, any
+        # value that is not a router mode names a policy type, and the
+        # load-aware preset implies KV routing.
+        view.router_mode = resolve_router_mode(
+            view.router_mode, None, load_aware=view.load_aware
+        )
         view.apply_load_aware_preset()
         view.apply_conditional_disagg_config()
         kwargs = {name: getattr(view, name) for name in _KV_ROUTER_FIELDS}
@@ -825,8 +827,13 @@ def _policy_maps(
 
 
 def _router_mode(cli_mode: str) -> str:
-    """``--router-mode`` in the ``RetuneEngineSpec.router_mode`` spelling."""
+    """``--router-mode`` in the ``RetuneEngineSpec.router_mode`` spelling.
 
+    A policy type has none and keeps its name.
+    """
+
+    if is_policy_type(cli_mode):
+        return cli_mode
     return "kv_router" if cli_mode == "kv" else cli_mode.replace("-", "_")
 
 

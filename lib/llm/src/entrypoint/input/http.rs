@@ -72,6 +72,7 @@ impl HttpFrontend {
                 .local_model()
                 .router_config()
                 .router_mode
+                .fixed_mode()
                 .is_kv_routing()
         {
             anyhow::bail!("request classifiers require --router-mode kv");
@@ -85,7 +86,7 @@ impl HttpFrontend {
         // Hosts that pass no resolved plugins resolve the policy file later, so read its
         // selection from the config as well.
         let router_config = engine_config.local_model().router_config();
-        if router_config.router_mode.is_kv_routing()
+        if router_config.router_mode == dynamo_runtime::pipeline::RouterMode::KV
             && !self.plugins.has_custom_worker_selection()
             && matches!(
                 router_config
@@ -104,8 +105,9 @@ impl HttpFrontend {
         let plugins = RouterPluginBuilder::new(self.plugins);
         let router_config = engine_config.local_model().router_config();
         plugins.validate_config(&router_config.kv_router_config)?;
+        crate::kv_router::check_policy_type_mode(router_config)?;
         crate::kv_router::check_hint_policies_route_on_kv_path(
-            router_config.router_mode,
+            router_config.router_mode.fixed_mode(),
             &router_config.kv_router_config,
             &crate::kv_router::EVERY_ROLE,
         )?;

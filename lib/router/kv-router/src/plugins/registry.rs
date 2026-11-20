@@ -194,7 +194,17 @@ impl RouterPluginRegistry {
         &self,
         config: &KvRouterConfig,
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
-        self.hint_policies.resolve(config)
+        self.hint_policies.resolve(config, None)
+    }
+
+    /// [`Self::resolve_hint_policies`] for a host whose router mode names `policy_type` as every
+    /// role's worker-selection type: each role runs the hints on by default for that type.
+    pub fn resolve_hint_policies_for_type(
+        &self,
+        config: &KvRouterConfig,
+        policy_type: &str,
+    ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
+        self.hint_policies.resolve(config, Some(policy_type))
     }
 
     /// Whether this image has no linked router plugin types.

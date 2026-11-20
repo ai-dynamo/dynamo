@@ -22,6 +22,7 @@ use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
+use dynamo_llm::entrypoint::RouterModeSetting as RsRouterModeSetting;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
 use dynamo_llm::frontend_config::{
@@ -411,11 +412,50 @@ impl KvRouterConfig {
     }
 }
 
+/// What `RouterConfig` takes as its mode: a `RouterMode`, or the name of a registered
+/// worker-selection policy type.
+#[derive(Clone, Debug, FromPyObject, IntoPyObject)]
+pub enum RouterModeArg {
+    Mode(RouterMode),
+    PolicyType(String),
+}
+
+impl RouterModeArg {
+    /// A string that names a router mode becomes that `RouterMode`, so `router_mode` reads back
+    /// as the mode the router uses.
+    fn normalized(self) -> Self {
+        let Self::PolicyType(name) = &self else {
+            return self;
+        };
+        let named = RsRouterModeSetting::from_name(name);
+        [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::KV,
+            RouterMode::Direct,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ]
+        .into_iter()
+        .find(|mode| named == RsRouterModeSetting::Mode(mode.clone().into()))
+        .map_or(self, Self::Mode)
+    }
+}
+
+impl From<RouterModeArg> for RsRouterModeSetting {
+    fn from(mode: RouterModeArg) -> Self {
+        match mode {
+            RouterModeArg::Mode(mode) => Self::Mode(mode.into()),
+            RouterModeArg::PolicyType(name) => Self::from_name(&name),
+        }
+    }
+}
+
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
-    #[pyo3(get, set)]
-    pub router_mode: RouterMode,
+    #[pyo3(get)]
+    pub router_mode: RouterModeArg,
 
     #[pyo3(get, set)]
     pub kv_router_config: KvRouterConfig,
@@ -436,7 +476,7 @@ impl RouterConfig {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     pub fn new(
-        mode: RouterMode,
+        mode: RouterModeArg,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
@@ -465,7 +505,7 @@ impl RouterConfig {
             .parse()
             .map_err(PyValueError::new_err)?;
         Ok(Self {
-            router_mode: mode,
+            router_mode: mode.normalized(),
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
@@ -473,6 +513,11 @@ impl RouterConfig {
             session_affinity_ttl_secs,
             session_affinity_mode,
         })
+    }
+
+    #[setter]
+    fn set_router_mode(&mut self, mode: RouterModeArg) {
+        self.router_mode = mode.normalized();
     }
 }
 
@@ -962,6 +1007,7 @@ pub fn run_input<'p>(
             .local_model()
             .router_config()
             .router_mode
+            .fixed_mode()
             .is_kv_routing(),
     )
     .map_err(PyValueError::new_err)?;

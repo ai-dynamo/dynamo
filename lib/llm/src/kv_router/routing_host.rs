@@ -273,7 +273,8 @@ fn into_monitored_response(
 pub enum RoutingPolicy {
     /// KV-aware selection and booking through the role's [`KvRouter`].
     Kv(Arc<KvRouter>),
-    /// A picker that needs no KV state: round-robin, random or least-loaded.
+    /// A picker that needs no KV state: round-robin, random, least-loaded, or a registered
+    /// policy type that is only a picker.
     Hosted(HostedPolicy),
     /// Each request names its worker.
     Direct,
@@ -290,6 +291,20 @@ impl RoutingPolicy {
             Self::Direct => RouterMode::Direct,
             Self::DeviceAwareWeighted => RouterMode::DeviceAwareWeighted,
         }
+    }
+
+    /// The registered type of a hosted policy that no router mode names.
+    pub(crate) fn policy_type(&self) -> Option<&str> {
+        match self {
+            Self::Hosted(hosted) => hosted.policy_type.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The name errors give the policy: its policy type, else its router mode.
+    pub(crate) fn name(&self) -> String {
+        self.policy_type()
+            .map_or_else(|| format!("{:?}", self.transport_mode()), str::to_owned)
     }
 
     /// The hosted policy, when its picker reads no occupancy. Only such a policy runs under a
@@ -309,22 +324,49 @@ impl RoutingPolicy {
     }
 }
 
-/// One of the hosted router modes: its picker and the mode it came from.
+type PickerFactory = Arc<dyn Fn() -> anyhow::Result<HostedWorkerPicker> + Send + Sync>;
+
+/// A picker that runs without KV state, and how to build another of its type.
 pub struct HostedPolicy {
     picker: HostedWorkerPicker,
+    fresh_picker: PickerFactory,
+    /// The registered type the picker came from. `None` for a router mode, which `mode` names.
+    policy_type: Option<Arc<str>>,
     /// The transport opens in this mode: it gives a picker that reads active requests its
-    /// occupancy state, and it names the policy in the transport's logs.
+    /// occupancy state, and it names the policy in the transport's logs. For a policy type
+    /// it is a stand-in, least-loaded or round-robin.
     mode: RouterMode,
 }
 
 impl HostedPolicy {
-    /// The only constructor, so the picker is always the mode's own and the mode can stand
-    /// for the picker's type.
+    /// The picker of a hosted router mode.
     pub(crate) fn for_mode(mode: RouterMode) -> anyhow::Result<Self> {
         Ok(Self {
             picker: crate::kv_router::hosted_picker(mode)?,
+            fresh_picker: Arc::new(move || crate::kv_router::hosted_picker(mode)),
+            policy_type: None,
             mode,
         })
+    }
+
+    /// The picker of a registered policy type, which the caller built with what `fresh_picker`
+    /// runs: each call must build another picker of that type.
+    pub(crate) fn for_type(
+        policy_type: &str,
+        picker: HostedWorkerPicker,
+        fresh_picker: impl Fn() -> anyhow::Result<HostedWorkerPicker> + Send + Sync + 'static,
+    ) -> Self {
+        let mode = if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS) {
+            RouterMode::LeastLoaded
+        } else {
+            RouterMode::RoundRobin
+        };
+        Self {
+            picker,
+            fresh_picker: Arc::new(fresh_picker),
+            policy_type: Some(policy_type.into()),
+            mode,
+        }
     }
 
     pub(crate) fn picker(&self) -> &HostedWorkerPicker {
@@ -333,7 +375,14 @@ impl HostedPolicy {
 
     /// Another picker of the same type, with its own state.
     pub(crate) fn fresh_picker(&self) -> anyhow::Result<HostedWorkerPicker> {
-        crate::kv_router::hosted_picker(self.mode)
+        (self.fresh_picker)()
+    }
+
+    /// The name logs give the policy: its policy type, else its router mode's label.
+    pub(crate) fn label(&self) -> &str {
+        self.policy_type
+            .as_deref()
+            .unwrap_or(self.mode.telemetry_label())
     }
 }
 
