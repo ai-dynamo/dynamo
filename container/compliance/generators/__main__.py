@@ -317,13 +317,29 @@ def main(argv: list[str] | None = None) -> int:
         all_components, exception_reasons, args.output_dir / "osrb-deps.csv"
     )
     common.write_cyclonedx(all_components, args.output_dir / "osrb.cdx.json")
+    # Only a scanned dpkg root is the shipped filesystem (the operator's is a
+    # helper image), so only then are base Debian packages limited to it.
+    shipped_debs: set[tuple[str, str]] | None = None
+    if args.subtract_sbom is not None and "dpkg" in args.ecosystem:
+        from . import dpkg
+
+        shipped_debs = {
+            (c.name, c.version) for c in dpkg.collect_components(args.dpkg_root)
+        }
+        if not shipped_debs:
+            logger.warning(
+                "no dpkg packages under %s; THIRD-PARTY.txt lists every base "
+                "Debian package unfiltered",
+                args.dpkg_root,
+            )
+            shipped_debs = None
     common.write_third_party(
         args.output_dir,
         args.ecosystem,
         args.source_location,
         base_sbom=args.subtract_sbom,
-        # Only a scanned dpkg root is the shipped filesystem (the operator's is a helper).
-        dpkg_root=args.dpkg_root if "dpkg" in args.ecosystem else None,
+        shipped_debs=shipped_debs,
+        dpkg_root=args.dpkg_root,
     )
     logger.info(
         "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",

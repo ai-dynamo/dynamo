@@ -221,35 +221,20 @@ def _base_image_label(sbom_path: Path) -> str:
     return sbom_path.name
 
 
-def _installed_debs(root: Path) -> set[tuple[str, str]]:
-    """Return the (package, version) pairs dpkg lists as installed under root."""
-    status = root / "var/lib/dpkg/status"
-    try:
-        text = status.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return set()
-    installed: set[tuple[str, str]] = set()
-    for paragraph in text.split("\n\n"):
-        fields = dict(
-            line.split(": ", 1) for line in paragraph.splitlines() if ": " in line
-        )
-        if "installed" in fields.get("Status", "").split() and "Package" in fields:
-            installed.add((fields["Package"], fields.get("Version", "")))
-    return installed
-
-
 def load_base_components(
-    sbom_path: Path, dpkg_root: Path | None = None
+    sbom_path: Path,
+    shipped_debs: set[tuple[str, str]] | None = None,
+    dpkg_root: Path = Path("/"),
 ) -> list[Component]:
     """Return the library and application components of a baseline CycloneDX SBOM.
 
     Licenses are joined with " AND "; a component with none gets NOASSERTION.
-    dpkg_root is the shipped filesystem: a Debian package it does not have
-    installed at the same version is dropped, and one it has gets its
-    /usr/share/doc/<pkg>/copyright file as license text.
+    shipped_debs is the (name, version) set the dpkg generator found in the
+    shipped filesystem at dpkg_root: a Debian package outside it is dropped, and
+    one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
+    as license text.
     """
     doc = json.loads(sbom_path.read_text(encoding="utf-8"))
-    debs = _installed_debs(dpkg_root) if dpkg_root is not None else set()
     by_key: dict[tuple[str, str], Component] = {}
     for c in doc.get("components", []) or []:
         name, version = c.get("name"), c.get("version")
@@ -266,8 +251,8 @@ def load_base_components(
             if ident and not ident.startswith("sha256:") and ident not in ids:
                 ids.append(ident)
         text = None
-        if dpkg_root is not None and (c.get("purl") or "").startswith("pkg:deb/"):
-            if (name, version) not in debs:
+        if shipped_debs is not None and (c.get("purl") or "").startswith("pkg:deb/"):
+            if (name, version) not in shipped_debs:
                 continue
             copyright_path = dpkg_root / "usr/share/doc" / name / "copyright"
             try:
@@ -345,7 +330,8 @@ def write_third_party(
     ecosystems: list[str],
     source_location: str | None = None,
     base_sbom: Path | None = None,
-    dpkg_root: Path | None = None,
+    shipped_debs: set[tuple[str, str]] | None = None,
+    dpkg_root: Path = Path("/"),
 ) -> Path:
     """Write THIRD-PARTY.txt: this run's NOTICES files plus the base image's components."""
     parts = [_THIRD_PARTY_HEADER]
@@ -359,7 +345,7 @@ def write_third_party(
         if notices.is_file():
             parts.append(notices.read_text(encoding="utf-8").rstrip() + "\n\n")
     if base_sbom is not None:
-        base = load_base_components(base_sbom, dpkg_root)
+        base = load_base_components(base_sbom, shipped_debs, dpkg_root)
         parts.append(render_base_section(base_sbom, base).rstrip() + "\n")
     path = output_dir / "THIRD-PARTY.txt"
     path.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")

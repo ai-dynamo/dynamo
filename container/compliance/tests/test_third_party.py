@@ -13,9 +13,11 @@ import json
 from pathlib import Path
 
 import pytest
+from compliance.generators import dpkg
 from compliance.generators.__main__ import main
 from compliance.generators.common import (
     NOASSERTION,
+    Component,
     load_base_components,
     spdx_license_text,
     write_third_party,
@@ -168,35 +170,31 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     assert missing.splitlines() == ["Apache 2.0", "Odd)License"]
 
 
-def test_base_debs_limited_to_installed_versions(tmp_path: Path) -> None:
+def test_base_debs_limited_to_shipped_versions(tmp_path: Path) -> None:
     sbom = _write_base_sbom(tmp_path / "base_sboms")
     root = tmp_path / "root"
-    (root / "var/lib/dpkg").mkdir(parents=True)
-    (root / "var/lib/dpkg/status").write_text(
-        "Package: zlib1g\nStatus: install ok installed\nVersion: 1.3\n\n"
-        "Package: liba\nStatus: install ok installed\nVersion: 9.9\n"
-    )
     for pkg in ("zlib1g", "liba"):
         (root / "usr/share/doc" / pkg).mkdir(parents=True)
         (root / "usr/share/doc" / pkg / "copyright").write_text(f"{pkg} COPYRIGHT\n")
 
-    comps = {c.name: c for c in load_base_components(sbom, dpkg_root=root)}
+    comps = {
+        c.name: c
+        for c in load_base_components(sbom, {("zlib1g", "1.3")}, dpkg_root=root)
+    }
 
     assert comps["zlib1g"].license_text == "zlib1g COPYRIGHT\n"
     assert comps["liba"].license_text is None
     assert "libremoved" not in comps
 
 
-def test_main_writes_third_party_with_base_section(tmp_path: Path) -> None:
+def _run_main(tmp_path: Path, ecosystem: str) -> str:
     sbom = _write_base_sbom(tmp_path / "base_sboms")
     go_sbom = _write_go_sbom(tmp_path / "sbom-go.cdx.json")
     out = tmp_path / "legal"
-    url = "https://example.invalid/sources.zip"
-
     rc = main(
         [
             "--ecosystem",
-            "go",
+            ecosystem,
             "--go-sbom",
             str(go_sbom),
             "--output-dir",
@@ -204,17 +202,42 @@ def test_main_writes_third_party_with_base_section(tmp_path: Path) -> None:
             "--subtract-sbom",
             str(sbom),
             "--source-location",
-            url,
+            "https://example.invalid/sources.zip",
             "--dpkg-root",
-            str(tmp_path / "empty-root"),
+            str(tmp_path / "root"),
         ]
     )
-
     assert rc == 0
-    text = (out / "THIRD-PARTY.txt").read_text()
-    assert url in text
+    return (out / "THIRD-PARTY.txt").read_text()
+
+
+def test_main_go_only_keeps_every_base_deb(tmp_path: Path) -> None:
+    text = _run_main(tmp_path, "go")
+
+    assert "https://example.invalid/sources.zip" in text
     assert text.index("## github.com/example/mod v1.2.3") < text.index("BASE IMAGE")
     assert "## zlib1g 1.3" in text
+    assert "## libremoved 3.0" in text
+
+
+def test_main_dpkg_limits_base_debs_to_shipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shipped = [Component(ecosystem="dpkg", name="zlib1g", version="1.3", spdx="Zlib")]
+    monkeypatch.setattr(dpkg, "collect_components", lambda root: shipped)
+
+    text = _run_main(tmp_path, "go,dpkg")
+
+    assert "## zlib1g 1.3" in text
+    assert "## libremoved 3.0" not in text
+
+
+def test_main_dpkg_without_packages_keeps_every_base_deb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dpkg, "collect_components", lambda root: [])
+
+    assert "## libremoved 3.0" in _run_main(tmp_path, "go,dpkg")
 
 
 def test_base_label_falls_back_to_filename(tmp_path: Path) -> None:
