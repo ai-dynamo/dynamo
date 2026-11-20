@@ -5630,6 +5630,56 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             del skip_special_tokens
             return bytes(token_ids).decode("utf-8", errors="replace")
 
+    @pytest.mark.parametrize("batch_size", [512, 7])
+    @pytest.mark.parametrize("name", ["lookup", "other_tool"])
+    def test_catalogued_calls_reach_http_allowlist(self, batch_size, name):
+        tokenizer = self.ByteTokenizer()
+        lookup, other = (
+            {"type": "function", "function": {"name": tool_name}}
+            for tool_name in ("lookup", "other_tool")
+        )
+        request = {
+            "tools": [lookup],
+            "chat_template_tools": [lookup, other],
+            "tool_choice": "auto",
+        }
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=FakeRoutedEngine(items=[]),
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+        parser, reasoner = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        post = processor._build_postprocessor(
+            request,
+            {"sampling_options": {"guided_decoding": None}},
+            tool_call_parser=parser,
+            reasoning_parser=reasoner,
+            named_zero_arg_tool=None,
+            prompt_token_ids=[],
+        )
+        text = (
+            "<tool_call>\n"
+            + json.dumps({"name": name, "arguments": {}})
+            + "\n</tool_call>"
+        )
+        token_ids = list(text.encode())
+
+        for start in range(0, len(token_ids), batch_size):
+            end = start + batch_size
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[start:end],
+                    "finish_reason": "stop" if end >= len(token_ids) else None,
+                }
+            )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"]["name"] == name
+
     def test_basic_decode(self, tokenizer):
         """Tokens decode to expected text."""
         post = SglangStreamingPostProcessor(
