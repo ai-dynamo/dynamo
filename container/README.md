@@ -130,7 +130,7 @@ container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
 ### 2. test image (layers test deps on top of runtime):
 ```bash
 # Build test image from a runtime image (for running tests locally)
-docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
+docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime --build-arg FRAMEWORK=vllm -t dynamo:latest-vllm-test .
 ```
 
 ### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
