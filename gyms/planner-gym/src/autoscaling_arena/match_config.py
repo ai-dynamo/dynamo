@@ -1451,7 +1451,17 @@ def _parse_sim_autoscaler(
             f"{path}: starting fleet requires {initial_gpus} GPUs, exceeding "
             f"backend.gpu_budget={gpu_budget}"
         )
-    if autoscaler_type in {"keda", "reactive", "jev"}:
+    # MPC and self-hosted Jev choose the two pools together, only among fleets
+    # that fit the budget, so a disaggregated match needs just a starting fleet
+    # that fits. A planner that sizes each pool on its own can reach both
+    # ceilings at once, so those must fit together.
+    picks_joint_fleets = topology == "disagg" and (
+        autoscaler_type in _MPC_TYPES
+        or (
+            autoscaler_type == "jev" and adapter_config.get("provider") == "self_hosted"
+        )
+    )
+    if autoscaler_type in {"keda", "reactive", "jev"} and not picks_joint_fleets:
         max_decode = int(adapter_config.get("max_decode", 8))
         max_prefill = (
             int(adapter_config.get("max_prefill", 16)) if topology == "disagg" else 0
@@ -1463,11 +1473,10 @@ def _parse_sim_autoscaler(
                 f"{maximum_gpus} GPUs, exceeding backend.gpu_budget={gpu_budget}; "
                 "set max_prefill/max_decode to a budget-safe combination"
             )
-    if autoscaler_type in _MPC_TYPES:
-        # The maximum applies independently to each pool. Reserve enough budget
-        # for both pools at their ceiling (prefill costs zero in aggregate mode).
+    if autoscaler_type in _MPC_TYPES and not picks_joint_fleets:
+        # Aggregate mode has one pool, so its ceiling alone must fit.
         max_replicas = int(adapter_config["max_replicas"])
-        maximum_gpus = max_replicas * (prefill_num_gpus + decode_num_gpus)
+        maximum_gpus = max_replicas * decode_num_gpus
         if maximum_gpus > gpu_budget:
             raise MatchConfigError(
                 f"{path}.config: configured/default maximum fleet requires "
@@ -1569,8 +1578,17 @@ def _resolve_mpc_config(
             "decode engines must share runtime.cold_start_delay_s"
         )
     config.setdefault("gpus_per_worker", cost_engine.num_gpus)
-    if cost_engine.runtime.cold_start_delay_s is not None:
-        config.setdefault("cold_start_s", cost_engine.runtime.cold_start_delay_s)
+    # Replay starts each worker after its engine's delay. A different delay in
+    # the controller would credit new capacity at the wrong time.
+    engine_delay = cost_engine.runtime.cold_start_delay_s
+    if engine_delay is not None:
+        if "cold_start_s" in config and config["cold_start_s"] != engine_delay:
+            raise MatchConfigError(
+                f"{path}.cold_start_s: must equal the deployed engine's "
+                f"runtime.cold_start_delay_s ({engine_delay:g} s); omit it to use "
+                "the engine's value"
+            )
+        config.setdefault("cold_start_s", engine_delay)
     if topology == "disagg":
         # The prefill pool's GPU cost and KV-transfer parameters.
         config.setdefault("prefill_gpus_per_worker", ttft_engine.num_gpus)

@@ -24,6 +24,7 @@ from autoscaling_arena.match_config import (
     MatchConfigError,
     SimAutoscalerConfig,
     SimBackendConfig,
+    feasible_worker_targets,
     load_match_config,
 )
 
@@ -203,13 +204,14 @@ def test_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
             ("start.decode", "[1, 8]"),
         ),
         (
+            # Replay starts workers after the engine's delay, here 60 seconds.
             """
             - name: bad
               type: mpc
               start: {prefill: 1, decode: 1}
-              config: {max_replicas: 40}
+              config: {cold_start_s: 10}
             """,
-            ("maximum fleet requires 80 GPUs", "gpu_budget=32", "max_replicas"),
+            ("cold_start_s", "runtime.cold_start_delay_s (60 s)"),
         ),
         (
             # The controller's targets must be the ones the run is scored on.
@@ -286,11 +288,70 @@ def test_mpc_accepts_matching_costs_and_aligned_cadence(tmp_path: Path):
               config:
                 gpus_per_worker: 1
                 prefill_gpus_per_worker: 1
+                cold_start_s: 60
                 poll_interval_s: 10
             """,
         )
     )
     assert mpc.config["poll_interval_s"] == 10
+    assert mpc.config["cold_start_s"] == 60
+
+
+def _asymmetric_mpc_config(tmp_path: Path, start: str) -> Path:
+    """Four-GPU prefill and eight-GPU decode workers under an 80-GPU budget."""
+    engines = {
+        "common": {"system": "h200_sxm", "backend": "vllm"},
+        "prefill": {"tp_size": 4},
+        "decode": {"tp_size": 8},
+    }
+    model = {"name": "served-model", "ais_model_path": "perf-db/model"}
+    return _write_sim_config(
+        tmp_path,
+        autoscalers=f"""
+        - name: mpc
+          type: mpc
+          start: {start}
+          config: {{max_replicas: 15}}
+        """,
+        gpu_budget=80,
+        substrate=False,
+        backend_extra=yaml.safe_dump({"model": model, "engines": engines}),
+    )
+
+
+def test_disaggregated_mpc_searches_asymmetric_fleets_within_the_budget(
+    tmp_path: Path,
+):
+    backend = load_match_config(
+        _asymmetric_mpc_config(tmp_path, "{prefill: 1, decode: 1}")
+    ).backend
+    (mpc,) = backend.autoscalers
+    targets = feasible_worker_targets(backend, mpc)
+    # Both pools at 15 workers would need 180 GPUs. The controller chooses
+    # only among the pairs that fit, so the wide prefill pool stays reachable.
+    assert (15, 1) in targets and (2, 9) in targets
+    assert all(4 * prefill + 8 * decode <= 80 for prefill, decode in targets)
+
+    with pytest.raises(MatchConfigError, match="starting fleet requires 84 GPUs"):
+        load_match_config(_asymmetric_mpc_config(tmp_path, "{prefill: 15, decode: 3}"))
+
+
+def test_aggregated_mpc_ceiling_must_fit_the_gpu_budget(tmp_path: Path):
+    with pytest.raises(MatchConfigError) as excinfo:
+        load_match_config(
+            _write_sim_config(
+                tmp_path,
+                topology="agg",
+                autoscalers="""
+                - name: bad
+                  type: mpc
+                  start: {decode: 1}
+                  config: {max_replicas: 40}
+                """,
+            )
+        )
+    for part in ("maximum fleet requires 40 GPUs", "gpu_budget=32", "max_replicas"):
+        assert part in str(excinfo.value)
 
 
 @pytest.mark.parametrize("interval", ["null", "10"])
@@ -475,6 +536,7 @@ def test_mpc_reads_the_canonical_nextn_and_an_explicit_cold_start(tmp_path: Path
     backend = config["backend"]
     backend["planner_config"] = str(PLANNER_CONFIG)
     backend["engines"]["common"]["extra_args"]["aic_nextn"] = 2
+    backend["engines"]["common"]["runtime"]["cold_start_delay_s"] = 45
     entry = next(a for a in backend["autoscalers"] if a["type"] == "mpc")
     entry["config"]["cold_start_s"] = 45
     path = tmp_path / "match.yaml"
@@ -511,7 +573,6 @@ def test_mpc_rejects_disaggregated_settings_in_aggregated_topology(tmp_path: Pat
 def test_mpc_example_builds_the_real_controller():
     pytest.importorskip("dynamo.planner.core.types")
     from autoscaling_arena.adapters.mpc import AISCapacityModel, MPCAutoscaler
-    from autoscaling_arena.match_config import feasible_worker_targets
 
     backend = load_match_config(MPC_EXAMPLE).backend
     entry = next(a for a in backend.autoscalers if a.type == "mpc")

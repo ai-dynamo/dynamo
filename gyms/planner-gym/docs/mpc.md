@@ -106,7 +106,7 @@ plan/SLO bounds.
 | `slo_ttft_ms`, `slo_itl_ms` | Controller latency targets; they must equal every SLO profile in the Match Config |
 | `poll_interval_s`, `horizon` | Decision cadence (a multiple of the 5-second telemetry interval) and planning horizon beyond cold start |
 | `min_replicas`, `max_replicas` | Candidate bounds; applied to each pool in disaggregated mode |
-| `cold_start_s` | Replica startup delay; defaults to the decode or aggregate engine's `cold_start_delay_s` |
+| `cold_start_s` | Replica startup delay, filled from the decode or aggregate engine's `cold_start_delay_s` if omitted; a set value must equal the engine's delay |
 | `scale_up_penalty`, `scale_down_penalty` | Optional switching costs |
 | `rho_min`, `rho_window_s` | Efficiency weight floor (default `1e-6`) and measured trailing window; also the startup model's smoothing window |
 | `reactive_queue_threshold` | Threshold for the queue-spike floor |
@@ -123,11 +123,15 @@ MPC to a case.
 Match Config validates what the controller cannot handle at run time. The
 controller plans against one TTFT/ITL pair, so `slo_ttft_ms` and `slo_itl_ms`
 must equal every SLO profile, and a profile with an end-to-end target is
-rejected. A `max_replicas` whose two pools at their ceiling exceed
-`backend.gpu_budget` is rejected as well. Worker GPU costs must match the
-deployed engines, so the controller scores the GPU-seconds replay charges. The
-controller plans with one cold-start delay, so a disaggregated match whose
-prefill and decode engines have different `cold_start_delay_s` is rejected.
+rejected. The starting fleet must fit `backend.gpu_budget`. In disaggregated
+mode `max_replicas` may be larger than both pools could reach together,
+because the controller chooses only among the pairs that fit the budget; an
+aggregated `max_replicas` the budget cannot hold is rejected. Worker GPU costs
+must match the deployed engines, so the controller scores the GPU-seconds
+replay charges. The controller plans with one cold-start delay, so a
+disaggregated match whose prefill and decode engines have different
+`cold_start_delay_s` is rejected, and so is a `cold_start_s` that differs from
+the engine's delay.
 `poll_interval_s` must be a multiple of the telemetry interval, and
 `backend.replay.telemetry_sample_interval_s` must be 5; both are checked by
 `--validate-only`.

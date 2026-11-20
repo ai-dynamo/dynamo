@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 import yaml
-from autoscaling_arena.match_config import MatchConfigError, load_match_config
+from autoscaling_arena.match_config import (
+    MatchConfigError,
+    feasible_worker_targets,
+    load_match_config,
+)
 from autoscaling_arena.match_runner import (
     MatchPublishError,
     preflight_publish_destinations,
@@ -58,6 +62,36 @@ def test_self_hosted_endpoint_survives_match_resolution(tmp_path):
     assert parameters["provider"] == "self_hosted"
     assert parameters["base_url"] == "http://localhost:8123"
     assert parameters["max_calls"] == 40400
+
+
+def test_self_hosted_jev_needs_only_a_starting_fleet_within_the_budget(tmp_path):
+    def asymmetric_workers(config):
+        # Four-GPU prefill and eight-GPU decode workers under a 16-GPU budget.
+        backend = config["backend"]
+        backend["gpu_budget"] = 16
+        backend["autoscalers"] = backend["autoscalers"][:1]
+        for key in ("tp_size", "moe_tp_size", "moe_ep_size"):
+            del backend["engines"]["common"][key]
+        backend["engines"]["prefill"]["tp_size"] = 4
+        backend["engines"]["decode"]["tp_size"] = 8
+
+    bounds = {"max_prefill": 2, "max_decode": 2}
+    self_hosted = {
+        "provider": "self_hosted",
+        "base_url": "http://localhost:8123",
+        "model": "PelaAI/KnowLine-31B-Gen1",
+    }
+    backend = load_example(
+        tmp_path, {**bounds, **self_hosted}, edit=asymmetric_workers
+    ).backend
+    # Both pools at two workers would need 24 GPUs; the joint choices stop at 16.
+    assert set(feasible_worker_targets(backend, backend.autoscalers[0])) == {
+        (1, 1),
+        (2, 1),
+    }
+    # Hosted Jev sizes each pool on its own, so both ceilings must fit together.
+    with pytest.raises(MatchConfigError, match="maximum fleet requires 24 GPUs"):
+        load_example(tmp_path, bounds, edit=asymmetric_workers)
 
 
 @pytest.mark.parametrize(

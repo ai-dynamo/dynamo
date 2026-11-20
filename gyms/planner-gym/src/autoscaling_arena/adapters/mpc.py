@@ -381,6 +381,7 @@ class AISCapacityModel(CapacityModel):
     def _ensure_loaded(self) -> None:
         if self._session is not None:
             return
+        # Imported on first use: the roofline model runs without the AIS wrapper.
         from dynamo._internal.ais import create_session
 
         prefill_session = create_session(dict(self._config))

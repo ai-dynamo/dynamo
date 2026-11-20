@@ -53,6 +53,10 @@ is sent only over HTTPS or to a loopback address, so a remote endpoint with
 `api_key_env` needs an `https` origin. The adapter bypasses ambient HTTP
 proxies for a self-hosted endpoint.
 
+Plain `http` without a token is meant for the loopback setup above. Over any
+other network it sends the workload and fleet measurements unencrypted, and
+the model's answers can be altered in transit, so use an `https` origin there.
+
 ## Joint fleet actions
 
 Each decision asks one Choice question about the joint fleet. Options specify
@@ -60,7 +64,9 @@ absolute prefill/decode worker counts, weighted GPU cost, and the GPUs needed
 immediately. The candidate set intersects bounded per-pool steps with the
 shared GPU budget and the pool bounds. Workers remain indivisible: adding a
 four-GPU prefill worker uses four GPUs; adding an eight-GPU decode worker uses
-eight.
+eight. Because every option fits the budget, a disaggregated Match Config
+needs only a starting fleet that fits; `max_prefill` and `max_decode` may
+together exceed it.
 
 Active, starting and draining workers occupy the budget. A reduction cannot
 fund growth until its workers release their GPUs. Confidence gating holds the
