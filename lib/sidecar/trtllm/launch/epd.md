@@ -127,28 +127,20 @@ matching checkpoint locally.
 
 ## Upstream-nightly CI
 
-The shared TRT-LLM media workflow runs `image-epd` (E+PD) and
-`image-epd-disaggregated` (E+P+D) against the latest published official nightly.
-Each job runs its engine roles on one GPU, sequentially after an aggregated
-baseline. Two opposite-color images must produce the expected captions and match
-the baseline's output tokens and expanded usage. The tests also check schema compatibility, single-use references, and KV-only
-decode continuation.
+The upstream TRT-LLM nightly workflow selects the standard serve cases
+`trtllm_image_e_pd` and `trtllm_image_e_p_d`. Each runs an aggregated baseline,
+then the configured EPD topology on one GPU. Two distinct images must produce
+correct colors and match the baseline's expanded token usage. Per-worker request
+counters require exactly one dispatch through each stage; split P/D responses
+must identify different workers. Tests use pinned model snapshots and disable
+encoder and KV reuse for this comparison.
 
-These tests exercise the Rust sidecar adapters and native engines directly;
-Dynamo HTTP routing and cross-host transfers require separate validation.
+These cases exercise the HTTP frontend, routing, sidecars and native engines.
 A missing or mismatched contract fails the job rather than skipping it. The EPD
-prerequisites must be published in the upstream nightly before these jobs can pass.
+prerequisites must be published in the upstream nightly before these jobs can
+pass. Source overlays used for pre-publication and cross-host validation are
+separate evidence, not a stock-nightly pass. Native protocol ownership and
+cancellation tests remain CPU integration coverage.
 
-The standard serve suite additionally provides `trtllm_image_e_pd` and
-`trtllm_image_e_p_d` configurations. These send two distinct images through the
-HTTP frontend and require correct colors, expanded usage and distinct P/D worker
-IDs for the split topology. Both cases are selected in the sidecar nightly serve
-job now and fail until its runtime includes the matching upstream contract.
-Source overlays used before publication are separate validation evidence, not a
-stock-nightly pass.
-
-Engine cleanup uses the shared process manager: graceful shutdown waits for
-observed descendants and remaining session members, including reparented workers.
-A timeout or forced cleanup fails validation. A process that starts a separate
-session and loses its parent before observation cannot be proven owned by this
-tracker; the test does not claim to audit arbitrary detached processes.
+The launchers use the shared process manager for teardown. No EPD-specific
+process-tracking implementation is required.

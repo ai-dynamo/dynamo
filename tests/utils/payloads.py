@@ -29,6 +29,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fractions import Fraction
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import psutil
@@ -511,10 +512,38 @@ class ChatPayload(BasePayload):
 
 @dataclass
 class EncoderImagePayload(ChatPayload):
-    """Image-conditioned output through a vision-disabled EPD consumer."""
+    """Image output, usage parity and one dispatch per configured EPD stage."""
 
     color: str = field(default="green", kw_only=True)
     split: bool = field(default=False, kw_only=True)
+    baseline_path: Path | None = field(default=None, kw_only=True)
+    is_baseline: bool = field(default=False, kw_only=True)
+    _env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _before: tuple[float, ...] = field(default=(), init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._env = env
+
+    def _stage_counts(self, *, require_present: bool) -> tuple[float, ...]:
+        name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        counts = []
+        for index in range(1, 4 if self.split else 3):
+            port = self._env[f"DYN_SYSTEM_PORT{index}"]
+            response = requests.get(f"http://{self.host}:{port}/metrics", timeout=5)
+            response.raise_for_status()
+            samples = find_metric_samples(
+                response.text, name, {prometheus_names.labels.ENDPOINT: "generate"}
+            )
+            assert samples or not require_present, f"Missing {name} on port {port}"
+            counts.append(sum(samples))
+        return tuple(counts)
+
+    def before_request(self) -> None:
+        if not self.is_baseline:
+            self._before = self._stage_counts(require_present=False)
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
@@ -522,15 +551,38 @@ class EncoderImagePayload(ChatPayload):
         assert colors and colors[0] == self.color, content
         result = response.json()
         usage = result["usage"]
-        assert usage["prompt_tokens"] > 64, usage
-        assert usage["completion_tokens"] > 0, usage
+        assert type(usage["prompt_tokens"]) is int and usage["prompt_tokens"] > 64, (
+            usage
+        )
+        assert (
+            type(usage["completion_tokens"]) is int and usage["completion_tokens"] > 0
+        ), usage
         assert (
             usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
         ), usage
+        assert (usage.get("prompt_tokens_details") or {}).get("cached_tokens") == 0, (
+            usage
+        )
+        assert self.baseline_path is not None
+        observation = {
+            "request": {k: v for k, v in self.body.items() if k != "model"},
+            "color": colors[0],
+            "usage": usage,
+        }
+        if self.is_baseline:
+            self.baseline_path.write_text(json.dumps(observation))
+            return
+        assert observation == json.loads(self.baseline_path.read_text()), observation
+        after = self._stage_counts(require_present=True)
+        assert len(self._before) == len(after)
+        assert all(end - start == 1 for start, end in zip(self._before, after)), (
+            self._before,
+            after,
+        )
         if self.split:
             workers = require_router_worker_id(result)
-            assert workers.get("prefill_worker_id") is not None, workers
-            assert workers.get("decode_worker_id") is not None, workers
+            assert type(workers.get("prefill_worker_id")) is int, workers
+            assert type(workers.get("decode_worker_id")) is int, workers
             assert workers["prefill_worker_id"] != workers["decode_worker_id"], workers
 
 

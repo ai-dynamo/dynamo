@@ -9,6 +9,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/common.sh"
 
 if [[ "${1:-}" == "--help" ]]; then
     echo "Usage: MODEL=Qwen/Qwen3-VL-2B-Instruct $0"
@@ -16,7 +18,7 @@ if [[ "${1:-}" == "--help" ]]; then
     echo "MODEL_REVISION: required full checkpoint commit SHA; NIXL/UCX must be available."
     echo "EPD_MODE: e_pd (default) or e_p_d."
     echo "In E+P+D, image encoder handoffs stay on P; text can use conditional prefill bypass."
-    echo "TRTLLM_PYTHON: engine Python."
+    echo "TRTLLM_PYTHON: engine Python. EPD_ENGINE_ARGS: optional native YAML/JSON options."
     echo "ENCODER_GPU/PD_GPU/PREFILL_GPU/DECODE_GPU: explicit CUDA device IDs."
     echo "Defaults use the first inherited CUDA_VISIBLE_DEVICES entry; otherwise E/PD=0, P=1, D=2."
     echo "ENCODER_BIND_HOST: engine interface; ENCODER_CONNECT_HOST: local sidecar destination."
@@ -99,9 +101,11 @@ if (
 MODEL_PATH=$("$TRTLLM_PYTHON" - "$MODEL" "$MODEL_REVISION" <<'PY'
 import sys
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import constants, snapshot_download
 
-print(snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2]))
+print(snapshot_download(
+    repo_id=sys.argv[1], revision=sys.argv[2], local_files_only=constants.HF_HUB_OFFLINE
+))
 PY
 )
 resolve_sidecar trtllm SIDECAR_CMD
@@ -116,11 +120,9 @@ export TRTLLM_OPENENGINE_ENCODER_TRANSFER=nixl
 export TRTLLM_OPENENGINE_ENCODER_MODEL_REVISION="$MODEL_REVISION"
 
 CONTEXT="${TRTLLM_CONTEXT_LENGTH:-4096}"
-cat > "$RUN_DIR/encode.yaml" <<'YAML'
-mm_encoder_only: true
-max_batch_size: 1
-dtype: bfloat16
-YAML
+trtllm_write_merged_config "${EPD_ENGINE_ARGS:-}" \
+    '{"mm_encoder_only":true,"max_batch_size":1,"dtype":"bfloat16"}' \
+    "$RUN_DIR/encode.yaml" "$TRTLLM_PYTHON"
 CONSUMER_OPTIONS='{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16"}'
 CONSUMER_ARGS=()
 CONSUMER_GPU="${PD_GPU:-$DEFAULT_ENCODER_GPU}"
@@ -131,7 +133,9 @@ if [[ "$EPD_MODE" == e_p_d ]]; then
     CONSUMER_GPU="${PREFILL_GPU:-$DEFAULT_PREFILL_GPU}"
     TOPOLOGY="E+P+D"
 fi
-build_trtllm_override_args_with_mem --merge-with-json "$CONSUMER_OPTIONS" > "$RUN_DIR/pd.yaml"
+CONSUMER_OVERRIDES=$(build_trtllm_override_args_with_mem --merge-with-json "$CONSUMER_OPTIONS")
+trtllm_write_merged_config "${EPD_ENGINE_ARGS:-}" "$CONSUMER_OVERRIDES" \
+    "$RUN_DIR/pd.yaml" "$TRTLLM_PYTHON"
 print_launch_banner --multimodal "TensorRT-LLM sidecar image $TOPOLOGY" "$MODEL" "${DYN_HTTP_PORT:-8000}"
 python3 -m dynamo.frontend &
 TRTLLM_OPENENGINE_ENCODER_ENDPOINT="$(grpc_address "$ENCODER_ADVERTISE_HOST" "$ENCODER_GRPC_PORT")" \
