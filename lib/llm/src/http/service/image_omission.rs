@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::discovery::ChatEngineSelection;
 use dynamo_protocols::types::responses::{
     EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, InputTextContent,
     Item, MessageItem,
@@ -12,12 +13,6 @@ use dynamo_protocols::types::{
 };
 
 pub(super) const OMITTED_IMAGE: &str = "[image omitted]";
-
-pub(super) type ChatEngineSelection = (
-    crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
-    crate::protocols::openai::ParsingOptions,
-    bool,
-);
 
 pub(super) fn select_chat_engine(
     state: &super::service_v2::State,

@@ -16,6 +16,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::chat_input::ChatInputPolicy;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
@@ -36,7 +37,6 @@ use crate::types::{
 };
 
 const SYSTEMONE_MAX_QUESTIONS: usize = 128;
-const SYSTEMONE_MAX_CANDIDATES: usize = 255;
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -94,9 +94,18 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) tower_connector_lora_enabled: bool,
 }
 
-/// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
+/// A chat engine and the policies advertised by the same WorkerSet.
+pub(crate) struct ChatEngineSelection {
+    pub(crate) engine: OpenAIChatCompletionsStreamingEngine,
+    pub(crate) parsing_options: ParsingOptions,
+    pub(crate) input_policy: ChatInputPolicy,
+    pub(crate) omit_images: bool,
+}
+
+/// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
 pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) backend: crate::protocols::systemone::ScoringBackend,
     pub(crate) canonical_model: String,
     pub(crate) engine: GenerateStreamingEngine,
     pub(crate) card: ModelDeploymentCard,
@@ -132,12 +141,11 @@ impl SystemOneExecutionSelection {
     }
 
     pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
-        // The serialized SGLang capability pins the zero-decode requested-ID
-        // contract, including vocabulary logprobs and meta_info.cached_tokens.
+        // Both qualified profiles provide vocabulary logprobs and measured cache reads.
         // Tokenizer-specific candidate limits are checked during preflight.
         dynamo_decisions::Capabilities {
             max_questions: SYSTEMONE_MAX_QUESTIONS,
-            max_candidates: SYSTEMONE_MAX_CANDIDATES,
+            max_candidates: self.backend.max_candidates(),
             supports_predicate: true,
             supports_choice: true,
             supports_score: true,
@@ -811,11 +819,33 @@ impl Model {
 
     pub(crate) fn get_systemone_execution_selection(
         &self,
+        required_candidates: usize,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         self.select_worker_set_with_worker_count(
-            |ws| self.systemone_execution_inputs(ws),
+            |ws| {
+                let backend = ws.card().systemone_backend()?;
+                if required_candidates > backend.max_candidates() {
+                    return None;
+                }
+                self.systemone_execution_inputs(ws)
+            },
             WorkerSet::decision_worker_count,
         )
+        .or_else(|| {
+            let has_capable_profile = self.worker_sets.load().values().any(|ws| {
+                ws.card()
+                    .systemone_backend()
+                    .is_some_and(|backend| required_candidates <= backend.max_candidates())
+            });
+            if has_capable_profile {
+                return None;
+            }
+            // Preserve canonical validation errors when every advertised profile is too small.
+            self.select_worker_set_with_worker_count(
+                |ws| self.systemone_execution_inputs(ws),
+                WorkerSet::decision_worker_count,
+            )
+        })
         .ok_or_else(|| {
             if self
                 .worker_sets
@@ -835,10 +865,9 @@ impl Model {
         worker_set: &WorkerSet,
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
-        if !card.is_systemone_serial_eligible() {
-            return None;
-        }
+        let backend = card.systemone_backend()?;
         Some(SystemOneExecutionSelection {
+            backend,
             canonical_model: self.name.clone(),
             engine: worker_set.generate_engine.clone()?,
             card: card.clone(),
@@ -853,15 +882,32 @@ impl Model {
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        self.get_chat_engine_with_input_policy()
+            .map(|(engine, parsing, _)| (engine, parsing))
+    }
+
+    pub(crate) fn get_chat_engine_with_input_policy(
+        &self,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            ParsingOptions,
+            ChatInputPolicy,
+        ),
+        ModelManagerError,
+    > {
+        self.select_worker_set_with(|ws| {
+            ws.chat_engine
+                .clone()
+                .map(|engine| (engine, ws.parsing_options(), ws.input_policy()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     /// Keep omission aligned with the selected deployment, including its media-processing peers.
     pub(crate) fn get_chat_engine_with_image_policy(
         &self,
-    ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions, bool), ModelManagerError>
-    {
+    ) -> Result<ChatEngineSelection, ModelManagerError> {
         self.get_chat_engine_with_image_policy_for_capability(None)?
             .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
@@ -869,10 +915,7 @@ impl Model {
     pub(crate) fn get_chat_engine_with_image_policy_for_capability(
         &self,
         capability: Option<&str>,
-    ) -> Result<
-        Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions, bool)>,
-        ModelManagerError,
-    > {
+    ) -> Result<Option<ChatEngineSelection>, ModelManagerError> {
         if let Some(capability) = capability
             && !self.has_chat_engine_for_capability(capability)
         {
@@ -893,7 +936,12 @@ impl Model {
                     .map(|engine| (engine, ws.parsing_options()))
             },
             WorkerSet::worker_count,
-            |(engine, parsing), selected| (engine, parsing, selected.allows_image_omission()),
+            |(engine, parsing_options), selected| ChatEngineSelection {
+                engine,
+                parsing_options,
+                input_policy: selected.input_policy(),
+                omit_images: selected.allows_image_omission(),
+            },
         )
         .map(Some)
         .ok_or_else(|| self.engine_error(self.has_chat_engine()))
@@ -1414,6 +1462,68 @@ mod tests {
         assert!(model.get_generate_engine().is_err());
     }
 
+    struct StubChatEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> for StubChatEngine {
+        async fn generate(&self, _: SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>)
+            -> Result<ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> {
+            unreachable!("selection must not generate")
+        }
+    }
+
+    #[test]
+    fn chat_selection_keeps_engine_parsing_and_input_policy_atomic() {
+        let model = Model::new("chat-policy".into());
+        let make_set = |namespace: &str, native: bool| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.tool_call_parser = native.then(|| "mistral".into());
+            let mut set = WorkerSet::new(namespace.into(), namespace.into(), card);
+            let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(StubChatEngine);
+            set.chat_engine = Some(engine.clone());
+            let policy = if native {
+                ChatInputPolicy::Mistral
+            } else {
+                ChatInputPolicy::Standard
+            };
+            set.set_input_policy(policy.clone());
+            let (tx, rx) = watch::channel(vec![1]);
+            set.set_instance_watcher(rx);
+            (Arc::new(set), engine, policy, tx)
+        };
+        let (standard, standard_engine, standard_policy, standard_tx) = make_set("standard", false);
+        let (native, native_engine, native_policy, native_tx) = make_set("native", true);
+        model.add_worker_set("standard".into(), standard);
+        model.add_worker_set("native".into(), native);
+        for native_active in [false, true] {
+            standard_tx.send_replace(if native_active { vec![] } else { vec![1] });
+            native_tx.send_replace(if native_active { vec![2] } else { vec![] });
+            let (engine, parsing, policy) = model.get_chat_engine_with_input_policy().unwrap();
+            assert!(Arc::ptr_eq(
+                &engine,
+                if native_active {
+                    &native_engine
+                } else {
+                    &standard_engine
+                }
+            ));
+            assert_eq!(
+                policy,
+                if native_active {
+                    native_policy.clone()
+                } else {
+                    standard_policy.clone()
+                }
+            );
+            assert_eq!(
+                parsing.tool_call_parser.as_deref(),
+                native_active.then_some("mistral")
+            );
+        }
+    }
+
     #[test]
     fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
         let model = Model::new("generate-model".to_string());
@@ -1513,12 +1623,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(Arc::ptr_eq(&engine, &flagged_engine));
-            let (engine, _, omit) = model
+            let selected = model
                 .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY))
                 .unwrap()
                 .unwrap();
-            assert!(Arc::ptr_eq(&engine, &flagged_engine));
-            assert!(!omit, "unknown modalities must preserve images");
+            assert!(Arc::ptr_eq(&selected.engine, &flagged_engine));
+            assert!(
+                !selected.omit_images,
+                "unknown modalities must preserve images"
+            );
         }
     }
 
@@ -1562,7 +1675,7 @@ mod tests {
         workers_b.send(vec![]).unwrap();
         model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
         model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
-        let selection_a = model.get_systemone_execution_selection().unwrap();
+        let selection_a = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection_a.engine,
             worker_set_a.generate_engine.as_ref().unwrap()
@@ -1576,7 +1689,7 @@ mod tests {
 
         workers_a.send(vec![]).unwrap();
         workers_b.send(vec![2]).unwrap();
-        let selection_b = model.get_systemone_execution_selection().unwrap();
+        let selection_b = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection_b.engine,
             worker_set_b.generate_engine.as_ref().unwrap()
@@ -1587,6 +1700,22 @@ mod tests {
         ));
         assert_eq!(selection_b.card.kv_cache_block_size, 32);
         assert_eq!(selection_a.card.kv_cache_block_size, 16);
+    }
+
+    #[test]
+    fn incomplete_vllm_flag_cannot_change_a_selected_sglang_backend() {
+        let model = Model::new("scoring-model".into());
+        let (workers, _tx) = systemone_worker_set("ns", |card| {
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), true.into());
+        });
+        model.add_worker_set("ns".into(), workers);
+        let selected = model.get_systemone_execution_selection(2).unwrap();
+        assert_eq!(
+            selected.backend,
+            crate::protocols::systemone::ScoringBackend::Sglang
+        );
     }
 
     #[test]
@@ -1634,7 +1763,7 @@ mod tests {
             let (worker_set, _workers) = systemone_worker_set("ns", configure);
             model.add_worker_set("ns".to_string(), worker_set);
             assert!(matches!(
-                model.get_systemone_execution_selection(),
+                model.get_systemone_execution_selection(2),
                 Err(SystemOneSelectionError::Unsupported)
             ));
         }
@@ -1645,7 +1774,7 @@ mod tests {
             .systemone_preprocessor = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
@@ -1653,7 +1782,7 @@ mod tests {
         Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
@@ -1661,7 +1790,7 @@ mod tests {
         workers.send(vec![]).unwrap();
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
     }
@@ -1673,7 +1802,7 @@ mod tests {
             card.migration_limit = 1;
         });
         model.add_worker_set("ns".to_string(), worker_set);
-        assert!(model.get_systemone_execution_selection().is_ok());
+        assert!(model.get_systemone_execution_selection(2).is_ok());
     }
 
     #[test]
@@ -1685,7 +1814,7 @@ mod tests {
             .unwrap()
             .set_lifecycle_cancellation(cancellation.clone());
         model.add_worker_set("ns".to_string(), workers);
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
         cancellation.cancel();
         assert_eq!(
@@ -1693,7 +1822,7 @@ mod tests {
             Err(SystemOneSelectionError::Unavailable)
         );
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
     }
@@ -1713,7 +1842,7 @@ mod tests {
         local.set_lifecycle_cancellation(cancellation.clone());
         assert_eq!(local.decision_worker_count(), 1);
         model.add_worker_set("local".to_string(), Arc::new(local));
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(selection.admitted_ids.is_none());
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         cancellation.cancel();
@@ -1752,12 +1881,12 @@ mod tests {
         );
         model.add_worker_set("ns-a".to_string(), unadmitted);
         assert!(matches!(
-            model.get_systemone_execution_selection(),
+            model.get_systemone_execution_selection(2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let (available, _available_tx) = systemone_worker_set("ns-b", |_| {});
         model.add_worker_set("ns-b".to_string(), available.clone());
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection.engine,
             available.generate_engine.as_ref().unwrap()
@@ -1774,7 +1903,7 @@ mod tests {
         assert_eq!(workers.decision_worker_count(), 0);
         drop(admitted_tx);
         assert_eq!(workers.decision_worker_count(), 0);
-        let selection = model.get_systemone_execution_selection().unwrap();
+        let selection = model.get_systemone_execution_selection(2).unwrap();
         assert!(Arc::ptr_eq(
             &selection.engine,
             available.generate_engine.as_ref().unwrap()
@@ -2774,27 +2903,39 @@ mod tests {
         };
         let mut text = make_set("text", Some(vec!["text"]), WorkerType::Aggregated);
         text.chat_engine = Some(text_engine.clone());
+        text.set_input_policy(ChatInputPolicy::Mistral);
         text.prefill_router = Some(prefill.clone());
         text.encoder_router = Some(encoder.clone());
         model.add_worker_set("text".into(), Arc::new(text));
-        assert!(model.get_chat_engine_with_image_policy().unwrap().2);
+        assert!(
+            model
+                .get_chat_engine_with_image_policy()
+                .unwrap()
+                .omit_images
+        );
         let mut vision = make_set("vision", Some(vec!["image"]), WorkerType::Aggregated);
         vision.chat_engine = Some(vision_engine.clone());
         model.add_worker_set("vision".into(), Arc::new(vision));
         for _ in 0..32 {
-            let (engine, _, omit) = model.get_chat_engine_with_image_policy().unwrap();
-            assert_eq!(omit, Arc::ptr_eq(&engine, &text_engine));
-            assert!(Arc::ptr_eq(&engine, &text_engine) || Arc::ptr_eq(&engine, &vision_engine));
+            let selected = model.get_chat_engine_with_image_policy().unwrap();
+            let text_selected = Arc::ptr_eq(&selected.engine, &text_engine);
+            assert!(text_selected || Arc::ptr_eq(&selected.engine, &vision_engine));
+            assert_eq!(selected.omit_images, text_selected);
+            assert_eq!(
+                selected.input_policy == ChatInputPolicy::Mistral,
+                text_selected
+            );
         }
         for _ in 0..32 {
-            let (engine, _, omit) = model
+            let selected = model
                 .get_chat_engine_with_image_policy_for_capability(Some(
                     crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
                 ))
                 .unwrap()
                 .unwrap();
-            assert!(Arc::ptr_eq(&engine, &text_engine));
-            assert!(omit);
+            assert!(Arc::ptr_eq(&selected.engine, &text_engine));
+            assert!(selected.omit_images);
+            assert_eq!(selected.input_policy, ChatInputPolicy::Mistral);
         }
         model.remove_worker_set("vision");
 
@@ -2803,7 +2944,12 @@ mod tests {
         let (_workers_tx, workers_rx) = watch::channel(Vec::new());
         inactive.set_instance_watcher(workers_rx);
         model.add_worker_set("text:idle".into(), Arc::new(inactive));
-        assert!(model.get_chat_engine_with_image_policy().unwrap().2);
+        assert!(
+            model
+                .get_chat_engine_with_image_policy()
+                .unwrap()
+                .omit_images
+        );
 
         for (role, modalities) in [
             (WorkerType::Prefill, Some(vec!["image"])),
@@ -2819,14 +2965,22 @@ mod tests {
                 admitted_ids: watch::channel(vec![1]).1,
             });
             model.add_worker_set("text:peer".into(), Arc::new(peer));
-            assert!(model.get_chat_engine_with_image_policy().unwrap().2);
+            assert!(
+                model
+                    .get_chat_engine_with_image_policy()
+                    .unwrap()
+                    .omit_images
+            );
             match role {
                 WorkerType::Prefill => prefill.set_target(Some(target)),
                 WorkerType::Encode => encoder.set_target(Some(target)),
                 _ => unreachable!(),
             }
             assert!(
-                !model.get_chat_engine_with_image_policy().unwrap().2,
+                !model
+                    .get_chat_engine_with_image_policy()
+                    .unwrap()
+                    .omit_images,
                 "the selected {role:?} target requires preserving images"
             );
             model.remove_worker_set("text:peer");

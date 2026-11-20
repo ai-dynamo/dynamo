@@ -243,3 +243,16 @@ def pytest_itemcollected(item):
         defaulted = True
     if defaulted:
         item.add_marker(pytest.mark.defaulted)
+
+
+@pytest.fixture
+def no_ais_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep AIS inputs of the shell that runs the tests out of a test.
+
+    Defined here because test trees of several components use it.
+    """
+    prefixes = ("DYN_AIS_", "DYN_AIC_", "DYN_ROUTER_PREFILL_LOAD_")
+    for name in list(os.environ):
+        # A squeeze_evolve tier carries ais_perf_model.
+        if name.startswith(prefixes) or name == "DYN_SQUEEZE_TIERS":
+            monkeypatch.delenv(name)

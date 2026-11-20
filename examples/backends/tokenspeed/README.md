@@ -263,3 +263,7 @@ worker IDs, overlap scores, timings, and a `passed` result.
 - `--engine-startup-timeout` (`DYN_TOKENSPEED_ENGINE_STARTUP_TIMEOUT`, default
   3600 s) bounds how long the worker waits for every engine rank to load and
   register.
+- `--freeze-gc-after-init` (`DYN_TOKENSPEED_FREEZE_GC_AFTER_INIT`, default off)
+  freezes the worker's start-up heap and raises Python's garbage collector
+  thresholds once the engine is up, so collections stop stalling streams.
+  Validate memory usage for your workload before enabling it.

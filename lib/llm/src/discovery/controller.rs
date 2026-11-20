@@ -1537,6 +1537,10 @@ mod tests {
                 return Ok(None);
             }
             let card: ModelDeploymentCard = serde_json::from_value(card_json)?;
+            let mdc_checksum = card
+                .source_path
+                .clone()
+                .expect("test cards store their synthetic MDC checksum in source_path");
             let mcid = ModelCardInstanceId {
                 namespace: namespace.clone(),
                 component: component.clone(),
@@ -1553,8 +1557,8 @@ mod tests {
                     name: endpoint,
                 },
                 group_key: group_key(),
-                mdc_checksum: card.mdcsum().to_string(),
-                projection_fingerprint: card.source_path.clone().unwrap(),
+                mdc_checksum: mdc_checksum.clone(),
+                projection_fingerprint: mdc_checksum,
                 video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
                 input_modalities: crate::discovery::watcher::input_modalities_contract(&card),
                 card,
@@ -1723,7 +1727,7 @@ mod tests {
                 name: "generate".to_string(),
             },
             group_key: group_key(),
-            mdc_checksum: card.mdcsum().to_string(),
+            mdc_checksum: mdc_checksum.to_string(),
             projection_fingerprint: mdc_checksum.to_string(),
             video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
             input_modalities: crate::discovery::watcher::input_modalities_contract(&card),

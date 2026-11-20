@@ -21,6 +21,7 @@ from dynamo.planner.connectors.protocol import (
     ScaleResponse,
     ScaleStatus,
 )
+from dynamo.planner.core.types import WorkerCounts
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -245,22 +246,35 @@ async def test_rejection_retains_demand_and_grant_without_raising(connector):
     assert connector.last_managed_allocation.reason == "insufficient_capacity"
 
 
+# Both pool-local reads carry the managed status poll; the environment uses
+# whichever one the connector supports on each replica-count refresh.
+WORKER_OBSERVATION_METHODS = ("get_actual_worker_counts", "get_worker_inventory")
+
+
+def _worker_observation(method):
+    if method == "get_actual_worker_counts":
+        return (0, 1, False)
+    return WorkerCounts(ready_num_decode=1, pending_num_decode=1)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", WORKER_OBSERVATION_METHODS)
 async def test_worker_observation_refreshes_status_without_substituting_grant(
-    connector,
+    connector, method
 ):
+    observed = _worker_observation(method)
     connector.last_managed_allocation = _allocation(granted_replicas=2)
     connector.managed_allocation = True
     connector.last_desired_replicas = [_target(3)]
     connector.remote_client.get_allocation_status.return_value = _response()
     local = MagicMock()
-    local.get_actual_worker_counts = AsyncMock(return_value=(0, 1, False))
+    setattr(local, method, AsyncMock(return_value=observed))
     connector._local_k8s_connector = local
     connector._local_k8s_init_attempted = True
 
-    counts = await connector.get_actual_worker_counts(decode_component_name="Decode")
+    counts = await getattr(connector, method)(decode_component_name="Decode")
 
-    assert counts == (0, 1, False)
+    assert counts == observed
     assert connector.last_managed_allocation.granted_replicas == 1
     assert connector.last_desired_replicas[0].desired_replicas == 3
     connector.remote_client.send_scale_request.assert_not_awaited()
@@ -270,19 +284,43 @@ async def test_worker_observation_refreshes_status_without_substituting_grant(
         graph_deployment_name="batch-dgd",
         k8s_namespace="workers",
     )
-    local.get_actual_worker_counts.assert_awaited_once_with(
+    getattr(local, method).assert_awaited_once_with(
         prefill_component_name=None, decode_component_name="Decode"
     )
+    connector.remote_client.get_allocation_status.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_legacy_worker_observation_never_polls_managed_endpoint(connector):
+@pytest.mark.parametrize("method", WORKER_OBSERVATION_METHODS)
+async def test_legacy_worker_observation_never_polls_managed_endpoint(
+    connector, method
+):
+    observed = _worker_observation(method)
     local = MagicMock()
-    local.get_actual_worker_counts = AsyncMock(return_value=(0, 2, True))
+    setattr(local, method, AsyncMock(return_value=observed))
     connector._local_k8s_connector = local
     connector._local_k8s_init_attempted = True
 
-    assert await connector.get_actual_worker_counts() == (0, 2, True)
+    assert await getattr(connector, method)() == observed
+    connector.remote_client.get_allocation_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_local", [False, True])
+async def test_unavailable_inventory_leaves_status_poll_to_count_fallback(
+    connector, has_local
+):
+    # None sends the environment to get_actual_worker_counts, which polls.
+    connector.managed_allocation = True
+    local = None
+    if has_local:
+        # A Pod-list 403 makes the pool-local inventory unavailable.
+        local = MagicMock()
+        local.get_worker_inventory = AsyncMock(return_value=None)
+    connector._local_k8s_connector = local
+    connector._local_k8s_init_attempted = True
+
+    assert await connector.get_worker_inventory(decode_component_name="Decode") is None
     connector.remote_client.get_allocation_status.assert_not_awaited()
 
 

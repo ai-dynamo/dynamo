@@ -1042,6 +1042,30 @@ def test_p4_accepts(args, env):
     assert report.p4_ok, report.reasons
 
 
+@pytest.mark.parametrize(
+    "worker_type",
+    ["prefill", {"valueFrom": {"configMapKeyRef": {"name": "c", "key": "t"}}}],
+)
+def test_worker_type_env_is_not_a_violation(worker_type):
+    # The variable only chooses the entry of an AIS perf model, and the load
+    # model here is 'none'.
+    env = {"DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE": worker_type}
+    args = (*KV_ARGS, "--router-prefill-load-model", "none")
+
+    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    assert report.p4_ok, report.reasons
+
+    # Another router variable next to it is still reported, alone.
+    env["DYN_ROUTER_POSITIONAL_SEARCH_MODE"] = "x"
+    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    reasons = reasons_matching(report, "P4:")
+    assert not report.p4_ok
+    assert any("DYN_ROUTER_POSITIONAL_SEARCH_MODE" in reason for reason in reasons)
+    assert not any(
+        "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE" in reason for reason in report.reasons
+    )
+
+
 def test_p4_unsearched_knob_when_router_domain_is_pinned():
     # A scalar still searches (pins) the knob: it stays in the domain.
     config = planner_config(
