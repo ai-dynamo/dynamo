@@ -106,6 +106,58 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### CRD and admission breaking changes
+
+##### Generated Service names and selector values
+
+**Change:** The DGD and DCD webhooks reject an object when a name the operator generates from it
+is not valid in Kubernetes. Component names are lowercased in generated resource names.
+Grove component Pods use `<dgd>-<component>` as the `nvidia.com/selector` label value. Outside
+Grove, a generated DCD is named `<dgd>-<component>`, with a `-<hash>` suffix for worker types;
+the hash has 8 characters. Single-node DCD Pods use the full DCD name as their selector value;
+LeaderWorkerSet and DisaggregatedSet Pod templates omit that label. A frontend always gets a component Service;
+other components get one only with Kubernetes discovery, the default. Grove component Services
+use `<dgd>-<component>` with dots replaced by hyphens. DCD Services use the full DCD name with
+dots replaced by hyphens. DisaggregatedSet worker Services also include the worker hash, even
+though those workers have no DCD.
+
+On Grove, a single-pod elastic-EP leader also gets a headless Service with any discovery backend.
+Its name is `<dgd>-<component>-ray` with dots replaced by hyphens. If that exceeds 63 characters,
+the operator keeps the first 58 characters and appends `-` and four hex digits, so the shortened
+name need not end in `-ray`. Grove also creates a headless Service named `<pcs>-0`, where `<pcs>`
+is the generated PodCliqueSet name. That name retains dots, so dotted DGD names are invalid on
+Grove. A standalone single-node frontend DCD with `metadata.name: model.v1` and explicit
+`spec.name: frontend` gets Service `model-v1`. Without explicit `spec.name`, the defaulter copies
+`model.v1` into it, and the schema rejects the dots.
+
+Selector values allow at most 63 characters. A Service name must be a DNS-1035 label: at most 63
+characters, starting with a letter. A generated DCD name must also be a valid Kubernetes object
+name. The DGD name is also the `nvidia.com/dynamo-graph-deployment-name` label value, which
+allows at most 63 characters. Before this change the webhooks accepted these names, and the API
+server later rejected the Service, Deployment, or Pod that the operator created.
+
+**Affected:** New DGDs and standalone DCDs whose generated names break these rules. Examples are
+a DGD or frontend DCD named `70b-llama-production`, and a 58-character DGD name with a
+`Frontend` component, which gives a 67-character Service name. Updates are affected when they
+add a generated name that breaks a rule: setting an unset component `type` to `worker`,
+`prefill`, or `decode` outside Grove when the hash-suffixed worker DCD name would be too long,
+or switching a component with a digit-leading name to Kubernetes discovery. For DCDs owned by a
+DGD, only creates and updates authenticated as the configured Dynamo operator skip these naming
+checks, so older DGD rollouts can continue. Other writes receive the checks even when the DCD has
+a DGD owner reference. The DGD webhook checks the parent graph.
+
+Clusters with the Kubernetes `RelaxedServiceNameValidation` feature gate enabled accept Service
+names that start with a digit, so a DGD or standalone DCD whose name starts with a digit works
+there today. After this change the webhooks reject new objects with such names on those
+clusters too, when the name is used for a Service.
+
+**Action:** Choose a shorter DGD, DCD, or component name, or one that starts with a letter. The
+error names the field to change and the generated name that is invalid.
+
+**Existing deployments:** On update, the webhooks report only generated-name problems that the
+old object did not already have. An existing DGD or DCD with such a name can still be updated
+and deleted. To create it again, choose a valid name.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract

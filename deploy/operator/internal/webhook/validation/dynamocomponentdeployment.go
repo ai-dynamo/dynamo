@@ -22,26 +22,32 @@ import (
 	"fmt"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // DynamoComponentDeploymentValidator validates v1beta1 DynamoComponentDeployment resources.
-type DynamoComponentDeploymentValidator struct{}
+type DynamoComponentDeploymentValidator struct {
+	discoveryBackend  configv1alpha1.DiscoveryBackend
+	operatorPrincipal string
+}
 
 // NewDynamoComponentDeploymentValidator creates a validator for v1beta1 DynamoComponentDeployment.
-func NewDynamoComponentDeploymentValidator() *DynamoComponentDeploymentValidator {
-	return &DynamoComponentDeploymentValidator{}
+// discoveryBackend is the operator's configured default discovery backend.
+func NewDynamoComponentDeploymentValidator(discoveryBackend configv1alpha1.DiscoveryBackend, operatorPrincipal string) *DynamoComponentDeploymentValidator {
+	return &DynamoComponentDeploymentValidator{discoveryBackend: discoveryBackend, operatorPrincipal: operatorPrincipal}
 }
 
 // dynamoComponentDeploymentValidation carries DCD-specific request state.
 // API values and derived traversal state remain explicit validator arguments.
 type dynamoComponentDeploymentValidation struct {
 	sharedValidation
+	operatorPrincipal string
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoComponentDeployment.
@@ -62,6 +68,8 @@ func (v *DynamoComponentDeploymentValidator) validate(
 		ctx:                                ctx,
 		runtimeVersionSource:               runtimeVersionSource,
 		allowMissingRuntimeVersionOverride: true,
+		discoveryBackend:                   v.discoveryBackend,
+		operatorPrincipal:                  v.operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
@@ -70,7 +78,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha, nil)...)
 
 	return validation.warnings, invalidDynamoComponentDeploymentError(dcd, allErrs)
 }
@@ -89,6 +97,8 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		runtimeVersionSource:               runtimeVersionSource,
 		ratchetRuntimeVersion:              true,
 		allowMissingRuntimeVersionOverride: true,
+		discoveryBackend:                   v.discoveryBackend,
+		operatorPrincipal:                  v.operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
@@ -97,14 +107,14 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
+	oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
+	if err != nil {
+		return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
+	}
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldAlpha)...)
 
 	// Run the source-version old/new ratchet after the stateless traversal.
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
-		if err != nil {
-			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
-		}
 		allErrs = append(allErrs, validation.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
 			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
@@ -137,12 +147,8 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 		return nil
 	}
 
-	controller := metav1.GetControllerOf(dcd)
-	if controller != nil && controller.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
-		groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
-		if err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group {
-			return nil
-		}
+	if controlledByDynamoGraphDeployment(dcd) {
+		return nil
 	}
 
 	checkpointRefPath := field.NewPath("spec", "experimental", "checkpoint", "checkpointRef")
@@ -167,6 +173,21 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
+	// Authenticated operator writes retain the exemption needed for older DGDs' rollouts.
+	// An update reports only a violation the old object did not have, so existing objects stay editable.
+	if !operatorOwnedDCDNameExemption(v.ctx, dcd, v.operatorPrincipal) {
+		existing := map[generatedNameViolationKey]bool{}
+		if oldDCD != nil && controlledByDynamoGraphDeployment(oldDCD) == controlledByDynamoGraphDeployment(dcd) {
+			for _, violation := range standaloneDCDNameViolations(oldDCD, v.discoveryBackend, features.MustGateFrom(v.ctx).Enabled(features.LWS)) {
+				existing[violation.key] = true
+			}
+		}
+		for _, violation := range standaloneDCDNameViolations(dcd, v.discoveryBackend, features.MustGateFrom(v.ctx).Enabled(features.LWS)) {
+			if !existing[violation.key] {
+				allErrs = append(allErrs, violation.err)
+			}
+		}
+	}
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
 }
 

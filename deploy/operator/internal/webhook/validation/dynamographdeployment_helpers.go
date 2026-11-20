@@ -20,21 +20,26 @@ package validation
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -432,4 +437,149 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+// generatedDynamoGraphDeploymentNameViolations reports generated names Kubernetes would reject:
+// the DGD label value, <dgd>-<component>, and outside Grove the worker DCD name. Service names
+// are checked only for components that get a Service. dgd must not be nil.
+func generatedDynamoGraphDeploymentNameViolations(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	grovePathway bool,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+	lwsEnabled bool,
+	source runtimeVersionValidationSource,
+) []generatedNameViolation {
+	var violations []generatedNameViolation
+	if msgs := k8svalidation.IsValidLabelValue(dgd.Name); len(msgs) > 0 {
+		violations = append(violations, generatedNameViolation{
+			key: generatedNameViolationKey{generatedName: dgd.Name, rule: consts.KubeLabelDynamoGraphDeploymentName},
+			err: field.Invalid(
+				field.NewPath("metadata", "name"),
+				dgd.Name,
+				fmt.Sprintf(
+					"invalid as the %s label value (%s); choose a shorter DynamoGraphDeployment name",
+					consts.KubeLabelDynamoGraphDeploymentName,
+					strings.Join(msgs, "; "),
+				),
+			),
+		})
+	}
+
+	disaggregatedSet := dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == consts.WorkloadProviderDisaggregatedSet ||
+		(!grovePathway && dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "" && strings.EqualFold(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet], "true"))
+	violations = append(violations, generatedProviderHeadlessServiceNameViolations(dgd, grovePathway, disaggregatedSet)...)
+
+	// A stable placeholder compares name budgets without treating every new worker hash as a new rule.
+	workerHashPlaceholder := strings.Repeat("0", dynamo.WorkerHashLength)
+	componentsPath := field.NewPath("spec", "components")
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.ManagedByExternalController() && !component.IsLPX() {
+			continue
+		}
+		namePath := componentsPath.Index(i).Child("name")
+		if source == runtimeVersionSourceV1Alpha1 {
+			namePath = field.NewPath("spec", "services").Key(component.ComponentName)
+		}
+
+		// Converted alpha keys also become child spec.name and component labels verbatim.
+		if msgs := k8svalidation.IsDNS1123Label(strings.ToLower(component.ComponentName)); len(msgs) > 0 {
+			violations = append(violations, generatedNameViolation{
+				key: generatedNameViolationKey{component: component.ComponentName, generatedName: component.ComponentName, rule: "component name"},
+				err: field.Invalid(namePath, component.ComponentName, "component name must be a non-empty alphanumeric name with internal hyphens: "+strings.Join(msgs, "; ")),
+			})
+		}
+
+		baseName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+		name := baseName
+		action := "choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name"
+		if !grovePathway {
+			name = dynamo.GetDCDResourceName(dgd, component.ComponentName, workerHashPlaceholder)
+			if name != baseName {
+				action = fmt.Sprintf("worker DynamoComponentDeployment names end with an %d-character worker hash (shown as zeros); choose a shorter DynamoGraphDeployment or component name", dynamo.WorkerHashLength)
+			}
+		}
+		dsWorker := disaggregatedSet && component.IsMultinode() && dynamo.IsWorkerComponent(string(component.ComponentType))
+		checks := generatedNameChecks{
+			dcd:      !grovePathway && !dsWorker && !component.IsLPX(),
+			service:  !component.IsLPX() && dynamoGraphDeploymentComponentHasService(dgd, component, grovePathway, discoveryBackend),
+			selector: grovePathway || !(dsWorker || (lwsEnabled && component.IsMultinode())),
+		}
+		for _, violation := range generatedNameViolations(namePath, name, checks, action) {
+			violation.key.component = component.ComponentName
+			violations = append(violations, violation)
+		}
+
+		// The LWS and elastic-EP leader Services have names distinct from discovery Services.
+		if !grovePathway && !dsWorker && lwsEnabled && component.IsMultinode() {
+			for _, violation := range generatedHeadlessServiceNameViolations(namePath, dynamo.LeaderWorkerSetNameForWorkload(name), "LeaderWorkerSet headless Service name") {
+				violation.key.component = component.ComponentName
+				violations = append(violations, violation)
+			}
+		}
+		if grovePathway && !component.IsLPX() && dynamo.IsSinglePodElasticEPLeader(component) {
+			serviceName := dynamo.ElasticEPLeaderServiceName(baseName)
+			if msgs := k8svalidation.IsDNS1035Label(serviceName); len(msgs) > 0 {
+				violations = append(violations, generatedNameViolation{
+					key: generatedNameViolationKey{component: component.ComponentName, generatedName: serviceName, rule: "Service name"},
+					err: field.Invalid(namePath, serviceName, fmt.Sprintf("generated name is invalid (Service name: %s); %s", strings.Join(msgs, "; "), action)),
+				})
+			}
+		}
+	}
+	return violations
+}
+
+// generatedProviderHeadlessServiceNameViolations checks names created independently of discovery.
+// dgd must not be nil.
+func generatedProviderHeadlessServiceNameViolations(dgd *nvidiacomv1beta1.DynamoGraphDeployment, grovePathway, disaggregatedSet bool) []generatedNameViolation {
+	var violations []generatedNameViolation
+	// Grove creates the ordinary PCS only when it owns at least one component.
+	if grovePathway && slices.ContainsFunc(dgd.Spec.Components, func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return !component.ManagedByExternalController()
+	}) {
+		pcsName := dynamo.PCSNameForDGD(dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)
+		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), pcsName+"-0", "Grove PodCliqueSet headless Service name")...)
+	}
+	if disaggregatedSet {
+		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), dynamo.DisaggregatedSetName(dgd), "DisaggregatedSet child Service prefix")...)
+	}
+	return violations
+}
+
+// dynamoGraphDeploymentComponentHasService reports whether the controller renders a Service named
+// from component: a frontend always gets one, and other components get one only under
+// Kubernetes discovery. The elastic-EP leader Service is checked separately.
+// dgd and component must not be nil.
+func dynamoGraphDeploymentComponentHasService(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	grovePathway bool,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+) bool {
+	if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend {
+		return true
+	}
+	// Grove reads the DGD annotation; child DCDs inherit it unless the component overrides it.
+	annotations := map[string]string{}
+	if backend, ok := dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend]; ok && (grovePathway || component.PodTemplate != nil) {
+		annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = backend
+	}
+	if !grovePathway {
+		maps.Copy(annotations, dynamo.GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component))
+	}
+	return commoncontroller.IsK8sDiscoveryEnabled(discoveryBackend, annotations)
+}
+
+// generatedHeadlessServiceNameViolations checks the unnormalized names provider controllers use.
+// fldPath must not be nil.
+func generatedHeadlessServiceNameViolations(fldPath *field.Path, name, rule string) []generatedNameViolation {
+	msgs := k8svalidation.IsDNS1035Label(name)
+	if len(msgs) == 0 {
+		return nil
+	}
+	return []generatedNameViolation{{
+		key: generatedNameViolationKey{generatedName: name, rule: rule},
+		err: field.Invalid(fldPath, name, fmt.Sprintf("generated name is invalid (%s: %s); choose a shorter name starting with a letter and without dots", rule, strings.Join(msgs, "; "))),
+	}}
 }

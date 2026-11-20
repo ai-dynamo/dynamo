@@ -20,9 +20,11 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -45,13 +47,17 @@ import (
 
 // DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
 type DynamoGraphDeploymentValidator struct {
-	mgr ctrl.Manager
+	mgr              ctrl.Manager
+	discoveryBackend configv1alpha1.DiscoveryBackend
 }
 
 // NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
-// mgr must not be nil.
-func NewDynamoGraphDeploymentValidator(mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{mgr: mgr}
+// mgr must not be nil. discoveryBackend is the operator's configured default discovery backend.
+func NewDynamoGraphDeploymentValidator(
+	mgr ctrl.Manager,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{mgr: mgr, discoveryBackend: discoveryBackend}
 }
 
 // dynamoGraphDeploymentValidation carries DGD-specific request state.
@@ -95,6 +101,7 @@ func (v *DynamoGraphDeploymentValidator) validate(
 		mgr:                   v.mgr,
 		runtimeVersionSource:  runtimeVersionSource,
 		ratchetRuntimeVersion: ratchetRuntimeVersion,
+		discoveryBackend:      v.discoveryBackend,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -102,7 +109,14 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha)...)
+	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
+	if oldDeployment != nil {
+		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha, deployment, oldDeployment)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
@@ -123,6 +137,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 		mgr:                   v.mgr,
 		runtimeVersionSource:  runtimeVersionSource,
 		ratchetRuntimeVersion: true,
+		discoveryBackend:      v.discoveryBackend,
 		userInfo:              userInfo,
 		operatorPrincipal:     operatorPrincipal,
 	}
@@ -237,6 +252,32 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		)
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+
+	// Check on update too: a component can gain a worker hash or a Service.
+	// Skip violations the old object had; components are matched by name, not list index.
+	nameViolations := generatedDynamoGraphDeploymentNameViolations(dgd, grovePathway, v.discoveryBackend, features.MustGateFrom(v.ctx).Enabled(features.LWS), v.runtimeVersionSource)
+	if oldDGD != nil && len(nameViolations) > 0 {
+		// Provider adoption records the already running pathway; judge both objects on that pathway.
+		oldForNames := oldDGD
+		if oldDGD.Annotations[consts.KubeAnnotationWorkloadProvider] == "" && workloadProvider != "" {
+			oldForNames = oldDGD.DeepCopy()
+			if oldForNames.Annotations == nil {
+				oldForNames.Annotations = map[string]string{}
+			}
+			oldForNames.Annotations[consts.KubeAnnotationWorkloadProvider] = workloadProvider
+		}
+		oldGrovePathway, _ := grovePathwayForDynamoGraphDeployment(groveEnabled, oldForNames)
+		existing := map[generatedNameViolationKey]bool{}
+		for _, violation := range generatedDynamoGraphDeploymentNameViolations(oldForNames, oldGrovePathway, v.discoveryBackend, features.MustGateFrom(v.ctx).Enabled(features.LWS), v.runtimeVersionSource) {
+			existing[violation.key] = true
+		}
+		nameViolations = slices.DeleteFunc(nameViolations, func(violation generatedNameViolation) bool {
+			return existing[violation.key]
+		})
+	}
+	for _, violation := range nameViolations {
+		allErrs = append(allErrs, violation.err)
+	}
 
 	// LPX children require the Grove route for materialization.
 	if dgd.HasLPXComponent() && !grovePathway {

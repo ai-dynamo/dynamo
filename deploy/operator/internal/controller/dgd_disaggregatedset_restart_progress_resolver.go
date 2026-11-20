@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -69,7 +70,7 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 	}
 
 	ds := newDisaggregatedSetObject()
-	dsErr := r.reader.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)
+	dsErr := r.reader.Get(ctx, types.NamespacedName{Name: dynamo.DisaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)
 	if dsErr != nil && !apierrors.IsNotFound(dsErr) {
 		logger.V(1).Info("failed to get DisaggregatedSet for restart progress", "error", dsErr)
 	}

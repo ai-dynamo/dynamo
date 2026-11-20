@@ -20,6 +20,7 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -61,12 +62,32 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
+	const digitLeadingDCDName = "70b-llama-production"
+	const shortenDCD = "choose a shorter or letter-leading DynamoComponentDeployment name"
+	boundaryDCDName := "d" + strings.Repeat("x", 62)
+	const invalidDNS1035Label = "a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"
+	longDCDNameErrs := []string{
+		fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD),
+		fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD),
+	}
+
+	t.Log("Prepare owned alpha Ingress fixtures for both served API versions")
+	alphaIngressChild := alphaOwnedDCDWithIngressForAdmission("worker.example.com")
+	alphaIngressStandalone := alphaIngressChild.DeepCopy()
+	alphaIngressStandalone.OwnerReferences = nil
+	betaIngressChild := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, alphaIngressChild.ConvertTo(betaIngressChild))
+	betaIngressStandalone := betaIngressChild.DeepCopy()
+	betaIngressStandalone.OwnerReferences = nil
+
 	type dcdAdmissionTestCase struct {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
 		oldBeforeUpdate    runtime.Object
 		checkpointOff      bool
+		lwsEnabled         bool
+		username           string
 		seedWithoutWebhook bool
 		wantSchemaErr      string
 		wantCELErr         string
@@ -92,6 +113,121 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
 			dcd.Spec.Experimental.Checkpoint.CheckpointRef = new("existing-snapshot")
 		})},
+		// A standalone DCD name is its Service name and pod selector label value.
+		{name: "standalone DCD with a digit-leading name is rejected on create", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')); %s", digitLeadingDCDName, shortenDCD)}},
+		{name: "standalone DCD name accepts 63 characters", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName
+		})},
+		{name: "standalone DCD name rejects 64 characters", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), wantWebhookErrs: longDCDNameErrs},
+		{name: "existing standalone DCD with an invalid generated name remains updateable", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			dcd.Labels = map[string]string{"updated": "true"}
+		})},
+		{name: "standalone DCD without a Service accepts a digit-leading name", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "enabling Kubernetes discovery rejects a digit-leading standalone DCD name", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')); %s", digitLeadingDCDName, shortenDCD)}},
+		// Legacy ingress still points to a Service even when the worker uses etcd discovery.
+		{name: "alpha etcd worker rejects a digit-leading Ingress backend Service name", deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "authenticated operator can create a legacy child with an invalid alpha Ingress backend", username: admissionOperatorPrincipal,
+			deployment: alphaOwnedDCDWithIngressForAdmission("worker.example.com")},
+		{name: "forged owner does not bypass alpha Ingress backend checks",
+			deployment:      alphaOwnedDCDWithIngressForAdmission("worker.example.com"),
+			wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "operator child naming exemption still checks the alpha Ingress host", username: admissionOperatorPrincipal,
+			deployment:      alphaOwnedDCDWithIngressForAdmission(""),
+			wantWebhookErrs: []string{"spec.ingress.host: Required value: is required when ingress is enabled"}},
+		{name: "removing a DGD owner rejects an unchecked alpha Ingress backend", username: admissionOperatorPrincipal,
+			oldDeployment:   alphaIngressChild,
+			deployment:      alphaIngressStandalone,
+			wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "removing a DGD owner rejects an unchecked preserved alpha Ingress backend", username: admissionOperatorPrincipal,
+			oldDeployment:   betaIngressChild,
+			deployment:      betaIngressStandalone,
+			wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "enabling alpha ingress rejects a digit-leading backend Service name", oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "existing alpha ingress with an invalid backend name remains editable", seedWithoutWebhook: true, oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		}), deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+			dcd.Labels = map[string]string{"updated": "true"}
+		})},
+
+		// Removing a Service preserves old selector errors; adding one must still report a new Service error.
+		{name: "disabling Kubernetes discovery preserves an existing standalone DCD selector error", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "enabling Kubernetes discovery adds a Service error to an existing standalone DCD selector error", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD)}},
+		// The DGD webhook checks these names; rollouts of older DGDs create new worker DCDs.
+		{name: "authenticated operator can create a legacy DGD-owned worker DCD", username: admissionOperatorPrincipal, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		})},
+		{name: "a forged DGD owner reference cannot bypass generated name checks", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		}), wantWebhookErrs: longDCDNameErrs},
+		{name: "removing the DGD owner rejects an invalid standalone name", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), wantWebhookErrs: longDCDNameErrs},
+		// LWS renders its own selector and an unnormalized headless Service name.
+		{name: "LWS accepts a long standalone worker name with etcd discovery", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "LWS rejects a digit-leading standalone headless Service name", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (LeaderWorkerSet headless Service name: %s); choose a shorter name starting with a letter and without dots", "7b-0", invalidDNS1035Label)}},
+		{name: "LWS rejects a dotted standalone headless Service name", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "model.v1"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (LeaderWorkerSet headless Service name: %s); choose a shorter name starting with a letter and without dots", "model.v1-0", invalidDNS1035Label)}},
+
 		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = admissionTRTLLMBackend
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
@@ -2177,9 +2313,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gates := features.Gates{Checkpoint: !tt.checkpointOff}
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, LWS: tt.lwsEnabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
+				username:           tt.username,
 				oldObject:          tt.oldDeployment,
 				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				gates:              gates,
@@ -2245,6 +2382,16 @@ func admittedBetaDCD(t *testing.T, actual *unstructured.Unstructured) *nvidiacom
 		t.Fatalf("convert admitted DCD to v1beta1: %v", err)
 	}
 	return beta
+}
+
+// alphaOwnedDCDWithIngressForAdmission exercises the child naming exemption independently of other alpha rules.
+func alphaOwnedDCDWithIngressForAdmission(host string) *nvidiacomv1alpha1.DynamoComponentDeployment {
+	return alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+		dcd.Name = "7b"
+		dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: host, IngressControllerClassName: new("nginx")}
+	})
 }
 
 func alphaDCDForAdmission(

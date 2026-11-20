@@ -22,19 +22,31 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateDynamoComponentDeploymentV1alpha1 validates dcd. dcd must not be nil.
+// validateDynamoComponentDeploymentV1alpha1 validates dcd. dcd must not be nil; oldDCD is nil on create.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
 	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
+	oldDCD *nvidiacomv1alpha1.DynamoComponentDeployment,
 ) field.ErrorList {
 	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
-	return v.validateDynamoComponentDeploymentSpecV1alpha1(
+	allErrs := v.validateDynamoComponentDeploymentSpecV1alpha1(
 		&dcd.Spec,
 		field.NewPath("spec"),
 		dcd.GetDynamoNamespace(),
 	)
+	if operatorOwnedDCDNameExemption(v.ctx, dcd, v.operatorPrincipal) {
+		return allErrs
+	}
+	var oldIngress *nvidiacomv1alpha1.IngressSpec
+	var oldName string
+	// Names skipped under a DGD owner cannot be grandfathered after ownership changes.
+	if oldDCD != nil && controlledByDynamoGraphDeployment(oldDCD) == controlledByDynamoGraphDeployment(dcd) {
+		oldIngress = oldDCD.Spec.Ingress
+		oldName = oldDCD.Name
+	}
+	return append(allErrs, alphaIngressBackendNameErrors(dcd.Spec.Ingress, oldIngress, dcd.Name, oldName, field.NewPath("metadata", "name"))...)
 }
 
 // validateDynamoComponentDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.

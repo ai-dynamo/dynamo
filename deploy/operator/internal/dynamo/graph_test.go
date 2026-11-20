@@ -9805,6 +9805,12 @@ func TestGetDCDResourceName(t *testing.T) {
 
 	// Empty hash — workers don't get suffix
 	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(beta, "prefill", ""))
+
+	// Admission checks these names before the worker hash exists, using its length.
+	workerHash, err := ComputeDGDWorkersSpecHash(beta)
+	require.NoError(t, err)
+	assert.Len(t, workerHash, WorkerHashLength)
+
 }
 
 func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testing.T) {

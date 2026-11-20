@@ -20,12 +20,14 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -54,6 +57,7 @@ type dgdAdmissionTestCase struct {
 	oldDeployment      runtime.Object
 	oldBeforeUpdate    runtime.Object
 	mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
+	lwsEnabled         bool                             // enables LeaderWorkerSet rendering
 	groveDisabled      bool                             // disables the configured Grove pathway
 	lpxDisabled        bool                             // disables the LPX integration
 	checkpointOff      bool                             // disables checkpoint creation and restore
@@ -82,9 +86,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const customSidecarImage = "runtime:custom"
 	const trtllmBackendFramework = "trtllm"
 
-	longDGDName := "test-graph-" + strings.Repeat("x", 50)
+	// Longer than the PodCliqueSet name budget, but short enough for the
+	// generated Service names.
+	longDGDName := "test-graph-xxx"
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+
+	const ticketDGDName = "dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1"
+	const digitLeadingDGDName = "70b-llama-production"
+	const tooLongServiceName = "Service name: must be no more than 63 characters"
+	const tooLongSelectorValue = "nvidia.com/selector label value: must be no more than 63 bytes"
+	const invalidDNS1035ServiceName = "Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"
+	const shortenDGDOrComponent = "choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name"
+	shortenWorkerDGDOrComponent := fmt.Sprintf("worker DynamoComponentDeployment names end with an %d-character worker hash (shown as zeros); choose a shorter DynamoGraphDeployment or component name", dynamo.WorkerHashLength)
+	invalidComponentName := "component name must be a non-empty alphanumeric name with internal hyphens: " + strings.Join(k8svalidation.IsDNS1123Label(""), "; ")
+	generatedNameErr := func(path, value, action string, problems ...string) string {
+		return fmt.Sprintf("%s: Invalid value: %q: generated name is invalid (%s); %s", path, value, strings.Join(problems, "; "), action)
+	}
+	const shortenHeadlessName = "choose a shorter name starting with a letter and without dots"
+	groveDigitNameErr := generatedNameErr("metadata.name", digitLeadingDGDName+"-0", shortenHeadlessName, strings.Replace(invalidDNS1035ServiceName, "Service name:", "Grove PodCliqueSet headless Service name:", 1))
+	// <dgd>-frontend is 63 characters at the boundary; <dgd>-worker-<hash> is 63 outside Grove.
+	frontendBoundaryDGDName := "f" + strings.Repeat("x", 53)
+	workerBoundaryDGDName := "w" + strings.Repeat("x", 46)
+	// <dgd>-worker-00000000 is 64 characters, from either a worker or a component of that name.
+	collisionDGDName := "c" + strings.Repeat("x", 47)
+	// These args make a single-pod worker an elastic-EP leader with its own headless Service.
+	elasticEPArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
 
 	tests := []dgdAdmissionTestCase{
 		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -922,9 +949,25 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[1].name: Invalid value: "": spec.components[1].name in body should be at least 1 chars long`,
 		},
 		{
-			name:       "v1alpha1 converted empty service map key is accepted",
+			name:       "v1alpha1 converted empty service map key is rejected by its generated Service name",
 			deployment: alphaDGDForAdmissionWithServiceNames(""),
+			wantWebhookErrs: []string{
+				fmt.Sprintf("spec.services[]: Invalid value: %q: %s", "", invalidComponentName),
+				generatedNameErr("spec.services[]", "test-graph-", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.services[]", "test-graph-", shortenDGDOrComponent, "nvidia.com/selector label value: a valid label must be an empty string or consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyValue',  or 'my_value',  or '12345', regex used for validation is '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')"),
+			},
 		},
+		{
+			name:            "v1alpha1 leading-hyphen service key is rejected as a component name",
+			deployment:      alphaDGDForAdmissionWithServiceNames("-worker"),
+			wantWebhookErrs: []string{fmt.Sprintf("spec.services[-worker]: Invalid value: %q: component name must be a non-empty alphanumeric name with internal hyphens: %s", "-worker", strings.Join(k8svalidation.IsDNS1123Label("-worker"), "; "))},
+		},
+		{
+			name:            "v1alpha1 dotted service key is rejected as a component name",
+			deployment:      alphaDGDForAdmissionWithServiceNames("worker.v1"),
+			wantWebhookErrs: []string{fmt.Sprintf("spec.services[worker.v1]: Invalid value: %q: component name must be a non-empty alphanumeric name with internal hyphens: %s", "worker.v1", strings.Join(k8svalidation.IsDNS1123Label("worker.v1"), "; "))},
+		},
+
 		{
 			name: "v1beta1 component names are unique case-insensitively in CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -951,9 +994,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames(dgdAdmissionWorkerName, dgdAdmissionUpperWorkerName)),
 		},
 		{
-			name:          "v1alpha1 empty service name remains updateable",
-			oldDeployment: alphaDGDForAdmissionWithServiceNames(""),
-			deployment:    dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames("")),
+			name:               "v1alpha1 empty service name remains updateable",
+			seedWithoutWebhook: true,
+			oldDeployment:      alphaDGDForAdmissionWithServiceNames(""),
+			deployment:         dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames("")),
 		},
 		{
 			name: "v1beta1 compilation cache mount requires a PVC name in the schema",
@@ -2750,6 +2794,409 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
 			}),
 		},
+		{
+			name: "generated Service names longer than 63 characters are rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", ticketDGDName+"-frontend", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[0].name", ticketDGDName+"-frontend", shortenDGDOrComponent, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "digit-leading generated Service names are rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+			}),
+			wantWebhookErrs: []string{
+				groveDigitNameErr,
+				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name: "Grove headless Service rejects a dotted graph name",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "model.v1"
+			}),
+			wantWebhookErrs: []string{generatedNameErr("metadata.name", "model.v1-0", shortenHeadlessName, strings.Replace(invalidDNS1035ServiceName, "Service name:", "Grove PodCliqueSet headless Service name:", 1))},
+		},
+
+		{
+			// On Grove the worker name has no hash; with one it would be 70 characters here.
+			name: "generated frontend Service name accepts 63 characters",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = frontendBoundaryDGDName
+			}),
+		},
+		{
+			name: "generated frontend Service name rejects 64 characters",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = frontendBoundaryDGDName + "x"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", frontendBoundaryDGDName+"x-frontend", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[0].name", frontendBoundaryDGDName+"x-frontend", shortenDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "generated worker DCD name accepts 63 characters outside Grove",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName
+			}),
+		},
+		{
+			name: "generated worker DCD name rejects 64 characters outside Grove",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "setting an unset component type to worker rejects a generated worker DCD name of 64 characters",
+			oldDeployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+				dgd.Spec.Components[1].ComponentType = ""
+			}),
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "DGD name label value longer than 63 characters is rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "g" + strings.Repeat("x", 63)
+			}),
+			wantWebhookErrs: []string{
+				fmt.Sprintf("metadata.name: Invalid value: %q: invalid as the nvidia.com/dynamo-graph-deployment-name label value (must be no more than 63 bytes); choose a shorter DynamoGraphDeployment name", "g"+strings.Repeat("x", 63)),
+				generatedNameErr("spec.components[0].name", "g"+strings.Repeat("x", 63)+"-frontend", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[0].name", "g"+strings.Repeat("x", 63)+"-frontend", shortenDGDOrComponent, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", "g"+strings.Repeat("x", 63)+"-worker", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", "g"+strings.Repeat("x", 63)+"-worker", shortenDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+		{
+			name:               "existing DGD with invalid generated Service names remains updateable",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Labels = map[string]string{"updated": "true"}
+				// A reorder changes spec.components[i] but not the generated names.
+				slices.Reverse(dgd.Spec.Components)
+			}),
+		},
+		// Service decisions must not change whether an unchanged selector error is grandfathered.
+		{
+			name:               "disabling Kubernetes discovery preserves an existing DGD selector error",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+		},
+		{
+			name:               "enabling Kubernetes discovery adds a Service error to an existing DGD selector error",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName),
+			},
+		},
+		{
+			name: "Grove headless Service rejects a digit-leading name even without discovery",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+			wantWebhookErrs: []string{
+				groveDigitNameErr,
+				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name: "worker DCD names without a Service accept a digit-leading name outside Grove",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name: "a single-pod elastic-EP leader on Grove gets a Service without Kubernetes discovery",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
+			}),
+			wantWebhookErrs: []string{
+				groveDigitNameErr,
+				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker-ray", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name:               "an update that makes a Grove component a single-pod elastic-EP leader rejects a digit-leading name",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker-ray", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name:               "an existing component Service error does not hide a new elastic-EP leader Service error",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker-ray", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name:               "enabling Kubernetes discovery rejects a digit-leading generated Service name",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name:               "an existing invalid base name does not hide a new worker DCD name",
+			seedWithoutWebhook: true,
+			oldDeployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Spec.Components[1].ComponentType = ""
+			}),
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+		{
+			name:               "another component's existing invalid name does not hide a new worker DCD name",
+			seedWithoutWebhook: true,
+			oldDeployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = collisionDGDName
+				dgd.Spec.Components[0].ComponentName = "worker-00000000"
+				dgd.Spec.Components[1].ComponentType = ""
+			}),
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = collisionDGDName
+				dgd.Spec.Components[0].ComponentName = "worker-00000000"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", collisionDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", collisionDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
+			},
+		},
+
+		{
+			name:          "alpha LWS worker Ingress checks the full hash-suffixed backend name",
+			groveDisabled: true, lwsEnabled: true,
+			deployment:      alphaDGDWithLongWorkerIngressForAdmission(true),
+			wantWebhookErrs: []string{fmt.Sprintf("spec.services[worker].ingress: Invalid value: %q: generated Ingress backend Service name is invalid: must be no more than 63 characters; choose a shorter name starting with a letter; worker hash is shown as zeros", strings.Repeat("a", 56)+"-worker-00000000")},
+		},
+		{
+			name:          "existing alpha LWS worker Ingress with an invalid backend remains editable",
+			groveDisabled: true, lwsEnabled: true, seedWithoutWebhook: true,
+			oldDeployment: alphaDGDWithLongWorkerIngressForAdmission(true),
+			deployment:    dgdAdmissionWithLabel(t, alphaDGDWithLongWorkerIngressForAdmission(true)),
+		},
+		{
+			name:       "Grove does not check an alpha Ingress that only a worker DCD would render",
+			deployment: alphaDGDWithLongWorkerIngressForAdmission(false),
+		},
+
+		{
+			name:               "operator adoption preserves an existing component worker name violation",
+			seedWithoutWebhook: true, username: admissionOperatorPrincipal,
+			oldBeforeUpdate: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent}
+			}),
+		},
+		{
+			name:       "LWS multinode worker accepts a long DCD name without a discovery Service",
+			lwsEnabled: true,
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+		},
+		{
+			name:       "LWS headless Service rejects a digit-leading worker name with etcd discovery",
+			lwsEnabled: true,
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "7b"
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Spec.Components = dgd.Spec.Components[1:]
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{generatedNameErr("spec.components[0].name", "7b-worker-00000000-0", shortenHeadlessName, strings.Replace(invalidDNS1035ServiceName, "Service name:", "LeaderWorkerSet headless Service name:", 1))},
+		},
+		{
+			name:       "LWS headless Service rejects a dotted worker name with etcd discovery",
+			lwsEnabled: true,
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "model.v1"
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Spec.Components = dgd.Spec.Components[1:]
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{generatedNameErr("spec.components[0].name", "model.v1-worker-00000000-0", shortenHeadlessName, strings.Replace(invalidDNS1035ServiceName, "Service name:", "LeaderWorkerSet headless Service name:", 1))},
+		},
+		{
+			name: "DisaggregatedSet child Service prefix rejects a digit-leading name with etcd discovery",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "7b"
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderDisaggregatedSet
+				dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = "true"
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Spec.Components = dgd.Spec.Components[1:]
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				decode := worker.DeepCopy()
+				decode.ComponentName = "decode"
+				decode.ComponentType = nvidiacomv1beta1.ComponentTypeDecode
+				dgd.Spec.Components = append(dgd.Spec.Components, *decode)
+			}),
+			wantWebhookErrs: []string{generatedNameErr("metadata.name", "7b", shortenHeadlessName, strings.Replace(invalidDNS1035ServiceName, "Service name:", "DisaggregatedSet child Service prefix:", 1))},
+		},
+		{
+			name: "DisaggregatedSet workers accept long generated names with etcd discovery",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = strings.Repeat("a", 58)
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderDisaggregatedSet
+				dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = "true"
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Spec.Components = dgd.Spec.Components[1:]
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				decode := worker.DeepCopy()
+				decode.ComponentName = "decode"
+				decode.ComponentType = nvidiacomv1beta1.ComponentTypeDecode
+				dgd.Spec.Components = append(dgd.Spec.Components, *decode)
+			}),
+		},
+
+		// Delegated-only graphs have no ordinary Grove headless Service.
+		{
+			name: "LPX-only graph accepts a digit-leading name without an ordinary Grove Service",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+			}),
+		},
+		{
+			name: "LPX-only graph accepts a dotted name without an ordinary Grove Service",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "model.v1"
+			}),
+		},
+		{
+			name: "adding an ordinary Grove worker to an LPX-only graph rejects a new headless Service error",
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components = append(dgd.Spec.Components, betaDGDForAdmission(nil).Spec.Components[1])
+			}),
+			wantWebhookErrs: []string{groveDigitNameErr},
+		},
+		{
+			name: "LPX Pod selector rejects a generated name longer than 63 characters",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = strings.Repeat("l", 60)
+			}),
+			wantWebhookErrs: []string{generatedNameErr("spec.components[0].name", strings.Repeat("l", 60)+"-lpx", shortenDGDOrComponent, tooLongSelectorValue)},
+		},
+		{
+			name: "role-only workers use operator discovery when the DGD annotation is not inherited",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "7b"
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Spec.Components = dgd.Spec.Components[1:]
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 2)
+			}),
+			wantWebhookErrs: []string{generatedNameErr("spec.components[0].name", "7b-worker-00000000", shortenWorkerDGDOrComponent, invalidDNS1035ServiceName)},
+		},
+		{
+			name: "role template discovery annotations do not override the component Service backend",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "7b"
+				dgd.Spec.Components = dgd.Spec.Components[1:]
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 2)
+				for i := range worker.Roles {
+					worker.Roles[i].PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				}
+			}),
+			wantWebhookErrs: []string{generatedNameErr("spec.components[0].name", "7b-worker-00000000", shortenWorkerDGDOrComponent, invalidDNS1035ServiceName)},
+		},
 
 		// Topology rules.
 		{
@@ -4272,7 +4719,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Assemble the admission scenario from the table entry")
-			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled, LPX: !tt.lpxDisabled}
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled, LPX: !tt.lpxDisabled, LWS: tt.lwsEnabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
@@ -4472,6 +4919,21 @@ func alphaDGDForAdmission(
 		mutate(dgd)
 	}
 	return dgd
+}
+
+// alphaDGDWithLongWorkerIngressForAdmission gives the base name 63 characters and the DCD name 72.
+func alphaDGDWithLongWorkerIngressForAdmission(multinode bool) *nvidiacomv1alpha1.DynamoGraphDeployment {
+	return alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+		dgd.Name = strings.Repeat("a", 56)
+		worker := dgd.Spec.Services["worker"]
+		worker.RuntimeVersionOverride = "1.6.0"
+		worker.ExtraPodSpec.MainContainer.Image = "runtime:1.6.0"
+		worker.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		worker.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		if multinode {
+			worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+		}
+	})
 }
 
 func alphaDGDForAdmissionWithServiceNames(names ...string) *nvidiacomv1alpha1.DynamoGraphDeployment {

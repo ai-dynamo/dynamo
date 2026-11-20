@@ -34,6 +34,10 @@ import (
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
 
+// WorkerHashLength is the length of the worker hash that worker DCD names end
+// with. Admission uses it to check the generated names before the hash exists.
+const WorkerHashLength = 8
+
 // Preserve hashes for runtimes released before version hashing.
 var minimumHashedRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}
 
@@ -90,7 +94,7 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])[:8], nil
+	return hex.EncodeToString(hash[:])[:WorkerHashLength], nil
 }
 
 func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoComponentDeploymentSpec {

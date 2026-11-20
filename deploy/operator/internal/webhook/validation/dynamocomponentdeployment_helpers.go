@@ -18,12 +18,19 @@
 package validation
 
 import (
+	"context"
 	"fmt"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // invalidDynamoComponentDeploymentError converts allErrs for dcd into an API error.
@@ -67,4 +74,46 @@ func hasDynamoComponentDeploymentV1alpha1CompatibilityFields(
 		spec.EPPConfig != nil ||
 		spec.FrontendSidecar != nil ||
 		spec.Failover != nil
+}
+
+// controlledByDynamoGraphDeployment reports whether dcd's controller owner
+// reference names a DynamoGraphDeployment. dcd must not be nil.
+func controlledByDynamoGraphDeployment(dcd metav1.Object) bool {
+	controller := metav1.GetControllerOf(dcd)
+	if controller == nil || controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
+		return false
+	}
+	groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
+	return err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group
+}
+
+// standaloneDCDNameViolations reports each failing naming rule for a standalone DCD.
+// Service names are checked only when the DCD gets a Service. dcd must not be nil.
+func standaloneDCDNameViolations(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+	lwsEnabled bool,
+) []generatedNameViolation {
+	hasService := dcd.IsFrontendComponent() ||
+		commoncontroller.IsK8sDiscoveryEnabled(discoveryBackend, dynamo.GetDCDKubeAnnotations(dcd))
+	violations := generatedNameViolations(
+		field.NewPath("metadata", "name"),
+		dcd.Name,
+		generatedNameChecks{dcd: true, service: hasService, selector: !(lwsEnabled && dcd.IsMultinode())},
+		"choose a shorter or letter-leading DynamoComponentDeployment name",
+	)
+	if lwsEnabled && dcd.IsMultinode() {
+		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), dynamo.LeaderWorkerSetNameForWorkload(dcd.Name), "LeaderWorkerSet headless Service name")...)
+	}
+	return violations
+}
+
+// operatorOwnedDCDNameExemption applies only to authenticated operator writes for graph children.
+// ctx and dcd must not be nil. An unset principal does not grant an exemption.
+func operatorOwnedDCDNameExemption(ctx context.Context, dcd metav1.Object, operatorPrincipal string) bool {
+	if operatorPrincipal == "" || !controlledByDynamoGraphDeployment(dcd) {
+		return false
+	}
+	request, err := admission.RequestFromContext(ctx)
+	return err == nil && request.UserInfo.Username == operatorPrincipal
 }

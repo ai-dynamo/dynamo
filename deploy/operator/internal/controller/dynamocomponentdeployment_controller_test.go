@@ -693,6 +693,64 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 	require.Equal(t, testNormalizedDCDName, service.Name)
 }
 
+func TestDCDWorkloadRenderer_GeneratedNameBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, component, dgdName string
+		valid                    bool
+	}{
+		{name: "frontend 63 characters", component: "frontend", dgdName: strings.Repeat("f", 54), valid: true},
+		{name: "frontend 64 characters", component: "frontend", dgdName: strings.Repeat("f", 55)},
+		{name: "worker 63 characters with hash", component: "worker", dgdName: strings.Repeat("w", 47), valid: true},
+		{name: "worker 64 characters with hash", component: "worker", dgdName: strings.Repeat("w", 48)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Generate a child DCD through the graph renderer with its real worker hash")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name: tc.dgdName, Namespace: "default", UID: "graph-uid",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: tc.component, ComponentType: v1beta1.ComponentType(tc.component),
+						RuntimeVersionOverride: "1.6.0", Replicas: new(int32(1)),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "runtime:1.6.0"}},
+						}},
+					}},
+				},
+			}
+			workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: workerHash})
+			require.NoError(t, err)
+			dcd := dcds[tc.component]
+			require.NotNil(t, dcd)
+
+			t.Log("Render the Service and Pod template through the controller workload renderer")
+			renderer := newDCDWorkloadRenderer(
+				fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dgd, dcd).Build(),
+				&configv1alpha1.OperatorConfiguration{Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes}},
+				&controller_common.RuntimeConfig{},
+				&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+			)
+			service, toDelete, err := renderer.generateService(t.Context(), dcd)
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			podTemplate, err := renderer.generatePodTemplateSpec(t.Context(), dcd, dynamo.RoleMain, noContainerGPUs())
+			require.NoError(t, err)
+
+			t.Log("Check Kubernetes limits on the rendered Service name and actual Pod selector label")
+			selector, present := podTemplate.Labels[commonconsts.KubeLabelDynamoSelector]
+			require.True(t, present)
+			require.Equal(t, dcd.Name, selector)
+			require.Equal(t, tc.valid, len(validation.IsValidLabelValue(selector)) == 0, selector)
+			require.Equal(t, tc.valid, len(validation.IsDNS1035Label(service.Name)) == 0, service.Name)
+			for key, value := range service.Spec.Selector {
+				require.Equal(t, value, podTemplate.Labels[key], "Service selector %s must select the rendered Pod", key)
+			}
+		})
+	}
+}
+
 func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
 	t.Log("Arrange a standalone frontend DCD and its service-rendering configuration")
 	dcd := &v1beta1.DynamoComponentDeployment{

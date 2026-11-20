@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -37,11 +38,15 @@ const (
 
 // DynamoComponentDeploymentHandler is a handler for validating DynamoComponentDeployment resources.
 // It is a thin wrapper around DynamoComponentDeploymentValidator.
-type DynamoComponentDeploymentHandler struct{}
+type DynamoComponentDeploymentHandler struct {
+	discoveryBackend  configv1alpha1.DiscoveryBackend
+	operatorPrincipal string
+}
 
 // NewDynamoComponentDeploymentHandler creates a new handler for DynamoComponentDeployment Webhook.
-func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
-	return &DynamoComponentDeploymentHandler{}
+// discoveryBackend is the operator's configured default discovery backend.
+func NewDynamoComponentDeploymentHandler(discoveryBackend configv1alpha1.DiscoveryBackend, operatorPrincipal string) *DynamoComponentDeploymentHandler {
+	return &DynamoComponentDeploymentHandler{discoveryBackend: discoveryBackend, operatorPrincipal: operatorPrincipal}
 }
 
 // ValidateCreate validates a DynamoComponentDeployment create request.
@@ -54,7 +59,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 
 	logger.Info("validate create", "name", obj.Name, "namespace", obj.Namespace)
 
-	validator := NewDynamoComponentDeploymentValidator()
+	validator := NewDynamoComponentDeploymentValidator(h.discoveryBackend, h.operatorPrincipal)
 	return validator.validate(
 		ctx,
 		obj,
@@ -81,7 +86,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(
 		return nil, nil
 	}
 
-	validator := NewDynamoComponentDeploymentValidator()
+	validator := NewDynamoComponentDeploymentValidator(h.discoveryBackend, h.operatorPrincipal)
 	return validator.ValidateUpdate(
 		ctx,
 		oldObj,
