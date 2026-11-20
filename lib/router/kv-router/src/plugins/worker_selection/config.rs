@@ -15,12 +15,17 @@
 //!     hints:                                   # optional: the role's hints, in run order
 //!       - type: my_hint                        # any linked hint policy
 //!     session_affinity: true                   # optional: keep a session on one worker
+//!     busy_threshold:                          # optional: when a worker stops taking requests
+//!       active_decode_blocks: 0.85
 //! ```
 //!
 //! A role whose entry lists no `hints` runs its default hints; `hints: []` runs none.
 //!
 //! `session_affinity` is read by the router, not by the policy: `true` is a 300 s idle TTL in
 //! `hard` mode, `{ttl_secs, mode, max_entries}` tunes it, and `false` turns it off for the role.
+//!
+//! `busy_threshold` is read by the router too: `{active_decode_blocks, active_prefill_tokens_frac}`
+//! are the role's busy-worker thresholds, and `{}` sets none.
 //!
 //! The older `instances:` list, which named a `{type, parameters}` pair once and referenced it
 //! from each role by name, is deprecated and still accepted.
@@ -55,6 +60,7 @@ pub struct WorkerSelectionConfig {
 struct RoleSelection {
     policy: WorkerSelectionPolicySelection,
     session_affinity: Option<SessionAffinitySetting>,
+    busy_threshold: Option<BusyThresholdSpec>,
 }
 
 fn policy(role: &Option<RoleSelection>) -> Option<&WorkerSelectionPolicySelection> {
@@ -90,6 +96,19 @@ impl WorkerSelectionConfig {
         }
         .as_ref()
         .and_then(|role| role.session_affinity)
+    }
+
+    /// A role's `busy_threshold`; `None` when its entry does not have the key. An `encode`
+    /// entry cannot set it.
+    pub fn busy_threshold(&self, worker_type: WorkerType) -> Option<BusyThresholdSpec> {
+        match worker_type {
+            WorkerType::Aggregated => &self.aggregated,
+            WorkerType::Prefill => &self.prefill,
+            WorkerType::Decode => &self.decode,
+            WorkerType::Encode => &self.encode,
+        }
+        .as_ref()
+        .and_then(|role| role.busy_threshold)
     }
 
     /// The hints a role's entry lists, in order; `None` when it lists none, so the role runs its
@@ -149,6 +168,18 @@ impl Default for SessionAffinitySpec {
             max_entries: None,
         }
     }
+}
+
+/// A role's `busy_threshold` key: when one of the role's workers stops taking requests. An
+/// omitted limit is not checked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusyThresholdSpec {
+    /// Fraction (0.0 to 1.0) of the worker's KV blocks in use above which it is busy.
+    pub active_decode_blocks: Option<f64>,
+    /// Fraction of the worker's `max_num_batched_tokens` above which its active prefill
+    /// tokens make it busy.
+    pub active_prefill_tokens_frac: Option<f64>,
 }
 
 /// One role's worker-selection policy selection.
@@ -223,7 +254,7 @@ pub(crate) struct RawWorkerSelectionConfig {
 
 enum RawRoleSelection {
     Named(String),
-    Inline(RawInlineSelection),
+    Inline(Box<RawInlineSelection>),
 }
 
 impl RawRoleSelection {
@@ -256,6 +287,16 @@ struct RawInlineSelection {
     hints: Option<Vec<RawHintPolicyEntry>>,
     #[serde(default)]
     session_affinity: Option<serde_yaml::Value>,
+    #[serde(default, deserialize_with = "present")]
+    busy_threshold: Option<serde_yaml::Value>,
+}
+
+/// Keeps a key with a null value (`busy_threshold:` with its limits commented out) apart from
+/// an absent key, so it is rejected instead of falling back to the card or the flags.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_yaml::Value>, D::Error> {
+    serde_yaml::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,6 +339,35 @@ fn resolve_session_affinity(
         mode: raw.mode.unwrap_or(defaults.mode),
         max_entries: raw.max_entries,
     }))
+}
+
+fn resolve_busy_threshold(
+    location: &str,
+    value: serde_yaml::Value,
+) -> Result<BusyThresholdSpec, RouterPolicyConfigError> {
+    if !value.is_mapping() {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location} must be an {{active_decode_blocks, active_prefill_tokens_frac}} mapping"
+        )));
+    }
+    let spec: BusyThresholdSpec = serde_yaml::from_value(value)
+        .map_err(|source| RouterPolicyConfigError::Validation(format!("{location}: {source}")))?;
+    if let Some(threshold) = spec.active_decode_blocks
+        && !(0.0..=1.0).contains(&threshold)
+    {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location}.active_decode_blocks must be between 0.0 and 1.0, got {threshold}"
+        )));
+    }
+    if let Some(threshold) = spec.active_prefill_tokens_frac
+        && !(threshold.is_finite() && threshold >= 0.0)
+    {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location}.active_prefill_tokens_frac must be a finite value greater than or \
+             equal to 0.0, got {threshold}"
+        )));
+    }
+    Ok(spec)
 }
 
 impl RawWorkerSelectionConfig {
@@ -358,9 +428,10 @@ impl RawWorkerSelectionConfig {
                     return Ok(Some(RoleSelection {
                         policy: WorkerSelectionPolicySelection::Named(name),
                         session_affinity: None,
+                        busy_threshold: None,
                     }));
                 }
-                RawRoleSelection::Inline(inline) => inline,
+                RawRoleSelection::Inline(inline) => *inline,
             };
             let session_affinity = inline
                 .session_affinity
@@ -371,6 +442,16 @@ impl RawWorkerSelectionConfig {
             if session_affinity.is_some() && role == "encode" {
                 return Err(RouterPolicyConfigError::Validation(format!(
                     "{location}.session_affinity is not supported for encode"
+                )));
+            }
+            let busy_threshold = inline
+                .busy_threshold
+                .map(|value| resolve_busy_threshold(&format!("{location}.busy_threshold"), value))
+                .transpose()?;
+            // The router monitors no load for an encode pool, so a threshold would never apply.
+            if busy_threshold.is_some() && role == "encode" {
+                return Err(RouterPolicyConfigError::Validation(format!(
+                    "{location}.busy_threshold is not supported for encode"
                 )));
             }
             let policy = if inline.policy_type == "default" {
@@ -400,6 +481,7 @@ impl RawWorkerSelectionConfig {
             Ok(Some(RoleSelection {
                 policy,
                 session_affinity,
+                busy_threshold,
             }))
         };
 

@@ -22,6 +22,19 @@
 //! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
 //! ```
 //!
+//! **One role's pools (optional `role`: `aggregated`, `prefill` or `decode`):**
+//!
+//! A disaggregated model has a prefill pool and a decode pool, each with its own thresholds.
+//! Without `role` a write reaches both and a read returns the serving (aggregated or decode)
+//! pool's values. With `role` both are limited to that role's pools, and the response repeats
+//! it. A role the model does not serve is a 404.
+//! ```json
+//! // Request
+//! {"model": "llama-3-70b", "role": "prefill", "active_prefill_tokens_threshold_frac": 0.8}
+//! // Response
+//! {"model": "llama-3-70b", "role": "prefill", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null, "active_prefill_tokens_threshold_frac": 0.8}
+//! ```
+//!
 //! **Get thresholds (omit thresholds):**
 //! ```json
 //! // Request
@@ -43,6 +56,7 @@
 
 use super::{RouteDoc, service_v2};
 use crate::discovery::{LoadThresholdConfig, ModelManager};
+use crate::worker_type::WorkerType;
 use axum::{
     Json, Router,
     extract::Request,
@@ -62,6 +76,11 @@ use std::sync::Arc;
 pub struct BusyThresholdRequest {
     /// The model name
     pub model: String,
+    /// Limit the request to this role's pools. Omitted: write every pool, read the serving pool.
+    /// `worker_type`, the name `GET /router_policy` gives a role, is accepted too: an unknown
+    /// key is ignored, so a mis-keyed role would write every pool.
+    #[serde(default, alias = "worker_type")]
+    pub role: Option<WorkerType>,
     /// The active decode blocks threshold value (0.0 to 1.0), or null to just get the current value
     pub active_decode_blocks_threshold: Option<f64>,
     /// The active prefill tokens threshold value (literal token count), or null to just get the current value
@@ -75,6 +94,9 @@ pub struct BusyThresholdRequest {
 pub struct BusyThresholdResponse {
     /// The model name
     pub model: String,
+    /// The role the request named; absent when it named none
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<WorkerType>,
     /// The active decode blocks threshold value (null if no threshold is configured)
     pub active_decode_blocks_threshold: Option<f64>,
     /// The active prefill tokens threshold value (null if no threshold is configured)
@@ -160,12 +182,39 @@ async fn busy_threshold_handler(
         );
     }
 
+    let role = request.role;
+    if role == Some(WorkerType::Encode) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse {
+                error: "encode workers have no busy thresholds; role must be aggregated, \
+                        prefill or decode"
+                    .to_string(),
+            })),
+        );
+    }
+
     // Build LoadThresholdConfig from request if any threshold is being set
     let is_setting = requested_config.is_configured();
     let update_config = is_setting.then_some(requested_config);
 
     // Get or set the thresholds via the model's worker monitor
-    let config = manager.load_threshold_config(&request.model, update_config.as_ref());
+    let config = manager.load_threshold_config(&request.model, role, update_config.as_ref());
+
+    // A role-less read of an unknown model returns nulls; a named role must exist.
+    if config.is_none()
+        && let Some(role) = role
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!(
+                    "Model '{}' has no {role} workers with busy thresholds.",
+                    request.model
+                ),
+            })),
+        );
+    }
 
     // If trying to SET but model has no monitor, return 404
     if is_setting && config.is_none() {
@@ -180,7 +229,7 @@ async fn busy_threshold_handler(
         );
     }
 
-    if is_setting && !manager.accepts_load_thresholds(&request.model) {
+    if is_setting && !manager.accepts_load_thresholds(&request.model, role) {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!(ErrorResponse {
@@ -196,6 +245,7 @@ async fn busy_threshold_handler(
     if is_setting {
         tracing::info!(
             model = %request.model,
+            ?role,
             config = ?config,
             "Updated busy thresholds"
         );
@@ -217,6 +267,7 @@ async fn busy_threshold_handler(
         StatusCode::OK,
         Json(serde_json::json!(BusyThresholdResponse {
             model: request.model,
+            role,
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
@@ -234,6 +285,7 @@ async fn list_busy_thresholds_handler(
             .into_iter()
             .map(|(model, config)| BusyThresholdResponse {
                 model,
+                role: None,
                 active_decode_blocks_threshold: config.active_decode_blocks_threshold,
                 active_prefill_tokens_threshold: config.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: config.active_prefill_tokens_threshold_frac,

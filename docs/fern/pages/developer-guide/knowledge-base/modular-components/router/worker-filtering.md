@@ -21,13 +21,40 @@ These checks are centralized in the router's routing eligibility path so selecti
 
 ## Busy Thresholds
 
-Busy thresholds are worker filters. They are configured separately from the queue threshold:
+Busy thresholds are worker filters. Set them for a worker role with `busy_threshold` in that role's entry of the `--router-policy-config` file:
+
+```yaml
+worker_selection:
+  prefill:
+    type: dynamo-default-cost-fn
+    busy_threshold:
+      active_prefill_tokens_frac: 1.5
+  decode:
+    type: dynamo-default-cost-fn
+    busy_threshold:
+      active_decode_blocks: 0.85
+```
+
+| Key | Meaning |
+|---|---|
+| `active_decode_blocks` | Fraction of the worker's KV cache blocks in use, from `0.0` through `1.0`, above which the worker is busy |
+| `active_prefill_tokens_frac` | Non-negative fraction of the worker's `max_num_batched_tokens` above which its active prefill tokens make the worker busy |
+
+The `aggregated`, `prefill`, and `decode` roles accept the key on any policy type, including `{type: default, busy_threshold: {...}}`. `encode` rejects it, because the router does not monitor the load of encode workers. A role's entry is taken whole: a limit it omits is not checked, and `busy_threshold: {}` checks nothing. The key with no value (`busy_threshold:` alone, for example after its only limit is commented out) is a startup error. Each role's entry is its own, so a prefill pool does not use the `decode` entry. Only the frontend reads the key; the standalone router and the inference-gateway endpoint picker accept it in a policy file and ignore it.
+
+A role's `busy_threshold` rejects requests: once every eligible worker of the role is past it, the request fails with HTTP 529. The `prefill_busy_threshold_frac` and `decode_busy_threshold_frac` keys of a [policy class](configuration-and-tuning.md#policy-class-queues) in the same file do not reject. They hold the request in the router queue until a worker is free; see [Queue Backpressure](#queue-backpressure).
+
+A role whose entry has no `busy_threshold` keeps the earlier rules for now. A worker set that advertises router settings uses its own threshold flags, and a worker set that advertises nothing uses the frontend's:
 
 - `--active-decode-blocks-threshold`
 - `--active-prefill-tokens-threshold`
 - `--active-prefill-tokens-threshold-frac`
 
-When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the [`/busy_threshold` admin endpoint](../../../../reference/components/frontend-configuration.mdx#admin).
+A prefill pool without the key uses the same advertised or flag thresholds as the decode set it fronts, not the `decode` entry of the policy file. On the frontend, `--active-decode-blocks-threshold` and `--active-prefill-tokens-threshold-frac` and their environment variables are deprecated and scheduled for removal in v1.9; see [Deprecations](../../../../reference/general/releases/deprecations.mdx#v180). The absolute `--active-prefill-tokens-threshold` was deprecated earlier and has no policy-file key. The frontend logs each role's starting thresholds and where they came from (`busy_thresholds_source`) on the `Activating router` line, and for a prefill pool on the `Prefill pool busy thresholds` line.
+
+A worker set in direct routing mode has no busy thresholds, because the caller picks its workers. Its prefill pool has none either: the pool follows the mode of the decode set it fronts, whatever mode the prefill workers advertise.
+
+When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime, for a whole model or for one role, through the [`/busy_threshold` admin endpoint](configuration-and-tuning.md#busy-thresholds).
 
 Busy filtering preserves error classification:
 

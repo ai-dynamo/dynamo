@@ -139,6 +139,11 @@ inherits another role's selection. A bare string is a policy type from the table
 default parameters. To tune a policy, write a mapping with `type` and `parameters` instead (see
 [Configure the Default Policy](#configure-the-default-policy)).
 
+A role's mapping also takes two settings that the router applies itself, whatever the policy
+type: `session_affinity` (see [Session Affinity](#session-affinity)) and `busy_threshold`, the
+role's busy-worker rejection thresholds (see
+[Busy Thresholds](worker-filtering.md#busy-thresholds)).
+
 > [!NOTE]
 > Before v1.7, the YAML listed `instances` (each with a `name`, a `type`, and `parameters`) and each
 > role referenced an instance by name. That form still works and logs a deprecation warning; it is
@@ -848,7 +853,7 @@ off unless `DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
 | Resource | Methods | Scope |
 | --- | --- | --- |
 | `/router_policy` | GET, PATCH | One concrete router instance, with a revision |
-| `/router_policy/busy_threshold` | GET, POST | All existing WorkerSets for a model in this frontend |
+| `/router_policy/busy_threshold` | GET, POST | All existing WorkerSets for a model in this frontend, or the pools of one role |
 
 ### Worker Selection
 
@@ -945,6 +950,31 @@ fields retain their current values; a body containing only `model` queries that 
 to an undiscovered model returns 404. Invalid threshold ranges return 400, and invalid field
 types return 422, without changing the thresholds. A frontend in direct routing mode
 (`--router-mode direct`) does not pick workers and ignores busy thresholds, so a write returns 409.
+
+The field names differ from the policy file's: `active_decode_blocks_threshold` is a role's
+`busy_threshold.active_decode_blocks`, and `active_prefill_tokens_threshold_frac` is its
+`active_prefill_tokens_frac`. The absolute threshold has no policy-file key.
+
+A disaggregated model has a prefill pool and a decode pool, and each holds its own thresholds.
+Add `role` (`aggregated`, `prefill`, or `decode`) to limit a request to that role's pools.
+`worker_type`, the name `GET /router_policy` gives a role, is accepted as the same field:
+
+```bash
+curl -X POST http://localhost:8002/router_policy/busy_threshold \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen","role":"prefill","active_prefill_tokens_threshold_frac":0.8}'
+```
+
+| Request | Write | Values returned |
+| --- | --- | --- |
+| Without `role` | Every pool of the model | The serving pool's: aggregated, or decode for a disaggregated model |
+| With `role` | That role's pools | That role's, with `role` repeated in the response |
+
+Read each role to compare the pools: the response to a request without `role` does not show
+the prefill pool. A `role` the model does not serve returns 404, `role: encode` returns 400
+because encode workers have no busy thresholds, and any other value returns 422. `GET` lists
+one entry per model with the serving pool's values. A frontend older than v1.8 ignores `role`
+and applies the write to every pool.
 
 The legacy `GET` and `POST /busy_threshold` routes remain compatibility aliases with the same
 handlers and state. Writes through either path are visible through the other. These updates

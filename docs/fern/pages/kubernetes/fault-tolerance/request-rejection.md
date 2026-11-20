@@ -31,6 +31,11 @@ Use the signals that match the workers you want to protect:
 - Set `--active-prefill-tokens-threshold-frac` when the prefill limit should scale with the worker's
   `max_num_batched_tokens` value.
 
+The frontend's `--active-decode-blocks-threshold` and `--active-prefill-tokens-threshold-frac` are
+deprecated for removal in v1.9. A policy file sets the same thresholds for each worker role, so
+prefill and decode workers can have different limits; see
+[Busy Thresholds](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#busy-thresholds).
+
 The checks use OR logic. If you configure more than one threshold, exceeding any configured threshold
 marks that data-parallel rank as busy. A worker is rejected only after all of its ranks are busy, and a
 request is shed only when every eligible worker is busy.

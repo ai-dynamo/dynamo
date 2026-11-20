@@ -14,12 +14,13 @@ use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
-use super::worker_monitor::LoadThresholdConfig;
+use super::worker_monitor::{LoadThresholdConfig, LoadThresholdHandle};
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
+use crate::worker_type::WorkerType;
 
 use crate::types::{
     RealtimeBidirectionalEngine,
@@ -942,35 +943,45 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet with a threshold handle,
-    /// preferring an enabled one. When `config` is Some, updates every handle:
-    /// each WorkerSet's serving pool and, for a decode set, its prefill pool.
+    /// Read, and with `config` first update, the busy thresholds of this model's pools.
+    ///
+    /// `role` limits both to the pools of that role. Without it an update reaches every
+    /// handle (each WorkerSet's serving pool and, for a decode set, its prefill pool) and
+    /// the value returned is a serving pool's. `None` means no pool matched. An enabled
+    /// handle is preferred over one in direct routing mode.
     pub fn load_threshold_config(
         &self,
+        role: Option<WorkerType>,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
         let worker_sets = self.worker_sets.load();
-        let handles: Vec<_> = worker_sets
-            .values()
-            .flat_map(|worker_set| worker_set.load_threshold_handles())
-            .collect();
+        let mut handles = Self::load_threshold_handles(&worker_sets, role).collect::<Vec<_>>();
         if let Some(cfg) = config {
-            handles.iter().for_each(|handle| handle.update(cfg));
+            handles.iter().for_each(|(_, handle)| handle.update(cfg));
         }
+        // Stable, so pools of one role keep their order.
+        handles.sort_by_key(|(role, _)| *role == WorkerType::Prefill);
         handles
             .iter()
-            .find(|handle| handle.is_enabled())
+            .find(|(_, handle)| handle.is_enabled())
             .or(handles.first())
-            .map(|handle| handle.get())
+            .map(|(_, handle)| handle.get())
     }
 
-    /// Whether any WorkerSet has an enabled threshold handle.
-    pub(crate) fn accepts_load_thresholds(&self) -> bool {
-        self.worker_sets.load().values().any(|worker_set| {
-            worker_set
-                .load_threshold_handles()
-                .any(|thresholds| thresholds.is_enabled())
-        })
+    /// Whether any pool, of `role` when given, has an enabled threshold handle.
+    pub(crate) fn accepts_load_thresholds(&self, role: Option<WorkerType>) -> bool {
+        Self::load_threshold_handles(&self.worker_sets.load(), role)
+            .any(|(_, handle)| handle.is_enabled())
+    }
+
+    fn load_threshold_handles(
+        worker_sets: &WorkerSetMap,
+        role: Option<WorkerType>,
+    ) -> impl Iterator<Item = (WorkerType, &LoadThresholdHandle)> {
+        worker_sets
+            .values()
+            .flat_map(|worker_set| worker_set.load_threshold_handles())
+            .filter(move |(handle_role, _)| role.is_none_or(|role| role == *handle_role))
     }
 
     /// Total worker count across all WorkerSets.

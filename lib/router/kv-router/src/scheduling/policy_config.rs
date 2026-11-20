@@ -433,7 +433,9 @@ mod tests {
 
     use super::*;
     use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
-    use crate::plugins::worker_selection::{SessionAffinitySetting, SessionAffinitySpec};
+    use crate::plugins::worker_selection::{
+        BusyThresholdSpec, SessionAffinitySetting, SessionAffinitySpec,
+    };
     use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
     use dynamo_admission::UnknownPolicyClassError;
     use dynamo_router_protocol::WorkerType;
@@ -740,6 +742,91 @@ worker_selection:
 
         let error = RouterPolicyConfig::from_yaml(
             "worker_selection:\n  encode: {type: alpha, session_affinity: true}\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not supported for encode"), "{error}");
+    }
+
+    fn decode_busy_threshold(
+        value: &str,
+    ) -> Result<Option<BusyThresholdSpec>, RouterPolicyConfigError> {
+        let yaml =
+            format!("worker_selection:\n  decode: {{type: alpha, busy_threshold: {value}}}\n");
+        Ok(RouterPolicyConfig::from_yaml(&yaml)?
+            .worker_selection()
+            .unwrap()
+            .busy_threshold(WorkerType::Decode))
+    }
+
+    #[test]
+    fn busy_threshold_is_set_per_role() {
+        assert_eq!(
+            decode_busy_threshold("{active_decode_blocks: 0.85, active_prefill_tokens_frac: 1.5}")
+                .unwrap(),
+            Some(BusyThresholdSpec {
+                active_decode_blocks: Some(0.85),
+                active_prefill_tokens_frac: Some(1.5),
+            })
+        );
+        // `{}` is a role with the key and no limits, which is not a role without the key.
+        assert_eq!(
+            decode_busy_threshold("{}").unwrap(),
+            Some(BusyThresholdSpec::default())
+        );
+
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  aggregated: {type: default, busy_threshold: {active_decode_blocks: 0.0}}
+  prefill: {type: alpha, busy_threshold: {active_prefill_tokens_frac: 0.0}}
+  decode: alpha
+"#,
+        )
+        .unwrap();
+        let selection = config.worker_selection().unwrap();
+        assert!(selection.aggregated().unwrap().is_default());
+        assert_eq!(
+            selection.busy_threshold(WorkerType::Aggregated),
+            Some(BusyThresholdSpec {
+                active_decode_blocks: Some(0.0),
+                active_prefill_tokens_frac: None,
+            })
+        );
+        assert_eq!(
+            selection.busy_threshold(WorkerType::Prefill),
+            Some(BusyThresholdSpec {
+                active_decode_blocks: None,
+                active_prefill_tokens_frac: Some(0.0),
+            })
+        );
+        assert_eq!(selection.busy_threshold(WorkerType::Decode), None);
+    }
+
+    #[test]
+    fn rejects_invalid_busy_threshold() {
+        for value in [
+            "~",
+            "0.85",
+            "true",
+            "[0.85]",
+            "{active_decode_blocks: 1.1}",
+            "{active_decode_blocks: -0.1}",
+            "{active_decode_blocks: .nan}",
+            "{active_prefill_tokens_frac: -1}",
+            "{active_prefill_tokens_frac: .inf}",
+            "{active_prefill_tokens: 1000}",
+            "{active_decode_blocks_threshold: 0.85}",
+        ] {
+            let error = decode_busy_threshold(value).unwrap_err().to_string();
+            assert!(
+                error.contains("worker_selection.decode.busy_threshold"),
+                "{value}: {error}"
+            );
+        }
+
+        let error = RouterPolicyConfig::from_yaml(
+            "worker_selection:\n  encode: {type: alpha, busy_threshold: {}}\n",
         )
         .unwrap_err()
         .to_string();

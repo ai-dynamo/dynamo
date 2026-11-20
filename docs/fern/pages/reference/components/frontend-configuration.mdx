@@ -630,6 +630,8 @@ With the flat flags, MoE models require `ais_tp_size * ais_attention_dp_size == 
 </ParamField>
 
 <ParamField path="--active-decode-blocks-threshold" type="float" default="null">
+  **Deprecated; removal in v1.9.** Set `busy_threshold: {active_decode_blocks: FRACTION}` on a role under `worker_selection` in `--router-policy-config`. Keep the flag with `--router-mode device-aware-weighted`, which a policy file cannot select yet.
+
   KV cache utilization fraction from `0.0` through `1.0`. A numeric value independently enables
   decode-block busy rejection. Decode-block telemetry requires `--router-mode kv`; use
   `--router-track-output-blocks` when generated tokens should contribute to the observed load.
@@ -638,7 +640,9 @@ With the flat flags, MoE models require `ais_tp_size * ais_attention_dp_size == 
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
-  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+  Deprecated; will be removed in v1.7. Use a fraction: `busy_threshold: {active_prefill_tokens_frac: FRACTION}`
+  on a role under `worker_selection` in `--router-policy-config`. The absolute threshold has no
+  policy-file key.
 
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
@@ -647,13 +651,15 @@ With the flat flags, MoE models require `ais_tp_size * ais_attention_dp_size == 
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold-frac" type="float" default="null">
+  **Deprecated; removal in v1.9.** Set `busy_threshold: {active_prefill_tokens_frac: FRACTION}` on a role under `worker_selection` in `--router-policy-config`. Keep the flag with `--router-mode device-aware-weighted`, which a policy file cannot select yet.
+
   Non-negative fraction of `max_num_batched_tokens` used as the active-prefill-token threshold. A
   numeric value independently enables this check. Uses OR logic with the absolute prefill threshold.
 
   Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC`
 </ParamField>
 
-For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md) and [Request Migration](../../kubernetes/fault-tolerance/request-migration.md).
+A role's `busy_threshold` in the policy file replaces these flags for that role; see [Busy Thresholds](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#busy-thresholds). For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md) and [Request Migration](../../kubernetes/fault-tolerance/request-migration.md).
 
 ## Model discovery
 
@@ -1083,8 +1089,8 @@ routes; `generate-frontend-openapi` does.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`, `PATCH` | `/router_policy` | Get or update worker-selection parameters of a router instance |
-| `GET`, `POST` | `/router_policy/busy_threshold` | Get or set busy thresholds for a discovered model |
-| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model |
+| `GET`, `POST` | `/router_policy/busy_threshold` | Get or set busy thresholds for a discovered model, or for one role's pools of it |
+| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model, or for one role's pools of it |
 | `GET` | `/busy_threshold` | Get stored busy thresholds |
 
 <ParamField path="DYN_ENABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
@@ -1104,7 +1110,9 @@ routes; `generate-frontend-openapi` does.
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
-only that check. The router reevaluates workers on the next worker-load or runtime-configuration
+only that check. An optional `role` (`aggregated`, `prefill`, or `decode`) limits the request to that
+role's pools; without it a write reaches every pool of the model and the response holds the serving
+pool's values. See [Busy Thresholds](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#busy-thresholds). The router reevaluates workers on the next worker-load or runtime-configuration
 update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
 recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
 `--router-track-output-blocks`.

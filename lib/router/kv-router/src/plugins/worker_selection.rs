@@ -28,8 +28,8 @@ pub use super::registry::{
 };
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{
-    SessionAffinitySetting, SessionAffinitySpec, WorkerSelectionConfig, WorkerSelectionInstance,
-    WorkerSelectionPolicySelection,
+    BusyThresholdSpec, SessionAffinitySetting, SessionAffinitySpec, WorkerSelectionConfig,
+    WorkerSelectionInstance, WorkerSelectionPolicySelection,
 };
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 pub use dynamo_scheduler::{
