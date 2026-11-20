@@ -118,7 +118,7 @@ fn valid_video_layout(layout: &pb::VideoLayout) -> bool {
         && layout.timestamps.is_sorted()
         && layout
             .second_per_grid_ts
-            .is_none_or(|value| value.is_finite() && value >= 0.0)
+            .is_none_or(|value| value.is_finite() && value > 0.0)
 }
 
 fn is_lower_hex(value: &str, len: usize) -> bool {

@@ -1144,6 +1144,10 @@ fn staged_mixed_media_gates_each_peer_and_preserves_native_layout() {
         req.encoder_result.as_mut().unwrap()["videos"][0]["timestamps"] = invalid;
         assert!(crate::encoder::validate_consumer(&req, "public", true, true).is_err());
     }
+    let mut zero_duration = handoff.clone();
+    zero_duration["videos"][1]["second_per_grid_ts"] = json!(0.0);
+    req.encoder_result = Some(zero_duration);
+    assert!(crate::encoder::validate_consumer(&req, "public", true, true).is_err());
     let mut short = handoff;
     short["videos"].as_array_mut().unwrap().pop();
     req.encoder_result = Some(short);
