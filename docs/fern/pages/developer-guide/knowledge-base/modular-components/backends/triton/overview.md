@@ -309,14 +309,15 @@ The worker emits every vector as base64-encoded little-endian FP32 bytes on the 
 The Triton release is pinned by `triton.cuda13.4.runtime_image_tag` in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) (default `26.09-py3`), mirroring how the other framework runtimes pin their image.
 The CUDA family is fixed by the Triton release, so `--cuda-version` is auto-derived; passing it explicitly is rejected.
 
-To build into a different Triton release, override `RUNTIME_IMAGE_TAG` at build time (no `context.yaml` edit needed). Keep `BASE_IMAGE_TAG` on CUDA 13.1 (default `26.02-cuda13.1-devel-ubuntu24.04`):
-the Rust `cudarc` crate rejects other CUDA versions at build time, and the wheels load CUDA dynamically so they run on the 13.4 runtime image regardless:
+To build into a different Triton release, override `RUNTIME_IMAGE_TAG` at build time (no `context.yaml` edit needed). Keep `BASE_IMAGE_TAG` on CUDA 13.4 or older (default `26.09-cuda13.4-devel-ubuntu24.04`).
+The Rust `cudarc` crate rejects a newer CUDA version at build time.
+The wheels load CUDA dynamically, so they run on a runtime image with a newer CUDA version:
 
 ```bash
 python container/render.py --framework=triton --target=runtime --output-short-filename
 docker buildx build --network=host \
   --build-arg RUNTIME_IMAGE_TAG=26.09-py3 \
-  --build-arg BASE_IMAGE_TAG=26.02-cuda13.1-devel-ubuntu24.04 \
+  --build-arg BASE_IMAGE_TAG=26.09-cuda13.4-devel-ubuntu24.04 \
   -f container/rendered.Dockerfile -t dynamo:triton-26.08 .
 ```
 

@@ -27,7 +27,7 @@ inputs:
     required: false
     default: 'runtime'
   cuda_version:
-    description: 'CUDA version for base image resolution (e.g., 13.0, 13.1)'
+    description: 'CUDA version for base image resolution (e.g., 13.0, 13.4)'
     required: false
     default: ''
   base_image:
