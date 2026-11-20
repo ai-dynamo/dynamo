@@ -48,6 +48,13 @@ Only published checkpoint events create presence: reaching an attention boundary
 does not imply an SSM checkpoint was retained, including during decode under
 sparse checkpoint-retention policies.
 
+Predict-on-route is the one place where the router assumes a checkpoint before
+its event arrives. With `--router-predicted-ttl-secs` set, a routing decision
+predicts that the chosen hybrid worker will keep a checkpoint at the last full
+block of the prompt it was routed, for that TTL. A repeat or a continuation of
+that prompt is then credited up to that block. A request that shares only a
+shorter prefix is not, and neither is a query answered by a remote indexer.
+
 The router maintains complete-group membership when events arrive. During an
 attention lookup it checks those memberships at each matched logical block; it
 does not scan backward through every boundary for each worker. The original

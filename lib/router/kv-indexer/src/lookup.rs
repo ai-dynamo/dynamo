@@ -210,6 +210,20 @@ impl<'a> LookupPipeline<'a> {
             .filter(|residency| residency.is_active())
     }
 
+    /// The request's block hashes when its device match includes
+    /// predict-on-route scores, for crediting predicted checkpoints.
+    fn predicted_request<'s>(
+        &self,
+        sequence: &'s HashInput<'_>,
+        with_side: bool,
+    ) -> Option<&'s [LocalBlockHash]> {
+        if with_side && self.side.is_some() {
+            Some(sequence.as_slice())
+        } else {
+            None
+        }
+    }
+
     async fn merge_side(&self, primary: MatchDetails, sequence: HashInput<'_>) -> MatchDetails {
         if self.side.is_none() {
             return primary;
@@ -265,7 +279,12 @@ impl<'a> LookupPipeline<'a> {
                 raw = merge_side_or_warn(self.side, raw, HashInput::Borrowed(sequence.as_slice()))
                     .await;
             }
-            evaluator.finish(&mut raw, &mut Default::default(), &Default::default());
+            evaluator.finish_with_request(
+                &mut raw,
+                &mut Default::default(),
+                &Default::default(),
+                self.predicted_request(sequence, with_side),
+            );
             raw
         } else {
             let raw = self
@@ -346,10 +365,11 @@ impl<'a> LookupPipeline<'a> {
                 raw = merge_side_or_warn(self.side, raw, HashInput::Borrowed(sequence.as_slice()))
                     .await;
             }
-            evaluator.finish(
+            evaluator.finish_with_request(
                 &mut raw,
                 &mut lower,
                 snapshot.as_deref().unwrap_or(&Default::default()),
+                self.predicted_request(sequence, with_side),
             );
             (raw, lower)
         } else {
@@ -1503,7 +1523,7 @@ mod tests {
         );
     }
 
-    /// Predicted attention cannot lift confirmed recurrent credit.
+    /// Predicted attention alone cannot lift confirmed recurrent credit.
     #[tokio::test]
     async fn side_merge_does_not_lift_hybrid_worker_above_its_checkpoint() {
         let primary = Arc::new(ThreadPoolIndexer::new(
@@ -1623,6 +1643,181 @@ mod tests {
         assert!(!details.overlap_scores.scores.contains_key(&hybrid));
         let scores = indexer.find_matches(block_hashes).await.unwrap();
         assert!(!scores.scores.contains_key(&hybrid));
+    }
+
+    /// A concurrent indexer with a predict-on-route overlay whose routing
+    /// decisions also predict a checkpoint that lives for `ttl`.
+    fn predicting_indexer(
+        ttl: Duration,
+    ) -> (
+        Indexer,
+        Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
+    ) {
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let side = Arc::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            1,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        ));
+        let lower_tier = LowerTierIndexers::new(2, 4);
+        lower_tier.group_residency().set_prediction_ttl(Some(ttl));
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier,
+            approx: Some(super::SideIndexer::Concurrent(side.clone())),
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        (indexer, side)
+    }
+
+    fn blocks(local: &[u64]) -> Vec<LocalBlockHash> {
+        local.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    /// A routing decision predicts a checkpoint at the routed prompt's end.
+    /// Only a request that contains the whole routed prompt reaches it.
+    #[tokio::test]
+    async fn predicted_checkpoint_credits_a_repeat_and_a_continuation_of_the_routed_prompt() {
+        let (indexer, side) = predicting_indexer(Duration::from_secs(60));
+        let hybrid = WorkerWithDpRank::new(10, 0);
+        let dense = WorkerWithDpRank::new(20, 0);
+        // An off-prefix checkpoint makes the worker a known hybrid worker.
+        indexer
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .await
+            .unwrap();
+        let routed = blocks(&[11, 12, 13]);
+        for worker in [hybrid, dense] {
+            indexer
+                .record_hashed_routing_decision(
+                    worker,
+                    routed.clone(),
+                    compute_seq_hash_for_block(&routed),
+                )
+                .await
+                .unwrap();
+        }
+        flush_indexer(&indexer).await;
+        side.flush().await;
+
+        // A repeat of the routed prompt is credited to its end, on every path.
+        let tiered = indexer.find_matches_by_tier(routed.clone()).await.unwrap();
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&hybrid).copied(),
+            Some(3)
+        );
+        let details = indexer.find_match_details(routed.clone()).await.unwrap();
+        assert_eq!(details.overlap_scores.scores.get(&hybrid).copied(), Some(3));
+        let scores = indexer.find_matches(routed.clone()).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(3));
+        assert_eq!(scores.scores.get(&dense).copied(), Some(3));
+
+        // A continuation is credited to the routed prompt's end.
+        let scores = indexer
+            .find_matches(blocks(&[11, 12, 13, 14, 15]))
+            .await
+            .unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(3));
+
+        // A prompt that shares only a shorter prefix reaches no predicted
+        // checkpoint. The dense worker keeps its predicted blocks.
+        let scores = indexer.find_matches(blocks(&[11, 12, 99])).await.unwrap();
+        assert!(!scores.scores.contains_key(&hybrid), "{:?}", scores.scores);
+        assert_eq!(scores.scores.get(&dense).copied(), Some(2));
+    }
+
+    /// A prediction lifts a confirmed, shallower checkpoint, and nothing else
+    /// does: without the routing decision the worker stays at its checkpoint.
+    #[tokio::test]
+    async fn predicted_checkpoint_lifts_a_worker_above_its_confirmed_checkpoint() {
+        let (indexer, side) = predicting_indexer(Duration::from_secs(60));
+        let hybrid = WorkerWithDpRank::new(10, 0);
+        let local = [11_u64, 12, 13];
+        let prompt = blocks(&local);
+        let chain = compute_seq_hash_for_block(&prompt);
+        indexer
+            .try_apply_event(store_event(10, 0, 1, &[], &local, StorageTier::Device))
+            .await
+            .unwrap();
+        indexer
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, chain[0], 1, 1))
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        let scores = indexer.find_matches(prompt.clone()).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(1));
+
+        indexer
+            .record_hashed_routing_decision(hybrid, prompt.clone(), chain)
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side.flush().await;
+        let scores = indexer.find_matches(prompt.clone()).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(3));
+        // The confirmed checkpoint still bounds a request that stops before
+        // the predicted one.
+        let scores = indexer.find_matches(blocks(&[11, 12])).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(1));
+    }
+
+    /// A prediction ends with its lifetime, and with the worker's checkpoints.
+    #[tokio::test]
+    async fn predicted_checkpoints_expire_and_are_dropped_with_the_worker() {
+        let hybrid = WorkerWithDpRank::new(10, 0);
+        let routed = blocks(&[11, 12, 13]);
+
+        let (indexer, side) = predicting_indexer(Duration::from_millis(40));
+        indexer
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .await
+            .unwrap();
+        indexer
+            .record_hashed_routing_decision(
+                hybrid,
+                routed.clone(),
+                compute_seq_hash_for_block(&routed),
+            )
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side.flush().await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // The predicted blocks are still in the overlay; the checkpoint is not.
+        let scores = indexer.find_matches(routed.clone()).await.unwrap();
+        assert!(!scores.scores.contains_key(&hybrid), "{:?}", scores.scores);
+
+        let (indexer, side) = predicting_indexer(Duration::from_secs(60));
+        indexer
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .await
+            .unwrap();
+        indexer
+            .record_hashed_routing_decision(
+                hybrid,
+                routed.clone(),
+                compute_seq_hash_for_block(&routed),
+            )
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side.flush().await;
+        let scores = indexer.find_matches(routed.clone()).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(3));
+        let Indexer::Concurrent { lower_tier, .. } = &indexer else {
+            unreachable!("built as a concurrent indexer");
+        };
+        lower_tier.group_residency().clear_worker(hybrid);
+        let scores = indexer.find_matches(routed).await.unwrap();
+        assert!(!scores.scores.contains_key(&hybrid), "{:?}", scores.scores);
     }
 
     /// Every lower-tier extension needs a usable checkpoint.

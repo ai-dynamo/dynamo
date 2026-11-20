@@ -2234,6 +2234,11 @@ pub fn create_indexer_with_policy(
         }
     };
     let primary_records_routing_decisions = retention.is_some();
+    // A predicted checkpoint lives as long as the predicted blocks beside it.
+    let lower_tier = LowerTierIndexers::new(num_threads.max(1), block_size);
+    lower_tier
+        .group_residency()
+        .set_prediction_ttl(policy.side_ttl);
     if num_threads > 1 {
         Indexer::Concurrent {
             primary: Arc::new(
@@ -2245,7 +2250,7 @@ pub fn create_indexer_with_policy(
                     retention,
                 ),
             ),
-            lower_tier: LowerTierIndexers::new(num_threads, block_size),
+            lower_tier,
             approx,
             primary_records_routing_decisions,
             session_updates: None,
@@ -2258,7 +2263,7 @@ pub fn create_indexer_with_policy(
                 metrics,
                 retention,
             ),
-            lower_tier: LowerTierIndexers::new(1, block_size),
+            lower_tier,
             approx,
             primary_records_routing_decisions,
             session_updates: None,

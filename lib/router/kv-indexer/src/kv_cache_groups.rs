@@ -19,6 +19,7 @@ use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, Guard};
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -305,9 +306,71 @@ struct CheckpointDirectory {
     /// for it.
     filter: OnceLock<DeviceFilter>,
     lower_tier_members: LowerTierMembers,
+    /// Checkpoints that routing decisions predict, by worker.
+    predicted: DashMap<WorkerWithDpRank, Vec<PredictedCheckpoint>, FxBuildHasher>,
+    /// How long a prediction lives, in milliseconds. Zero turns prediction off.
+    prediction_ttl_ms: AtomicU64,
 }
 
+/// A checkpoint the router expects a worker to hold soon: the last full block
+/// of a prompt it was just routed. It stands in for the worker's checkpoint
+/// event until that arrives or the prediction expires.
+#[derive(Clone, Copy, Debug)]
+struct PredictedCheckpoint {
+    position: usize,
+    hash: ExternalSequenceBlockHash,
+    expires: Instant,
+}
+
+/// Predictions kept per worker. Only a repeat or a continuation of a recent
+/// prompt can match one, so a few are enough.
+const PREDICTED_PER_WORKER: usize = 8;
+
 impl CheckpointDirectory {
+    fn predict(&self, worker: WorkerWithDpRank, position: usize, hash: ExternalSequenceBlockHash) {
+        let ttl = self.prediction_ttl_ms.load(Ordering::Relaxed);
+        if ttl == 0 || position == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let mut points = self.predicted.entry(worker).or_default();
+        points.retain(|point| {
+            point.expires > now && !(point.position == position && point.hash == hash)
+        });
+        if points.len() >= PREDICTED_PER_WORKER {
+            points.remove(0);
+        }
+        points.push(PredictedCheckpoint {
+            position,
+            hash,
+            expires: now + Duration::from_millis(ttl),
+        });
+    }
+
+    /// The deepest live prediction for `worker` at or below `end` whose block
+    /// is the request's block at that position.
+    fn predicted_point(
+        &self,
+        worker: WorkerWithDpRank,
+        end: usize,
+        request_hash_at: impl Fn(usize) -> Option<ExternalSequenceBlockHash>,
+    ) -> Option<(usize, ExternalSequenceBlockHash)> {
+        if self.prediction_ttl_ms.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let points = self.predicted.get(&worker)?;
+        let now = Instant::now();
+        points
+            .iter()
+            .filter(|point| {
+                point.position <= end
+                    && point.expires > now
+                    && request_hash_at(point.position) == Some(point.hash)
+            })
+            .map(|point| (point.position, point.hash))
+            .max_by_key(|&(position, _)| position)
+    }
+
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -776,6 +839,18 @@ impl CheckpointReadView {
         DeviceRecords(&self.checkpoints)
     }
 
+    /// The deepest live predicted checkpoint of `worker` at or below `end`
+    /// that sits on the request's own chain, as `(position, hash)`.
+    pub(crate) fn predicted_checkpoint(
+        &self,
+        worker: WorkerWithDpRank,
+        end: usize,
+        request_hash_at: impl Fn(usize) -> Option<ExternalSequenceBlockHash>,
+    ) -> Option<(usize, ExternalSequenceBlockHash)> {
+        self.checkpoints
+            .predicted_point(worker, end, request_hash_at)
+    }
+
     /// The callback receives a copy of the current complete owners. All guards
     /// are released before invoking the callback; separate calls may see newer
     /// versions.
@@ -952,6 +1027,9 @@ impl KvCacheGroupResidency {
     }
 
     fn clear_owner(&self, owner: ResidencyOwner, state: &mut OwnerPresence) {
+        if let Some(worker) = owner.as_worker() {
+            self.checkpoints.predicted.remove(&worker);
+        }
         let previous = std::mem::take(&mut state.complete_checkpoints);
         state.clear_checkpoints();
         self.publish_reset(owner, previous, state);
@@ -1307,6 +1385,28 @@ impl KvCacheGroupResidency {
             .load()
             .owners
             .contains_key(&ResidencyOwner::worker(worker))
+    }
+
+    /// Let a routing decision predict a checkpoint for `ttl`, the lifetime of
+    /// the predict-on-route overlay. `None` turns prediction off, the default.
+    pub fn set_prediction_ttl(&self, ttl: Option<Duration>) {
+        let millis = ttl.map_or(0, |ttl| ttl.as_millis().min(u128::from(u64::MAX)) as u64);
+        self.checkpoints
+            .prediction_ttl_ms
+            .store(millis, Ordering::Relaxed);
+    }
+
+    /// A hybrid worker that was just routed a prompt of `position` full blocks
+    /// ending at `hash` is expected to keep a checkpoint there.
+    pub fn predict_checkpoint(
+        &self,
+        worker: WorkerWithDpRank,
+        position: usize,
+        hash: ExternalSequenceBlockHash,
+    ) {
+        if self.is_hybrid(worker) {
+            self.checkpoints.predict(worker, position, hash);
+        }
     }
 
     #[cfg(test)]

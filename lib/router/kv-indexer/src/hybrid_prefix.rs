@@ -13,9 +13,10 @@ use super::{
 };
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::prelude::{
-    ExternalSequenceBlockHash, ResidencyOwner, ResidencyOwnerKey, ResidencyRoutingSnapshot,
-    StorageTier, WorkerWithDpRank,
+    ExternalSequenceBlockHash, LocalBlockHash, ResidencyOwner, ResidencyOwnerKey,
+    ResidencyRoutingSnapshot, StorageTier, WorkerWithDpRank, compute_seq_hash_for_block,
 };
+use dynamo_tokens::SequenceHash;
 
 #[derive(Clone, Copy, Debug)]
 struct Checkpoint {
@@ -442,14 +443,32 @@ impl HybridPrefixEvaluator {
         anchor
     }
 
-    /// The sole credit decision, after tier walks and prediction merges. One
-    /// endpoint P partitions the continuous GPU -> host -> disk -> external path.
+    /// [`Self::finish_with_request`] without predicted checkpoints.
+    #[cfg(test)]
     pub(crate) fn finish(
         &mut self,
         device: &mut MatchDetails,
         tiers: &mut HashMap<StorageTier, LowerTierMatchDetails>,
         snapshot: &ResidencyRoutingSnapshot,
     ) {
+        self.finish_with_request(device, tiers, snapshot, None);
+    }
+
+    /// The sole credit decision, after tier walks and prediction merges. One
+    /// endpoint P partitions the continuous GPU -> host -> disk -> external path.
+    /// `request` is the query's block hashes when the device match includes
+    /// predict-on-route scores. A hybrid worker whose score reaches past its
+    /// confirmed checkpoint is then also credited up to its deepest predicted
+    /// checkpoint on the request's own chain.
+    pub(crate) fn finish_with_request(
+        &mut self,
+        device: &mut MatchDetails,
+        tiers: &mut HashMap<StorageTier, LowerTierMatchDetails>,
+        snapshot: &ResidencyRoutingSnapshot,
+        request: Option<&[LocalBlockHash]>,
+    ) {
+        // The request's sequence hashes, computed only if a prediction is tried.
+        let request_chain: OnceCell<Vec<SequenceHash>> = OnceCell::new();
         // Each hybrid worker's deepest checkpoint within its hits on a tier.
         let mut lower_points = FxHashMap::default();
         for (tier, details) in tiers.iter() {
@@ -488,14 +507,29 @@ impl HybridPrefixEvaluator {
                 return true;
             }
             state.resume_cap.get_or_insert(0);
-            let cap = state.checkpoint.position;
+            let mut point = state.checkpoint;
+            let reach = (*blocks as usize).min(self.max_blocks);
+            if reach > point.position
+                && let Some(request) = request
+            {
+                let chain = request_chain.get_or_init(|| compute_seq_hash_for_block(request));
+                let predicted = self.view.predicted_checkpoint(*worker, reach, |position| {
+                    chain
+                        .get(position.checked_sub(1)?)
+                        .map(|hash| ExternalSequenceBlockHash(*hash))
+                });
+                if let Some((position, hash)) = predicted
+                    && position > point.position
+                {
+                    point = Checkpoint { position, hash };
+                }
+            }
+            let cap = point.position;
             *blocks = (*blocks).min(cap as u32);
             if cap == 0 {
                 device.last_matched_hashes.remove(worker);
             } else {
-                device
-                    .last_matched_hashes
-                    .insert(*worker, state.checkpoint.hash);
+                device.last_matched_hashes.insert(*worker, point.hash);
             }
             *blocks > 0
         });
