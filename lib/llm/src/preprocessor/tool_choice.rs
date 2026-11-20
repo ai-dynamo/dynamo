@@ -2380,6 +2380,7 @@ mod tests {
             unified_starting_state: None,
             prefix: None,
             reasoning_closed_by_prompt: None,
+            thinking_off_error: None,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
         };
@@ -2451,6 +2452,7 @@ mod tests {
             unified_starting_state: None,
             prefix: None,
             reasoning_closed_by_prompt: None,
+            thinking_off_error: None,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
         };

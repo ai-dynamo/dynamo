@@ -86,17 +86,20 @@ async fn context_overflow_events_require_the_selected_deployment_capability() {
                 .unwrap();
             partial.truncate(terminal);
             for enabled in [false, true] {
-                for phase in ["generate", "preflight", "streaming"] {
-                    const DIAGNOSTIC: &str = "Input length (100) exceeds max_seq_len (64).";
+                for (phase, stream) in [
+                    ("generate", true),
+                    ("preflight", true),
+                    ("streaming", true),
+                    ("generate", false),
+                ] {
+                    const DIAGNOSTIC: &str = "private backend diagnostic";
+                    let error = DynamoError::builder()
+                        .error_type(DynamoErrorType::InvalidRequest)
+                        .diagnostic(DIAGNOSTIC)
+                        .build()
+                        .with_context_length_exceeded();
                     let engine = if phase == "generate" {
-                        scripted_chat_engine::ScriptedChatEngine::with_generate_error(
-                            DynamoError::builder()
-                                .error_type(DynamoErrorType::Backend(
-                                    dynamo_runtime::error::BackendError::InvalidArgument,
-                                ))
-                                .message(DIAGNOSTIC)
-                                .build(),
-                        )
+                        scripted_chat_engine::ScriptedChatEngine::with_generate_error(error)
                     } else {
                         scripted_chat_engine::ScriptedChatEngine::with_backend_error(
                             if phase == "streaming" {
@@ -104,7 +107,7 @@ async fn context_overflow_events_require_the_selected_deployment_capability() {
                             } else {
                                 vec![]
                             },
-                            DynamoError::msg(json!({"code":400,"message":DIAGNOSTIC}).to_string()),
+                            error,
                         )
                     };
                     let mut card = ModelDeploymentCard::with_name_only(MODEL);
@@ -118,16 +121,18 @@ async fn context_overflow_events_require_the_selected_deployment_capability() {
                     let response = post_responses(
                         &svc,
                         &json!({
-                            "model": MODEL, "input": "ping", "stream": true
+                            "model": MODEL, "input": "ping", "stream": stream
                         }),
                     )
                     .await;
-                    if !enabled && phase != "streaming" {
+                    if !stream || (!enabled && phase != "streaming") {
                         assert_eq!(
                             response.status(),
                             reqwest::StatusCode::BAD_REQUEST,
-                            "{phase}"
+                            "{enabled}/{phase}/{stream}"
                         );
+                        let body = response.text().await.unwrap();
+                        assert!(!body.contains(DIAGNOSTIC), "{enabled}/{phase}/{stream}");
                     } else {
                         assert_eq!(
                             response.status(),
