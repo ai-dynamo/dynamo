@@ -75,6 +75,30 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
 
+  # libzmq is not a standalone binary: the `zeromq-src` crate (pulled in by
+  # zmq-sys) compiles the libzmq 4.3.4 sources it vendors and links them
+  # STATICALLY into the dynamo native module (dynamo/_core.abi3.so) and the
+  # frontend's /epp binary. cargo metadata only records the crate's own
+  # MIT/Apache-2.0 license, so the libzmq license (LGPL-3.0 plus the upstream
+  # static-linking exception) is attributed here. The license text is the
+  # upstream COPYING.LESSER, which carries the exception verbatim; the libzmq
+  # source ships in the zeromq-src crate in the Rust source archive.
+  - name: libzmq
+    version: "4.3.4"
+    license: LGPL-3.0-only
+    source: https://github.com/zeromq/libzmq
+    license_text_path: licenses/libzmq/COPYING.LESSER
+    images:
+      - dynamo-frontend
+      - dynamo-planner
+      - dynamo-sidecar
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+
   - name: libvpx
     # VP8/VP9 codec library — the in-tree ffmpeg's only video encoder now that
     # H.264/NVENC is removed. Shipped in every image that carries the ffmpeg libs.
