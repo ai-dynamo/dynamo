@@ -176,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--source-location",
+        default=None,
+        help=(
+            "URL where the corresponding source for the image's open-source "
+            "software is published. Written into THIRD-PARTY.txt when given."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     args = parser.parse_args(argv)
@@ -309,6 +317,12 @@ def main(argv: list[str] | None = None) -> int:
         all_components, exception_reasons, args.output_dir / "osrb-deps.csv"
     )
     common.write_cyclonedx(all_components, args.output_dir / "osrb.cdx.json")
+    common.write_third_party(
+        args.output_dir,
+        args.source_location,
+        base_sbom=args.subtract_sbom,
+        dpkg_root=args.dpkg_root,
+    )
     logger.info(
         "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",
         len(all_components),
