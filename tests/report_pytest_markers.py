@@ -191,8 +191,6 @@ STUB_MODULES = [
     "gpu_memory_service.server.session",
     "prometheus_client",
     "prometheus_client.parser",
-    "sklearn",
-    "sklearn.linear_model",
     "torch",
     "PIL",
     "PIL.Image",
