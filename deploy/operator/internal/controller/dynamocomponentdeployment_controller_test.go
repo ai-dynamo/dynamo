@@ -2643,6 +2643,13 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			}
 
 			// Assert the ComponentReconcileResult
+			t.Log("Target roles match the persisted templates even when the Pods are not ready")
+			persisted := &leaderworkersetv1.LeaderWorkerSet{}
+			g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Namespace: dcd.Namespace, Name: result.serviceReplicaStatus.ComponentNames[0]}, persisted)).To(gomega.Succeed())
+			tt.wantComponentReconcileResult.serviceReplicaStatus.Roles = []v1beta1.ComponentRoleStatus{
+				dynamo.ResolveComponentRoleStatus("leader", &persisted.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec),
+				dynamo.ResolveComponentRoleStatus("worker", &persisted.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec),
+			}
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
@@ -2882,6 +2889,12 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
 			tt.wantComponentReconcileResult.gpuShape = &dynamo.GPUShape{}
 
+			t.Log("Target main matches the persisted Deployment even when it is not ready")
+			persisted := &appsv1.Deployment{}
+			g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Namespace: dcd.Namespace, Name: dcd.Name}, persisted)).To(gomega.Succeed())
+			tt.wantComponentReconcileResult.serviceReplicaStatus.Roles = []v1beta1.ComponentRoleStatus{
+				dynamo.ResolveComponentRoleStatus("main", &persisted.Spec.Template.Spec),
+			}
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
@@ -2999,12 +3012,15 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 
 	result, err := reconciler.reconcileDeploymentResources(ctx, dcd)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+	persisted := &appsv1.Deployment{}
+	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Namespace: dcd.Namespace, Name: dcd.Name}, persisted)).To(gomega.Succeed())
 	g.Expect(result).To(gomega.Equal(ComponentReconcileResult{
 		modified: true,
 		status:   metav1.ConditionFalse,
 		reason:   "DeploymentNotReady",
 		message:  "Deployment is not ready",
 		serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
+			Roles:             []v1beta1.ComponentRoleStatus{dynamo.ResolveComponentRoleStatus("main", &persisted.Spec.Template.Spec)},
 			ComponentKind:     v1beta1.ComponentKindDeployment,
 			ComponentNames:    []string{"test-component"},
 			RuntimeNamespace:  "default",
@@ -3219,6 +3235,14 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				Namespace: "default",
 			}
 
+			t.Log("Publish target roles with generation acknowledgement even while readiness is false")
+			targetRoles := []v1beta1.ComponentRoleStatus{{Name: "main", Containers: []v1beta1.ComponentContainerStatus{{
+				Name: "main", Image: "engine:target", Env: map[string]v1beta1.EnvironmentValueStatus{
+					"EMPTY": {Value: new("")}, "POD_NAME": {Unresolved: true},
+				},
+			}}}}
+			tt.componentReconcileResult.serviceReplicaStatus.Roles = targetRoles
+			tt.wantServiceReplicaStatus.Roles = targetRoles
 			err = reconciler.setStatusConditionAndServiceReplicaStatus(ctx, dcd, tt.componentReconcileResult)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 

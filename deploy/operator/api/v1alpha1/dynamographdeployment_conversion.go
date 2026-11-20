@@ -808,6 +808,7 @@ func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *Rolling
 // v1beta1.
 func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
 	*dst = v1beta1.ComponentReplicaStatus{
+		Roles:                src.Roles,
 		ComponentKind:        v1beta1.ComponentKind(src.ComponentKind),
 		ComponentNames:       componentNamesToHub(src),
 		RuntimeNamespace:     src.RuntimeNamespace,
@@ -842,6 +843,7 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	componentNames := slices.Clone(src.ComponentNames)
 
 	*dst = ServiceReplicaStatus{
+		Roles:                src.Roles,
 		ComponentKind:        ComponentKind(src.ComponentKind),
 		ComponentNames:       componentNames,
 		RuntimeNamespace:     src.RuntimeNamespace,

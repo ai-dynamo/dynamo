@@ -219,8 +219,74 @@ def dgd_object() -> dict[str, Any]:
     return {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
-        "metadata": {"name": DGD_NAME, "namespace": K8S_NAMESPACE, "uid": DGD_UID},
+        "metadata": {
+            "name": DGD_NAME,
+            "namespace": K8S_NAMESPACE,
+            "uid": DGD_UID,
+            "generation": 1,
+        },
         "spec": {"components": [frontend, worker, planner]},
+        # These independent operator facts are not computed from the authored recipe.
+        "status": {
+            "observedGeneration": 1,
+            "components": {
+                "Frontend": {
+                    "roles": [
+                        {
+                            "name": "main",
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.8.0",
+                                    "command": ["python3"],
+                                    "args": [
+                                        "-m",
+                                        "dynamo.frontend",
+                                        "--router-mode",
+                                        "kv",
+                                        "--router-replica-sync",
+                                    ],
+                                    "env": {
+                                        "DYN_PARENT_DGD_K8S_NAME": {"value": DGD_NAME},
+                                        "DYN_POD_NAME": {"unresolved": True},
+                                        "DYN_REQUEST_TRACE": {"value": "1"},
+                                        "DYN_REQUEST_TRACE_RECORDS": {
+                                            "value": "request_end"
+                                        },
+                                        "DYN_REQUEST_TRACE_SINKS": {"value": "file"},
+                                        "DYN_REQUEST_TRACE_FILE_FORMAT": {
+                                            "value": "jsonl_gz"
+                                        },
+                                        "DYN_REQUEST_TRACE_FILE_PATH": {
+                                            "unresolved": True
+                                        },
+                                        "DYN_ENABLE_FRONTEND_ADMIN_API": {"value": "1"},
+                                        "DYN_FRONTEND_ADMIN_HOST": {"value": "0.0.0.0"},
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "worker": {
+                    "servedModelName": MODEL,
+                    "roles": [
+                        {
+                            "name": "main",
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.8.0",
+                                    "command": ["python3", "-m", "dynamo.vllm"],
+                                    "args": [f"--model={MODEL}"],
+                                    "env": {},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+        },
     }
 
 

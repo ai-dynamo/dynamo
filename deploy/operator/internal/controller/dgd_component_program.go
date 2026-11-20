@@ -68,6 +68,7 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	defer func() { programResult.boundTargetRoleStatus(req.DGD) }()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -146,6 +147,7 @@ func (p *componentProgram) Reconcile(
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
 		if result.ComponentStatus != nil {
+			preserveComponentRoleStatuses(programResult.Status.Components, result.ComponentStatus)
 			programResult.Status.Components = result.ComponentStatus
 		}
 		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)

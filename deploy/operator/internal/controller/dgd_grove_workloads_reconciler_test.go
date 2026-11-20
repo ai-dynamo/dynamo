@@ -155,6 +155,9 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			require.EqualValues(t, 9, pcs.Generation)
 			require.EqualValues(t, 8, *pcs.Status.ObservedGeneration)
 			require.Equal(t, "runtime:new", pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].Image)
+			require.Equal(t, dgd.Generation, result.Status.ObservedGeneration)
+			require.Len(t, result.Status.Components["frontend"].Roles, 1)
+			require.Equal(t, "runtime:new", result.Status.Components["frontend"].Roles[0].Containers[0].Image)
 			dgd.Status = result.Status
 
 			t.Log("Fresh program instances keep the new spec pending despite old or missing progress")
@@ -1148,13 +1151,24 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
 
 			t.Log("Run the complete program and preserve component facts while applying the scaling policy")
+			if dgd.Status.Components == nil {
+				dgd.Status.Components = make(map[string]nvidiacomv1beta1.ComponentReplicaStatus)
+			}
+			previous := dgd.Status.Components["frontend"]
+			previous.Roles = []nvidiacomv1beta1.ComponentRoleStatus{{Name: "previous-target"}}
+			dgd.Status.Components["frontend"] = previous
 			result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 			if test.guard {
 				require.Error(t, err)
 				require.True(t, apierrors.IsForbidden(err))
 				require.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+				require.Equal(t, dgd.Status.ObservedGeneration, result.Status.ObservedGeneration)
+				require.Equal(t, previous.Roles, result.Status.Components["frontend"].Roles)
 			} else {
 				require.NoError(t, err)
+				require.Equal(t, dgd.Generation, result.Status.ObservedGeneration)
+				require.Len(t, result.Status.Components["frontend"].Roles, 1)
+				require.Equal(t, "main", result.Status.Components["frontend"].Roles[0].Name)
 				if test.allowScaling {
 					require.False(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
 				} else {

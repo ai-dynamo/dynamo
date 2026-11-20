@@ -556,7 +556,12 @@ func (s *DynamoComponentDeployment) GetComponentStatuses() map[string]ComponentR
 	if componentName == "" {
 		componentName = s.GetName()
 	}
-	return map[string]ComponentReplicaStatus{componentName: *s.Status.Component}
+	// Never relay a previous child target under a newly acknowledged parent spec.
+	status := *s.Status.Component
+	if s.Status.ObservedGeneration != s.Generation {
+		status.Roles = nil
+	}
+	return map[string]ComponentReplicaStatus{componentName: status}
 }
 
 // GetState returns "ready" or "not_ready" based on status conditions.

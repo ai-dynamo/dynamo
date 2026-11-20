@@ -3,15 +3,10 @@
 # ruff: noqa: E402
 # Optional-dependency preflight must run before the retune imports.
 
-"""Frontend startup parsing and the spec premises of live retune.
+"""Retune checks target status declarations, without reproducing operator lowering.
 
-Covers ``find_frontend``, ``parse_frontend`` (the operator's argv
-defaulting, env merging and ``$(VAR)`` expansion, the frontend's own parser
-built against an explicit env, a golden comparison with the real frontend
-parser, disaggregated maps) and
-``evaluate_premises`` (P4, P6-P10) on table-driven DGD fixtures, including
-P4 on workers that advertise their own router configuration (compared with
-the real worker parser) and the P7 check of ``retune.dgdr.model``.
+Router parser golden cases use explicit current target facts; the separate P10
+trace/PVC/admin recipe checks retain their authored-declaration constraints.
 """
 
 from __future__ import annotations
@@ -146,41 +141,78 @@ def trace_env(**overrides: Any) -> list[dict[str, Any]]:
     return list(entries.values())
 
 
+def target_env(**values: Any) -> dict[str, dict[str, Any]]:
+    """Author status bindings directly; None explicitly means unresolved."""
+
+    return {
+        name: (
+            {"unresolved": True}
+            if value is None
+            else value
+            if isinstance(value, dict)
+            else {"value": value}
+        )
+        for name, value in values.items()
+    }
+
+
+def target_main(component: dict[str, Any], role: int = 0) -> dict[str, Any]:
+    return component["target"]["roles"][role]["containers"][0]
+
+
 def frontend(
     *,
     args: tuple[str, ...] | list[str] | None = KV_ARGS,
     command: tuple[str, ...] | list[str] | None = ("python3",),
-    env: list[dict[str, Any]] | None = None,
+    env: dict[str, dict[str, Any]] | None = None,
+    recipe_env: list[dict[str, Any]] | None = None,
     replicas: int | None = 1,
     mounts: list[dict[str, Any]] | None = None,
     volumes: list[dict[str, Any]] | None = None,
     name: str = "Frontend",
     **extra: Any,
 ) -> dict[str, Any]:
-    main: dict[str, Any] = {
+    """Keep authored recipe declarations separate from explicit target facts."""
+
+    main = {
         "name": "main",
-        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0",
-        "env": trace_env() if env is None else env,
-        "volumeMounts": (
-            [{"name": "traces", "mountPath": "/trace"}] if mounts is None else mounts
-        ),
+        "image": "raw-spec:ignored",
+        "env": trace_env() if recipe_env is None else recipe_env,
+        "volumeMounts": [{"name": "traces", "mountPath": "/trace"}]
+        if mounts is None
+        else mounts,
     }
-    if command is not None:
-        main["command"] = list(command)
-    if args is not None:
-        main["args"] = list(args)
     component: dict[str, Any] = {
         "name": name,
         "type": "frontend",
         "podTemplate": {
             "spec": {
                 "containers": [main],
-                "volumes": (
-                    [{"name": "traces", "persistentVolumeClaim": {"claimName": CLAIM}}]
-                    if volumes is None
-                    else volumes
-                ),
+                "volumes": [
+                    {"name": "traces", "persistentVolumeClaim": {"claimName": CLAIM}}
+                ]
+                if volumes is None
+                else volumes,
             }
+        },
+        "target": {
+            "roles": [
+                {
+                    "name": "main",
+                    "containers": [
+                        {
+                            "name": "main",
+                            "image": "target-runtime:1.8.0",
+                            "command": list(command or []),
+                            "args": list(args or []),
+                            "env": {
+                                **target_env(DYN_PARENT_DGD_K8S_NAME=DGD),
+                                **(env or {}),
+                            },
+                        }
+                    ],
+                }
+            ]
         },
         **extra,
     }
@@ -190,22 +222,35 @@ def frontend(
 
 
 def worker(
-    name: str = "agg", *, type_: str = "worker", model: str = MODEL, **extra: Any
+    name: str = "agg",
+    *,
+    model: str = MODEL,
+    type_: str = "worker",
+    **extra: Any,
 ) -> dict[str, Any]:
     return {
         "name": name,
         "type": type_,
-        "replicas": 2,
+        "replicas": 1,
         "podTemplate": {
-            "spec": {
-                "containers": [
-                    {
-                        "name": "main",
-                        "command": ["python3", "-m", "dynamo.vllm"],
-                        "args": [f"--model={model}", "--tensor-parallel-size=2"],
-                    }
-                ]
-            }
+            "spec": {"containers": [{"name": "main", "image": "raw-engine:ignored"}]}
+        },
+        "target": {
+            "servedModelName": model,
+            "roles": [
+                {
+                    "name": "main",
+                    "containers": [
+                        {
+                            "name": "main",
+                            "image": "target-engine:1.8.0",
+                            "command": ["python3", "-m", "dynamo.vllm"],
+                            "args": [f"--model={model}", "--tensor-parallel-size=2"],
+                            "env": {},
+                        }
+                    ],
+                }
+            ],
         },
         **extra,
     }
@@ -221,13 +266,33 @@ def planner(replicas: int = 1) -> dict[str, Any]:
 
 
 def dgd(*components: dict[str, Any], **spec: Any) -> dict[str, Any]:
+    """Assemble independently authored spec and status; never lower the spec."""
+
     if not components:
         components = (frontend(), worker(), planner())
     return {
         "apiVersion": "nvidia.com/v1beta1",
         "kind": "DynamoGraphDeployment",
-        "metadata": {"name": DGD, "namespace": NAMESPACE, "uid": "u-1"},
-        "spec": {"components": list(components), **spec},
+        "metadata": {
+            "name": DGD,
+            "namespace": NAMESPACE,
+            "uid": "u-1",
+            "generation": 1,
+        },
+        "spec": {
+            "components": [
+                {key: value for key, value in component.items() if key != "target"}
+                for component in components
+            ],
+            **spec,
+        },
+        "status": {
+            "observedGeneration": 1,
+            "components": {
+                component["name"]: copy.deepcopy(component.get("target", {}))
+                for component in components
+            },
+        },
     }
 
 
@@ -335,10 +400,8 @@ def test_parse_recipe_frontend():
 @pytest.mark.parametrize(
     ("command", "args", "mode"),
     [
-        # Operator default: python3 -m dynamo.frontend (round-robin).
-        (None, None, "round_robin"),
-        # Authored args keep the default python3 command.
-        (None, KV_ARGS, "kv_router"),
+        # Already-lowered declarations, not authored operator defaults.
+        (("python3",), ("-m", "dynamo.frontend"), "round_robin"),
         (("python3",), KV_ARGS, "kv_router"),
         (("python3", "-m", "dynamo.frontend"), ("--router-mode", "kv"), "kv_router"),
         (
@@ -355,14 +418,12 @@ def test_parse_recipe_frontend():
         ),
     ],
 )
-def test_effective_argv(command, args, mode):
+def test_target_argv(command, args, mode):
     startup = parse(with_frontend(command=command, args=args))
     assert startup.router_mode == mode
 
 
-def test_authored_command_drops_default_args():
-    # graph.go: an authored frontend command clears the default args, so the
-    # command alone must name the module.
+def test_target_command_does_not_invent_default_args():
     error = parse_error(with_frontend(command=("python3",), args=()))
     assert "does not run python -m dynamo.frontend" in error
 
@@ -394,12 +455,149 @@ def test_non_frontend_command_is_unparseable(command, args, match):
 
 
 def test_frontend_roles_are_unparseable():
-    error = parse_error(dgd(frontend(roles=[{"name": "leader"}]), worker()))
-    assert "uses roles" in error
+    component = frontend()
+    component["target"]["roles"][0]["name"] = "leader"
+    error = parse_error(dgd(component, worker()))
+    assert "one main target role" in error
+
+
+def test_router_target_status_wins_over_conflicting_authored_spec():
+    deployment = with_frontend(env=target_env(DYN_ROUTER_TEMPERATURE="0.25"))
+    authored = deployment["spec"]["components"][0]
+    authored["podTemplate"]["spec"]["containers"][0].update(
+        command=["invalid-authored-command"],
+        args=["--router-temperature", "0.9"],
+        env=[{"name": "DYN_ROUTER_TEMPERATURE", "value": "0.8"}],
+    )
+    deployment["spec"]["env"] = [{"name": "DYN_ROUTER_TEMPERATURE", "value": "0.7"}]
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.0.0"
+    }
+    assert parse(deployment).router_config == {"router_temperature": 0.25}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "no-status",
+        "no-generation",
+        "no-observation",
+        "stale",
+        "future",
+        "boolean-observation",
+        "no-component",
+        "child-pending",
+    ],
+)
+def test_router_target_requires_current_publication(case):
+    deployment = dgd()
+    if case == "no-status":
+        del deployment["status"]
+    elif case == "no-generation":
+        del deployment["metadata"]["generation"]
+    elif case == "no-observation":
+        del deployment["status"]["observedGeneration"]
+    elif case in ("stale", "future"):
+        deployment["status"]["observedGeneration"] = 0 if case == "stale" else 2
+    elif case == "boolean-observation":
+        deployment["status"]["observedGeneration"] = True
+    elif case == "no-component":
+        del deployment["status"]["components"]["Frontend"]
+    else:
+        del deployment["status"]["components"]["Frontend"]["roles"]
+    assert "current target roles" in parse_error(deployment)
+
+
+def test_frontend_command_and_module_aliases_expand_once():
+    deployment = with_frontend(
+        command=("$(PYTHON)",),
+        args=("-m", "$(MODULE)", "--router-temperature", "$(TEMP)"),
+        env=target_env(PYTHON="python3", MODULE="dynamo.frontend", TEMP="0.25"),
+    )
+    assert parse(deployment).router_config == {"router_temperature": 0.25}
+    target = deployment["status"]["components"]["Frontend"]["roles"][0]["containers"][0]
+    target["env"]["TEMP"] = {"value": "$(OTHER)"}
+    target["env"]["OTHER"] = {"value": "0.75"}
+    assert "cannot parse" in parse_error(deployment)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {},
+        {"unresolved": False},
+        {"unresolved": "true"},
+        {"value": 1},
+        {"value": "", "unresolved": True},
+    ],
+)
+def test_malformed_target_binding_is_unavailable(binding):
+    assert "target environment binding" in parse_error(
+        with_frontend(env={"SETTING": binding})
+    )
+
+
+@pytest.mark.parametrize("component_name", ["Frontend", "agg"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "duplicate-role",
+        "duplicate-container",
+        "missing-main",
+        "missing-image",
+        "malformed-command",
+        "malformed-env",
+    ],
+)
+def test_malformed_or_ambiguous_target_is_unavailable(component_name, case):
+    deployment = dgd()
+    roles = deployment["status"]["components"][component_name]["roles"]
+    container = roles[0]["containers"][0]
+    if case == "duplicate-role":
+        roles.append(copy.deepcopy(roles[0]))
+    elif case == "duplicate-container":
+        roles[0]["containers"].append(copy.deepcopy(container))
+    elif case == "missing-main":
+        container["name"] = "helper"
+    elif case == "missing-image":
+        del container["image"]
+    elif case == "malformed-command":
+        container["command"] = "python3"
+    else:
+        container["env"] = [{"name": "NAME", "value": "value"}]
+    report = evaluate(deployment)
+    assert not report.p4_ok
+    assert any(
+        "target" in reason for reason in reasons_matching(report, "P4:")
+    ), report.reasons
+
+
+def test_target_values_are_not_replayed_and_empty_is_known():
+    values = target_env(EMPTY="", ESCAPED="$(LATER)", LATER="0.7", UNKNOWN=None)
+    container = {"env": values}
+    before = copy.deepcopy(container)
+    result = fc._target_env(container)
+    assert result.values == {"EMPTY": "", "ESCAPED": "$(LATER)", "LATER": "0.7"}
+    assert result.opaque == frozenset({"UNKNOWN"})
+    assert result.expand("x$(EMPTY)y") == "xy"
+    assert result.expand("$(ESCAPED)") == "$(LATER)"
+    assert result.expand("$$(LATER)") == "$(LATER)"
+    assert fc._OPAQUE in result.expand("$(MISSING)")
+    assert container == before
+
+
+def test_regular_runtime_named_helper_cannot_hide_worker_router_flags():
+    component = router_worker("--router-mode", "kv")
+    component["target"]["roles"][0]["containers"].append(
+        {"name": "runtime", "image": "helper:1"}
+    )
+    report = evaluate(dgd(frontend(), component, planner()))
+    assert not report.p4_ok
+    assert any("router mode 'kv'" in reason for reason in report.reasons)
 
 
 def test_env_sets_router_mode_and_knobs():
-    env = trace_env(
+    env = target_env(
         DYN_ROUTER_MODE="kv",
         DYN_ROUTER_TEMPERATURE="0.5",
         DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT="0.25",
@@ -414,8 +612,12 @@ def test_env_sets_router_mode_and_knobs():
     assert startup.startup_maps["aggregated"]["overlap_score_credit"] == 0.25
 
 
-def test_cli_wins_over_env_and_container_env_over_graph_env():
-    env = trace_env(DYN_ROUTER_TEMPERATURE="0.5", DYN_ROUTER_PREFILL_LOAD_SCALE="2")
+def test_cli_wins_over_target_env_and_authored_graph_is_ignored():
+    env = target_env(
+        DYN_ROUTER_TEMPERATURE="0.5",
+        DYN_ROUTER_PREFILL_LOAD_SCALE="2",
+        DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT="0.25",
+    )
     deployment = dgd(
         frontend(args=(*KV_ARGS, "--router-temperature", "0.2"), env=env),
         worker(),
@@ -427,7 +629,7 @@ def test_cli_wins_over_env_and_container_env_over_graph_env():
     assert parse(deployment).router_config == {
         "router_temperature": 0.2,
         "prefill_load_scale": 2.0,
-        "overlap_score_credit": 0.5,
+        "overlap_score_credit": 0.25,
     }
 
 
@@ -535,7 +737,7 @@ def test_omitted_replicas_default_to_one():
 
 
 def test_arg_expands_literal_env():
-    env = trace_env(TEMP="0.3")
+    env = target_env(TEMP="0.3")
     args = (*KV_ARGS, "--router-temperature", "$(TEMP)")
     assert parse(with_frontend(args=args, env=env)).router_config == {
         "router_temperature": 0.3
@@ -544,28 +746,28 @@ def test_arg_expands_literal_env():
 
 def test_escaped_reference_stays_literal():
     # $$(TEMP) is the literal "$(TEMP)", which is not a float.
-    env = trace_env(TEMP="0.3")
+    env = target_env(TEMP="0.3")
     args = (*KV_ARGS, "--router-temperature", "$$(TEMP)")
     error = parse_error(with_frontend(args=args, env=env))
     assert "cannot parse the frontend args" in error
 
 
 def test_arg_referencing_value_from_is_unparseable():
-    env = trace_env(TEMP={"valueFrom": {"configMapKeyRef": {"name": "c", "key": "t"}}})
+    env = target_env(TEMP={"unresolved": True})
     args = (*KV_ARGS, "--router-temperature", "$(TEMP)")
     error = parse_error(with_frontend(args=args, env=env))
     assert "$(TEMP)" in error and "cannot read" in error
 
 
 def test_opaque_string_router_arg_is_unparseable():
-    env = trace_env(MODE={"valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}})
+    env = target_env(MODE={"unresolved": True})
     args = ("-m", "dynamo.frontend", "--router-tracking-key-id", "id-$(MODE)")
     error = parse_error(with_frontend(args=args, env=env))
     assert "router_tracking_key_id" in error
 
 
 def test_arg_that_is_an_opaque_reference_is_unparseable():
-    env = trace_env(EXTRA={"valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}})
+    env = target_env(EXTRA={"unresolved": True})
     error = parse_error(with_frontend(args=(*KV_ARGS, "$(EXTRA)"), env=env))
     assert "$(EXTRA)" in error
 
@@ -575,7 +777,7 @@ def test_opaque_reference_in_a_non_router_arg_is_fine():
     assert parse(with_frontend(args=args)).router_config == {}
 
 
-OPAQUE_PORT = {"valueFrom": {"configMapKeyRef": {"name": "c", "key": "port"}}}
+OPAQUE_PORT = {"unresolved": True}
 
 
 @pytest.mark.parametrize(
@@ -607,7 +809,7 @@ OPAQUE_PORT = {"valueFrom": {"configMapKeyRef": {"name": "c", "key": "port"}}}
     ],
 )
 def test_opaque_reference_in_a_typed_non_router_arg_is_fine(args):
-    startup = parse(with_frontend(args=args, env=trace_env(HTTP_PORT=OPAQUE_PORT)))
+    startup = parse(with_frontend(args=args, env=target_env(HTTP_PORT=OPAQUE_PORT)))
     assert startup.router_mode == "kv_router"
     assert startup.router_config == {}
 
@@ -664,13 +866,13 @@ def test_opaque_reference_in_a_typed_non_router_arg_is_fine(args):
             ),
             "could set a router flag",
         ),
-        # Inert env is still unreadable as a router value or an option name.
+        # An unresolved binding is unreadable as a router value or option name.
         ((*KV_ARGS, "--router-temp", "$(POD_UID)"), "router arg references $(POD_UID)"),
         ((*KV_ARGS, "--$(POD_NAME)"), "could set a router flag"),
     ],
 )
 def test_opaque_reference_that_could_set_a_router_flag_is_unparseable(args, match):
-    error = parse_error(with_frontend(args=args, env=trace_env(HTTP_PORT=OPAQUE_PORT)))
+    error = parse_error(with_frontend(args=args, env=target_env(HTTP_PORT=OPAQUE_PORT)))
     assert error.startswith("P4:")
     assert match in error
 
@@ -683,10 +885,9 @@ def test_opaque_reference_that_could_set_a_router_flag_is_unparseable(args, matc
         (*KV_ARGS, "$(NODE)"),
     ],
 )
-def test_inert_reference_where_a_flag_could_stand_is_fine(args):
-    # A pod name, uid or node name never starts with "-".
-    env = trace_env(NODE={"valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}})
-    assert parse(with_frontend(args=args, env=env)).router_config == {}
+def test_unresolved_names_are_not_assumed_inert(args):
+    env = target_env(NODE=None)
+    assert "could set a router flag" in parse_error(with_frontend(args=args, env=env))
 
 
 @pytest.mark.parametrize(
@@ -700,7 +901,7 @@ def test_inert_reference_where_a_flag_could_stand_is_fine(args):
         ),
         ((*KV_ARGS, "$(APP_ROUTER_ARG)"), "APP_", "could set a router flag"),
         # A prefix that cannot produce the name, and command substitution.
-        ((*KV_ARGS, "$(ROUTER_ARG)"), "APP_", None),
+        ((*KV_ARGS, "$(ROUTER_ARG)"), "APP_", "could set a router flag"),
         ((*KV_ARGS, "--metrics-prefix", "$(seq 1 3)"), None, None),
     ],
 )
@@ -720,32 +921,26 @@ def test_env_from_may_define_an_undefined_reference(args, prefix, match):
 
 
 def test_router_env_from_value_from_is_unparseable():
-    env = trace_env(
-        DYN_ROUTER_TEMPERATURE={
-            "valueFrom": {"configMapKeyRef": {"name": "c", "key": "t"}}
-        }
-    )
+    env = target_env(DYN_ROUTER_TEMPERATURE={"unresolved": True})
     error = parse_error(with_frontend(env=env))
-    assert "DYN_ROUTER_TEMPERATURE" in error and "valueFrom" in error
+    assert "DYN_ROUTER_TEMPERATURE" in error and "unresolved in target status" in error
 
 
 def test_router_env_referencing_value_from_is_unparseable():
-    env = trace_env(
-        A_TEMP={"valueFrom": {"configMapKeyRef": {"name": "c", "key": "t"}}},
-        DYN_ROUTER_TEMPERATURE="$(A_TEMP)",
+    env = target_env(
+        A_TEMP={"unresolved": True},
+        DYN_ROUTER_TEMPERATURE=None,
     )
     assert "DYN_ROUTER_TEMPERATURE" in parse_error(with_frontend(env=env))
 
 
-def test_router_env_references_earlier_literal():
-    env = trace_env(A_TEMP="0.7", DYN_ROUTER_TEMPERATURE="$(A_TEMP)")
+def test_router_env_uses_final_known_value_without_replaying_sources():
+    env = target_env(A_TEMP=None, DYN_ROUTER_TEMPERATURE="0.7")
     assert parse(with_frontend(env=env)).router_config == {"router_temperature": 0.7}
 
 
 def test_non_router_value_from_is_fine():
-    env = trace_env(
-        HF_TOKEN={"valueFrom": {"secretKeyRef": {"name": "hf", "key": "t"}}}
-    )
+    env = target_env(HF_TOKEN={"unresolved": True})
     assert parse(with_frontend(env=env)).router_mode == "kv_router"
 
 
@@ -798,7 +993,7 @@ def test_router_policy_config_is_unparseable():
     ],
 )
 def test_invalid_router_config_is_unparseable(args, env, match):
-    error = parse_error(with_frontend(args=args, env=trace_env(**env)))
+    error = parse_error(with_frontend(args=args, env=target_env(**env)))
     assert error.startswith("P4:")
     assert match in error
 
@@ -857,7 +1052,7 @@ def test_matches_real_frontend_parser(monkeypatch, args, env):
 
     for name in env:
         monkeypatch.delenv(name)
-    startup = parse(with_frontend(args=args, env=trace_env(**env)))
+    startup = parse(with_frontend(args=args, env=target_env(**env)))
     actual = json.loads(
         KvRouterConfig.from_json(json.dumps(startup.router_config)).to_json()
     )
@@ -997,7 +1192,7 @@ def test_parse_error_fails_p4_only():
     ],
 )
 def test_p4_rejects(args, env, match):
-    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    report = evaluate(with_frontend(args=args, env=target_env(**env)))
     assert not report.p4_ok and not report.spec_ok
     assert any(
         match in reason for reason in reasons_matching(report, "P4:")
@@ -1038,7 +1233,7 @@ def test_p4_rejects(args, env, match):
     ],
 )
 def test_p4_accepts(args, env):
-    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    report = evaluate(with_frontend(args=args, env=target_env(**env)))
     assert report.p4_ok, report.reasons
 
 
@@ -1089,7 +1284,7 @@ def test_p4_disagg_decode_credit_zero_is_not_a_zero_credit_startup():
 # ------------------------------------------- P4: worker router advertisement
 
 
-SECRET = {"valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}}
+SECRET = {"unresolved": True}
 # A Secret that may hold any key.
 ENV_FROM = [{"secretRef": {"name": "worker-launch-options"}}]
 # A worker launch in a shell script.
@@ -1098,18 +1293,18 @@ WORKER = f"python3 -m dynamo.vllm --model {MODEL}"
 
 def router_worker(
     *args: str,
-    env: list[dict[str, Any]] | None = None,
+    env: dict[str, dict[str, Any]] | None = None,
     env_from: list[dict[str, Any]] | None = None,
     name: str = "agg",
     type_: str = "worker",
 ) -> dict[str, Any]:
     component = worker(name, type_=type_)
-    main = component["podTemplate"]["spec"]["containers"][0]
+    main = target_main(component)
     main["args"] = [*main["args"], *args]
     if env is not None:
         main["env"] = env
     if env_from is not None:
-        main["envFrom"] = env_from
+        component["podTemplate"]["spec"]["containers"][0]["envFrom"] = env_from
     return component
 
 
@@ -1117,13 +1312,13 @@ def shell_worker(
     script: str,
     *,
     command: tuple[str, ...] | None = ("/bin/sh", "-c"),
-    env: list[dict[str, Any]] | None = None,
+    env: dict[str, dict[str, Any]] | None = None,
     env_from: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """A worker running ``script``; ``command=None`` omits the command."""
 
     component = worker()
-    main = component["podTemplate"]["spec"]["containers"][0]
+    main = target_main(component)
     main["args"] = [script]
     if command is None:
         del main["command"]
@@ -1132,88 +1327,55 @@ def shell_worker(
     if env is not None:
         main["env"] = env
     if env_from is not None:
-        main["envFrom"] = env_from
+        component["podTemplate"]["spec"]["containers"][0]["envFrom"] = env_from
     return component
 
 
-def field_ref_env(name: str, path: str) -> dict[str, Any]:
-    return {"name": name, "valueFrom": {"fieldRef": {"fieldPath": path}}}
+def unresolved_env(name: str) -> dict[str, Any]:
+    return {name: {"unresolved": True}}
 
 
-def router_arg_env() -> list[dict[str, Any]]:
+def router_arg_env() -> dict[str, dict[str, Any]]:
     """ROUTER_ARG from a ConfigMap the planner cannot read."""
 
-    return [
-        {
-            "name": "ROUTER_ARG",
-            "valueFrom": {
-                "configMapKeyRef": {
-                    "name": "worker-launch-options",
-                    "key": "router-arg",
-                }
-            },
-        }
-    ]
+    return {"ROUTER_ARG": {"unresolved": True}}
 
 
 def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
-    """The PrefillWorker of recipes/minimax-m3/vllm/disagg-gb200-agentic."""
+    """Explicit target declarations corresponding to a production prefill launch."""
 
-    return {
-        "name": "PrefillWorker",
-        "type": "prefill",
-        "replicas": 3,
-        "podTemplate": {
-            "spec": {
-                "containers": [
-                    {
-                        "name": "main",
-                        "command": ["python3"],
-                        "args": [
-                            "-m",
-                            "dynamo.vllm",
-                            *router_args,
-                            "--model",
-                            "$(MODEL_NAME)",
-                            "--served-model-name",
-                            "$(SERVED_MODEL_NAME)",
-                            "--tensor-parallel-size",
-                            "4",
-                            "--speculative-config",
-                            "$(SPECULATIVE_CONFIG)",
-                            "--disaggregation-mode",
-                            "prefill",
-                            "--kv-transfer-config",
-                            "$(KV_TRANSFER_CONFIG)",
-                            "--kv-events-config",
-                            '{"enable_kv_cache_events":true,"publisher":"zmq"}',
-                        ],
-                        "env": [
-                            {
-                                "name": "KV_TRANSFER_CONFIG",
-                                "value": '{"kv_connector":"NixlConnector",'
-                                '"kv_role":"kv_both"}',
-                            },
-                            {
-                                "name": "SPECULATIVE_CONFIG",
-                                "valueFrom": {
-                                    "configMapKeyRef": {
-                                        "name": "minimax-m3-config",
-                                        "key": "speculative-config",
-                                    }
-                                },
-                            },
-                            {"name": "MODEL_NAME", "value": "nvidia/MiniMax-M3-NVFP4"},
-                            {
-                                "name": "SERVED_MODEL_NAME",
-                                "value": "nvidia/MiniMax-M3-NVFP4",
-                            },
-                        ],
-                    }
-                ]
-            }
-        },
-    }
+    component = worker(
+        "PrefillWorker", type_="prefill", model="nvidia/MiniMax-M3-NVFP4", replicas=3
+    )
+    target_main(component).update(
+        command=["python3"],
+        args=[
+            "-m",
+            "dynamo.vllm",
+            *router_args,
+            "--model",
+            "$(MODEL_NAME)",
+            "--served-model-name",
+            "$(SERVED_MODEL_NAME)",
+            "--tensor-parallel-size",
+            "4",
+            "--speculative-config",
+            "$(SPECULATIVE_CONFIG)",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-transfer-config",
+            "$(KV_TRANSFER_CONFIG)",
+            "--kv-events-config",
+            '{"enable_kv_cache_events":true,"publisher":"zmq"}',
+        ],
+        env=target_env(
+            MODEL_NAME="nvidia/MiniMax-M3-NVFP4",
+            SERVED_MODEL_NAME="nvidia/MiniMax-M3-NVFP4",
+            SPECULATIVE_CONFIG=None,
+            KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        ),
+    )
+    return component
 
 
 @pytest.mark.parametrize(
@@ -1222,36 +1384,33 @@ def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
         (("--router-mode", "kv"), None, "advertises its own router configuration"),
         (("--router-mode=round-robin",), None, "router mode 'round-robin'"),
         (("--router-m", "kv", "--no-router-kv-events"), None, "router mode 'kv'"),
-        ((), [{"name": "DYN_ROUTER_MODE", "value": "kv"}], "router mode 'kv'"),
-        ((), [{"name": "DYN_ROUTER_MODE", "value": ""}], "router mode ''"),
+        ((), {"DYN_ROUTER_MODE": {"value": "kv"}}, "router mode 'kv'"),
+        ((), {"DYN_ROUTER_MODE": {"value": ""}}, "router mode ''"),
         (
             (),
-            [{"name": "DYN_ROUTER_MODE", **SECRET}],
-            "DYN_ROUTER_MODE through valueFrom",
+            {"DYN_ROUTER_MODE": SECRET},
+            "DYN_ROUTER_MODE through unresolved target status",
         ),
         (
             (),
-            [
-                {"name": "A_MODE", **SECRET},
-                {"name": "DYN_ROUTER_MODE", "value": "$(A_MODE)"},
-            ],
-            "DYN_ROUTER_MODE through valueFrom",
+            {"A_MODE": SECRET, "DYN_ROUTER_MODE": {"unresolved": True}},
+            "DYN_ROUTER_MODE through unresolved target status",
         ),
         (
             ("--router-mode", "$(A_MODE)"),
-            [{"name": "A_MODE", **SECRET}],
+            {"A_MODE": SECRET},
             "router flag that references $(A_MODE)",
         ),
         (
             ("--router-mode", "$(A_MODE)"),
-            [{"name": "A_MODE", "value": "kv"}],
+            {"A_MODE": {"value": "kv"}},
             "router mode 'kv'",
         ),
         (("--router-mode", "fastest"), None, "cannot parse"),
         (("--router-mode", "power-of-two"), None, "cannot parse"),
         (
             (),
-            [{"name": "DYN_ROUTER_TEMPERATURE", "value": "hot"}],
+            {"DYN_ROUTER_TEMPERATURE": {"value": "hot"}},
             "invalid router env",
         ),
         # An unreadable argument where an option could stand, e.g. a
@@ -1268,23 +1427,23 @@ def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
         ),
         (
             ("--$(A_MODE)=kv",),
-            [{"name": "A_MODE", **SECRET}],
+            {"A_MODE": SECRET},
             "has an option whose name references $(A_MODE)",
         ),
         (
             ("--router-$(A_MODE)", "kv"),
-            [{"name": "A_MODE", **SECRET}],
+            {"A_MODE": SECRET},
             "has an option whose name references $(A_MODE)",
         ),
-        # Inert env could still spell an option's name.
+        # An unresolved binding could still spell an option's name.
         (
             ("--x-$(MY_POD)=1",),
-            [field_ref_env("MY_POD", "metadata.name")],
+            {**unresolved_env("MY_POD")},
             "has an option whose name references $(MY_POD)",
         ),
         (
             ("--speculative-config", "$(A_SECRET)", "$(A_SECRET)"),
-            [{"name": "A_SECRET", **SECRET}],
+            {"A_SECRET": SECRET},
             "has an argument that references $(A_SECRET)",
         ),
         # Only the first value of --served-model-name (nargs "+") is exempt:
@@ -1308,7 +1467,7 @@ def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
         ),
         (
             ("$(NOTE)",),
-            [field_ref_env("NOTE", "metadata.annotations['router']")],
+            {**unresolved_env("NOTE")},
             "has an argument that references $(NOTE)",
         ),
     ],
@@ -1327,20 +1486,20 @@ def test_p4_rejects_a_worker_that_advertises_a_router_config(args, env, match):
     [
         # Router flags and env without a mode advertise nothing.
         (("--no-router-kv-events", "--router-temperature", "0.5"), None),
-        ((), [{"name": "DYN_ROUTER_TEMPERATURE", "value": "0.5"}]),
-        ((), [{"name": "DYN_ROUTER_MODE_HINT", "value": "kv"}]),
+        ((), {"DYN_ROUTER_TEMPERATURE": {"value": "0.5"}}),
+        ((), {"DYN_ROUTER_MODE_HINT": {"value": "kv"}}),
         # Unreadable env as the value of a non-mode router flag, of an
         # option known to take one, or attached to its option.
-        (("--router-temperature", "$(A_SECRET)"), [{"name": "A_SECRET", **SECRET}]),
-        (("--speculative-config", "$(A_SECRET)"), [{"name": "A_SECRET", **SECRET}]),
+        (("--router-temperature", "$(A_SECRET)"), {"A_SECRET": SECRET}),
+        (("--speculative-config", "$(A_SECRET)"), {"A_SECRET": SECRET}),
         (("--speculative-config", "$(ROUTER_ARG)"), router_arg_env()),
         (("--model", "$(ROUTER_ARG)"), router_arg_env()),
         (("--model-path", "$(ROUTER_ARG)"), router_arg_env()),
         (("--served-model-name", "$(ROUTER_ARG)"), router_arg_env()),
         (("--some-opt=$(ROUTER_ARG)",), router_arg_env()),
-        # Inert env never stands for an option.
-        (("$(POD_NAME)",), None),
-        (("--enforce-eager", "$(MY_POD)"), [field_ref_env("MY_POD", "metadata.name")]),
+        # A reported literal needs no source or ownership inference.
+        (("$(POD_NAME)",), target_env(POD_NAME="worker-0")),
+        (("--enforce-eager", "$(MY_POD)"), target_env(MY_POD="worker-0")),
     ],
 )
 def test_p4_accepts_workers_that_advertise_nothing(args, env):
@@ -1351,34 +1510,41 @@ def test_p4_accepts_workers_that_advertise_nothing(args, env):
 @pytest.mark.parametrize(
     ("args", "env_from", "match"),
     [
-        # A Secret or ConfigMap key may define what env leaves undefined.
+        # Missing status bindings stay unknown regardless of authored envFrom.
         (
             ("$(ROUTER_ARG)",),
             ENV_FROM,
-            "references $(ROUTER_ARG), which the planner cannot read (the "
-            "container's env leaves it to an envFrom source)",
+            "references $(ROUTER_ARG), which the planner cannot read",
         ),
         (
             ("$(APP_ROUTER_ARG)",),
             [{**ENV_FROM[0], "prefix": "APP_"}],
             "references $(APP_ROUTER_ARG)",
         ),
-        # A prefix that cannot produce the name, the worker's own env, and
-        # the value of an option known to take one.
-        (("$(ROUTER_ARG)",), [{**ENV_FROM[0], "prefix": "APP_"}], None),
+        (
+            ("$(ROUTER_ARG)",),
+            [{**ENV_FROM[0], "prefix": "APP_"}],
+            "references $(ROUTER_ARG)",
+        ),
+        # A value position cannot introduce an option in exec form.
         (("--model", "$(MODEL_ID)"), ENV_FROM, None),
         (("--model", "$(MODEL_NAME)"), ENV_FROM, None),
-        # The operator sets these on the container, whose env wins over
-        # envFrom, and none of them holds an option.
-        (("--draft-endpoint", "$(DYN_NAMESPACE)/backend/generate"), ENV_FROM, None),
-        (("--x", "$(DYN_COMPONENT)", "$(DYN_SYSTEM_PORT)"), ENV_FROM, None),
-        # The operator sets this one only for some discovery configurations.
+        (
+            ("--draft-endpoint", "$(DYN_NAMESPACE)/backend/generate"),
+            ENV_FROM,
+            "references $(DYN_NAMESPACE)",
+        ),
+        (
+            ("--x", "$(DYN_COMPONENT)", "$(DYN_SYSTEM_PORT)"),
+            ENV_FROM,
+            "references $(DYN_COMPONENT)",
+        ),
         (("$(NATS_SERVER)",), ENV_FROM, "references $(NATS_SERVER)"),
     ],
 )
-def test_p4_worker_reference_an_env_from_source_may_define(args, env_from, match):
+def test_p4_worker_uses_target_bindings_not_authored_env_from(args, env_from, match):
     component = router_worker(
-        *args, env=[{"name": "MODEL_ID", "value": MODEL}], env_from=env_from
+        *args, env={"MODEL_ID": {"value": MODEL}}, env_from=env_from
     )
     report = evaluate(dgd(frontend(), component, planner()))
     rejected = reasons_matching(report, "P4: worker component agg ")
@@ -1392,28 +1558,38 @@ def test_p4_worker_reference_an_env_from_source_may_define(args, env_from, match
     ("command", "script", "match"),
     [
         (("/bin/sh", "-c"), "$(ROUTER_ARG)", "references $(ROUTER_ARG)"),
-        (None, "$(ROUTER_ARG)", "references $(ROUTER_ARG)"),
-        # Image env too, which a shell splits unless quoted; a script's own
-        # assignment overrides what such a source may define.
+        (("/bin/sh", "-c"), "$(ROUTER_ARG)", "references $(ROUTER_ARG)"),
+        # Missing image env is unknown; shell control flow is not evaluated.
         (
             ("/bin/sh", "-c"),
             f"export LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH; exec {WORKER}",
             "references $LD_LIBRARY_PATH where it could become an option, and "
-            "the planner cannot read it (the container's env leaves it to an "
-            "envFrom source)",
+            "the planner cannot read it",
         ),
         (
             ("/bin/sh", "-c"),
             f'export LD_LIBRARY_PATH="/opt/lib:$LD_LIBRARY_PATH"; exec {WORKER}',
             None,
         ),
-        (("/bin/sh", "-c"), f"ARGS=; exec {WORKER} $ARGS", None),
+        (("/bin/sh", "-c"), f"ARGS=; exec {WORKER} $ARGS", "references $ARGS"),
         # A redirection target is a file, never an argument.
         (("/bin/sh", "-c"), f'exec {WORKER} > "$HOME/worker.log" 2>&1', None),
-        # Operator env the container's env defines.
-        (None, f"echo $DYN_NAMESPACE $DYN_COMPONENT; exec {WORKER}", None),
-        (None, f"exec {WORKER} --endpoint dyn://$DYN_NAMESPACE.backend.generate", None),
-        (None, f"echo $DYN_SYSTEM_PORT; exec {WORKER}", None),
+        # Names do not imply a binding supplied by the operator.
+        (
+            ("/bin/sh", "-c"),
+            f"echo $DYN_NAMESPACE $DYN_COMPONENT; exec {WORKER}",
+            "references $DYN_NAMESPACE",
+        ),
+        (
+            ("/bin/sh", "-c"),
+            f"exec {WORKER} --endpoint dyn://$DYN_NAMESPACE.backend.generate",
+            "references $DYN_NAMESPACE",
+        ),
+        (
+            ("/bin/sh", "-c"),
+            f"echo $DYN_SYSTEM_PORT; exec {WORKER}",
+            "references $DYN_SYSTEM_PORT",
+        ),
     ],
 )
 def test_p4_worker_script_reference_an_env_from_source_may_define(
@@ -1422,7 +1598,7 @@ def test_p4_worker_script_reference_an_env_from_source_may_define(
     component = shell_worker(
         script,
         command=command,
-        env=[{"name": "MODEL_ID", "value": MODEL}],
+        env={"MODEL_ID": {"value": MODEL}},
         env_from=ENV_FROM,
     )
     report = evaluate(dgd(frontend(), component, planner()))
@@ -1449,20 +1625,15 @@ def test_p4_names_the_env_a_dangerous_script_variable_holds(env_from):
 @pytest.mark.parametrize(
     ("env", "match"),
     [
-        (None, None),
-        # User env of an operator name overrides the operator's.
+        (target_env(DYN_NAMESPACE="ns"), None),
+        # A known target binding needs no ownership or source inference.
         (
-            [
-                {
-                    "name": "DYN_NAMESPACE",
-                    "valueFrom": {"configMapKeyRef": {"name": "c", "key": "ns"}},
-                }
-            ],
+            {"DYN_NAMESPACE": {"unresolved": True}},
             "references $(DYN_NAMESPACE)",
         ),
     ],
 )
-def test_p4_user_env_overrides_operator_env(env, match):
+def test_p4_known_and_unresolved_target_bindings(env, match):
     component = router_worker(
         "--draft-endpoint", "$(DYN_NAMESPACE)/backend/generate", env=env
     )
@@ -1474,9 +1645,7 @@ def test_p4_user_env_overrides_operator_env(env, match):
         assert any(match in reason for reason in rejected), report.reasons
 
 
-def test_p4_untyped_component_gets_no_worker_operator_env():
-    # ComponentDefaultsFactory gives an untyped component the common base
-    # container only, so an envFrom source may define DYN_SYSTEM_PORT.
+def test_p4_untyped_component_uses_only_reported_bindings():
     component = router_worker("$(DYN_SYSTEM_PORT)", env_from=ENV_FROM, type_="")
     report = evaluate(dgd(frontend(), component, planner()))
     assert any(
@@ -1499,23 +1668,21 @@ def test_p4_checks_an_untyped_worker():
     ), report.reasons
 
 
-def test_p4_rejects_graph_env_router_mode_reaching_the_workers():
-    # recipes/solar-open2-250b: a graph-level DYN_ROUTER_MODE reaches the
-    # frontend and every worker.
+def test_p4_checks_router_mode_in_every_projected_worker():
+    prefill = worker("prefill", type_="prefill")
+    decode = worker("decode", type_="decode")
+    for component in (prefill, decode):
+        target_main(component)["env"] = target_env(DYN_ROUTER_MODE="kv")
     deployment = dgd(
-        frontend(args=("-m", "dynamo.frontend")),
-        worker("prefill", type_="prefill"),
-        worker("decode", type_="decode"),
+        frontend(args=("-m", "dynamo.frontend"), env=target_env(DYN_ROUTER_MODE="kv")),
+        prefill,
+        decode,
         planner(),
-        env=[{"name": "DYN_ROUTER_MODE", "value": "kv"}],
     )
     report = evaluate(deployment, config=planner_config("disagg"))
     assert report.startup is not None and report.startup.router_mode == "kv_router"
     assert not report.p4_ok
-    assert [r.split(" advertises")[0] for r in reasons_matching(report, "P4:")] == [
-        "P4: worker component prefill",
-        "P4: worker component decode",
-    ]
+    assert len(reasons_matching(report, "P4: worker component")) == 2
 
 
 def test_p4_checks_the_real_recipe_prefill_worker():
@@ -1532,7 +1699,7 @@ def test_p4_checks_the_real_recipe_prefill_worker():
     assert not report.p4_ok
     assert reasons_matching(
         report,
-        "P4: worker component PrefillWorker advertises its own router "
+        "P4: worker component PrefillWorker (role main) advertises its own router "
         "configuration (router mode 'kv'",
     )
 
@@ -1553,12 +1720,9 @@ def test_p4_checks_the_real_recipe_prefill_worker():
 
 @pytest.mark.parametrize(
     "command",
-    # The operator's /bin/sh -c applies to an omitted or empty command; a
-    # launcher may start the shell.
+    # Explicit projected commands; omitted entrypoints are tested separately.
     [
         ("/bin/sh", "-c"),
-        None,
-        (),
         ("/usr/bin/env", "bash", "-c"),
         ("tini", "--", "/bin/sh", "-c"),
         ("dumb-init", "--", "bash", "-c"),
@@ -1567,8 +1731,6 @@ def test_p4_checks_the_real_recipe_prefill_worker():
     ],
     ids=[
         "explicit",
-        "omitted",
-        "empty",
         "env-bash",
         "tini-sh",
         "dumb-init-bash",
@@ -1593,7 +1755,10 @@ def test_p4_checks_the_real_recipe_prefill_worker():
             f"DYN_ROUTER_MODE=kv python3 -m dynamo.vllm --model {MODEL}",
             "sets DYN_ROUTER_MODE in its shell command",
         ),
-        ('python3 -m dynamo.vllm --router-mode "$MODE"', "cannot parse"),
+        (
+            'python3 -m dynamo.vllm --router-mode "$MODE"',
+            "router flag that references $MODE",
+        ),
         (f"python3 -m dynamo.vllm --model {MODEL} --no-router-kv-events", None),
     ],
 )
@@ -1613,11 +1778,10 @@ def test_p4_shell_wrapped_worker(command, script, match):
     [
         ("/bin/sh", "-c"),
         ("bash", "-lc"),
-        None,
         ("/bin/bash", "-o", "pipefail", "-c"),
         ("bash", "-euo", "pipefail", "-c"),
     ],
-    ids=["sh", "bash-lc", "omitted", "bash-o-pipefail", "bash-euo-pipefail"],
+    ids=["sh", "bash-lc", "bash-o-pipefail", "bash-euo-pipefail"],
 )
 @pytest.mark.parametrize(
     ("script", "match"),
@@ -1663,7 +1827,7 @@ def test_p4_shell_wrapped_worker(command, script, match):
         ),
         (
             f'[ -n "$OVERRIDE" ] && EXTRA="$OVERRIDE"; exec {WORKER} $EXTRA',
-            "router mode 'kv'",
+            "references $EXTRA (assigned from $OVERRIDE)",
         ),
         # A quoted one stays one word: an option's value, unless it stands
         # alone as an argument of the worker.
@@ -1746,31 +1910,32 @@ def test_p4_shell_wrapped_worker(command, script, match):
         (f"{WORKER} ${{MODE:+--router-mode=kv}}", "router mode 'kv'"),
         (
             f"{WORKER} ${{UNSET:-$ROUTER_ARG}}",
-            "has a shell script that references $ROUTER_ARG",
+            "has a shell script that references $UNSET",
         ),
-        # Inert env never stands for an option.
-        (f'{WORKER} $POD_NAME "$MY_POD" $(MY_POD) $(POD_UID)', None),
+        # Pod-specific names carry no implicit known-safe classification.
+        (f'{WORKER} $POD_NAME "$MY_POD" $(MY_POD) $(POD_UID)', "references $POD_NAME"),
         (f'[ "$POD_INDEX" = "0" ] && exec {WORKER}', None),
         (f"{WORKER} $NOTE", "has a shell script that references $NOTE"),
-        # Neither evaluated nor rejected: command substitution and script
-        # variables built from it.
-        (f"{WORKER} $(cat /etc/router-args)", None),
-        (f"ARGS=`cat /etc/router-args`; {WORKER} $ARGS", None),
+        # Neither command output nor script variables are target facts.
+        (f"{WORKER} $(cat /etc/router-args)", "references $(cat /etc/router-args)"),
+        (f"ARGS=`cat /etc/router-args`; {WORKER} $ARGS", "references $ARGS"),
     ],
 )
 def test_p4_shell_wrapped_worker_with_unreadable_env(command, script, match):
-    env = [
-        {"name": name, "valueFrom": {"configMapKeyRef": {"name": "c", "key": "k"}}}
+    env = {
+        name: {"unresolved": True}
         for name in ("CFG", "ROUTER_ARG", "SPECULATIVE_CONFIG", "WORKER_CMD")
-    ]
-    env += [
-        {"name": "MODEL_NAME", "value": MODEL},
-        {"name": "EXTRA", "value": "--router-mode kv"},
-        {"name": "MODE", "value": "kv"},
-        field_ref_env("MY_POD", "metadata.name"),
-        field_ref_env("POD_INDEX", "metadata.labels['grove.io/podclique-pod-index']"),
-        field_ref_env("NOTE", "metadata.annotations['router']"),
-    ]
+    }
+    env.update(
+        {
+            "MODEL_NAME": {"value": MODEL},
+            "EXTRA": {"value": "--router-mode kv"},
+            "MODE": {"value": "kv"},
+            **unresolved_env("MY_POD"),
+            **unresolved_env("POD_INDEX"),
+            **unresolved_env("NOTE"),
+        }
+    )
     report = evaluate(
         dgd(frontend(), shell_worker(script, command=command, env=env), planner())
     )
@@ -1807,9 +1972,7 @@ def test_p4_shell_wrapped_worker_with_unreadable_env(command, script, match):
 )
 def test_p4_worker_behind_a_launcher(command, args, match):
     component = worker()
-    component["podTemplate"]["spec"]["containers"][0].update(
-        command=list(command), args=list(args)
-    )
+    target_main(component).update(command=list(command), args=list(args))
     report = evaluate(dgd(frontend(), component, planner()))
     rejected = reasons_matching(report, "P4: worker component agg ")
     if match is None:
@@ -1818,80 +1981,54 @@ def test_p4_worker_behind_a_launcher(command, args, match):
         assert any(match in reason for reason in rejected), report.reasons
 
 
-MODEL_FROM_CONFIG_MAP = [
-    {"name": "MODEL", "valueFrom": {"configMapKeyRef": {"name": "c", "key": "model"}}}
-]
-RUNTIME_SIDECAR = {"name": "runtime", "restartPolicy": "Always"}
-
-
-@pytest.mark.parametrize(
-    ("command", "args"),
-    [
-        (None, ["--model-path", "$(MODEL)", "--tp", "2"]),
-        (["python3", "-m", "tensorrt_llm.commands.serve"], ["$(MODEL)"]),
-        (None, ["--model-path=$(MODEL)", "--router-mode", "kv"]),
-    ],
-)
-@pytest.mark.parametrize("leader_only", [False, True], ids=["component", "leader"])
-def test_p4_skips_native_sidecar_mains(command, args, leader_only):
-    # The main runs the engine with its image entrypoint, and the runtime
-    # sidecar registers no router configuration.
+@pytest.mark.parametrize("command", [None, ()])
+def test_missing_projected_command_does_not_infer_an_entrypoint(command):
+    assert "image entrypoint is unknown" in parse_error(with_frontend(command=command))
     component = worker()
-    spec = component["podTemplate"]["spec"]
-    main = spec["containers"][0]
-    main.update(args=args, env=MODEL_FROM_CONFIG_MAP)
-    if command is None:
-        del main["command"]
-    else:
-        main["command"] = command
-    if leader_only:
-        component["multinode"] = {"nodeCount": 2}
-        component["roles"] = [
-            {
-                "name": "leader",
-                "podTemplate": {"spec": {"initContainers": [RUNTIME_SIDECAR]}},
-            }
-        ]
-    else:
-        spec["initContainers"] = [RUNTIME_SIDECAR]
+    target_main(component)["command"] = list(command or [])
+    component["target"]["roles"][0]["containers"].append(
+        {"name": "runtime", "image": "runtime:1.8.0"}
+    )
     report = evaluate(dgd(frontend(), component, planner()))
-    assert report.p4_ok, report.reasons
+    assert any("image entrypoint is unknown" in reason for reason in report.reasons)
 
 
-def test_p4_reads_an_omitted_command_without_a_native_sidecar_as_a_script():
+def test_projected_native_engine_with_router_flag_is_not_silently_skipped():
     component = worker()
-    main = component["podTemplate"]["spec"]["containers"][0]
-    del main["command"]
-    main.update(args=["--model-path=$(MODEL)", "--tp", "2"], env=MODEL_FROM_CONFIG_MAP)
-    report = evaluate(dgd(frontend(), component, planner()))
-    (reason,) = reasons_matching(report, "P4: worker component agg ")
-    # Quoting or attaching never helps a $(VAR): Kubernetes substitutes it
-    # before the shell parses the script.
-    assert "has a shell script that references $(MODEL), which Kubernetes" in reason
-    assert '(--option="$MODEL")' in reason
-    assert "quote the reference" not in reason
+    target_main(component).update(
+        command=["vllm", "serve"], args=[MODEL, "--router-mode", "kv"]
+    )
+    component["target"]["roles"][0]["containers"].append(
+        {"name": "runtime", "image": "runtime:1.8.0"}
+    )
+    assert not evaluate(dgd(frontend(), component, planner())).p4_ok
 
 
 def role_worker(
     leader: dict[str, Any], worker_: dict[str, Any], **extra: Any
 ) -> dict[str, Any]:
-    """A multinode worker whose launches are only in its role pod templates."""
+    """Author two target roles without reproducing template selection."""
 
-    roles = []
-    for name, main in (("leader", leader), ("worker", worker_)):
-        container = {"name": "main", "command": ["python3", "-m", "dynamo.vllm"]}
-        container.update(main)
-        roles.append(
-            {"name": name, "podTemplate": {"spec": {"containers": [container]}}}
-        )
-    return {
-        "name": "agg",
-        "type": "worker",
-        "replicas": 1,
-        "multinode": {"nodeCount": 2},
-        "roles": roles,
-        **extra,
-    }
+    component = worker(**extra)
+    component["target"]["roles"] = [
+        {
+            "name": name,
+            "containers": [
+                {
+                    "name": "main",
+                    "image": "target-engine:1.8.0",
+                    "command": ["python3", "-m", "dynamo.vllm"],
+                    **{
+                        key: value
+                        for key, value in main.items()
+                        if key in ("command", "args", "env")
+                    },
+                }
+            ],
+        }
+        for name, main in (("leader", leader), ("worker", worker_))
+    ]
+    return component
 
 
 ROLE_ARGS = ["--model", MODEL, "--tensor-parallel-size", "16"]
@@ -1907,7 +2044,7 @@ ROLE_ARGS = ["--model", MODEL, "--tensor-parallel-size", "16"]
         ),
         (
             {"args": ROLE_ARGS},
-            {"args": ROLE_ARGS, "env": [{"name": "DYN_ROUTER_MODE", "value": "kv"}]},
+            {"args": ROLE_ARGS, "env": {"DYN_ROUTER_MODE": {"value": "kv"}}},
             "agg (role worker) advertises its own router configuration",
         ),
         (
@@ -1916,18 +2053,18 @@ ROLE_ARGS = ["--model", MODEL, "--tensor-parallel-size", "16"]
             "agg (role leader) has an argument that references $(ROUTER_ARG)",
         ),
         ({"args": ROLE_ARGS}, {"args": ROLE_ARGS}, None),
-        # The operator sets the rank, so envFrom cannot.
+        # An attached option value cannot introduce another flag in exec form.
         (
-            {"args": ROLE_ARGS, "envFrom": ENV_FROM},
+            {"args": ROLE_ARGS},
             {
-                "args": [*ROLE_ARGS, "--node-rank", "$(DYNAMO_RANK)"],
-                "envFrom": ENV_FROM,
+                "args": [*ROLE_ARGS, "--node-rank=$(DYNAMO_RANK)"],
+                "env": target_env(DYNAMO_RANK=None),
             },
             None,
         ),
     ],
 )
-def test_p4_checks_each_role_pod_template(leader, worker_, match):
+def test_p4_checks_each_projected_role(leader, worker_, match):
     report = evaluate(dgd(frontend(), role_worker(leader, worker_), planner()))
     if match is None:
         assert report.p4_ok, report.reasons
@@ -1985,7 +2122,7 @@ def test_worker_router_mode_matches_the_real_worker_parser(monkeypatch, args, en
     for name in env:
         monkeypatch.delenv(name)
 
-    worker_env = [{"name": name, "value": value} for name, value in env.items()]
+    worker_env = {name: {"value": value} for name, value in env.items()}
     report = evaluate(dgd(frontend(), router_worker(*args, env=worker_env), planner()))
     rejected = reasons_matching(report, "P4: worker component agg ")
     if config.router_mode is None:
@@ -1996,26 +2133,16 @@ def test_worker_router_mode_matches_the_real_worker_parser(monkeypatch, args, en
         ), rejected
 
 
-def test_worker_env_from_is_warned_once():
-    deployment = dgd(frontend(), worker("a"), worker("b"), planner())
-    for component in deployment["spec"]["components"]:
-        component["podTemplate"]["spec"]["containers"][0]["envFrom"] = [
-            {"secretRef": {"name": "hf-token-secret"}}
-        ]
-    report = evaluate(deployment)
-    assert report.p4_ok and report.spec_ok, report.reasons
-    env_from = sorted(w for w in report.warnings if "envFrom" in w)
-    assert env_from == [
-        "P10: the frontend uses envFrom, which the planner cannot read; it "
-        "assumes envFrom sets no DYN_FRONTEND_ADMIN_PORT and calls port 8002. "
-        "Set DYN_FRONTEND_ADMIN_PORT in the container's env to be sure",
-        "P4: the frontend container uses envFrom secretRef 'hf-token-secret'; "
-        "the planner cannot read it and assumes it sets no router env (P14 "
-        "still checks the routers' policy parameters)",
-        "P4: worker components a, b use envFrom; the planner cannot read it and "
-        "assumes it sets no router env (a DYN_ROUTER_MODE there would make the "
-        "worker advertise its own router configuration)",
+def test_worker_target_publication_is_required_even_with_native_authored_spec():
+    deployment = dgd()
+    authored = deployment["spec"]["components"][1]
+    authored["podTemplate"]["spec"]["initContainers"] = [
+        {"name": "runtime", "image": "runtime:1.8.0"}
     ]
+    del deployment["status"]["components"]["agg"]["roles"]
+    report = evaluate(deployment)
+    assert not report.p4_ok
+    assert any("current target roles" in reason for reason in report.reasons)
 
 
 # ---------------------------------------------------------- P6-P10
@@ -2064,89 +2191,37 @@ def test_p7_served_models():
     assert fc.served_model_name(dgd()) == MODEL
 
 
-def test_p7_served_model_prefers_current_status_and_warns_when_unknown():
+def test_p7_served_model_status_is_authoritative_and_generation_checked():
     unknown = worker("b")
-    unknown["podTemplate"]["spec"]["containers"][0]["args"] = ["--model", "$(MODEL)"]
+    del unknown["target"]["servedModelName"]
     deployment = dgd(frontend(), worker("a"), unknown, planner())
     report = evaluate(deployment)
     assert report.spec_ok
-    assert any("served model of b" in w for w in report.warnings)
-
-    deployment["metadata"]["generation"] = 3
-    deployment["status"] = {
-        "observedGeneration": 3,
-        "components": {"b": {"servedModelName": "other/model"}},
-    }
+    assert any("served model of b" in warning for warning in report.warnings)
+    deployment["status"]["components"]["b"]["servedModelName"] = "other/model"
     assert fc.served_model_names(deployment) == ({"a": MODEL, "b": "other/model"}, ())
-    deployment["status"]["observedGeneration"] = 2
-    assert fc.served_model_names(deployment)[1] == ("b",)
+    deployment["metadata"]["generation"] = 2
+    assert fc.served_model_names(deployment) == ({}, ("a", "b"))
 
 
-def test_p7_shell_wrapped_worker_model():
-    shell = worker("a")
-    shell["podTemplate"]["spec"]["containers"][0].update(
-        command=["/bin/sh", "-c"],
-        args=[
-            f"python3 -m dynamo.sglang --model-path {MODEL} --served-model-name qwen"
-        ],
-    )
-    assert fc.served_model_names(dgd(frontend(), shell)) == ({"a": "qwen"}, ())
+def test_p7_does_not_infer_model_identity_from_exec_or_shell_flags():
+    for command, args in (
+        (["python3", "-m", "dynamo.vllm"], ["--model", MODEL]),
+        (["/bin/sh", "-c"], [f"vllm serve {MODEL} --served-model-name guessed"]),
+    ):
+        component = worker("a")
+        target_main(component).update(command=command, args=args)
+        component["target"]["servedModelName"] = "registered-name"
+        assert fc.served_model_names(dgd(component)) == ({"a": "registered-name"}, ())
+        del component["target"]["servedModelName"]
+        assert fc.served_model_names(dgd(component)) == ({}, ("a",))
 
 
-def p7_model_warnings(report: PremiseReport) -> list[str]:
-    return [w for w in report.warnings if w.startswith("P7: retune.dgdr.model")]
-
-
-def test_p7_warns_when_dgdr_model_is_not_what_the_workers_serve():
-    deployment = dgd(frontend(), worker(model="meta-llama/Llama-3.1-8B"), planner())
+def test_p7_served_alias_does_not_claim_to_establish_underlying_hf_model():
+    deployment = dgd(frontend(), worker(model="served-alias"), planner())
     report = evaluate(deployment)
     assert report.p4_ok and report.spec_ok, report.reasons
-    assert p7_model_warnings(report) == [
-        f"P7: retune.dgdr.model {MODEL!r} is not among the workers' "
-        "--model/--model-path/--served-model-name values "
-        "(meta-llama/Llama-3.1-8B); every DGDR Run simulates retune.dgdr.model, "
-        "so make sure it is the model the DGD serves"
-    ]
-    assert not p7_model_warnings(evaluate(dgd()))
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        # An alias: the HF id is still among the values.
-        ["--model", "/models/qwen", "--served-model-name", MODEL],
-        ["--model-path", MODEL, "--served-model-name", "qwen"],
-        ["--model", "/models/qwen", f"--served-model-name=qwen,{MODEL}"],
-        # Expanded against the worker's env.
-        ["--model", "$(MODEL_ID)"],
-    ],
-)
-def test_p7_dgdr_model_matches_any_worker_model_value(args):
-    component = worker()
-    component["podTemplate"]["spec"]["containers"][0].update(
-        args=args, env=[{"name": "MODEL_ID", "value": MODEL}]
-    )
-    report = evaluate(dgd(frontend(), component, planner()))
-    assert not p7_model_warnings(report), report.warnings
-
-
-def test_p7_dgdr_model_counts_the_current_served_model_status():
-    component = worker()
-    component["podTemplate"]["spec"]["containers"][0]["args"] = ["--model", "$(X)"]
-    deployment = dgd(frontend(), component, planner())
-    deployment["metadata"]["generation"] = 1
-    deployment["status"] = {
-        "observedGeneration": 1,
-        "components": {"agg": {"servedModelName": "other/model"}},
-    }
-    assert p7_model_warnings(evaluate(deployment))
-    deployment["status"]["components"]["agg"]["servedModelName"] = MODEL
-    assert not p7_model_warnings(evaluate(deployment))
-    # Nothing known: only the undetermined-model warning.
-    del deployment["status"]
-    report = evaluate(deployment)
-    assert not p7_model_warnings(report)
-    assert any("served model of agg" in w for w in report.warnings)
+    assert not any("not among" in warning for warning in report.warnings)
 
 
 @pytest.mark.parametrize(
@@ -2180,7 +2255,7 @@ def test_p7_no_frontend():
     ],
 )
 def test_p7_tls(args, env):
-    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    report = evaluate(with_frontend(args=args, env=target_env(**env)))
     assert report.p4_ok
     assert reasons_matching(report, "P7:") == [
         "P7: the frontend serves TLS (--tls-cert-path / DYN_TLS_CERT_PATH)"
@@ -2304,7 +2379,11 @@ P10_CASES = [
         None,
         "DYN_POD_NAME from fieldRef",
     ),
-    ({"DYN_PARENT_DGD_K8S_NAME": "other"}, None, "overrides DYN_PARENT_DGD_K8S_NAME"),
+    (
+        {},
+        {"env": target_env(DYN_PARENT_DGD_K8S_NAME="other")},
+        "overrides DYN_PARENT_DGD_K8S_NAME",
+    ),
     (
         {},
         {"volumes": [{"name": "traces", "persistentVolumeClaim": {"claimName": "x"}}]},
@@ -2351,7 +2430,9 @@ P10_CASES = [
 @pytest.mark.parametrize(("env", "frontend_kwargs", "match"), P10_CASES)
 def test_p10_trace_recipe(env, frontend_kwargs, match):
     deployment = dgd(
-        frontend(env=trace_env(**env), **(frontend_kwargs or {})), worker(), planner()
+        frontend(recipe_env=trace_env(**env), **(frontend_kwargs or {})),
+        worker(),
+        planner(),
     )
     report = evaluate(deployment)
     assert report.p4_ok, report.reasons
@@ -2366,7 +2447,7 @@ def test_p10_trace_recipe(env, frontend_kwargs, match):
 
 def test_p10_warns_when_env_from_could_set_the_admin_port():
     def with_env_from(env: list[dict[str, Any]], source: dict[str, Any]) -> dict:
-        component = frontend(env=env)
+        component = frontend(recipe_env=env)
         component["podTemplate"]["spec"]["containers"][0]["envFrom"] = [source]
         return dgd(component, worker(), planner())
 
@@ -2385,10 +2466,23 @@ def test_p10_warns_when_env_from_could_set_the_admin_port():
     assert report.spec_ok and not port_warnings(report)
 
 
+def test_p10_target_expansion_does_not_relax_actual_pod_admin_port_recipe():
+    deployment = with_frontend(
+        recipe_env=trace_env(DYN_FRONTEND_ADMIN_PORT="$(PORT)"),
+        env=target_env(PORT="8002", DYN_FRONTEND_ADMIN_PORT="8002"),
+    )
+    report = evaluate(deployment)
+    assert report.p4_ok
+    assert any(
+        "DYN_FRONTEND_ADMIN_PORT must be a literal value" in reason
+        for reason in reasons_matching(report, "P10:")
+    )
+
+
 def test_p10_custom_segments_dir_and_graph_env():
     path = "/trace/rt/segs/$(DYN_PARENT_DGD_K8S_NAME)/$(DYN_POD_NAME)/req"
     deployment = dgd(
-        frontend(env=trace_env(DYN_REQUEST_TRACE_FILE_PATH=None)),
+        frontend(recipe_env=trace_env(DYN_REQUEST_TRACE_FILE_PATH=None)),
         worker(),
         planner(),
         env=[{"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": path}],
@@ -2399,7 +2493,7 @@ def test_p10_custom_segments_dir_and_graph_env():
 
 def test_p10_extra_sinks_warn():
     report = evaluate(
-        with_frontend(env=trace_env(DYN_REQUEST_TRACE_SINKS="file,stderr"))
+        with_frontend(recipe_env=trace_env(DYN_REQUEST_TRACE_SINKS="file,stderr"))
     )
     assert report.spec_ok
     assert any("also enables stderr" in w for w in report.warnings)
@@ -2409,7 +2503,7 @@ def test_p10_is_checked_when_parsing_fails():
     deployment = with_frontend(
         command=("/bin/sh", "-c"),
         args=("python3 -m dynamo.frontend",),
-        env=trace_env(DYN_REQUEST_TRACE=None),
+        recipe_env=trace_env(DYN_REQUEST_TRACE=None),
     )
     report = evaluate(deployment)
     assert reasons_matching(report, "P4:")
@@ -2470,19 +2564,19 @@ def test_worker_types_and_canonical_json():
         ("plain", "plain"),
         ("$(A)/x", "1/x"),
         ("$$(A)", "$(A)"),
-        ("$(MISSING)", "$(MISSING)"),
+        ("$(MISSING)", "{opaque}$(MISSING)\x00"),
         ("$(A", "$(A"),
         ("$", "$"),
         ("a$$b", "a$b"),
         ("x-$(SECRET)", "x-{opaque}$(SECRET)\x00"),
-        ("$(POD)", "{inert}$(POD)\x00"),
-        # Undefined names an envFrom source with prefix APP_ may define.
+        ("$(POD)", "{opaque}$(POD)\x00"),
+        # Missing bindings stay unknown regardless of their spelling.
         ("$(APP_ARG)", "{opaque}$(APP_ARG)\x00"),
         ("$(APP_a.b-c)", "{opaque}$(APP_a.b-c)\x00"),
-        # The container's env wins over envFrom.
+        # Known target bindings are consumed verbatim.
         ("$(APP_DEFINED)", "2"),
-        ("$(ARG)", "$(ARG)"),
-        ("$(APP_ seq 1 60)", "$(APP_ seq 1 60)"),
+        ("$(ARG)", "{opaque}$(ARG)\x00"),
+        ("$(APP_ seq 1 60)", "{opaque}$(APP_ seq 1 60)\x00"),
     ],
 )
 def test_kubernetes_expansion(value, expected):
@@ -2490,13 +2584,11 @@ def test_kubernetes_expansion(value, expected):
         value,
         {"A": "1", "APP_DEFINED": "2"},
         {"SECRET", "POD"},
-        inert={"POD"},
-        env_from_prefixes=("APP_",),
     )
-    assert expanded == expected.format(opaque=fc._OPAQUE, inert=fc._INERT)
+    assert expanded == expected.format(opaque=fc._OPAQUE)
 
 
-def test_parse_is_cached_per_spec():
+def test_parse_is_cached_per_target():
     fc._parse_cached.cache_clear()
     parse(dgd())
     parse(dgd())

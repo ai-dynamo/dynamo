@@ -413,7 +413,7 @@ The operator maintains observed state under `status`.
 </ParamField>
 
 <ParamField path="status.observedGeneration" type="integer">
-  Most recent `metadata.generation` the controller has reconciled. A component is up to date when this equals `metadata.generation`.
+  Most recent `metadata.generation` whose lowering the controller has applied. Equality with `metadata.generation` acknowledges the target configuration, not Pod readiness or rollout completion.
 </ParamField>
 
 <ParamField path="status.component" type="ComponentReplicaStatus">
@@ -423,6 +423,59 @@ The operator maintains observed state under `status`.
 ## Additional Types
 
 Nested struct types referenced by the fields above, broken out here to keep the field lists shallow. Types prefixed `core/v1.`, `metav1.`, `resource.`, or `runtime.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
+
+### Target Role Configuration
+
+The operator reports final target container declarations under DCD `status.component.roles` and DGD `status.components.<name>.roles`. Roles and containers are lists keyed by `name`. Single-node components use `main`; multinode components use `leader` and `worker`. Native runtime sidecars and other initialization containers are included by their container names.
+
+The export describes the existing lowering for the resource's global `status.observedGeneration`. It has no separate generation or revision and does not wait for running Pods to adopt the target. It does not interpret shell scripts, infer image entrypoints, resolve image tags, or determine the runtime's effective router configuration.
+
+This status excerpt shows known values, including an empty string, separately from unresolved runtime inputs:
+
+```yaml
+status:
+  observedGeneration: 7
+  component:
+    componentKind: Deployment
+    replicas: 0
+    updatedReplicas: 0
+    roles:
+      - name: main
+        containers:
+          - name: main
+            image: registry.example/engine:example
+            command: [python3]
+            args: [-m, dynamo.vllm]
+            env:
+              Z_MODE:
+                value: kv
+              DYN_ROUTER_MODE:
+                value: kv # The final list contained DYN_ROUTER_MODE=$(Z_MODE).
+              OPTIONAL_SETTING:
+                value: ""
+              POD_NAME:
+                unresolved: true
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| Role `name` | string, required | Logical role name, independent of provider resource names. |
+| Role `containers` | named list | Final application and initialization container declarations. |
+| Container `name` | string, required | Name in the lowered PodSpec. |
+| Container `image` | string, required | Declared image reference. |
+| Container `command` | ordered string list | Declared command, without Kubernetes or shell expansion. Absence does not establish the image entrypoint. |
+| Container `args` | ordered string list | Declared arguments, without Kubernetes or shell expansion. |
+| Container `env` | map of bindings | Final sequentially evaluated environment bindings. |
+| Binding `value` | optional string | Known value; `""` is distinct from unknown. Mutually exclusive with `unresolved`. |
+| Binding `unresolved` | optional boolean | Must be `true` when `value` is absent. Partial expansions are not published. |
+
+Environment bindings are results, not an environment list to replay. The operator evaluates the final lowered list once in its existing order, including duplicate-name shadowing and Kubernetes dollar escaping. It does not sort this result to determine values or read ConfigMaps, Secrets, images, provider variables, or the operator process environment. Every `valueFrom` and references to unknown values remain unresolved. Missing names are not known absent because `envFrom`, images, or providers may add other variables.
+
+All new fields are optional, operator-owned status with no defaults. Until a child DCD acknowledges its current generation, the parent DGD omits that child's roles rather than relaying an older target under the current global generation. A reconciliation error does not publish a new target under an older generation. Existing runtime identity fields may still describe the old serving revision during a rollout; roles describe the new target instead.
+
+Unavailable projections remain absent. This includes LPX and ambiguous per-rank inter-pod GMS layouts. Expansions beyond the replay or retained-value budget remain unresolved; the combined serialized role export is capped at 128 KiB per resource, omitting whole component projections in name order when the remaining budget is insufficient. The export is also omitted if it would make the complete serialized object exceed a conservative 1 MiB threshold. Consumers must treat omitted roles or bindings as unavailable, not as empty configuration.
+
+The fields are also native in `v1alpha1`: DGD `status.services.<name>.roles` and DCD `status.service.roles`. Conversion does not store them in annotations. Publishing these fields does not change workload specs or their rollout hashes, including for older-origin resources. No origin-version test or knowledge of the DGD's generator is required to read the export.
 
 ### ExperimentalSpec
 

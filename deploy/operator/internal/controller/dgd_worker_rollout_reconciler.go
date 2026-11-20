@@ -1565,6 +1565,7 @@ func mergeWorkerComponentStatuses(
 		newStatus, exists := componentStatuses[componentName]
 		if !exists {
 			oldStatus.UpdatedReplicas = 0
+			oldStatus.Roles = nil
 			componentStatuses[componentName] = oldStatus
 			continue
 		}

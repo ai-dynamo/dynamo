@@ -129,6 +129,7 @@ func (p *groveProgram) Reconcile(
 		IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 	}
 	programResult = newWorkloadProgramResult(req.DGD)
+	defer func() { programResult.boundTargetRoleStatus(req.DGD) }()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -197,6 +198,7 @@ func (p *groveProgram) Reconcile(
 
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
+		preserveComponentRoleStatuses(programResult.Status.Components, result.ComponentStatus)
 		if programResult.Status.Components == nil {
 			programResult.Status.Components = result.ComponentStatus
 		} else {

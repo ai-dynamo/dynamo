@@ -819,6 +819,17 @@ type ComponentCheckpointStatus struct {
 
 // ComponentReplicaStatus contains replica information for a single component.
 type ComponentReplicaStatus struct {
+	// roles describes the lowered target configuration associated with the owning
+	// resource's status.observedGeneration, not the configuration of running Pods.
+	// Publication does not wait for Pod readiness or rollout cutover. Omission
+	// means no faithful current projection is available, including while a child
+	// reconciler has not acknowledged its target, for unsupported provider shapes,
+	// or when the projection exceeds the status size budget. No default is applied.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleStatus `json:"roles,omitempty"`
+
 	// componentKind is the underlying resource kind (e.g. `PodClique`,
 	// `Deployment`, `LeaderWorkerSet`).
 	// +required
