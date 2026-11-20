@@ -478,7 +478,10 @@ mod tests {
                 if query.contains("watch=true") {
                     std::future::pending::<()>().await;
                 }
-                let karmada = request.uri().path().starts_with("/apis/cluster.karmada.io/");
+                let karmada = request
+                    .uri()
+                    .path()
+                    .starts_with("/apis/cluster.karmada.io/");
                 axum::Json(if karmada { clusters } else { slices })
             }
         });
@@ -492,12 +495,13 @@ mod tests {
     async fn a_listed_pool_takes_its_clusters_region() {
         let slices = ["east", "west", "north"]
             .map(|cluster| slice(cluster, "mocker", "a1b2c", &[("10.43.0.1", true)]));
-        let cluster = |name: &str, region: &str| {
-            serde_json::json!({"metadata": {"name": name}, "spec": {"region": region}})
-        };
-        let clusters = serde_json::json!([cluster("east", "eu-east-9"), cluster("west", "us-west-2")]);
+        let cluster = |name: &str, region: &str| serde_json::json!({"metadata": {"name": name}, "spec": {"region": region}});
+        let clusters = serde_json::json!([cluster("east", "us-east-2")]);
         let client = fake_api(&slices, clusters).await;
-        let configured = HashMap::from([("east".to_owned(), "us-east-2".to_owned())]);
+        let configured = HashMap::from([
+            ("east".to_owned(), "eu-west-9".to_owned()),
+            ("west".to_owned(), "us-west-2".to_owned()),
+        ]);
         let regions = ClusterRegions::new(configured, Some(client.clone()));
         let pools = McsPoolDirectory::new(
             client,
@@ -509,10 +513,13 @@ mod tests {
         .unwrap();
         let listed = pools.list().await.unwrap();
         let region = |cluster: &str| {
-            let pool = listed.items.iter().find(|pool| pool.key.cluster_id() == cluster);
+            let pool = listed
+                .items
+                .iter()
+                .find(|pool| pool.key.cluster_id() == cluster);
             pool.unwrap().location.region.clone()
         };
-        // The flag wins over Karmada, which places the clusters the flag
+        // Karmada wins over the flag, which places the clusters Karmada
         // leaves out; a cluster neither places is named after itself.
         assert_eq!(region("east"), "us-east-2");
         assert_eq!(region("west"), "us-west-2");

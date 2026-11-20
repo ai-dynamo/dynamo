@@ -22,8 +22,8 @@ through `POST /routers`.
   `--router-discovery registrations` for leased router self-registration.
 - `karmada` or `mcs`: the EndpointSlices that Multi-Cluster Services imports, named the Karmada way or
   the standard way. A pool is listed while MCS imports a Ready Pool Relay endpoint for it. MCS
-  supplies the addresses, and `--cluster-region` or, with Karmada, the member `Cluster`'s
-  `spec.region` supplies the region. These modes take no registrations: `POST /pools` answers 501,
+  supplies the addresses. The region comes from the member `Cluster`'s `spec.region` with Karmada,
+  or else from `--cluster-region`. These modes take no registrations: `POST /pools` answers 501,
   and `GET /routers` tells Pool Relays not to call it.
 
 ## Router self-registration

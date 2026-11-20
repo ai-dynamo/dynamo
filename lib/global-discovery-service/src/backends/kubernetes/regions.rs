@@ -25,9 +25,9 @@ use super::cache::{WATCH_TIMEOUT_SECS, retried};
 /// Once one wait runs out, lists stop waiting.
 const FIRST_READ_WAIT: Duration = Duration::from_secs(5);
 
-/// Where each pool cluster is, by the name MCS gives the cluster: its
-/// configured region, then, with Karmada, the `spec.region` of its member
-/// `Cluster`, then the cluster's own name, as a stand-in that is logged once.
+/// Where each pool cluster is, by the name MCS gives the cluster: with
+/// Karmada, the `spec.region` of its member `Cluster`, then its configured
+/// region, then the cluster's own name, as a stand-in that is logged once.
 pub struct ClusterRegions {
     configured: HashMap<String, String>,
     karmada: Option<KarmadaRegions>,
@@ -36,10 +36,10 @@ pub struct ClusterRegions {
 }
 
 impl ClusterRegions {
-    /// `configured` maps a cluster's MCS name to its region. `karmada`, a
-    /// client of the Karmada control plane, adds each member `Cluster`'s
-    /// `spec.region`; the watch starts on first use and needs `get`, `list`
-    /// and `watch` on `clusters.cluster.karmada.io`.
+    /// `karmada`, a client of the Karmada control plane, gives each member
+    /// `Cluster`'s `spec.region`; the watch starts on first use and needs
+    /// `get`, `list` and `watch` on `clusters.cluster.karmada.io`.
+    /// `configured` maps a cluster's MCS name to its region otherwise.
     pub fn new(configured: HashMap<String, String>, karmada: Option<Client>) -> Self {
         Self {
             configured,
@@ -57,19 +57,19 @@ impl ClusterRegions {
     }
 
     pub(super) fn location(&self, cluster: &str) -> PoolLocation {
-        let region = self.configured.get(cluster).cloned().or_else(|| {
-            self.karmada
-                .as_ref()
-                .and_then(|karmada| karmada.region(cluster))
-        });
+        let region = self
+            .karmada
+            .as_ref()
+            .and_then(|karmada| karmada.region(cluster))
+            .or_else(|| self.configured.get(cluster).cloned());
         let region = region.unwrap_or_else(|| {
             let mut unplaced = self.unplaced.lock().unwrap_or_else(PoisonError::into_inner);
             if unplaced.insert(cluster.to_owned()) {
                 tracing::warn!(
                     cluster,
                     "no region is known for this pool cluster, so its pools are listed with the \
-                     cluster's name as their region; set the region with --cluster-region or, \
-                     with Karmada, in the member Cluster's spec.region"
+                     cluster's name as their region; set the region in the member Cluster's \
+                     spec.region with Karmada, or with --cluster-region"
                 );
             }
             cluster.to_owned()
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_regions_come_first_and_the_name_stands_in() {
+    async fn a_configured_region_or_the_name_places_a_cluster() {
         let regions = ClusterRegions::new(
             HashMap::from([("east".to_owned(), "us-east-2".to_owned())]),
             None,

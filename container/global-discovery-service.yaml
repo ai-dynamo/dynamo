@@ -15,8 +15,8 @@
 # the router Service. To read the Karmada control plane instead, mount its
 # kubeconfig from a Secret, point KUBECONFIG at it, and grant this access there.
 #
-# A pool's region is its cluster's --cluster-region, else, on the Karmada control
-# plane, its member Cluster's spec.region. It keeps no state, so run any number.
+# A pool's region is its member Cluster's spec.region on the Karmada control
+# plane, else its cluster's --cluster-region. It keeps no state, so run any number.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -85,7 +85,7 @@ spec:
             - --router-namespace=global-discovery
             - --router-service=global-router
             - --router-port-name=http
-            # One per pool cluster, by its Karmada member name.
+            # For a member Cluster without spec.region, by its member name.
             # - --cluster-region=aws-ohio=us-east-2
           env:
             - name: DYN_LOG

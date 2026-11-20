@@ -163,7 +163,6 @@ none of these flags. The router Service's flags replace `--router`:
             - --router-namespace=global-discovery
             - --router-service=global-router
             - --router-port-name=http
-            - --cluster-region=aws-ohio=us-east-2
 ```
 
 Start from [`container/global-discovery-service.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/global-discovery-service.yaml),

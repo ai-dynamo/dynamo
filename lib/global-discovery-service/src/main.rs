@@ -238,9 +238,9 @@ struct Args {
     )]
     router_port_name: Option<String>,
     /// A pool cluster's region as `<cluster>=<region>`, where the cluster is
-    /// its name in MCS. Repeat it for each cluster. With `karmada`, a cluster
-    /// not given here takes its member Cluster's `spec.region`; a cluster
-    /// with no region is listed with its name as the region.
+    /// its name in MCS. Repeat it for each cluster. With `karmada`, a member
+    /// Cluster's `spec.region` comes first; a cluster with no region is listed
+    /// with its name as the region.
     #[arg(long = "cluster-region", value_parser = parse_cluster_region, help_heading = WITH_MCS)]
     cluster_regions: Vec<(String, String)>,
 }

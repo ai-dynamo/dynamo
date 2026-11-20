@@ -46,7 +46,7 @@ its default is never refused.
 | `--router-namespace <ns>` | Required | Namespace of the Global Router Service. |
 | `--router-service <name>` | Required | The Global Router Service, exported through MCS. |
 | `--router-port-name <name>` | Required | The router Service's named port for state streams. |
-| `--cluster-region <cluster>=<region>` | None | A pool cluster's region, by the cluster's name in MCS. Repeat for each cluster; each cluster once. |
+| `--cluster-region <cluster>=<region>` | None | A pool cluster's region, by the cluster's name in MCS, for a cluster whose region Karmada does not give. Repeat for each cluster; each cluster once. |
 
 These modes list the pools whose Pool Relay Services MCS imports, and take no registrations:
 `POST /pools` answers 501, and `GET /routers` tells Pool Relays not to call it. A pool is listed
@@ -56,9 +56,9 @@ and frontend addresses; export each pool's frontend Service to supply its addres
 learn what each pool serves from its Pool Relays' state streams, so a Pool Relay's `--cluster-id` must
 be the MCS cluster ID or Karmada member cluster name: a stream names its pool by that key.
 
-A pool's region is its cluster's `--cluster-region`. With `karmada`, a cluster not given there takes
-the `spec.region` of its member `Cluster` on the Karmada control plane. A cluster with no region is
-listed with its name as the region, and the service logs a warning once per cluster.
+With `karmada`, a pool's region is the `spec.region` of its member `Cluster` on the Karmada control
+plane. A cluster without one, and every cluster with `mcs`, takes its `--cluster-region`. A cluster with
+no region is listed with its name as the region, and the service logs a warning once per cluster.
 
 The service needs read access to `endpointslices`, and with `karmada`, to `clusters.cluster.karmada.io`
 for regions; without that access it logs a warning and uses `--cluster-region` or the cluster's name.
