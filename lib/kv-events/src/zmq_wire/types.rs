@@ -62,6 +62,11 @@ pub enum KvTokenIds {
 /// an unmapped multimodal value and fails closed.
 pub const WIDE_TOKEN_SENTINEL: u32 = u32::MAX;
 
+/// One `[start, length, label]` entry of SGLang's `mm_routing_spans`: a run of
+/// multimodal positions inside one block, labeled with the caller's routing
+/// label (16 hex digits of Dynamo's per-item hash).
+pub type MmRoutingSpanWire = (u32, u32, String);
+
 /// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
 /// legacy events; vLLM never infers it. `Unknown` captures any future value so
 /// deserialization stays forward-compatible and unrecognized values fail closed

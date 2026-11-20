@@ -418,7 +418,8 @@ class DynamoSglangPublisher:
                 )
             connect_ip = kv_event_connect_ip(base_ep)
             # Event tokens carry SGLang's own multimodal pad values on builds
-            # with sgl-project/sglang#43043; the normalizer excludes them.
+            # with sgl-project/sglang#43043; the normalizer maps labeled spans
+            # and excludes the rest.
             # Accepted caller hashes also produce wide values on non-Kimi models.
             engine_owned_mm_identity = sglang_has_wide_mm_pad_values()
 

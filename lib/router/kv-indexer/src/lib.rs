@@ -72,6 +72,8 @@ mod lower_tier_indexers;
 mod metrics;
 #[cfg(test)]
 mod mm_exclusion_tests;
+#[cfg(test)]
+mod mm_labels_tests;
 #[cfg(feature = "bench")]
 mod observation;
 mod overlap;
