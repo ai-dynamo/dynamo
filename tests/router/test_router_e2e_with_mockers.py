@@ -174,6 +174,30 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
         {
             "num_prefill": 1,
             "num_decode": 1,
+            "max_tokens": 1,
+            # As prefill-tokens, but with no threshold flag: only the policy
+            # file's prefill role sets one, so the decode pool has none.
+            "prefill_speedup": _SLOW_SPEEDUP,
+            "decode_speedup": _FAST_SPEEDUP,
+            "thresholds": {},
+            "policy_file": (
+                "worker_selection:\n"
+                "  prefill:\n"
+                "    type: default\n"
+                "    busy_threshold: {active_prefill_tokens_frac: 0.0}\n"
+                "  decode: default\n"
+            ),
+            "role_busy_thresholds": {
+                "prefill": {"active_prefill_tokens_threshold_frac": 0.0},
+                "decode": {},
+            },
+        },
+        id="prefill-tokens-policy-file",
+    ),
+    pytest.param(
+        {
+            "num_prefill": 1,
+            "num_decode": 1,
             "max_tokens": 50,
             # Gate the DECODE pool only: fast prefill, slow decode (fills its
             # limited blocks). Prefill threshold disabled.
@@ -1274,6 +1298,7 @@ def test_mocker_disagg_router_overload_529(
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     monkeypatch,
+    tmp_path,
     overload_case,
 ):
     """Disaggregated load shedding: clients get 529 when the gated pool is busy.
@@ -1286,6 +1311,10 @@ def test_mocker_disagg_router_overload_529(
       ``/busy_threshold`` after startup must gate the PREFILL pool too. The
       prefill pool has its own threshold handle, so this guards the write
       reaching it.
+    - prefill-tokens-policy-file: a ``busy_threshold`` on the policy file's
+      ``prefill`` role alone must gate the PREFILL pool while the decode pool
+      has no threshold. This guards the prefill router holding the prefill
+      role's handle: with the decode role's, nothing is rejected.
     - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the
       DECODE pool (the path that already worked).
     """
@@ -1315,6 +1344,10 @@ def test_mocker_disagg_router_overload_529(
         enable_disagg_bootstrap=False,
     ) as (prefill_workers, decode_workers):
         frontend_port = allocate_frontend_ports(request, 1)[0]
+        policy_file = None
+        if "policy_file" in overload_case:
+            policy_file = tmp_path / "policy.yaml"
+            policy_file.write_text(overload_case["policy_file"])
         _test_disagg_router_overload_529(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
@@ -1324,6 +1357,8 @@ def test_mocker_disagg_router_overload_529(
             test_payload=TEST_PAYLOAD,
             max_tokens=overload_case["max_tokens"],
             busy_threshold_write=overload_case.get("busy_threshold_write"),
+            router_policy_config=str(policy_file) if policy_file else None,
+            role_busy_thresholds=overload_case.get("role_busy_thresholds"),
             **overload_case["thresholds"],
         )
 

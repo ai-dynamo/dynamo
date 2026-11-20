@@ -53,7 +53,15 @@ DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
 # TODO(v1.7): Remove --active-prefill-tokens-threshold.
 _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
     "--active-prefill-tokens-threshold is deprecated and will be removed in v1.7; "
-    "use --active-prefill-tokens-threshold-frac"
+    "use %s"
+)
+_PREFILL_FRAC_FLAG = "--active-prefill-tokens-threshold-frac"
+# The frontend's fraction flag is deprecated too, so its users are sent to the file.
+_PREFILL_FRAC_POLICY_FILE = (
+    "busy_threshold: {active_prefill_tokens_frac: FRACTION} on a role under "
+    "worker_selection in --router-policy-config (or "
+    "--active-prefill-tokens-threshold-frac with --router-mode "
+    "device-aware-weighted, which a policy file cannot select yet)"
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -133,7 +141,7 @@ class RouterConfigBase(ConfigBase):
                 "--active-prefill-tokens-threshold-frac must be a finite value >= 0"
             )
 
-    def log_rejection_thresholds(self) -> None:
+    def log_rejection_thresholds(self, policy_file: bool) -> None:
         """Log which independently configured rejection checks are active."""
         configured = [
             f"{flag}={value}"
@@ -153,10 +161,19 @@ class RouterConfigBase(ConfigBase):
             )
             if value is not None
         ]
+        # With a policy file, each role's busy_threshold is read by the router, not here.
         if configured:
             logger.info(
-                "busy-worker rejection enabled by %s",
+                "busy-worker rejection enabled by %s%s",
                 ", ".join(configured),
+                " for each role without busy_threshold in --router-policy-config"
+                if policy_file
+                else "",
+            )
+        elif policy_file:
+            logger.info(
+                "no busy-worker rejection flag is set; each role's busy_threshold in "
+                "--router-policy-config sets its thresholds"
             )
         else:
             logger.info(
@@ -210,6 +227,19 @@ class RouterArgGroup(ArgGroup):
         return Deprecated(
             f"session_affinity: {{{key}}} on a role under worker_selection in "
             "--router-policy-config (keep the flag with --router-mode direct or "
+            "device-aware-weighted, which a policy file cannot select yet)",
+            remove_in="v1.9",
+        )
+
+    def _busy_threshold_deprecation(self, key: str) -> Optional[Deprecated]:
+        # TODO(v1.9): Remove the frontend's --active-decode-blocks-threshold and
+        # --active-prefill-tokens-threshold-frac. A worker still advertises its
+        # thresholds on its model card with them, so its copies do not warn.
+        if not self.include_frontend_only:
+            return None
+        return Deprecated(
+            f"busy_threshold: {{{key}: FRACTION}} on a role under worker_selection "
+            "in --router-policy-config (keep the flag with --router-mode "
             "device-aware-weighted, which a policy file cannot select yet)",
             remove_in="v1.9",
         )
@@ -370,6 +400,7 @@ class RouterArgGroup(ArgGroup):
                 "Unset by default; pass 'None' to disable it."
             ),
             arg_type=nullable_float,
+            deprecated=self._busy_threshold_deprecation("active_decode_blocks"),
             env=self.env,
         )
         add_argument(
@@ -378,8 +409,13 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
             default=None,
             help=(
-                "Deprecated; will be removed in v1.7. Use --active-prefill-tokens-threshold-frac. "
-                "Literal token count threshold for determining when a worker is considered busy "
+                "Deprecated; will be removed in v1.7. Use "
+                + (
+                    _PREFILL_FRAC_POLICY_FILE
+                    if self.include_frontend_only
+                    else _PREFILL_FRAC_FLAG
+                )
+                + ". Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
                 "threshold, the worker is marked as busy. Setting a numeric value enables this "
                 "rejection check. Unset by default; pass 'None' to disable it. Uses OR logic "
@@ -400,6 +436,7 @@ class RouterArgGroup(ArgGroup):
                 "OR logic with --active-prefill-tokens-threshold."
             ),
             arg_type=nullable_float,
+            deprecated=self._busy_threshold_deprecation("active_prefill_tokens_frac"),
             env=self.env,
         )
 
@@ -524,6 +561,8 @@ class RouterConfigSource(Protocol):
 
 def build_router_config(
     config: Optional[RouterConfigSource],
+    *,
+    frontend: bool = False,
 ) -> Optional["RouterConfig"]:
     """Build the ``RouterConfig`` a worker set advertises in its model card.
 
@@ -531,7 +570,8 @@ def build_router_config(
     so the worker inherits the frontend's configuration. A ``None`` config means
     the same thing, so a backend can pass its optional advertisement directly.
     The frontend passes its own config here too, after ``resolve_router_mode``
-    has given it a mode, so it never gets ``None`` back.
+    has given it a mode, so it never gets ``None`` back. It sets ``frontend``,
+    which only changes what the deprecation notice below recommends.
     """
     if config is None:
         return None
@@ -546,7 +586,10 @@ def build_router_config(
     # here, so the notice reaches each process exactly once and only when the
     # deprecated value is actually forwarded.
     if router_kwargs["active_prefill_tokens_threshold"] is not None:
-        logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
+        logger.warning(
+            _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION,
+            _PREFILL_FRAC_POLICY_FILE if frontend else _PREFILL_FRAC_FLAG,
+        )
 
     # Imported lazily so that importing a backend's argument definitions does
     # not pull in the compiled bindings.

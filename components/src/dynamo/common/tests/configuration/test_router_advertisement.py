@@ -96,6 +96,24 @@ def test_worker_session_affinity_flags_are_not_deprecated():
     assert config.session_affinity_mode == "soft"
 
 
+def test_worker_busy_threshold_flags_are_not_deprecated():
+    """Only the frontend's copies moved to the policy file."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config, _ = parse_worker_router_config(
+            [
+                "--router-mode",
+                "round-robin",
+                "--active-decode-blocks-threshold",
+                "0.5",
+                "--active-prefill-tokens-threshold-frac",
+                "2.0",
+            ]
+        )
+    assert config.active_decode_blocks_threshold == 0.5
+    assert config.active_prefill_tokens_threshold_frac == 2.0
+
+
 def test_router_arg_group_refuses_to_guess_its_caller():
     """`RouterArgGroup()` must not fall back to frontend-shaped defaults.
 
@@ -139,6 +157,8 @@ def test_deprecated_absolute_prefill_threshold_warns_when_advertised(
 
     assert build_router_config(config) is not None
     assert caplog.text.count(_ABSOLUTE_PREFILL_DEPRECATION) == 1
+    # A worker's fraction flag is not deprecated, so its notice still names it.
+    assert "; use --active-prefill-tokens-threshold-frac" in caplog.text
 
 
 def test_absolute_prefill_threshold_unset_or_unadvertised_stays_quiet(

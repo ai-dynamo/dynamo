@@ -317,7 +317,7 @@ worker_selection:
 
 `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` each select the policy for the matching worker pool. `type` selects a registered provider and `parameters` is the mapping that provider validates. A role may also be a bare type name when the provider accepts an empty `parameters` mapping. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
 
-A role's mapping also takes `session_affinity`, which the router owns: it binds a session to a worker before the policy runs, and the policy's provider never receives the key. See [Session Affinity](configuration-and-tuning.md#session-affinity) for its values. Two roles with the same `type` and `parameters` share one policy factory whatever their `session_affinity`.
+A role's mapping also takes `session_affinity` and `busy_threshold`, which the router owns: it binds a session to a worker, and removes busy workers from the candidates, before the policy runs, and the policy's provider never receives either key. See [Session Affinity](configuration-and-tuning.md#session-affinity) and [Busy Thresholds](worker-filtering.md#busy-thresholds) for their values. Two roles with the same `type` and `parameters` share one policy factory whatever their `session_affinity` and `busy_threshold`.
 
 The pre-v1.7 form, a `worker_selection.instances` list of named `{type, parameters}` entries referenced by name from each role, still loads with a deprecation warning and is scheduled for removal in v1.8.
 

@@ -286,7 +286,7 @@ mod tests {
         }
         assert!(
             !manager
-                .load_threshold_config("second", None)
+                .load_threshold_config("second", None, None)
                 .unwrap()
                 .is_configured()
         );
@@ -386,6 +386,108 @@ mod tests {
             Some(0.85)
         );
         assert!(!mixed_direct.is_configured());
+    }
+
+    /// A disaggregated model has a decode pool and a prefill pool. `role` limits a write and
+    /// a read to one of them; without it a write reaches both and a read is the decode pool's.
+    #[tokio::test]
+    async fn busy_threshold_role_names_one_pool() {
+        use crate::discovery::{LoadThresholdConfig, LoadThresholdHandle, WorkerSet};
+        use crate::model_card::ModelDeploymentCard;
+        use crate::worker_type::WorkerType;
+
+        let manager = Arc::new(ModelManager::new());
+        let handle = || LoadThresholdHandle::new(LoadThresholdConfig::default());
+        let (decode, prefill, aggregated) = (handle(), handle(), handle());
+        let mut decode_card = ModelDeploymentCard::default();
+        decode_card.worker_type = Some(WorkerType::Decode);
+        let mut workers = WorkerSet::new("disagg".into(), "checksum".into(), decode_card);
+        workers.load_thresholds = Some(decode.clone());
+        workers.prefill_load_thresholds = Some(prefill.clone());
+        manager
+            .get_or_create_model("disagg")
+            .add_worker_set("disagg".into(), Arc::new(workers));
+        let mut workers = WorkerSet::new("agg".into(), "checksum".into(), Default::default());
+        workers.load_thresholds = Some(aggregated.clone());
+        manager
+            .get_or_create_model("agg")
+            .add_worker_set("agg".into(), Arc::new(workers));
+        let mut workers = WorkerSet::new("direct".into(), "checksum".into(), Default::default());
+        workers.load_thresholds = Some(LoadThresholdHandle::disabled());
+        manager
+            .get_or_create_model("direct")
+            .add_worker_set("direct".into(), Arc::new(workers));
+
+        let app = super::super::busy_threshold::router(manager.clone(), "/busy_threshold").1;
+        let post = |body: Value| call(&app, Method::POST, "/busy_threshold", body);
+
+        let (status, written) = post(serde_json::json!({
+            "model": "disagg", "role": "prefill", "active_prefill_tokens_threshold_frac": 0.5,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        assert_eq!(written["role"], "prefill");
+        assert_eq!(
+            prefill.get().active_prefill_tokens_threshold_frac,
+            Some(0.5)
+        );
+        assert!(!decode.is_configured());
+
+        // No role: the write reaches both pools, and the response is the decode pool's.
+        let (status, written) = post(serde_json::json!({
+            "model": "disagg", "active_decode_blocks_threshold": 0.85,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        assert!(written.get("role").is_none(), "{written}");
+        assert_eq!(written["active_prefill_tokens_threshold_frac"], Value::Null);
+        assert_eq!(decode.get().active_decode_blocks_threshold, Some(0.85));
+        assert_eq!(prefill.get().active_decode_blocks_threshold, Some(0.85));
+
+        // A read per role shows where the two pools differ.
+        let (_, read) = post(serde_json::json!({"model": "disagg", "role": "decode"})).await;
+        assert_eq!(read["role"], "decode");
+        assert_eq!(read["active_prefill_tokens_threshold_frac"], Value::Null);
+        let (_, read) = post(serde_json::json!({"model": "disagg", "role": "prefill"})).await;
+        assert_eq!(read["active_decode_blocks_threshold"], 0.85);
+        assert_eq!(read["active_prefill_tokens_threshold_frac"], 0.5);
+
+        // `worker_type`, the key `GET /router_policy` uses, names the role too.
+        let (status, written) = post(serde_json::json!({
+            "model": "disagg", "worker_type": "prefill", "active_decode_blocks_threshold": 0.6,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        assert_eq!(written["role"], "prefill");
+        assert_eq!(decode.get().active_decode_blocks_threshold, Some(0.85));
+
+        for (body, expected) in [
+            (
+                serde_json::json!({"model": "agg", "role": "prefill", "active_decode_blocks_threshold": 0.5}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                serde_json::json!({"model": "agg", "role": "prefill"}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                serde_json::json!({"model": "disagg", "role": "encode"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"model": "disagg", "role": "router"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"model": "direct", "role": "aggregated", "active_decode_blocks_threshold": 0.5}),
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let (status, response) = post(body).await;
+            assert_eq!(status, expected, "{response}");
+            assert!(response["error"].is_string());
+        }
+        assert!(!aggregated.is_configured());
     }
 
     #[test]

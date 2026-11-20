@@ -1747,6 +1747,8 @@ def _test_disagg_router_overload_529(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     busy_threshold_write: dict | None = None,
+    router_policy_config: str | None = None,
+    role_busy_thresholds: dict[str, dict] | None = None,
 ):
     """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
 
@@ -1767,6 +1769,12 @@ def _test_disagg_router_overload_529(
     ``busy_threshold_write`` is posted to ``/busy_threshold`` once the frontend
     is ready, for a case whose gating threshold is set at runtime.
 
+    ``router_policy_config`` is a policy file that replaces ``--router-mode``;
+    its roles' ``busy_threshold`` entries then set the thresholds. For such a
+    case ``role_busy_thresholds`` maps each role to the thresholds a read of
+    ``/busy_threshold`` with that ``role`` must return, which shows that the
+    two pools hold different values before the probe shows which one gates.
+
     In both cases the shared probe asserts that some requests succeed, some are
     rejected with 529, and the rejection metric matches.
 
@@ -1774,10 +1782,11 @@ def _test_disagg_router_overload_529(
         AssertionError: If no 529 is observed (the threshold did not gate the
         pool) or if any non-200/529 status appears.
     """
-    # The admin API is enabled only for a case that writes thresholds.
+    # The admin API is enabled only for a case that writes or reads thresholds.
+    uses_admin_api = bool(busy_threshold_write or role_busy_thresholds)
     admin_ports = (
         reserved_ports(1, DynamoPortRange.FRONTEND)
-        if busy_threshold_write
+        if uses_admin_api
         else contextlib.nullcontext((None,))
     )
     with admin_ports as (admin_port,), KVRouterProcess(
@@ -1791,13 +1800,15 @@ def _test_disagg_router_overload_529(
         tokens_threshold_frac=tokens_threshold_frac,
         router_queue_threshold=router_queue_threshold,
         request_plane=request_plane,
+        router_mode=None if router_policy_config is not None else "kv",
+        router_policy_config=router_policy_config,
         min_initial_workers=decode_workers.num_workers,
         extra_env=(
             {
                 "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
                 "DYN_FRONTEND_ADMIN_PORT": str(admin_port),
             }
-            if busy_threshold_write
+            if uses_admin_api
             else None
         ),
     ):
@@ -1832,6 +1843,22 @@ def _test_disagg_router_overload_529(
             assert response.status_code == 200, response.text
             written = response.json()
             assert busy_threshold_write.items() <= written.items(), written
+
+        for role, expected in (role_busy_thresholds or {}).items():
+            response = requests.post(
+                f"http://127.0.0.1:{admin_port}/busy_threshold",
+                json={"model": test_payload["model"], "role": role},
+                timeout=10,
+            )
+            assert response.status_code == 200, response.text
+            assert response.json() == {
+                "model": test_payload["model"],
+                "role": role,
+                "active_decode_blocks_threshold": None,
+                "active_prefill_tokens_threshold": None,
+                "active_prefill_tokens_threshold_frac": None,
+                **expected,
+            }
 
         _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
 
