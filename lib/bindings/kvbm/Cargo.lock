@@ -2653,6 +2653,7 @@ dependencies = [
  "validator",
  "velo",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
