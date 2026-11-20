@@ -270,7 +270,13 @@ def plot_decode_3d_surface(
 
     plot_path = f"{work_dir}/decode_itl_interpolation.png"
     logger.info(f"Saving ITL surface plot to {plot_path}")
-    plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+    # matplotlib 3.11 pads ragged 3D surface polygons with uninitialized memory
+    # and projects the padding before masking it out, which can overflow:
+    # https://github.com/matplotlib/matplotlib/issues/32272
+    # The padded values are never drawn, so ignoring overflow does not change
+    # the image. Remove once matplotlib ships the fix (matplotlib#32310).
+    with np.errstate(over="ignore"):
+        plt.savefig(plot_path, dpi=300, bbox_inches="tight")
     plt.close()
 
     # Plot Throughput surface
@@ -306,7 +312,9 @@ def plot_decode_3d_surface(
 
     thpt_plot_path = f"{work_dir}/decode_throughput_interpolation.png"
     logger.info(f"Saving throughput surface plot to {thpt_plot_path}")
-    plt.savefig(thpt_plot_path, dpi=300, bbox_inches="tight")
+    # Same matplotlib padding overflow as the ITL plot above.
+    with np.errstate(over="ignore"):
+        plt.savefig(thpt_plot_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
