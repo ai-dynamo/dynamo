@@ -33,13 +33,15 @@ impl WorkerError {
     pub fn canonical_invalid_request_message(
         error: &(dyn std::error::Error + 'static),
     ) -> Option<String> {
-        crate::http::service::error::find_canonical_error_in_chain(error)
+        use crate::http::service::error::{
+            Protocol, find_canonical_error_in_chain, public_message_for,
+        };
+
+        find_canonical_error_in_chain(error)
             .filter(|error| error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest)
             .map(|error| {
-                error
-                    .public_message()
-                    .unwrap_or("Invalid request")
-                    .to_string()
+                public_message_for(error, Protocol::OpenAi)
+                    .unwrap_or_else(|| "Invalid request".to_string())
             })
     }
 

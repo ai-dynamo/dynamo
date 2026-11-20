@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::core::SelectionCore;
 use super::error::SelectionError;
-use super::types::{WorkerCatalogRecord, WorkerLifecycle, WorkerRequest};
+use super::types::{WorkerLifecycle, WorkerRequest};
 use dynamo_router_protocol::worker::WorkerId;
 
 /// Delay before [`CatalogReconciler::run`] re-applies a snapshot whose pass failed.
@@ -34,16 +34,9 @@ pub trait WorkerCatalogSource: Send {
     async fn next_snapshot(&mut self) -> Option<Vec<WorkerRequest>>;
 }
 
-/// Notified after the reconciler applies a catalog change (metrics hooks).
-pub trait CatalogObserver: Send + Sync {
-    fn upserted(&self, record: &WorkerCatalogRecord);
-    fn removed(&self, record: &WorkerCatalogRecord);
-}
-
 /// Applies desired snapshots to a core's worker catalog.
 pub struct CatalogReconciler {
     core: Arc<SelectionCore>,
-    observer: Option<Arc<dyn CatalogObserver>>,
     /// Requests the core reported `Schedulable`. An identical desired record
     /// skips its upsert; anything else is retried on every snapshot.
     converged: HashMap<WorkerId, WorkerRequest>,
@@ -53,23 +46,27 @@ pub struct CatalogReconciler {
     /// Passes started by `run`, including retries.
     #[cfg(test)]
     applies: Arc<std::sync::atomic::AtomicUsize>,
+    /// Catalog upserts applied, including re-upserts of unconverged workers.
+    #[cfg(test)]
+    upserts: Arc<std::sync::atomic::AtomicUsize>,
+    /// Stale workers deleted from the catalog.
+    #[cfg(test)]
+    removals: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl CatalogReconciler {
     pub fn new(core: Arc<SelectionCore>) -> Self {
         Self {
             core,
-            observer: None,
             converged: HashMap::new(),
             tracked: HashSet::new(),
             #[cfg(test)]
             applies: Arc::default(),
+            #[cfg(test)]
+            upserts: Arc::default(),
+            #[cfg(test)]
+            removals: Arc::default(),
         }
-    }
-
-    pub fn with_observer(mut self, observer: Arc<dyn CatalogObserver>) -> Self {
-        self.observer = Some(observer);
-        self
     }
 
     /// Apply one desired snapshot. A snapshot with duplicate worker ids is
@@ -111,9 +108,9 @@ impl CatalogReconciler {
                     continue;
                 }
             };
-            if let Some(observer) = &self.observer {
-                observer.upserted(&record);
-            }
+            #[cfg(test)]
+            self.upserts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if record.lifecycle == WorkerLifecycle::Schedulable {
                 let request = *by_id.get(&worker_id).expect("upserted id came from by_id");
                 self.converged.insert(worker_id, request.clone());
@@ -136,10 +133,10 @@ impl CatalogReconciler {
             .collect();
         for worker_id in stale {
             match self.core.delete_worker(worker_id).await {
-                Ok(record) => {
-                    if let Some(observer) = &self.observer {
-                        observer.removed(&record);
-                    }
+                Ok(_) => {
+                    #[cfg(test)]
+                    self.removals
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 // A worker that was never registered is not an error (idempotent).
                 Err(SelectionError::NotFound(_)) => {}
@@ -239,38 +236,29 @@ mod tests {
             .map(|record| record.lifecycle)
     }
 
-    /// Counts observer callbacks so tests can assert convergence (a skipped
-    /// upsert) and stale deletion through the public surface.
-    #[derive(Default)]
+    /// The reconciler's upsert and removal counters, so tests can assert
+    /// convergence (a skipped upsert) and stale deletion after `run` consumes it.
     struct Counter {
-        upserted: AtomicUsize,
-        removed: AtomicUsize,
+        upserts: Arc<AtomicUsize>,
+        removals: Arc<AtomicUsize>,
     }
 
     impl Counter {
         fn upserts(&self) -> usize {
-            self.upserted.load(Ordering::SeqCst)
+            self.upserts.load(Ordering::SeqCst)
         }
 
         fn removals(&self) -> usize {
-            self.removed.load(Ordering::SeqCst)
+            self.removals.load(Ordering::SeqCst)
         }
     }
 
-    impl CatalogObserver for Counter {
-        fn upserted(&self, _record: &WorkerCatalogRecord) {
-            self.upserted.fetch_add(1, Ordering::SeqCst);
-        }
-
-        fn removed(&self, _record: &WorkerCatalogRecord) {
-            self.removed.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    fn reconciler(core: &Arc<SelectionCore>) -> (CatalogReconciler, Arc<Counter>) {
-        let counter = Arc::new(Counter::default());
-        let reconciler = CatalogReconciler::new(Arc::clone(core))
-            .with_observer(Arc::clone(&counter) as Arc<dyn CatalogObserver>);
+    fn reconciler(core: &Arc<SelectionCore>) -> (CatalogReconciler, Counter) {
+        let reconciler = CatalogReconciler::new(Arc::clone(core));
+        let counter = Counter {
+            upserts: Arc::clone(&reconciler.upserts),
+            removals: Arc::clone(&reconciler.removals),
+        };
         (reconciler, counter)
     }
 

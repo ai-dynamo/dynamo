@@ -481,7 +481,9 @@ def test_request_cancellation_vllm_prefill_cancel(
     phase in a disaggregated setup, the prefill worker still runs the
     request to completion so KV blocks are released via the normal path
     (rather than leaking on a torn-down NIXL transfer), and decode routing
-    still proceeds so the KV-transfer-complete guard can free the blocks.
+    still proceeds; the decode worker aborts its request as soon as the
+    cancellation arrives and vLLM frees the blocks once any in-flight KV
+    receive settles.
 
     Reference: PR ai-dynamo/dynamo#7489
 

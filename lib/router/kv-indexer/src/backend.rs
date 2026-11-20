@@ -864,11 +864,20 @@ impl Indexer {
     }
 
     /// Live per-rank block counts from the local primary, which starts keeping them on the first
-    /// call; `None` without a local primary.
+    /// call; `None` without a local primary. The counts also carry the local lower tiers, for
+    /// cache-owner block counts.
     pub fn track_resident_blocks(&self) -> Option<ResidentBlockCountsHandle> {
         match self {
-            Self::Single { primary, .. } => Some(primary.track_resident_blocks()),
-            Self::Concurrent { primary, .. } => Some(primary.track_resident_blocks()),
+            Self::Single {
+                primary,
+                lower_tier,
+                ..
+            } => Some(primary.track_resident_blocks().with_lower_tier(lower_tier)),
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => Some(primary.track_resident_blocks().with_lower_tier(lower_tier)),
             Self::Remote { .. } | Self::None => None,
         }
     }

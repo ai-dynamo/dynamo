@@ -315,14 +315,16 @@ where
     Resp: PipelineIO,
     Adapter: Send + Sync + 'static,
 {
-    /// Encode one frame for `publisher`: into an item it sends as it is, when
-    /// it takes one, or else as bytes.
-    async fn encode_frame<U>(
+    /// Encode the complete-final frame for `publisher`: into an item it sends
+    /// as it is, when it takes one, or else as bytes.
+    ///
+    /// [`Self::pump_response_stream`] encodes each response chunk inline the
+    /// same way. A helper's future would first move each ~1 KB response into
+    /// itself.
+    async fn encode_final_frame<U>(
         &self,
         publisher: &impl ResponsePublisher,
         payload_codec: RequestPlanePayloadCodec,
-        response: Option<U>,
-        complete_final: bool,
     ) -> Result<EncodedResponseFrame<ResponsePayload>, PipelineError>
     where
         U: Data,
@@ -331,13 +333,13 @@ where
         if let Some(mut item) = publisher.new_item() {
             let frame = self
                 .payload_adapter
-                .encode_response_into(payload_codec, response, complete_final, item.buffer())
+                .encode_response_into(payload_codec, None::<U>, true, item.buffer())
                 .await?;
             return Ok(frame.map(|()| ResponsePayload::Item(item)));
         }
         let frame = self
             .payload_adapter
-            .encode_response(payload_codec, response, complete_final)
+            .encode_response(payload_codec, None::<U>, true)
             .await?;
         Ok(frame.map(ResponsePayload::Bytes))
     }
@@ -371,10 +373,20 @@ where
             let _nvtx_chunk = dynamo_nvtx_range!("worker.egress.chunk");
             tracing::trace!("Sending response: {:?}", resp);
             let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
-            let encoded = match self
-                .encode_frame(publisher, payload_codec, Some(resp), false)
-                .await
-            {
+            // Inline, not a helper: its future would first move each ~1 KB response into itself.
+            let frame = match publisher.new_item() {
+                Some(mut item) => self
+                    .payload_adapter
+                    .encode_response_into(payload_codec, Some(resp), false, item.buffer())
+                    .await
+                    .map(|frame| frame.map(|()| ResponsePayload::Item(item))),
+                None => self
+                    .payload_adapter
+                    .encode_response(payload_codec, Some(resp), false)
+                    .await
+                    .map(|frame| frame.map(ResponsePayload::Bytes)),
+            };
+            let encoded = match frame {
                 Ok(encoded) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane response");
@@ -452,10 +464,7 @@ where
             send_complete_final = false;
         }
         if send_complete_final {
-            let encoded = match self
-                .encode_frame(publisher, payload_codec, None, true)
-                .await
-            {
+            let encoded = match self.encode_final_frame::<U>(publisher, payload_codec).await {
                 Ok(encoded) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane final response");
@@ -829,12 +838,18 @@ where
         // generation itself.
         let nvtx_generate = dynamo_nvtx_range!("worker.ingress.generate");
         let stream = async {
-            self.segment
+            let engine = self
+                .engine
                 .get()
-                .expect("segment not set")
-                .generate(request)
-                .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
-                .await
+                .ok_or_else(|| anyhow::anyhow!("Ingress has no engine"))?;
+            async {
+                // Held until the engine returns its stream, so the engine never
+                // sees a second call with this id at once.
+                let _claim = self.in_flight_ids.claim(request_context.id())?;
+                engine.generate(request).await
+            }
+            .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
+            .await
         }
         .instrument(worker_operation.clone())
         .await
@@ -956,7 +971,7 @@ where
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
         // Increment inflight and ensure it's decremented on all exits via RAII guard
-        let _inflight_guard = self.metrics().map(|m| {
+        let mut inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
@@ -1024,10 +1039,20 @@ where
             ResponsePlaneMode::Tcp => {
                 tracing::trace!("creating tcp response stream");
                 let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
-                let publisher = tcp::client::TcpClient::create_response_stream(
+                // The writer can outlive the publisher or fail before ingress returns.
+                // Keep the same metric guard alive until both are done.
+                let writer_guard = if self.track_response_completion.get() == Some(&true) {
+                    inflight_guard.take().map(Arc::new)
+                } else {
+                    None
+                };
+                let publisher = tcp::client::TcpClient::create_response_stream_with_guard(
                     request.context(),
                     response_connection_info,
                     cancellation_counter,
+                    writer_guard
+                        .clone()
+                        .map(|guard| guard as Arc<dyn Send + Sync>),
                 )
                 .await
                 .map_err(|error| {
@@ -1120,7 +1145,7 @@ where
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
-        drop(_inflight_guard);
+        drop(inflight_guard);
 
         Ok(())
     }

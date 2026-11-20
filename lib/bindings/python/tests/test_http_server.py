@@ -16,22 +16,102 @@
 # This test verifies that the HTTP server can be started and responds correctly to requests.
 
 import asyncio
+import base64
 import contextlib
 import json
+import re
 import time
+from pathlib import Path
 from typing import AsyncGenerator, Dict
 
 import aiohttp
+import numpy as np
 import pytest
+import pytest_asyncio
 
+from dynamo._core import Context, _raise_routed_http_error
 from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
+
+# Real VP9 clip. The probe names vp9, so this is a video, not a 415.
+_VALID_CLIP = Path(__file__).resolve().parents[4] / "lib/llm/tests/data/media/2p_10.mp4"
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
+MSG_CONTAINS_ROUTED_ERROR = "This message contains a routed worker's error."
+MSG_SETS_RESPONSE_HEADER = "This message sets a response header."
+
+
+class _OpenIfCodec:
+    """Software-decode stand-in: a probed codec plays, anything else fails open."""
+
+    def load_bytes(self, content: bytes):
+        # Imported here: the multimodal package imports torch, which the
+        # Triton CPU image does not install.
+        from dynamo.common.multimodal import video_loader as video_loader_module
+
+        if video_loader_module.probe_video_codec(content) is None:
+            raise ValueError("Could not open video stream")
+        frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
+        return frames, {"fps": 1.0, "frames_indices": [0]}
+
+
+async def _decode_request_videos(content: list) -> None:
+    """Run each video part through the real loader before the mock completion."""
+    from dynamo.common.multimodal.media_source import decode_data_uri
+    from dynamo.common.multimodal.video_loader import VideoLoader
+
+    loader = VideoLoader()
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "video_url":
+            continue
+        url = part["video_url"]["url"]
+        await loader._decode_video_bytes(decode_data_uri(url), _OpenIfCodec(), url)
+
+
+def _valid_clip_data_url() -> str:
+    payload = base64.b64encode(_VALID_CLIP.read_bytes()).decode("ascii")
+    return f"data:video/mp4;base64,{payload}"
+
+
+def _non_video_data_url() -> str:
+    payload = base64.b64encode(b"not-a-video").decode("ascii")
+    return f"data:video/mp4;base64,{payload}"
+
+
+def _sse_error(raw: str) -> Dict:
+    """The error object from the first SSE data frame that carries one."""
+    for line in raw.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload.strip() == "[DONE]":
+            continue
+        event = json.loads(payload)
+        if "error" in event:
+            return event["error"]
+    raise AssertionError(f"no SSE error frame; got: {raw}")
+
+
+def _video_request(model_name: str, url: str, stream: bool) -> Dict:
+    body = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video."},
+                    {"type": "video_url", "video_url": {"url": url}},
+                ],
+            }
+        ],
+    }
+    if stream:
+        body["stream"] = True
+    return body
 
 
 class _StatusLikeError(Exception):
@@ -65,11 +145,20 @@ class MockHttpEngine:
             if message.get("role") == "user":
                 user_message = message.get("content", "")
                 break
+        if isinstance(user_message, list):
+            await _decode_request_videos(user_message)
+            user_message = ""
         # verifies that cancellation is propagated
         if context.is_stopped():
             print(f"Request {context.id()} was cancelled before starting.")
             return
 
+        if MSG_SETS_RESPONSE_HEADER.lower() in user_message.lower():
+            context.set_response_header("x-mock-engine", "set")
+
+        if user_message.startswith("public-http-test:"):
+            status, message = json.loads(user_message.split(":", 1)[1])
+            raise _StatusLikeError(status, message)
         if MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
@@ -78,6 +167,10 @@ class MockHttpEngine:
             raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
             raise RuntimeError("Simulated internal error")
+        elif MSG_CONTAINS_ROUTED_ERROR.lower() in user_message.lower():
+            # A worker's HttpError(503) as a routed engine raises it; escaping
+            # the engine keeps the worker's status.
+            _raise_routed_http_error(503, MSG_CONTAINS_ROUTED_ERROR)
 
         # Stream a mock response
         created = int(time.time())
@@ -126,6 +219,24 @@ def test_batch_endpoint_cannot_be_changed_at_runtime():
 
 @pytest.fixture(scope="function", autouse=False)
 async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime):
+    async for server in _serve_mock_http(request, unused_tcp_port, runtime):
+        yield server
+
+
+@pytest_asyncio.fixture
+async def pixel_limit_http_server(request, unused_tcp_port, tmp_path, monkeypatch):
+    monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+    )
+    try:
+        async for server in _serve_mock_http(request, unused_tcp_port, runtime):
+            yield server
+    finally:
+        runtime.shutdown()
+
+
+async def _serve_mock_http(request, unused_tcp_port: int, runtime: DistributedRuntime):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten.
 
     Parametrize indirectly with a bool to set ``wait_for_first_item`` on the
@@ -263,6 +374,12 @@ HTTP_ERROR_CASES = (
         "Internal server error",
         "Internal Server Error",
     ),
+    (
+        MSG_CONTAINS_ROUTED_ERROR,
+        503,
+        "Internal server error",
+        "Service Unavailable",
+    ),
 )
 
 
@@ -301,6 +418,118 @@ async def test_chat_completion_http_error(
             assert await response.json() == expected_error_body(
                 status, expected_message, expected_type
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_valid_video_clip_completes_over_http(http_server):
+    """A real VP9 clip is a video, so the client gets a completion, not 415."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = _video_request(model_name, _valid_clip_data_url(), stream=False)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            body = await response.text()
+            assert response.status == 200, body
+            assert "Unsupported video media" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_valid_video_clip_streams_without_an_error_event(http_server):
+    """The same clip on a stream returns content and no SSE error event."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = _video_request(model_name, _valid_clip_data_url(), stream=True)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            assert response.status == 200
+            content = ""
+            raw = ""
+            async for line in response.content:
+                raw += line.decode()
+                if not line.startswith(b"data: "):
+                    continue
+                chunk_data = line[len(b"data: ") :]
+                if chunk_data.strip() == b"[DONE]":
+                    break
+                chunk = json.loads(chunk_data)
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                content += delta.get("content") or ""
+    assert content == "This is a mock response."
+    assert '"error"' not in raw
+    assert "Unsupported video media" not in raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_non_video_data_url_is_unsupported_over_http(http_server):
+    """Bytes with no codec and no container are a client error, not a completion."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = _video_request(model_name, _non_video_data_url(), stream=False)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            body = await response.text()
+            assert response.status == 415, body
+            assert json.loads(body) == {
+                "message": "Unsupported video media",
+                "type": "Unsupported Media Type",
+                "code": 415,
+            }
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_non_video_data_url_is_unsupported_over_sse(http_server):
+    """The same bytes on a stream arrive as an SSE error, not a completion."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = _video_request(model_name, _non_video_data_url(), stream=True)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            assert response.status == 200
+            assert response.content_type == "text/event-stream"
+            raw = await response.text()
+
+    assert _sse_error(raw) == {
+        "message": "Unsupported video media",
+        "type": "invalid_request_error",
+        "code": 415,
+    }
+    assert "This is a mock response." not in raw
+
+
+def test_video_public_message_matches_binding_allowlist():
+    """The Python producer and the Rust allowlist must agree on the video 415 text.
+
+    A reworded sentence on either side would silently fall back to the catalog
+    text, so this checks the literal in both files."""
+    repo = Path(__file__).resolve().parents[4]
+    sentence = "Unsupported video media"
+    loader_src = (
+        repo / "components/src/dynamo/common/multimodal/video_loader.py"
+    ).read_text()
+    errors_src = (repo / "lib/bindings/python/rust/errors.rs").read_text()
+
+    assert f'"{sentence}"' in loader_src
+    allowlist = re.search(
+        r"PUBLIC_HTTP_MESSAGES: &\[&str\] = &\[(.*?)\];", errors_src, re.DOTALL
+    )
+    assert allowlist is not None, "PUBLIC_HTTP_MESSAGES not found in errors.rs"
+    assert f'"{sentence}"' in allowlist.group(1)
 
 
 @pytest.mark.asyncio
@@ -364,3 +593,103 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
         f"the generator raised before its first yield, so the stream must "
         f"carry no content; got: {body}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("http_server", "stream", "trigger", "status", "has_header"),
+    [
+        pytest.param(False, False, "", 200, True, id="unary"),
+        pytest.param(False, False, MSG_CONTAINS_ERROR, 400, True, id="unary_error"),
+        pytest.param(True, True, "", 200, True, id="stream_wait_for_first_item"),
+        pytest.param(False, True, "", 200, False, id="stream_default"),
+    ],
+    indirect=["http_server"],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_chat_engine_response_header(
+    http_server, stream: bool, trigger: str, status: int, has_header: bool
+):
+    """A header the engine sets through its context is on the response, error
+    responses included, when the service reads the engine's stream before it
+    commits the response. The default service commits a streaming response
+    first, so that response never carries the header."""
+    base_url, model_name = http_server
+    data = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": f"{MSG_SETS_RESPONSE_HEADER} {trigger}"}
+        ],
+        "stream": stream,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            assert response.status == status
+            assert response.headers.get("x-mock-engine") == (
+                "set" if has_header else None
+            )
+            await response.read()
+
+
+def test_set_response_header_without_an_http_response():
+    # A context with no HTTP response behind it reports that nothing was set.
+    assert Context().set_response_header("x-mock-engine", "set") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("status", "message", "public"),
+    [
+        (413, "Image exceeds the decoded pixel limit", True),
+        (
+            413,
+            "Image exceeds the decoded pixel limit https://example.com/?secret=private",
+            False,
+        ),
+        (413, "private https://example.com/?secret=private", False),
+        (400, "Image exceeds the decoded pixel limit", True),
+    ],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_image_pixel_limit_public_response(
+    pixel_limit_http_server, stream, status, message, public
+):
+    base_url, model_name = pixel_limit_http_server
+    data = {
+        "model": model_name,
+        "stream": stream,
+        "messages": [
+            {
+                "role": "user",
+                "content": "public-http-test:" + json.dumps([status, message]),
+            }
+        ],
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            assert response.status == (200 if stream else status)
+            raw = await response.text()
+    error = _sse_error(raw) if stream else json.loads(raw)
+    assert error["code"] == status
+    if public:
+        error_type = {400: "Bad Request", 413: "Payload Too Large"}[status]
+        assert error == {
+            "message": "Image exceeds the decoded pixel limit",
+            "type": "invalid_request_error" if stream else error_type,
+            "code": status,
+        }
+    else:
+        assert error["message"] != "Image exceeds the decoded pixel limit"
+        assert "private" not in raw
+        assert "secret" not in raw

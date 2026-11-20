@@ -146,6 +146,7 @@ pub fn project(request: &PreprocessedRequest, projection: Projection) -> Preproc
         model,
         migration_state: _,
         staged_kv_cleanup: _,
+        elapsed_since_arrival_ms: _,
         token_ids,
         prompt_embeds,
         multi_modal_data,
@@ -237,6 +238,9 @@ pub fn project(request: &PreprocessedRequest, projection: Projection) -> Preproc
         // Frontend-only, never serialized.
         migration_state: None,
         staged_kv_cleanup: false,
+        // The primary's router stamps this as it dispatches, below the tap. A
+        // shadow router stamps its own.
+        elapsed_since_arrival_ms: None,
         jail_seed: None,
         tracker: None,
         is_probe: false,
@@ -304,6 +308,7 @@ mod tests {
             .unwrap();
         request.prompt_embeds = Some("embeds".to_string());
         request.extra_args = Some(serde_json::json!({"k": "v"}));
+        request.elapsed_since_arrival_ms = Some(5.0);
         request.mm_processor_kwargs = Some(serde_json::json!({"fps": 1}));
         request.annotations = vec!["a".to_string()];
         request.image_cache_scope = Some("sess-1".to_string());
@@ -354,6 +359,7 @@ mod tests {
         assert_eq!(copy.extra_args, source.extra_args);
         assert_eq!(copy.mdc_sum.as_deref(), Some("sum"));
         assert_eq!(copy.image_cache_scope.as_deref(), Some("sess-1"));
+        assert_eq!(copy.elapsed_since_arrival_ms, None);
     }
 
     #[test]

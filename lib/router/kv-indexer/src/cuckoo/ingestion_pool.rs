@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::failure::{CkfFailureAction, CkfFailureDisposition, CkfFailurePoint};
-use super::{
+use super::global::{
     ConsumerDrainMarker, GlobalCkfAssignmentError, GlobalCkfBuildError, GlobalCkfDelta,
     GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneFault, GlobalCkfLaneIngestor,
     GlobalCkfSnapshot, LaneLease, ProducerIdentity,
@@ -295,6 +295,7 @@ impl WorkerHealth {
         self.failed_workers[worker].load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     fn failed_worker(&self) -> Option<usize> {
         self.failed_workers
             .iter()
@@ -771,10 +772,6 @@ impl GlobalCkfIngestionPool {
 
     pub fn worker_for_lane(&self, lane: usize) -> Option<usize> {
         self.routes.get(lane)?.as_ref().map(|route| route.worker)
-    }
-
-    pub fn failed_worker(&self) -> Option<usize> {
-        self.health.failed_worker()
     }
 
     pub fn try_recv_fault(&self) -> Option<GlobalCkfIngestionFault> {
@@ -1364,10 +1361,11 @@ fn report_fault(fault_tx: &flume::Sender<GlobalCkfIngestionFault>, fault: Global
 
 #[cfg(test)]
 mod tests {
+    use super::super::global::GlobalCkfBucketImage;
     use super::*;
     use crate::cuckoo::{
         CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, ConsumerInstanceId,
-        DcCkfState, GlobalCkfBucketImage, GlobalCkfManifest, PrefixSearchConfig,
+        DcCkfState, GlobalCkfManifest, PrefixSearchConfig,
     };
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
@@ -1821,10 +1819,11 @@ mod tests {
         fixture.pool.crash_lane_worker(fixture.lane);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while fixture.pool.failed_worker().is_none() && std::time::Instant::now() < deadline {
+        while fixture.pool.health.failed_worker().is_none() && std::time::Instant::now() < deadline
+        {
             thread::yield_now();
         }
-        assert_eq!(fixture.pool.failed_worker(), Some(worker));
+        assert_eq!(fixture.pool.health.failed_worker(), Some(worker));
         assert_eq!(fixture.pool.indexer().ready_lanes(), 0);
         let deadline = Instant::now() + Duration::from_secs(1);
         let fault = loop {
