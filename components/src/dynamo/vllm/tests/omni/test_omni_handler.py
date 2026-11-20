@@ -2687,3 +2687,171 @@ async def test_live_context_does_not_cancel_successful_edit(image_request_handle
     assert prompt["multi_modal_data"]["image"] == images
     # The context watcher is torn down once preloading finishes.
     assert killed.cancelled()
+
+
+class TestCmafStreaming:
+    """The aggregated handler streams CMAF for the frontend's CMAF route, and only for it."""
+
+    @staticmethod
+    def _video_stage(label="image", frames=20):
+        """A diffusion stage output holding one generated clip."""
+        import numpy as np
+
+        return SimpleNamespace(
+            final_output_type=label,
+            images=[np.zeros((frames, 8, 8, 3), dtype=np.float32)],
+        )
+
+    @staticmethod
+    async def _run(request, stage_outputs):
+        """Drive the handler over ``stage_outputs`` and collect the responses.
+
+        Uses a real OutputFormatter; only the engine, the abort monitor and the
+        input build are stubbed.
+        """
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        handler = _make_handler()
+        handler.output_formatter = OutputFormatter(model_name="test-model")
+        handler.config.output_modalities = ["video"]
+
+        async def fake_generate(**kwargs):
+            """Replay the scripted stage outputs as the engine's stream."""
+            for stage_output in stage_outputs:
+                yield stage_output
+
+        handler.engine_client.generate = fake_generate
+
+        @asynccontextmanager
+        async def no_abort_monitor(context, request_id):
+            """Abort monitor that never fires."""
+            yield None
+
+        handler._abort_monitor = no_abort_monitor
+        handler.build_engine_inputs = _AsyncReturn(
+            EngineInputs(
+                prompt={"prompt": "a cat"},
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="b64_json",
+            )
+        )
+        return [
+            chunk
+            async for chunk in handler._generate_openai_mode(
+                request, _live_context(), "req-1"
+            )
+        ]
+
+    @staticmethod
+    def _cmaf_request():
+        """What the frontend's CMAF route forwards: the flag in ``extra_args``."""
+        return {
+            "prompt": "a cat",
+            "model": "test-model",
+            "extra_args": {"cmaf_stream": True},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label", ["image", "video"])
+    async def test_a_diffusion_output_is_streamed_under_either_label(
+        self, fake_cmaf_encoder, label
+    ):
+        """The pinned vLLM-Omni labels Wan output ``video``; skipping it left the
+        client with "Backend produced no CMAF frames"."""
+        chunks = await self._run(self._cmaf_request(), [self._video_stage(label)])
+
+        assert [chunk["cmaf"] for chunk in chunks] == [
+            "cmaf:metadata",
+            "cmaf:init",
+            "cmaf:segment:1",
+            "cmaf:segment:2",
+            "cmaf:segment:3",
+        ]
+        assert fake_cmaf_encoder.enc.fps == 16
+        assert fake_cmaf_encoder.enc.closed
+
+    @pytest.mark.asyncio
+    async def test_a_stage_without_frames_is_not_framed(self, fake_cmaf_encoder):
+        """On a multi-stage pipeline only the diffusion stage has a CMAF form."""
+        text_stage = SimpleNamespace(final_output_type="text", outputs=[])
+        chunks = await self._run(
+            self._cmaf_request(), [text_stage, self._video_stage("video", frames=8)]
+        )
+
+        assert [chunk["cmaf"] for chunk in chunks] == [
+            "cmaf:metadata",
+            "cmaf:init",
+            "cmaf:segment:1",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_nothing_a_client_sends_selects_cmaf(self, fake_cmaf_encoder):
+        """`/v1/videos` keeps its contract whatever the request body says.
+
+        This is the request a client produces by sending the annotation an
+        earlier design used, the flag as a top-level field, and its own
+        ``extra_args``: the frontend never deserializes a client's
+        ``extra_args`` and nests unknown fields under ``media_passthrough``.
+        """
+        request = {
+            "prompt": "a cat",
+            "model": "test-model",
+            "nvext": {"annotations": ["cmaf", "cmaf_stream"]},
+            "extra_args": {
+                "media_passthrough": {
+                    "cmaf_stream": True,
+                    "extra_args": {"cmaf_stream": True},
+                }
+            },
+        }
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"complete-mp4",
+        ):
+            chunks = await self._run(request, [self._video_stage("video")])
+
+        assert fake_cmaf_encoder.enc is None
+        assert len(chunks) == 1
+        (response,) = chunks
+        assert response["status"] == "completed" and response["progress"] == 100
+        assert response["cmaf"] is None
+        assert base64.b64decode(response["data"][0]["b64_json"]) == b"complete-mp4"
+
+    @pytest.mark.asyncio
+    async def test_an_encoder_failure_raises_instead_of_ending_the_stream(
+        self, fake_cmaf_encoder
+    ):
+        """The frontend turns the raised error into the terminal error frame."""
+
+        class _Failing(fake_cmaf_encoder.cls):
+            async def finish(self):
+                """Fail like an ffmpeg exit after frames went out."""
+                raise RuntimeError("ffmpeg libvpx-vp9 CMAF encode failed (exit 1)")
+                yield  # unreachable; keeps finish an async generator
+
+        fake_cmaf_encoder.cls = _Failing
+        with pytest.raises(RuntimeError, match="CMAF encode failed"):
+            await self._run(self._cmaf_request(), [self._video_stage("video")])
+
+        assert fake_cmaf_encoder.enc.closed
+
+    @pytest.mark.asyncio
+    async def test_the_encode_session_follows_the_request_context(
+        self, fake_cmaf_encoder
+    ):
+        """The handler hands the request's cancellation signal to the stream."""
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        seen = {}
+        original = DiffusionFormatter.stream_cmaf
+
+        def spy(self, stage_output, request_id, **ctx):
+            seen.update(ctx)
+            return original(self, stage_output, request_id, **ctx)
+
+        with patch.object(DiffusionFormatter, "stream_cmaf", spy):
+            await self._run(self._cmaf_request(), [self._video_stage("video")])
+
+        assert callable(seen["cancelled"])
+        assert seen["fps"] == 16

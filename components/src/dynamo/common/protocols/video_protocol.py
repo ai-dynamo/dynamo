@@ -173,3 +173,9 @@ class NvVideosResponse(BaseModel):
     """
     Inference time in seconds
     """
+    cmaf: StrictStr | None = None
+    """
+    CMAF frame tag, set by a worker answering the CMAF route and absent on
+    every other path: `cmaf:metadata`, `cmaf:init`, or `cmaf:segment:{n}`.
+    The frame's payload travels in `data[0].b64_json`.
+    """
