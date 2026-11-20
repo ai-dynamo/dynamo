@@ -91,6 +91,16 @@ def test_native_generate_cache_salt_applies_to_prefill_prompt():
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def _make_context() -> MagicMock:
+    context = MagicMock()
+    context.is_stopped.return_value = False
+    context.is_killed.return_value = False
+    context.async_killed_or_stopped.side_effect = (
+        lambda: asyncio.get_running_loop().create_future()
+    )
+    return context
+
+
 def _make_config(
     model: str = "test-model",
     enable_multimodal: bool = True,
@@ -921,7 +931,7 @@ async def test_engine_data_uses_effective_engine_prompt(
     chunks = [
         chunk
         async for chunk in handler._generate_token_mode(
-            request, MagicMock(), "req-engine-prompt"
+            request, _make_context(), "req-engine-prompt"
         )
     ]
     assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
@@ -994,7 +1004,7 @@ async def test_generate_engine_failure_status(case):
         )
 
     handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
-    generate = handler.generate(request, MagicMock())
+    generate = handler.generate(request, _make_context())
     if case == "engine_error":
         chunks = [chunk async for chunk in generate]
         assert chunks[-1]["finish_reason"] == "error"
@@ -1071,7 +1081,7 @@ async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatc
         )
 
     handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
-    context = MagicMock()
+    context = _make_context()
     context.id.return_value = "artifact-request"
     chunks = [chunk async for chunk in handler.generate(request, context)]
 
@@ -1211,7 +1221,7 @@ async def test_artifact_terminal_delivery_only_on_success(
             )
 
     handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
-    context = MagicMock()
+    context = _make_context()
     context.id.return_value = "artifact-request"
 
     chunks = [chunk async for chunk in handler.generate(request, context)]
@@ -1309,7 +1319,7 @@ async def test_artifact_logprobs_do_not_widen_client_output(
             return sampling
 
         monkeypatch.setattr(mod, "build_sampling_params", with_route_start)
-    context = MagicMock()
+    context = _make_context()
     context.id.return_value = "artifact-request"
 
     chunks = [chunk async for chunk in handler.generate(request, context)]
@@ -1414,7 +1424,7 @@ async def test_artifact_authority_unavailable_returns_typed_error(
         mod.InvalidArgument if authority_state == "missing" else mod.WorkerOverloaded
     )
     with pytest.raises(expected):
-        async for _ in handler.generate(request, MagicMock()):
+        async for _ in handler.generate(request, _make_context()):
             pass
 
 
@@ -1478,7 +1488,7 @@ async def test_artifact_destination_rejection_is_invalid_argument(
 
     expected = mod.InvalidArgument if client_error else ArtifactStorageError
     with pytest.raises(expected, match="policy says no"):
-        async for _ in handler.generate(request, MagicMock()):
+        async for _ in handler.generate(request, _make_context()):
             pass
     handler.engine_client.generate.assert_not_called()
     authority.submit.assert_not_called()
@@ -1509,9 +1519,11 @@ async def test_artifact_request_rejects_unsupported_worker_mode(worker_mode, mes
     if worker_mode == "text":
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
         handler.use_vllm_tokenizer = True
-        generate = handler.generate(request, MagicMock())
+        generate = handler.generate(request, _make_context())
     else:
-        generate = mod.PrefillWorkerHandler.generate(MagicMock(), request, MagicMock())
+        generate = mod.PrefillWorkerHandler.generate(
+            MagicMock(), request, _make_context()
+        )
 
     with pytest.raises(mod.InvalidArgument, match=message):
         async for _ in generate:
@@ -1537,7 +1549,7 @@ class TestDecodeWorkerMultimodalBranching:
         handler._multimodal_request_processor.enable_multimodal = False
 
         with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
-            async for _ in handler.generate(request_payload, MagicMock()):
+            async for _ in handler.generate(request_payload, _make_context()):
                 pass
 
     async def test_decode_only_qwen_with_mm_data_no_prefill_result_errors(self):
@@ -1553,7 +1565,7 @@ class TestDecodeWorkerMultimodalBranching:
             "stop_conditions": {},
             "output_options": {},
         }
-        context = MagicMock()
+        context = _make_context()
         chunks = []
         async for chunk in handler._generate_token_mode(request, context, "req-1"):
             chunks.append(chunk)
@@ -1588,7 +1600,7 @@ class TestDecodeWorkerMultimodalBranching:
                 },
             },
         }
-        context = MagicMock()
+        context = _make_context()
         chunks = []
         async for chunk in handler._generate_token_mode(request, context, "req-1"):
             chunks.append(chunk)
@@ -1615,7 +1627,7 @@ class TestDecodeWorkerMultimodalBranching:
         chunks = [
             chunk
             async for chunk in handler._generate_token_mode(
-                request, MagicMock(), "req-transfer-error"
+                request, _make_context(), "req-transfer-error"
             )
         ]
 
@@ -1658,7 +1670,7 @@ class TestDecodeWorkerMultimodalBranching:
                 },
             },
         }
-        context = MagicMock()
+        context = _make_context()
         with pytest.raises(RuntimeError, match="test stop"):
             async for _ in handler._generate_token_mode(request, context, "req-1"):
                 pass
@@ -1686,7 +1698,7 @@ class TestDecodeWorkerMultimodalBranching:
             "stop_conditions": {},
             "output_options": {},
         }
-        context = MagicMock()
+        context = _make_context()
 
         with pytest.raises(RuntimeError, match="test stop"):
             async for _ in handler._generate_token_mode(request, context, "req-1"):
@@ -1715,7 +1727,7 @@ class TestDecodeWorkerMultimodalBranching:
             "output_options": {},
             "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
         }
-        context = MagicMock()
+        context = _make_context()
 
         with pytest.raises(RuntimeError, match="test stop"):
             async for _ in handler._generate_token_mode(request, context, "req-1"):
@@ -1737,7 +1749,7 @@ class TestDecodeWorkerMultimodalBranching:
             "output_options": {},
             "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
         }
-        context = MagicMock()
+        context = _make_context()
 
         with pytest.raises(RuntimeError, match="stop"):
             async for _ in handler._generate_token_mode(request, context, "req-1"):
@@ -2123,6 +2135,8 @@ async def test_decode_reports_cache_hit_only_without_transferred_kv(
 
     handler.generate_tokens = _fake_generate_tokens
     context = MagicMock()
+    context.is_stopped.return_value = False
+    context.is_killed.return_value = False
     context.async_killed_or_stopped.return_value = (
         asyncio.get_running_loop().create_future()
     )
@@ -2253,6 +2267,7 @@ class TestAbortMonitor:
         handler.shutdown_event = None
         handler.runtime = MagicMock()
         handler.config = config
+        handler.use_vllm_tokenizer = False
         handler.default_sampling_params = {}
         handler.model_max_len = None
         handler.input_param_manager = MagicMock()
@@ -2261,13 +2276,15 @@ class TestAbortMonitor:
         handler._build_prompt_from_request = MagicMock(return_value=MagicMock())
 
         killed_future = asyncio.get_event_loop().create_future()
-        killed_future.set_result(None)
         context = MagicMock()
+        context.is_stopped.return_value = False
+        context.is_killed.return_value = False
         context.async_killed_or_stopped.return_value = killed_future
 
         async def _stalled_gen(*args, **kwargs):
             # No output ever arrives: the KV read is stuck. Only the abort
             # ends the request.
+            killed_future.set_result(None)
             await asyncio.wait_for(aborted.wait(), timeout=2.0)
             if False:
                 yield None
