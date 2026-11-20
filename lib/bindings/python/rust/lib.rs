@@ -1601,15 +1601,6 @@ impl DistributedRuntime {
         !routes.is_idle()
     }
 
-    /// Join only the discovery writes that started before registration closed.
-    fn wait_for_endpoint_registration<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let runtime = self.inner.runtime().clone();
-        crate::future_into_py(py, async move {
-            runtime.close_endpoint_registration().await;
-            Ok(())
-        })
-    }
-
     /// Fence endpoint registration, stop controls, and join admitted callbacks.
     fn shutdown_engine_routes<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let runtime = self.inner.runtime().clone();

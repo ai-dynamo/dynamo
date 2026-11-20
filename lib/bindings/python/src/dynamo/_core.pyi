@@ -156,10 +156,6 @@ class DistributedRuntime:
         """Close control and registration admission. Return whether a control is still active."""
         ...
 
-    async def wait_for_endpoint_registration(self) -> None:
-        """Wait for registrations admitted before shutdown to finish."""
-        ...
-
     async def shutdown_engine_routes(self) -> None:
         """Fence endpoint registration and join admitted engine-control callbacks."""
         ...

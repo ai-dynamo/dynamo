@@ -26,9 +26,6 @@ class IdleRuntime:
     def close_engine_routes(self):
         return False
 
-    async def wait_for_endpoint_registration(self):
-        pass
-
 
 @pytest.fixture
 def shutdown_env(monkeypatch):

@@ -98,7 +98,6 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
                 Mock(
                     shutdown_and_wait=AsyncMock(),
                     close_engine_routes=Mock(return_value=False),
-                    wait_for_endpoint_registration=AsyncMock(),
                 ),
                 Mock(),
             )

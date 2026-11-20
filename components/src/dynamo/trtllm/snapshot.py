@@ -159,10 +159,6 @@ class _SnapshotRuntimeProxy:
         self._shutting_down = True
         return self._runtime is not None and self._runtime.close_engine_routes()
 
-    async def wait_for_endpoint_registration(self) -> None:
-        if self._runtime is not None:
-            await self._runtime.wait_for_endpoint_registration()
-
     async def shutdown_engine_routes(self) -> None:
         self._shutting_down = True
         if self._runtime is not None:

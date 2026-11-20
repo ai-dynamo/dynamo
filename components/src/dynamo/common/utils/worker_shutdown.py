@@ -300,12 +300,12 @@ class WorkerShutdown:
         if self.notify_children is not None:
             self.notify_children()
 
-        async def withdraw():
-            # A registration submitted before close may still publish discovery.
-            await self.runtime.wait_for_endpoint_registration()
-            await _unregister_endpoints(list(self.endpoints), report_failure=True)
-
-        await self._stage("unregister", withdraw(), self._drain_remaining())
+        # Native terminal unregister waits for earlier discovery writes.
+        await self._stage(
+            "unregister",
+            _unregister_endpoints(list(self.endpoints), report_failure=True),
+            self._drain_remaining(),
+        )
         grace = min(self._caps["router_grace"], self._drain_remaining())
         if grace:
             await self._stage(
