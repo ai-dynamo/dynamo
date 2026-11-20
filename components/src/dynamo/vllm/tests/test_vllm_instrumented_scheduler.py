@@ -10656,6 +10656,51 @@ def test_power_window_gpu_mapping_rejects_too_few_visible_devices():
         instrumented_scheduler_module._bench_power_device_ids(_dp_parallel(), "0,1")
 
 
+def _fake_nvml(monkeypatch, names):
+    handles = []
+    fake = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlDeviceGetCount=lambda: len(names),
+        nvmlDeviceGetHandleByIndex=lambda index: handles.append(index) or index,
+        nvmlDeviceGetHandleByUUID=lambda uuid: uuid,
+        nvmlDeviceGetName=lambda handle: names[handle],
+        nvmlDeviceGetUUID=lambda handle: f"GPU-{handle}",
+        NVMLError=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", fake)
+    return handles
+
+
+@pytest.mark.parametrize(
+    ("names", "order", "ids", "ok"),
+    [
+        (["H200", "B200"], None, ["0"], False),
+        (["H200", "B200"], "FASTEST_FIRST", ["0"], False),
+        (["H200", "B200"], "PCI_BUS_ID", ["0"], True),
+        (["H200", "H200"], None, ["0"], True),
+        # UUID entries never depend on index order.
+        (["H200", "B200"], None, ["GPU-1"], True),
+    ],
+)
+def test_power_window_integer_ids_need_a_safe_nvml_index_mapping(
+    monkeypatch, names, order, ids, ok
+):
+    _fake_nvml(monkeypatch, names)
+    if order is None:
+        monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", order)
+
+    if ok:
+        assert instrumented_scheduler_module._bench_open_power_gpus(ids)
+    else:
+        with pytest.raises(
+            instrumented_scheduler_module._BenchPowerUnavailable,
+            match="gpu_mapping_unavailable",
+        ):
+            instrumented_scheduler_module._bench_open_power_gpus(ids)
+
+
 def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatch):
     point = BenchmarkPoint(
         point_type="prefill", total_prefill_tokens=16, total_kv_read_tokens=0
