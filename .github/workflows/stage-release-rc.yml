@@ -349,10 +349,17 @@ jobs:
           # The enterprise vLLM image comes from enterprise-ci.yml, which builds on
           # release-branch pushes only once the branch carries that trigger. Wait
           # for it when selected by name, or under "all" when the branch builds it.
+          # A failed read must not look like "no enterprise build": that would let
+          # an "all" rc publish without the enterprise image. Only a 404 means absent.
           ENTERPRISE_ON_BRANCH=false
-          if gh api "repos/${REPO}/contents/.github/workflows/enterprise-ci.yml?ref=${SHA}" --jq .content 2>/dev/null \
-              | base64 -d 2>/dev/null | grep -q "release/\*\.\*\.\*"; then
-            ENTERPRISE_ON_BRANCH=true
+          if ENT_CI=$(gh api "repos/${REPO}/contents/.github/workflows/enterprise-ci.yml?ref=${SHA}" \
+              --jq .content 2>"${RUNNER_TEMP}/enterprise-ci.err"); then
+            if base64 -d <<<"${ENT_CI}" | grep -q "release/\*\.\*\.\*"; then
+              ENTERPRISE_ON_BRANCH=true
+            fi
+          elif ! grep -q "HTTP 404" "${RUNNER_TEMP}/enterprise-ci.err"; then
+            echo "::error::could not read enterprise-ci.yml at ${SHA}: $(cat "${RUNNER_TEMP}/enterprise-ci.err")"
+            exit 1
           fi
           if ctr_selected vllm-enterprise && { [ "${CSET}" != "all" ] || [ "${ENTERPRISE_ON_BRANCH}" = "true" ]; }; then
             TAGS+=("${SHA}-vllm-runtime-enterprise")
