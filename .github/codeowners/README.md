@@ -31,7 +31,7 @@ adding required approvals.
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
 | `emit_codeowners.py` | Generates root `CODEOWNERS`, `CODEOWNERS.<team>` and `CONTRIBUTORS.md` from the policy; it never reads the git tree. |
 | `CODEOWNERS.<team>` | Generated, readable entries for one team's native policy review. Commit these with the central policy. |
-| `native_consent.py` | Generates team entries and verifies that ownership changes preserve native review for the affected teams. |
+| `team_codeowners.py` | Generates team entries and verifies that ownership changes preserve native review for the affected teams. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for matching, policy resolution, deterministic emission, precedence, and external-contributor co-ownership. |
 
@@ -49,7 +49,7 @@ adding required approvals.
      --areas .github/codeowners/areas.yaml --out CODEOWNERS
    ```
 
-3. Commit `areas.yaml` and `CODEOWNERS` together.
+3. Commit `areas.yaml`, `CODEOWNERS` and the changed `CODEOWNERS.<team>` files together.
 
 ### Native review of policy changes
 
@@ -64,17 +64,16 @@ Regenerate with the command above and commit the team files together with the
 central policy. The existing `codeowners` action checks all generated files for
 drift and verifies that every affected old/new owner has a changed team file.
 Unrepresentable wildcard changes fail rather than bypassing an affected owner;
-split the owning glob in that case. There are no hashes or placeholder contents.
+split the owning glob in that case.
 
 Register new owners first with an empty area or contributor-area list. Existing
 team files cannot be deleted or reassigned through a routing change. GitHub
 enforces native reviews using the repository's existing approval-retention rules.
-No additional check freshness or base-update protection is added.
 
-Rollout: merge the installer with `meta.native_policy_consents: false`, then set
-the flag to `true` and regenerate in a separate PR. This enables exactly two native
-exceptions (root CODEOWNERS and areas.yaml). The existing required `codeowners`
-action checks the team files; no new required check or branch setting is needed.
+Root `CODEOWNERS` and `areas.yaml` have no direct native owner; their reviews go
+through the affected team files. These are the only two exceptions. The existing
+required `codeowners` action checks the team files; no new required check or branch
+setting is needed.
 
 ### Add owners without dropping existing accountability
 
@@ -95,11 +94,9 @@ before it, which may have been decided by an ancestor several levels up or by
 an intermediate rule that already reassigned it. The catch-all never counts --
 every explicit row exists to replace it.
 
-That check covers `shared` rows only. An area `path_globs` entry nested inside
-another area's directory still replaces the outer owner silently. Whether an
-owner should inherit down a subtree at all is an open question about the
-ownership model; until it is settled, a reviewer reading the `areas.yaml` diff
-is the control there.
+That additivity check covers `shared` rows only. A nested area `path_globs` entry
+can replace the outer owner; the generated team files make that transfer
+reviewable by both affected teams.
 
 For an invariant that should not emit another CODEOWNERS row, use
 `required_owners`. The strict gate checks every matching tracked file against
@@ -119,7 +116,7 @@ deleted.
 
 Removing a `required_owners` entry lifts the requirement -- deliberately, or a
 contract could never be retired. The edit is itself a policy change: it is
-judged full-tree and reviewed by this directory's owners, so lifting a
+judged full-tree and reviewed through the generated Process file, so lifting a
 guarantee is always a visible, owned decision.
 
 ## External contributors

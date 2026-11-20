@@ -47,7 +47,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 from codeowners_match import ResolvedModel, anchor, compute_resolution  # noqa: E402
-from native_consent import (  # noqa: E402
+from team_codeowners import (  # noqa: E402
     DELEGATED,
     render_team_files,
     team_path,
@@ -279,14 +279,7 @@ def _render_codeowners(
         | {label_to_team.get(o, o) for fs in model.filetype_shared for o in fs.owners}
     )
 
-    installed = "native_policy_consents" in model.meta
-    if installed and type(model.meta["native_policy_consents"]) is not bool:
-        raise SystemExit("meta.native_policy_consents must be a boolean")
-    consent_owners = (
-        sorted(set(teams) | {_handle(_github(c)) for c in external or []})
-        if installed
-        else []
-    )
+    team_owners = sorted(set(teams) | {_handle(_github(c)) for c in external or []})
 
     # Group base rules per area; cross-area carve-outs -> override tail.
     dir_rules = [(p, t) for p, t in base_rules if p.endswith("/")]
@@ -308,7 +301,7 @@ def _render_codeowners(
     overrides.sort(key=lambda r: (len(r[0]), r[0]))
 
     all_paths = [p for p, _ in base_rules + shared_rules + ft_rules] + [
-        anchor(team_path(owner)) for owner in consent_owners
+        anchor(team_path(owner)) for owner in team_owners
     ]
     all_paths = all_paths or ["*"]
     width = max(len(p) for p in all_paths) + 2
@@ -374,15 +367,10 @@ def _render_codeowners(
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
-    if installed:
-        lines += ["", "# Native review of each team's generated ownership entries."]
-        lines += [fmt(anchor(team_path(owner)), owner) for owner in consent_owners]
-        if model.meta["native_policy_consents"]:
-            lines += [
-                "",
-                "# Policy changes are reviewed through the affected team files.",
-            ]
-            lines += [anchor(path) for path in sorted(DELEGATED)]
+    lines += ["", "# Native review of each team's generated ownership entries."]
+    lines += [fmt(anchor(team_path(owner)), owner) for owner in team_owners]
+    lines += ["", "# Policy changes are reviewed through the affected team files."]
+    lines += [anchor(path) for path in sorted(DELEGATED)]
 
     stats = {
         "base": len(base_rules),
@@ -391,7 +379,7 @@ def _render_codeowners(
         "overrides": len(overrides),
         "teams": len(teams),
     }
-    stats["consents"] = len(consent_owners)
+    stats["team_files"] = len(team_owners)
     return lines, stats
 
 
@@ -444,7 +432,7 @@ def main() -> int:
         stats["base"]
         + stats["shared"]
         + stats["filetype"]
-        + stats["consents"]
+        + stats["team_files"]
         + (1 if model.catch_all else 0)
     )
     print(

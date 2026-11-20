@@ -1,4 +1,4 @@
-"""Generate reviewable team CODEOWNERS files and preserve their native owners."""
+"""Generate team CODEOWNERS files and verify their approval coverage."""
 
 from __future__ import annotations
 
@@ -115,9 +115,7 @@ def validate(before: dict[str, str], after: dict[str, str]) -> None:
             "A higher-priority CODEOWNERS would replace native team routing"
         )
     config = yaml.safe_load(after.get(POLICY[1], "{}")) or {}
-    if config.get("meta", {}).get("native_policy_consents") and any(
-        resolve_owners(new, p) for p in DELEGATED
-    ):
+    if any(resolve_owners(new, p) for p in DELEGATED):
         raise ValueError("Keep exactly the two delegated policy paths ownerless")
     for path, value in render_team_files(after["CODEOWNERS"], config).items():
         if after.get(path) != value:
@@ -125,7 +123,12 @@ def validate(before: dict[str, str], after: dict[str, str]) -> None:
 
     # A new principal needs a natively owned file before it can receive code.
     application = [
-        [r for r in rules if not r[0].lstrip("/").startswith(PREFIX)]
+        [
+            r
+            for r in rules
+            if not r[0].lstrip("/").startswith(PREFIX)
+            and r[0].lstrip("/") not in DELEGATED
+        ]
         for rules in (old, new)
     ]
     if proposed.keys() - previous.keys() and application[0] != application[1]:
@@ -183,7 +186,7 @@ def main() -> None:
     parser.add_argument("--base", required=True)
     args = parser.parse_args()
     validate(snapshot(git("rev-parse", args.base).strip()), snapshot(None))
-    print("Native team CODEOWNERS routing is valid")
+    print("Team CODEOWNERS routing is valid")
 
 
 if __name__ == "__main__":

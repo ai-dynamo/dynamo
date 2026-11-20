@@ -928,3 +928,7 @@ requirements.txt                                                                
 /.github/codeowners/CODEOWNERS.sidecar                                                                  @ai-dynamo/dynamo-sidecar-codeowners
 /.github/codeowners/CODEOWNERS.tokenspeed                                                               @ai-dynamo/dynamo-tokenspeed-codeowners
 /.github/codeowners/CODEOWNERS.xpu                                                                      @ai-dynamo/dynamo-xpu-codeowners
+
+# Policy changes are reviewed through the affected team files.
+/.github/codeowners/areas.yaml
+/CODEOWNERS

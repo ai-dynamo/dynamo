@@ -23,6 +23,8 @@ requirements.txt
 /.ai/metrics-review.md @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.ai/metrics-guidelines.md @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.github/codeowners/areas.yaml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-process-codeowners
+/.github/codeowners/areas.yaml
+/CODEOWNERS
 
 # Generator settings and ownership contracts:
 # classify:
@@ -35,7 +37,6 @@ requirements.txt
 #     pattern: requirements.txt
 # meta:
 #   catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
-#   native_policy_consents: false
 # required_owners:
 # - glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
 #   owners:

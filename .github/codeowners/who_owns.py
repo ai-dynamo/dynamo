@@ -107,7 +107,7 @@ def main() -> int:
             else "(no owner -- falls through; CI coverage gate should block this)"
         )
         if not owners and f in DELEGATED:
-            owners_str = "(review through the affected owners' native consent files)"
+            owners_str = "(review through the affected CODEOWNERS.<team> files)"
         print(f"{f}\n    review: {owners_str}")
 
     if args.changed:

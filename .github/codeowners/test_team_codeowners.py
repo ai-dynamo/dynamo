@@ -9,7 +9,7 @@ import pytest
 import yaml
 from codeowners_match import compute_resolution, parse_codeowners, resolve_owners
 from emit_codeowners import _render_codeowners
-from native_consent import (
+from team_codeowners import (
     POLICY,
     PREFIX,
     PROCESS,
@@ -189,7 +189,7 @@ def test_higher_priority_codeowners_is_rejected(policy):
 
 
 @pytest.mark.unit
-def test_installer_preserves_native_owners_and_registers_empty_teams():
+def test_generator_delegates_only_policy_and_registers_empty_teams():
     spec = {
         "areas": [
             {"label": "ops", "github_team": "@org/ops", "path_globs": [".github/"]},
@@ -197,31 +197,23 @@ def test_installer_preserves_native_owners_and_registers_empty_teams():
             {"label": "new", "github_team": "@org/new", "path_globs": []},
         ]
     }
-    old, _ = _render_codeowners(compute_resolution(spec), group=True)
-    before = {"CODEOWNERS": "\n".join(old), POLICY[1]: yaml.safe_dump(spec)}
-    spec["meta"] = {"native_policy_consents": False}
+    before = {
+        "CODEOWNERS": "/.github/ @org/ops\n/CODEOWNERS " + PROCESS + "\n",
+        POLICY[1]: yaml.safe_dump(spec),
+    }
     lines, _ = _render_codeowners(compute_resolution(spec), group=True)
-    installed = generate(
-        {"CODEOWNERS": "\n".join(lines), POLICY[1]: yaml.safe_dump(spec)}
-    )
-    validate(before, installed)
-    assert installed[team_path("@org/new")] == ""
-    owners = parse_codeowners(installed["CODEOWNERS"])
-    assert resolve_owners(owners, "CODEOWNERS") == [PROCESS]
-    assert resolve_owners(owners, POLICY[1]) == ["@org/ops"]
-    bad = dict(installed, **{"app.py": ""})
+    after = generate({"CODEOWNERS": "\n".join(lines), POLICY[1]: yaml.safe_dump(spec)})
+    validate(before, after)
+    assert after[team_path("@org/new")] == ""
+    owners = parse_codeowners(after["CODEOWNERS"])
+    assert resolve_owners(owners, "CODEOWNERS") == []
+    assert resolve_owners(owners, POLICY[1]) == []
+    assert resolve_owners(owners, ".github/workflows/codeowners.yml") == ["@org/ops"]
+    bad = dict(after, **{"app.py": ""})
     bad["CODEOWNERS"] += "\n/app.py @org/new\n"
     generate(bad)
     with pytest.raises(ValueError, match="separately"):
         validate(before, bad)
-    spec["meta"]["native_policy_consents"] = True
-    lines, _ = _render_codeowners(compute_resolution(spec), group=True)
-    active = generate({"CODEOWNERS": "\n".join(lines), POLICY[1]: yaml.safe_dump(spec)})
-    validate(installed, active)
-    owners = parse_codeowners(active["CODEOWNERS"])
-    assert resolve_owners(owners, "CODEOWNERS") == []
-    assert resolve_owners(owners, POLICY[1]) == []
-    assert resolve_owners(owners, ".github/workflows/codeowners.yml") == ["@org/ops"]
 
 
 @pytest.mark.unit
@@ -234,7 +226,6 @@ def test_new_team_must_be_registered_before_receiving_code(policy):
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(30)
 @pytest.mark.parametrize("symlink", [False, True])
 def test_generator_and_validator_use_real_git_trees(tmp_path, symlink):
     scripts = Path(__file__).parent.resolve()
@@ -250,7 +241,6 @@ def test_generator_and_validator_use_real_git_trees(tmp_path, symlink):
         return result.stdout.strip()
 
     spec = {
-        "meta": {"native_policy_consents": False},
         "areas": [
             {
                 "label": "ops",
@@ -296,7 +286,7 @@ def test_generator_and_validator_use_real_git_trees(tmp_path, symlink):
         target.unlink()
         target.symlink_to(outside)
     generated = run(*emit)
-    check = [sys.executable, str(scripts / "native_consent.py"), "--base", base]
+    check = [sys.executable, str(scripts / "team_codeowners.py"), "--base", base]
     if symlink:
         assert generated.returncode != 0
         assert run(*check).returncode != 0

@@ -210,3 +210,4 @@ requirements.txt @ai-dynamo/dynamo-ops-codeowners
 /components/src/dynamo/common/configuration/groups/*router_args.py
 /tests/fault_tolerance/hardware/fault_injection_service/**/Dockerfile @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
 /tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/.github/codeowners/areas.yaml
