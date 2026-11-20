@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
@@ -279,6 +280,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         elif self.preprocess_workers < 0:
             raise ValueError("--dyn-preprocess-workers must be >= 0")
 
+        # Check what was asked for before --load-aware forces KV routing, so a
+        # policy file with a conflicting --router-mode still fails.
+        self.router_mode = resolve_router_mode(
+            self.router_mode, self.router_policy_config
+        )
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
@@ -624,7 +630,7 @@ class FrontendArgGroup(ArgGroup):
 
         # Router options (shared with dynamo.router)
         RouterArgGroup(
-            default_router_mode="round-robin",
+            default_router_mode=None,
             include_frontend_only=True,
             env=self.env,
         ).add_arguments(parser)
