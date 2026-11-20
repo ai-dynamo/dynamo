@@ -176,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--source-location",
+        default=None,
+        help=(
+            "URL where the corresponding source for the image's open-source "
+            "software is published. Written into THIRD-PARTY.txt when given."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     args = parser.parse_args(argv)
@@ -202,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
     # components, which we accumulate for the unified CSV + CycloneDX below.
     failures: list[str] = []
     all_components: list = []
+    # The dpkg root is the shipped filesystem only when dpkg is scanned (the
+    # operator's licenses stage is a helper image), so only then are base
+    # Debian packages in THIRD-PARTY.txt limited to what it holds.
+    shipped_debs: set[tuple[str, str]] | None = None
     for eco in args.ecosystem:
         comps = None
         try:
@@ -232,8 +244,19 @@ def main(argv: list[str] | None = None) -> int:
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 
+                collected = gen.collect_components(args.dpkg_root)
+                shipped_debs = {(c.name, c.version) for c in collected}
+                if not shipped_debs and args.subtract_sbom is not None:
+                    logger.warning(
+                        "no dpkg packages under %s; THIRD-PARTY.txt lists every "
+                        "base Debian package unfiltered",
+                        args.dpkg_root,
+                    )
                 comps = gen.generate(
-                    args.output_dir, subtract=subtract, root=args.dpkg_root
+                    args.output_dir,
+                    subtract=subtract,
+                    root=args.dpkg_root,
+                    components=collected,
                 )
             elif eco == "go":
                 if not args.go_sbom:
@@ -309,8 +332,17 @@ def main(argv: list[str] | None = None) -> int:
         all_components, exception_reasons, args.output_dir / "osrb-deps.csv"
     )
     common.write_cyclonedx(all_components, args.output_dir / "osrb.cdx.json")
+    common.write_third_party(
+        args.output_dir,
+        args.ecosystem,
+        args.source_location,
+        base_sbom=args.subtract_sbom,
+        shipped_debs=shipped_debs,
+        dpkg_root=args.dpkg_root,
+    )
     logger.info(
-        "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",
+        "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) and "
+        "THIRD-PARTY.txt to %s",
         len(all_components),
         args.output_dir,
     )

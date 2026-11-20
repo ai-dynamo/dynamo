@@ -46,6 +46,12 @@ denied / `UNKNOWN` license not covered by an exception. The `sboms` and `legal` 
 stages expose `/sboms` and `/legal` for CI extraction; the final runtime stage does
 `COPY --from=licenses /legal /legal` so NOTICES ship inside the image.
 
+The generator also writes `THIRD-PARTY.txt` into `/legal`: this run's NOTICES files, then
+every component of the `--subtract-sbom` baseline with its licenses (Debian packages limited
+to those still installed when `dpkg` is scanned, each followed by its copyright file where
+the image ships one), then one canonical text per SPDX license. `--source-location <url>`
+adds a pointer to the published corresponding source.
+
 `BASELINE_SBOM_FILE` is rendered from `container/context.yaml`'s per-(framework, device)
 `baseline_sbom` key (see `render.py:_resolve_compliance_inputs`). When set, the generators
 subtract the baseline's components so NOTICES attribute only what Dynamo adds on top of the
