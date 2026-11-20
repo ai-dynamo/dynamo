@@ -265,10 +265,22 @@ class BaseComponent(Component):
     license_ids: tuple[str, ...] = ()
 
 
+def _base_license_rank(component: BaseComponent) -> tuple[bool, int, bool]:
+    """Prefer a fully resolvable SPDX record, then more resolved identifiers."""
+    identifiers = set(component.license_ids)
+    resolved = sum(spdx_license_text(lid) is not None for lid in identifiers)
+    return (
+        bool(identifiers) and resolved == len(identifiers),
+        resolved,
+        component.spdx != NOASSERTION,
+    )
+
+
 def load_base_components(
     sbom_path: Path,
     shipped_debs: set[tuple[str, str]] | None = None,
     dpkg_root: Path = Path("/"),
+    python_components: list[Component] | None = None,
 ) -> list[BaseComponent]:
     """Return the library and application components of a baseline CycloneDX SBOM.
 
@@ -277,8 +289,15 @@ def load_base_components(
     shipped filesystem at dpkg_root: a Debian package outside it is dropped, and
     one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
     as license text. An empty set means the scan found nothing: no filter.
+    python_components supplies bundled licenses collected before subtraction.
     """
     shipped_debs = shipped_debs or None
+    # Match the separator-insensitive Python names used by baseline subtraction.
+    python_licenses = {
+        (re.sub(r"[-_.]+", "-", c.name).lower(), c.version): c.license_text
+        for c in python_components or []
+        if c.license_text and not c.license_text_is_canonical
+    }
     doc = json.loads(sbom_path.read_text(encoding="utf-8"))
     by_key: dict[tuple[str, str], BaseComponent] = {}
     for c in doc.get("components", []) or []:
@@ -309,6 +328,8 @@ def load_base_components(
                 ids.append(ident)
                 license_ids.extend(entry_ids)
         text = None
+        if (c.get("purl") or "").startswith("pkg:pypi/"):
+            text = python_licenses.get((re.sub(r"[-_.]+", "-", name).lower(), version))
         if shipped_debs is not None and is_deb:
             if (name, version) not in shipped_debs:
                 continue
@@ -322,7 +343,7 @@ def load_base_components(
             license_ids=tuple(license_ids),
         )
         existing = by_key.get((name, version))
-        if existing is None or (existing.spdx == NOASSERTION and ids):
+        if existing is None or _base_license_rank(comp) > _base_license_rank(existing):
             by_key[(name, version)] = comp
     return list(by_key.values())
 
@@ -375,6 +396,7 @@ def write_third_party(
     base_sbom: Path | None = None,
     shipped_debs: set[tuple[str, str]] | None = None,
     dpkg_root: Path = Path("/"),
+    python_components: list[Component] | None = None,
 ) -> Path:
     """Write THIRD-PARTY.txt: this run's NOTICES files plus the base image's components."""
     parts = [_THIRD_PARTY_HEADER]
@@ -388,7 +410,9 @@ def write_third_party(
         if notices.is_file():
             parts.append(notices.read_text(encoding="utf-8").rstrip() + "\n\n")
     if base_sbom is not None:
-        base = load_base_components(base_sbom, shipped_debs, dpkg_root)
+        base = load_base_components(
+            base_sbom, shipped_debs, dpkg_root, python_components
+        )
         section = render_base_section(
             base_sbom, base, _BASE_DEBS_FILTERED if shipped_debs else ""
         )

@@ -241,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     # operator's licenses stage is a helper image), so only then are base
     # Debian packages in THIRD-PARTY.txt limited to what it holds.
     shipped_debs: set[tuple[str, str]] | None = None
+    python_components: list[common.Component] = []
     for eco in args.ecosystem:
         comps = None
         try:
@@ -267,7 +268,13 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import python as gen  # type: ignore[no-redef]
 
-                comps = gen.generate(search_paths, args.output_dir, subtract=subtract)
+                python_components = gen.collect_components(search_paths)
+                comps = gen.generate(
+                    search_paths,
+                    args.output_dir,
+                    subtract=subtract,
+                    components=python_components,
+                )
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 
@@ -370,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         base_sbom=args.subtract_sbom,
         shipped_debs=shipped_debs,
         dpkg_root=args.dpkg_root,
+        python_components=python_components,
     )
     logger.info(
         "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) and "

@@ -341,3 +341,137 @@ def test_base_label_falls_back_to_filename(tmp_path: Path) -> None:
     text = write_third_party(tmp_path, [], base_sbom=sbom).read_text(encoding="utf-8")
 
     assert f"BASE IMAGE — {sbom.name}" in text
+
+
+@pytest.mark.parametrize("package_name", ["base-pkg", "Base_Pkg"])
+@pytest.mark.parametrize("bundled_license", [False, True])
+def test_main_retains_baseline_python_license_text(
+    tmp_path: Path, package_name: str, bundled_license: bool
+) -> None:
+    site = tmp_path / "site-packages"
+    dist = site / "base_pkg-1.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text(
+        f"Metadata-Version: 2.4\nName: {package_name}\nVersion: 1.0\n"
+        "License-Expression: MIT\n"
+    )
+    copyright_text = "Copyright (c) 2026 The Actual Package Authors"
+    if bundled_license:
+        (dist / "licenses").mkdir()
+        (dist / "licenses" / "LICENSE.txt").write_text(copyright_text)
+    sbom = tmp_path / "base.cdx.json"
+    sbom.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "base-pkg",
+                        "version": "1.0",
+                        "purl": "pkg:pypi/base-pkg@1.0",
+                        "licenses": [{"license": {"id": "MIT"}}],
+                    }
+                ]
+            }
+        )
+    )
+    out = tmp_path / "legal"
+
+    assert (
+        main(
+            [
+                "--ecosystem",
+                "python",
+                "--site-packages",
+                str(site),
+                "--subtract-sbom",
+                str(sbom),
+                "--output-dir",
+                str(out),
+            ]
+        )
+        == 0
+    )
+
+    text = (out / "THIRD-PARTY.txt").read_text()
+    assert "## base-pkg 1.0" in text
+    assert (copyright_text in text) == bundled_license
+    assert "MIT License" in text  # Canonical text remains available as fallback.
+    # The retained base license must not turn the delta reports into full inventories.
+    assert "base-pkg" not in (out / "osrb-deps.csv").read_text()
+    assert "Base_Pkg" not in (out / "osrb-deps.csv").read_text()
+    assert json.loads((out / "osrb.cdx.json").read_text())["components"] == []
+
+
+def test_base_python_license_matches_version_and_ecosystem(tmp_path: Path) -> None:
+    sbom = tmp_path / "base.cdx.json"
+    sbom.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "example",
+                        "version": version,
+                        "purl": f"pkg:{ecosystem}/example@{version}",
+                        "licenses": [{"license": {"id": "MIT"}}],
+                    }
+                    for version, ecosystem in [
+                        ("1.0", "pypi"),
+                        ("2.0", "pypi"),
+                        ("3.0", "deb"),
+                    ]
+                ]
+            }
+        )
+    )
+    collected = [
+        Component(
+            ecosystem="python",
+            name="example",
+            version=version,
+            spdx="MIT",
+            license_text="ACTUAL LICENSE",
+        )
+        for version in ("1.0", "3.0")
+    ]
+
+    components = load_base_components(sbom, python_components=collected)
+
+    assert {c.version: c.license_text for c in components} == {
+        "1.0": "ACTUAL LICENSE",
+        "2.0": None,
+        "3.0": None,
+    }
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "other_licenses",
+    [
+        [],
+        [{"license": {"name": "The Apache Software License, Version 2.0"}}],
+        [{"license": {"id": "Apache-2.0"}}, {"license": {"name": "Opaque License"}}],
+    ],
+)
+def test_base_duplicates_prefer_resolvable_spdx(
+    tmp_path: Path, reverse: bool, other_licenses: list[dict]
+) -> None:
+    components = [
+        {
+            "type": "library",
+            "name": "jackson-core",
+            "version": "2.16.0",
+            "licenses": licenses,
+        }
+        for licenses in [other_licenses, [{"license": {"id": "Apache-2.0"}}]]
+    ]
+    sbom = tmp_path / "base.cdx.json"
+    sbom.write_text(
+        json.dumps({"components": components[::-1] if reverse else components})
+    )
+
+    (component,) = load_base_components(sbom)
+
+    assert component.spdx == "Apache-2.0"
+    assert component.license_ids == ("Apache-2.0",)
