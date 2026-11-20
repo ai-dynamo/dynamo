@@ -19,6 +19,7 @@ pub mod mm_routing;
 #[cfg(all(test, feature = "mm-routing"))]
 mod glm5_next_tests;
 pub mod prompt;
+mod reply_end;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub use structural_tag::structural_tag_parser_names;
@@ -8888,6 +8889,7 @@ impl
         let trace_finish_reason_metadata =
             crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
+        let reply_tracker = tracker.clone();
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
 
@@ -8985,6 +8987,15 @@ impl
             &self.tokenizer,
             &self.speculative_prefill_tasks,
         );
+
+        // A request classifier left its handle on the tracker at dispatch: tell it how the
+        // reply ended.
+        let final_stream: Pin<Box<dyn Stream<Item = _> + Send>> = match reply_tracker {
+            Some(tracker) if tracker.has_classifier_progress() => {
+                Box::pin(reply_end::record_reply_end(final_stream, tracker))
+            }
+            _ => final_stream,
+        };
 
         let final_stream =
             crate::request_trace::wrap_chat_request_end_stream(final_stream, trace_state);
@@ -13047,6 +13058,49 @@ responses_tools: None,
         chunk
     }
 
+    #[tokio::test]
+    async fn reply_end_is_recorded_only_for_a_reply_that_finished() {
+        async fn recorded(
+            chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+            to_end: bool,
+        ) -> Option<bool> {
+            let (progress, updater) = dynamo_admission::host::RequestProgress::new(0);
+            let tracker = Arc::new(RequestTracker::new());
+            tracker.set_classifier_progress(updater);
+            let mut stream = reply_end::record_reply_end(futures::stream::iter(chunks), tracker);
+            if to_end {
+                while stream.next().await.is_some() {}
+            } else {
+                stream.next().await;
+            }
+            drop(stream);
+            progress.reply_tool_call()
+        }
+        let content = || chat_stream_chunk(0, None);
+        let stop = terminal_chat_stream_chunk;
+        let tool_call = || {
+            let mut chunk = terminal_chat_stream_chunk();
+            chunk.data.as_mut().unwrap().inner.choices[0].finish_reason =
+                Some(FinishReason::ToolCalls);
+            chunk
+        };
+
+        assert_eq!(
+            recorded(vec![content(), tool_call()], true).await,
+            Some(true)
+        );
+        assert_eq!(recorded(vec![content(), stop()], true).await, Some(false));
+        // Any choice that ended in a tool call counts.
+        assert_eq!(recorded(vec![tool_call(), stop()], true).await, Some(true));
+        // No choice finished.
+        assert_eq!(recorded(vec![content()], true).await, None);
+        // The reply failed after its terminal chunk.
+        let failed = Annotated::from_error("worker failed");
+        assert_eq!(recorded(vec![tool_call(), failed], true).await, None);
+        // The client left before the end.
+        assert_eq!(recorded(vec![tool_call(), content()], false).await, None);
+    }
+
     fn glm47_stream_chunk(
         content: &str,
         finish_reason: Option<FinishReason>,
@@ -16637,6 +16691,93 @@ responses_tools: None,
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
+    }
+
+    /// Leaves a classifier handle on the request's tracker, as the router does at dispatch,
+    /// then replies with one chunk that finishes with `stop`.
+    struct RepliesWith {
+        text: &'static str,
+        classifier_progress: dynamo_admission::host::RequestProgressUpdater,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for RepliesWith
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            request
+                .tracker
+                .as_ref()
+                .unwrap()
+                .set_classifier_progress(self.classifier_progress.clone());
+            let output = BackendOutput {
+                token_ids: vec![],
+                tokens: vec![],
+                text: Some(self.text.to_string()),
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                stop_reason: None,
+                index: Some(0),
+                completion_usage: None,
+                disaggregated_params: None,
+                encoder_result: None,
+                worker_trace_link: None,
+                engine_data: None,
+                routing_data: None,
+                jailed_text: None,
+            };
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move { Annotated::from_data(output) })),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_operator_tells_the_classifier_a_reply_ended_in_a_tool_call() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "auto",
+        }))
+        .unwrap();
+        let (progress, classifier_progress) = dynamo_admission::host::RequestProgress::new(0);
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(RepliesWith {
+            text: r#"<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>"#,
+            classifier_progress,
+        });
+
+        let mut stream =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                .await
+                .unwrap();
+        while stream.next().await.is_some() {}
+
+        // The worker finished with `stop`; only the tool-call parser makes that `tool_calls`.
+        assert_eq!(progress.reply_tool_call(), Some(true));
     }
 
     /// Records dispatched requests, then fails before any output.

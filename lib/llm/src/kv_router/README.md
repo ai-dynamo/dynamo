@@ -62,6 +62,8 @@ What a KV request does in `RoutingHost::generate` (call order):
 6. PushRouter: dispatch to the worker, stamped with `elapsed_since_arrival_ms` (time since the
    frontend received the request, plus the time a gateway in front of it reports in
    `x-dynamo-elapsed-since-arrival-ms`) so a backend can order admission by the original arrival
+   (with a classifier lifecycle, leave its progress handle on the request tracker: the frontend
+   records there how the reply ended, which it learns after this stream is done)
 7. affinity: bind the session to the worker once the stream starts
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```

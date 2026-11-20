@@ -2,45 +2,90 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-/// Lock-free access to the latest logical context observed for one request.
+const REPLY_END_UNKNOWN: u8 = 0;
+const REPLY_END_OTHER: u8 = 1;
+const REPLY_END_TOOL_CALL: u8 = 2;
+
+#[derive(Debug)]
+struct Observed {
+    context_tokens: AtomicUsize,
+    reply_end: AtomicU8,
+}
+
+/// Lock-free access to what the host has observed for one request: its latest logical
+/// context and how its reply ended.
 #[derive(Debug, Clone)]
 pub struct RequestProgress {
-    context_tokens: Arc<AtomicUsize>,
+    observed: Arc<Observed>,
 }
 
 /// Write capability paired with [`RequestProgress`].
 ///
-/// Updates are monotonic so concurrent or delayed observations cannot move a
+/// Context updates are monotonic so concurrent or delayed observations cannot move a
 /// request's logical context backwards.
 #[derive(Debug, Clone)]
 pub struct RequestProgressUpdater {
-    context_tokens: Arc<AtomicUsize>,
+    observed: Arc<Observed>,
 }
 
 impl RequestProgress {
     pub fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
-        let context_tokens = Arc::new(AtomicUsize::new(initial_context_tokens));
+        let observed = Arc::new(Observed {
+            context_tokens: AtomicUsize::new(initial_context_tokens),
+            reply_end: AtomicU8::new(REPLY_END_UNKNOWN),
+        });
         (
             Self {
-                context_tokens: Arc::clone(&context_tokens),
+                observed: Arc::clone(&observed),
             },
-            RequestProgressUpdater { context_tokens },
+            RequestProgressUpdater { observed },
         )
     }
 
     #[inline]
     pub fn context_tokens(&self) -> usize {
-        self.context_tokens.load(Ordering::Relaxed)
+        self.observed.context_tokens.load(Ordering::Relaxed)
+    }
+
+    /// Whether the reply ended in a tool call: `finish_reason: tool_calls` on any choice of
+    /// the chat response stream. A non-streaming response is aggregated from that stream
+    /// afterwards and can, rarely, end differently.
+    ///
+    /// `None` until the frontend has relayed the end of the reply, which is shortly after
+    /// the request's terminal event, so a plugin keeps this handle past that event to read
+    /// it. It stays `None` when the frontend did not see how the reply ended: an error, a
+    /// client disconnect, `/v1/completions`, a Python chat processor, or a router running
+    /// outside the frontend process.
+    #[inline]
+    pub fn reply_tool_call(&self) -> Option<bool> {
+        match self.observed.reply_end.load(Ordering::Relaxed) {
+            REPLY_END_TOOL_CALL => Some(true),
+            REPLY_END_OTHER => Some(false),
+            _ => None,
+        }
     }
 }
 
 impl RequestProgressUpdater {
     #[inline]
     pub fn update_context_tokens(&self, context_tokens: usize) {
-        self.context_tokens
+        self.observed
+            .context_tokens
             .fetch_max(context_tokens, Ordering::Relaxed);
+    }
+
+    /// Record how the reply ended. The host calls this once per request, after the
+    /// frontend has relayed the end of the reply.
+    #[inline]
+    pub fn record_reply_end(&self, tool_call: bool) {
+        let reply_end = if tool_call {
+            REPLY_END_TOOL_CALL
+        } else {
+            REPLY_END_OTHER
+        };
+        self.observed.reply_end.store(reply_end, Ordering::Relaxed);
     }
 }
 #[cfg(test)]

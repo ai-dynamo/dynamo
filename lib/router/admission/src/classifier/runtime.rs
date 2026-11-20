@@ -466,6 +466,13 @@ impl RequestLifecycle {
         self.progress_updater.update_context_tokens(context_tokens);
     }
 
+    /// Write capability for this request's [`RequestProgress`], for what the host observes
+    /// after the lifecycle has ended: the frontend learns how the reply ended only once the
+    /// router's response stream is finished.
+    pub fn progress_updater(&self) -> RequestProgressUpdater {
+        self.progress_updater.clone()
+    }
+
     pub fn prepare_retry(&mut self) {
         if self.phase != LifecyclePhase::Terminal {
             self.phase = LifecyclePhase::Registered;

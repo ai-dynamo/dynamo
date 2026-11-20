@@ -209,6 +209,7 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
 | `progress().context_tokens()` | Live context high-water mark from input and generated tokens; this measures logical context, not physical KV occupancy |
+| `progress().reply_tool_call()` | Whether the reply ended in a tool call (`finish_reason: tool_calls` in the chat response stream). Unset until the frontend has relayed the end of the reply, shortly after the request's terminal event, so keep the `progress()` handle to read it later. It stays unset after an error or a client disconnect, for `/v1/completions`, with a Python chat processor, and when the router runs outside the frontend process |
 
 ### Router Context
 

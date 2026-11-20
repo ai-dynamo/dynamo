@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dynamo_admission::host::RequestProgressUpdater;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -195,6 +196,12 @@ pub struct RequestTracker {
     /// `nvext.extra_fields=["prompt_token_ids"]` response request.
     /// First-write-wins because one response generator owns one prompt.
     prompt_token_ids: OnceLock<Vec<u32>>,
+
+    /// The request classifier's write handle for this request, left here by the router at
+    /// dispatch so the frontend can record how the reply ended: it learns that only after
+    /// the router's response stream is finished. First-write-wins because every attempt of
+    /// one request resumes the same classifier lifecycle.
+    classifier_progress: OnceLock<RequestProgressUpdater>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -269,6 +276,7 @@ impl RequestTracker {
             external_timing: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
             prompt_token_ids: OnceLock::new(),
+            classifier_progress: OnceLock::new(),
         }
     }
 
@@ -571,6 +579,23 @@ impl RequestTracker {
     /// Get the router scheduler queue depth recorded at routing time.
     pub fn router_queue_depth(&self) -> Option<usize> {
         self.router_queue_depth.get().copied()
+    }
+
+    /// Leave the request classifier's write handle for the frontend. Later calls are ignored.
+    pub(crate) fn set_classifier_progress(&self, progress: RequestProgressUpdater) {
+        let _ = self.classifier_progress.set(progress);
+    }
+
+    /// Whether a request classifier is waiting to hear how this request's reply ended.
+    pub(crate) fn has_classifier_progress(&self) -> bool {
+        self.classifier_progress.get().is_some()
+    }
+
+    /// Tell the request classifier, if one is waiting, how the reply ended.
+    pub(crate) fn record_reply_end(&self, tool_call: bool) {
+        if let Some(progress) = self.classifier_progress.get() {
+            progress.record_reply_end(tool_call);
+        }
     }
 
     /// Record when the prefill result was received by the router.
