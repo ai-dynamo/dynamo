@@ -272,6 +272,10 @@ fn process_event(
             tracker.handle_clear_all();
         }
 
+        // Recurrent/GDN state is carried by the ordered event plane, but this
+        // legacy dense-KV consolidator has no recurrent state index.
+        RawKvEvent::RecurrentState { .. } => {}
+
         RawKvEvent::Ignored => {}
     }
 }

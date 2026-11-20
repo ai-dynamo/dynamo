@@ -46,7 +46,7 @@ pub fn convert_event(
         | RawKvEvent::BlockRemoved {
             medium, locality, ..
         } => (medium.as_deref(), *locality),
-        RawKvEvent::AllBlocksCleared { .. } => (None, None),
+        RawKvEvent::AllBlocksCleared { .. } | RawKvEvent::RecurrentState { .. } => (None, None),
         RawKvEvent::Ignored => return None,
     };
 
@@ -174,6 +174,11 @@ pub fn convert_event(
         RawKvEvent::AllBlocksCleared { .. } => KvCacheEvent {
             event_id,
             data: KvCacheEventData::Cleared,
+            dp_rank,
+        },
+        RawKvEvent::RecurrentState { payload } => KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Recurrent(Box::new(payload)),
             dp_rank,
         },
         RawKvEvent::Ignored => unreachable!("ignored events return before conversion"),

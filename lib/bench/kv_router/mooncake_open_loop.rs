@@ -185,7 +185,7 @@ impl PreparedOpenLoopTrial {
                                 checksum ^= hash.0;
                             }
                         }
-                        KvCacheEventData::Cleared => {}
+                        KvCacheEventData::Cleared | KvCacheEventData::Recurrent(_) => {}
                     }
                 }
             }

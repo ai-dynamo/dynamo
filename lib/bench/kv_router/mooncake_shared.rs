@@ -468,6 +468,7 @@ pub(crate) fn prepare_scaled_benchmark(
                             }
                         }
                         KvCacheEventData::Cleared => live.clear(),
+                        KvCacheEventData::Recurrent(_) => {}
                     }
                 }
                 WorkerTraceEntry::Event { event, .. } => match &event.data {
@@ -480,6 +481,7 @@ pub(crate) fn prepare_scaled_benchmark(
                         totals.removed_blocks += remove.block_hashes.len();
                     }
                     KvCacheEventData::Cleared => totals.cleared_events += 1,
+                    KvCacheEventData::Recurrent(_) => {}
                 },
             }
         }

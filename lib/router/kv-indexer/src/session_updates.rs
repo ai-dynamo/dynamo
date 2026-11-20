@@ -176,6 +176,7 @@ impl SessionMutation {
                 block_hashes: removed.block_hashes.clone(),
             }),
             KvCacheEventData::Cleared => Some(Self::Cleared { worker }),
+            KvCacheEventData::Recurrent(_) => None,
         }
     }
 

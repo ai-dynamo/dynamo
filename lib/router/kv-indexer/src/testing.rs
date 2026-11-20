@@ -291,7 +291,7 @@ pub fn snapshot_events(mut events: Vec<RouterEvent>) -> Vec<RouterEvent> {
                     KvCacheEventData::Removed(r) => {
                         r.block_hashes.first().map(|h| h.0).unwrap_or(0)
                     }
-                    KvCacheEventData::Cleared => 0,
+                    KvCacheEventData::Cleared | KvCacheEventData::Recurrent(_) => 0,
                 };
                 let hash_b = match &b.event.data {
                     KvCacheEventData::Stored(s) => {
@@ -300,7 +300,7 @@ pub fn snapshot_events(mut events: Vec<RouterEvent>) -> Vec<RouterEvent> {
                     KvCacheEventData::Removed(r) => {
                         r.block_hashes.first().map(|h| h.0).unwrap_or(0)
                     }
-                    KvCacheEventData::Cleared => 0,
+                    KvCacheEventData::Cleared | KvCacheEventData::Recurrent(_) => 0,
                 };
                 hash_a.cmp(&hash_b)
             })

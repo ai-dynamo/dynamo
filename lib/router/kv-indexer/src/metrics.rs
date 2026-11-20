@@ -25,6 +25,7 @@ static IGNORED_RESIDENCY_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 pub enum EventKind {
     Stored,
     Removed,
+    Recurrent,
     Cleared,
 }
 
@@ -33,6 +34,7 @@ impl EventKind {
         match data {
             KvCacheEventData::Stored(_) => Self::Stored,
             KvCacheEventData::Removed(_) => Self::Removed,
+            KvCacheEventData::Recurrent(_) => Self::Recurrent,
             KvCacheEventData::Cleared => Self::Cleared,
         }
     }
@@ -41,6 +43,7 @@ impl EventKind {
         match self {
             Self::Stored => METRIC_EVENT_STORED,
             Self::Removed => METRIC_EVENT_REMOVED,
+            Self::Recurrent => METRIC_EVENT_RECURRENT,
             Self::Cleared => METRIC_EVENT_CLEARED,
         }
     }
@@ -181,6 +184,7 @@ pub const METRIC_STATUS_UNKNOWN: &str = "unknown";
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
 pub const METRIC_EVENT_REMOVED: &str = "removed";
+pub const METRIC_EVENT_RECURRENT: &str = "recurrent_state";
 pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
 /// Metric warning labels.
@@ -325,6 +329,7 @@ pub struct PreBoundEventCounters {
 struct PreBoundMetricCounters {
     stored: ResultCounters,
     removed: ResultCounters,
+    recurrent: ResultCounters,
     cleared: ResultCounters,
     duplicate_store_warning: IntCounter,
 }
@@ -395,6 +400,7 @@ impl PreBoundEventCounters {
                 inner: PreBoundMetricCounters {
                     stored: ResultCounters::new(cv, METRIC_EVENT_STORED),
                     removed: ResultCounters::new(cv, METRIC_EVENT_REMOVED),
+                    recurrent: ResultCounters::new(cv, METRIC_EVENT_RECURRENT),
                     cleared: ResultCounters::new(cv, METRIC_EVENT_CLEARED),
                     duplicate_store_warning: warnings
                         .with_label_values(&[METRIC_WARNING_DUPLICATE_STORE]),
@@ -419,6 +425,7 @@ impl PreBoundEventCounters {
             let counters = match kind {
                 EventKind::Stored => &self.inner.stored,
                 EventKind::Removed => &self.inner.removed,
+                EventKind::Recurrent => &self.inner.recurrent,
                 EventKind::Cleared => &self.inner.cleared,
             };
             counters.for_result(result).inc();
