@@ -59,7 +59,6 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
         supported_inputs: None,
         supports_image_routing: false,
         supported_media: Some(SupportedMedia::default()),
-        ..Default::default()
     })
 }
 
@@ -74,7 +73,6 @@ pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
             image: true,
             ..Default::default()
         }),
-        ..Default::default()
     })
 }
 
@@ -90,7 +88,6 @@ pub(crate) fn image_video_limits(context_length: u32) -> Option<ModelLimits> {
             video: true,
             ..Default::default()
         }),
-        ..Default::default()
     })
 }
 
@@ -106,7 +103,6 @@ pub(crate) fn all_media_limits(context_length: u32) -> Option<ModelLimits> {
             video: true,
             audio: true,
         }),
-        ..Default::default()
     })
 }
 
