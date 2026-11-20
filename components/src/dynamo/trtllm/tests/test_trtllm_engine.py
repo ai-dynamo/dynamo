@@ -86,14 +86,28 @@ async def test_get_llm_engine_forwards_backend():
 @pytest.mark.asyncio
 async def test_get_llm_engine_runs_a_preprocess_pool_on_request():
     calls = mock.Mock()
+
+    def build_llm(**engine_args):
+        # The LLM builds its input processor while it is constructed.
+        trtllm_llm_module.create_input_processor("model-dir", tokenizer=None)
+        return calls.llm
+
     with (
-        mock.patch(_PYTORCH_LLM_CLS_NAME, return_value=calls.llm),
+        mock.patch.object(
+            trtllm_llm_module, "create_input_processor", return_value=calls.processor
+        ),
+        mock.patch(_PYTORCH_LLM_CLS_NAME, side_effect=build_llm),
         mock.patch(
             "dynamo.trtllm.engine.PreprocessPool.start", return_value=calls.pool
         ) as start,
     ):
         async with get_llm_engine(engine_args={}, mm_preprocess_processes=4):
-            start.assert_called_once_with(trtllm_llm_module, calls.llm, 4)
+            start.assert_called_once_with(
+                trtllm_llm_module,
+                calls.llm,
+                [(("model-dir",), {"tokenizer": None}, calls.processor)],
+                4,
+            )
 
     # The pool closes before the LLM shuts down.
     assert calls.mock_calls == [mock.call.pool.close(), mock.call.llm.shutdown()]
@@ -113,7 +127,7 @@ class TestPreprocess:
     @pytest.mark.asyncio
     async def test_preprocesses_one_request_per_pool_process(self, engine):
         with mock.patch("dynamo.trtllm.engine.PreprocessPool.start"):
-            await engine.start_preprocess_pool(3)
+            await engine.start_preprocess_pool(3, [])
         # Each request waits until all three are being preprocessed at once.
         barrier = threading.Barrier(3, timeout=10)
 
@@ -175,3 +189,26 @@ class TestPreprocess:
         # Preprocessing finishes after the request was cancelled.
         finish.set()
         assert await asyncio.to_thread(released.wait, 10)
+
+    @pytest.mark.asyncio
+    async def test_closes_a_pool_that_starts_after_startup_was_cancelled(self, engine):
+        started, finish, closed = (threading.Event() for _ in range(3))
+        pool = mock.Mock()
+        pool.close.side_effect = closed.set
+
+        def start(*args):
+            started.set()
+            assert finish.wait(timeout=10)
+            return pool
+
+        with mock.patch("dynamo.trtllm.engine.PreprocessPool.start", side_effect=start):
+            task = asyncio.create_task(engine.start_preprocess_pool(2, []))
+            assert await asyncio.to_thread(started.wait, 10)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            # The processes finish starting after startup was cancelled.
+            finish.set()
+            assert await asyncio.to_thread(closed.wait, 10)
+        pool.close.assert_called_once_with()
