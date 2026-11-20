@@ -257,6 +257,64 @@ fetches, which would refresh KVCR recency; Disk/G3 tiers; the worker state
 agent's coalescing of events into chains of up to 128 blocks; and KV-aware
 placement, since sessions are partitioned across workers at random.
 
+### Router lookup mode
+
+`--router-lookup` makes every lookup through the router's `Indexer::Concurrent`
+with `find_tiered_matches_ref_with_options`, the call the scheduler makes,
+instead of calling the backend. It needs `concurrent-radix-tree-compressed` and
+works with or without the lower-tier mode.
+
+- The lookup returns match details, not only overlap scores, so its service
+  time is not comparable with a run without the flag.
+- The service time includes dropping the result, as the scheduler drops it
+  after reading it.
+- With the lower-tier mode the lookup is one call, so
+  `lower_tier.query_service` is zero.
+- `router_lookup` in the result reports the lookups that credited device blocks
+  and the blocks credited. Compare two runs only if these agree.
+
+### Hybrid worker mode
+
+`--recurrent-checkpoints POLICY` makes every worker a hybrid worker: a model
+that keeps recurrent state next to its attention KV cache, such as Qwen3.5. A
+hybrid worker can resume a cached prefix only at a block where it holds a state
+checkpoint for every recurrent group, so the router caps its match at its
+deepest checkpoint. The flag implies `--router-lookup`.
+
+- Each worker declares a layout of three recurrent groups before the run.
+- After each store a worker owns, on any tier, the blocks the policy picks
+  become checkpoints on that tier. A checkpoint is published as vLLM publishes
+  it: one tagged `Stored` per group. A removal takes its blocks' checkpoints
+  with it, one tagged `Removed` per group. KVCR cache owners publish none.
+- The router's checkpoint table applies a tagged event on the thread that
+  admits it, so the issuer threads apply them here, as the event subscriber does
+  in the router. They have no per-event completions and count toward
+  `update_issue_lag`.
+
+| Policy | Checkpoints | What it shows |
+|---|---|---|
+| `none` | None | Every match is cut to zero: the lookup searches each worker's whole match for a checkpoint and finds none. |
+| `store-end` | The last block of each store | One checkpoint at the end of each stored run of blocks, the nearest this trace offers to vLLM's default retention. |
+| `every-block` | Every stored block | Dense retention: the largest table and the most events. |
+
+Without host tiers the lookup takes the forward evaluator. With
+`--num-host-blocks` it takes the general evaluator, as in any deployment that
+publishes a lower tier.
+
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench \
+  --no-default-features --features mooncake -- \
+  "$TRACE" --recurrent-checkpoints store-end \
+  --benchmark-duration-ms 12000 --result-json-output /tmp/hybrid.json \
+  concurrent-radix-tree-compressed --num-event-workers 8
+```
+
+`router_lookup.checkpoints` in the result reports the checkpoint stream: its
+events and blocks, one per group, and the checkpoints live on device at the
+end. The `total_*` fields and throughputs stay attention-only. For the cost of
+the checkpoint logic, compare against a `--router-lookup` run of the same
+trace without the flag.
+
 ### Choosing a load for A/B comparisons
 
 An overloaded replay and a keep-up replay measure different things, so choose

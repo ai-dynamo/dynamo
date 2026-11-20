@@ -5,6 +5,8 @@
 mod mooncake_lower_tier;
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
+#[path = "mooncake_recurrent.rs"]
+mod mooncake_recurrent;
 #[path = "mooncake_shared.rs"]
 mod mooncake_shared;
 
@@ -16,13 +18,15 @@ use dynamo_bench::kv_router_common::replay::{
 };
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_indexer::host::{
-    ConcurrentRadixTreeCompressed, KvIndexerMetrics, PositionalIndexer, ThreadPoolIndexer,
+    ConcurrentRadixTreeCompressed, Indexer, KvIndexerMetrics, LowerTierIndexers, PositionalIndexer,
+    ThreadPoolIndexer,
 };
 use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
-    OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
-    prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
+    OpenLoopConfig, OpenLoopResult, RouterRun, RunProvenance, parse_cpu_list,
+    prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
 };
+use mooncake_recurrent::CheckpointPolicy;
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
     merge_worker_traces, prepare_scaled_benchmark,
@@ -175,6 +179,17 @@ struct Args {
     #[clap(long)]
     resident_blocks_reader_cpu: Option<usize>,
 
+    /// Make every lookup through the router's `Indexer`, as the scheduler does
+    /// (`find_tiered_matches_ref_with_options`), instead of calling the backend
+    /// (concurrent-radix-tree-compressed only).
+    #[clap(long)]
+    router_lookup: bool,
+
+    /// Make every worker a hybrid worker with three recurrent groups, which publishes a state
+    /// checkpoint on the blocks this policy picks. Implies `--router-lookup`.
+    #[clap(long, value_enum)]
+    recurrent_checkpoints: Option<CheckpointPolicy>,
+
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
@@ -250,6 +265,13 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         {
             anyhow::bail!(
                 "the lower-tier mode needs concurrent-radix-tree-compressed for device matches; got {name}"
+            );
+        }
+        if (args.router_lookup || args.recurrent_checkpoints.is_some())
+            && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+        {
+            anyhow::bail!(
+                "--router-lookup and --recurrent-checkpoints need concurrent-radix-tree-compressed; got {name}"
             );
         }
     }
@@ -342,7 +364,7 @@ async fn run_open_loop_for_config(
                 args.common.block_size,
                 Some(metrics),
             ));
-            run_backend(config.short_name(), indexer, None, trial, open_config).await
+            run_backend(config.short_name(), indexer, None, None, trial, open_config).await
         }
         MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
@@ -356,9 +378,32 @@ async fn run_open_loop_for_config(
                 LowerTierRun::crtc(
                     config.num_event_workers,
                     args.common.block_size,
-                    Some(metrics),
+                    Some(Arc::clone(&metrics)),
                     args.lower_tier.kvcr_blocks() > 0,
                 )
+            });
+            // As the router assembles `Indexer::Concurrent`: the primary, and a lower tier that
+            // stays empty unless the run has host tiers.
+            let hybrid = args.recurrent_checkpoints.is_some();
+            let router = (args.router_lookup || hybrid).then(|| RouterRun {
+                indexer: Indexer::Concurrent {
+                    primary: Arc::clone(&indexer),
+                    lower_tier: match &lower_tier {
+                        Some(lower) => lower.indexers.clone(),
+                        None => LowerTierIndexers::new_with_metrics(
+                            config.num_event_workers,
+                            args.common.block_size,
+                            Some(metrics),
+                        ),
+                    },
+                    approx: None,
+                    primary_records_routing_decisions: false,
+                    session_updates: None,
+                },
+                retain_kv_transfer_chain: lower_tier
+                    .as_ref()
+                    .is_some_and(|lower| lower.options.retain_kv_transfer_chain),
+                hybrid,
             });
             let counts = track_resident_blocks.then(|| indexer.bench_track_resident_blocks());
             let stop = Arc::new(AtomicBool::new(false));
@@ -387,8 +432,15 @@ async fn run_open_loop_for_config(
                     anyhow::anyhow!("resident block reader exited before pinning")
                 })??;
             }
-            let result =
-                run_backend(config.short_name(), indexer, lower_tier, trial, open_config).await;
+            let result = run_backend(
+                config.short_name(),
+                indexer,
+                lower_tier,
+                router,
+                trial,
+                open_config,
+            )
+            .await;
             stop.store(true, Ordering::Relaxed);
             if let Some((handle, _)) = reader {
                 handle
@@ -423,6 +475,7 @@ async fn run_backend<T: dynamo_kv_indexer::host::SyncIndexer>(
     backend_name: &str,
     indexer: Arc<ThreadPoolIndexer<T>>,
     lower_tier: Option<LowerTierRun<T>>,
+    router: Option<RouterRun>,
     trial: mooncake_open_loop::PreparedOpenLoopTrial,
     open_config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
@@ -430,7 +483,15 @@ async fn run_backend<T: dynamo_kv_indexer::host::SyncIndexer>(
     if let Some(cpu) = open_config.query_issuer_cpu {
         pin_current_thread_to_cpus(&[cpu])?;
     }
-    let result = run_open_loop(backend_name, indexer, lower_tier, trial, open_config).await;
+    let result = run_open_loop(
+        backend_name,
+        indexer,
+        lower_tier,
+        router,
+        trial,
+        open_config,
+    )
+    .await;
     // Restore the coordinator mask. Otherwise blocking-pool threads spawned while the
     // next sweep or compare cell generates events inherit the single query-issuer CPU.
     let restored = pin_current_thread_to_cpus(&coordinator_cpus);
@@ -473,6 +534,18 @@ fn print_open_loop_result(result: &OpenLoopResult) {
                 .bytes_per_membership
                 .map_or("?".to_string(), |bytes| format!("{bytes:.1}")),
         );
+    }
+    if let Some(router) = &result.router_lookup {
+        println!(
+            "Router lookup: {} of {} lookups credited device blocks | {} blocks credited",
+            router.device_hit_queries, result.total_requests, router.device_blocks,
+        );
+        if let Some(checkpoints) = &router.checkpoints {
+            println!(
+                "Checkpoints: {} stored and {} removed events | {} live on device at the end",
+                checkpoints.stored_events, checkpoints.removed_events, checkpoints.live_memberships,
+            );
+        }
     }
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);
@@ -583,6 +656,9 @@ async fn prepare_benchmark(
     let mut merged = merge_worker_traces(artifacts, args.common.block_size)?;
     if args.lower_tier.num_host_blocks.is_some() && args.lower_tier.kvcr_blocks() > 0 {
         merged = merged.with_kvcr_layer(args.lower_tier.kvcr_blocks())?;
+    }
+    if let Some(policy) = args.recurrent_checkpoints {
+        merged = merged.with_checkpoint_layer(policy);
     }
     Ok(Some(prepare_scaled_benchmark(
         merged,

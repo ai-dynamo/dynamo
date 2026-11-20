@@ -61,7 +61,9 @@ mod compressed_radix;
 mod concurrent_radix_tree_compressed;
 mod config;
 pub mod cuckoo;
+pub(crate) mod forward_prefix;
 pub mod host;
+pub(crate) mod hybrid_prefix;
 mod identity;
 mod kv_cache_groups;
 mod kv_hints;
@@ -70,6 +72,7 @@ mod local;
 mod lookup;
 mod lower_tier;
 mod lower_tier_indexers;
+mod match_observer;
 mod metrics;
 #[cfg(test)]
 mod mm_exclusion_tests;
@@ -161,11 +164,13 @@ pub use lower_tier::{
     CacheOwnerBlockCounts, KvTransferExtensions, LowerTierContinuation, LowerTierIndexer,
     LowerTierMatchDetails,
 };
+pub(crate) use lower_tier_indexers::query_lower_tiers_with_hybrid;
 pub use lower_tier_indexers::{
     LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails, TieredMatchProvider,
     lower_tier_query_order, query_lower_tiers_with_options,
     query_lower_tiers_with_options_and_snapshot,
 };
+pub use match_observer::{MatchEdge, MatchObserver};
 pub use metrics::{
     EventKind, EventWarningKind, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
     METRIC_EVENT_STORED, METRIC_STATUS_ALLOCATION_FAILED, METRIC_STATUS_BLOCK_NOT_FOUND,
@@ -207,7 +212,7 @@ pub use thread_pool::{
 pub use traits::{AnchorCapableSyncIndexer, KvIndexerInterface, ShardSizeSnapshot, SyncIndexer};
 pub use types::{
     AnchorRef, AnchorTask, ContainsWorkerBlockRequest, DumpRequest, FlushRequest,
-    GetWorkersRequest, KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest,
-    RoutingDecisionHashes, WireLowerTierMatchDetails, WireOverlapScores, WireTieredMatchDetails,
-    WorkerLookupStats, WorkerTask,
+    GetWorkersRequest, HybridResumeCaps, KvRouterError, MatchDetails, MatchDetailsRequest,
+    MatchRequest, RoutingDecisionHashes, WireLowerTierMatchDetails, WireOverlapScores,
+    WireTieredMatchDetails, WorkerLookupStats, WorkerTask,
 };

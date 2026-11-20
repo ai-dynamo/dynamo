@@ -11,7 +11,9 @@ use std::sync::{
 
 use dynamo_tokens::SequenceHash;
 
-use crate::prelude::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank};
+use crate::prelude::{
+    ExternalSequenceBlockHash, LocalBlockHash, TokensWithHashes, WorkerWithDpRank,
+};
 use crate::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruIncarnation, ApproximateLruLease,
     ApproximateLruReleaseAck, KvIndexer, KvIndexerInterface, KvRouterError, RoutingDecisionHashes,
@@ -161,12 +163,46 @@ impl Indexer {
         }
     }
 
+    /// A hybrid worker keeps a recurrent checkpoint at the last full block of
+    /// a prompt it serves. When the routing decision goes to the
+    /// predict-on-route overlay, predict that checkpoint too, so a repeat or
+    /// a continuation of the prompt is credited before the worker's events
+    /// arrive.
+    fn predict_recurrent_checkpoint(
+        &self,
+        worker: WorkerWithDpRank,
+        sequence_hashes: &[SequenceHash],
+    ) {
+        let (Self::Single {
+            lower_tier,
+            approx: Some(_),
+            ..
+        }
+        | Self::Concurrent {
+            lower_tier,
+            approx: Some(_),
+            ..
+        }) = self
+        else {
+            return;
+        };
+        let Some(&last) = sequence_hashes.last() else {
+            return;
+        };
+        lower_tier.group_residency().predict_checkpoint(
+            worker,
+            sequence_hashes.len(),
+            ExternalSequenceBlockHash(last),
+        );
+    }
+
     pub async fn record_hashed_routing_decision(
         &self,
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
+        self.predict_recurrent_checkpoint(worker, &sequence_hashes);
         self.recording_target()
             .record_routing_hashes(
                 worker,
@@ -183,6 +219,7 @@ impl Indexer {
         worker: WorkerWithDpRank,
         hashes: RoutingDecisionHashes,
     ) -> Result<(), KvRouterError> {
+        self.predict_recurrent_checkpoint(worker, &hashes.sequence_hashes);
         self.recording_target()
             .record_routing_hashes(worker, hashes)
             .await
@@ -205,6 +242,7 @@ impl Indexer {
 
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+        self.predict_recurrent_checkpoint(worker, &sequence_hashes);
         target
             .record_routing_hashes(
                 worker,

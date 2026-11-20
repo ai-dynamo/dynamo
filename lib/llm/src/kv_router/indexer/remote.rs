@@ -185,6 +185,16 @@ impl dynamo_kv_indexer::host::RemotePrimary for RemoteIndexer {
         block_hashes: Vec<LocalBlockHash>,
         device_only: bool,
     ) -> Result<TieredMatchDetails> {
+        self.find_matches_by_tier_with_limit(block_hashes, device_only, None)
+            .await
+    }
+
+    async fn find_matches_by_tier_with_limit(
+        &self,
+        block_hashes: Vec<LocalBlockHash>,
+        device_only: bool,
+        max_reusable_blocks: Option<usize>,
+    ) -> Result<TieredMatchDetails> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_query_failures();
         })?;
@@ -193,6 +203,7 @@ impl dynamo_kv_indexer::host::RemotePrimary for RemoteIndexer {
             model_name: self.model_name.clone(),
             block_hashes,
             device_only,
+            max_reusable_blocks,
         };
         let mut stream: ManyOut<IndexerQueryReply> = self
             .query_router
@@ -467,7 +478,10 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryReply>, anyh
                 // overlap; saves server-side CPU and wire bytes.
                 let result: Result<TieredMatchDetails, _> = if request.device_only {
                     indexer
-                        .find_primary_match_details(request.block_hashes)
+                        .find_primary_match_details_with_limit(
+                            request.block_hashes,
+                            request.max_reusable_blocks,
+                        )
                         .await
                         .map(|device| TieredMatchDetails {
                             device,
@@ -475,7 +489,10 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryReply>, anyh
                         })
                 } else {
                     indexer
-                        .find_primary_matches_by_tier(request.block_hashes)
+                        .find_primary_matches_by_tier_with_limit(
+                            request.block_hashes,
+                            request.max_reusable_blocks,
+                        )
                         .await
                 };
                 match result {
@@ -564,6 +581,81 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
+    async fn query_engine_enforces_hybrid_prompt_limit_for_device_and_tiered_queries() {
+        use dynamo_kv_events::event::{
+            KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+        };
+        use dynamo_kv_events::residency::KvCacheGroupTag;
+        use dynamo_kv_hashing::ExternalSequenceBlockHash;
+        let worker = WorkerWithDpRank::new(7, 0);
+        let primary = KvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let indexer = Indexer::Single {
+            primary: primary.clone(),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        let hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
+        let chain = compute_seq_hash_for_block(&hashes);
+        indexer
+            .apply_event_routed(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await
+            .unwrap();
+        let tag: KvCacheGroupTag = serde_json::from_value(serde_json::json!({"group_idx":0, "kind":"mamba", "expected_group_count":1, "alignment_blocks":1})).unwrap();
+        indexer
+            .apply_event_routed(
+                RouterEvent::new(
+                    7,
+                    KvCacheEvent {
+                        event_id: 2,
+                        dp_rank: 0,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: None,
+                            start_position: None,
+                            blocks: chain
+                                .into_iter()
+                                .map(|hash| KvCacheStoredBlockData {
+                                    block_hash: ExternalSequenceBlockHash(hash),
+                                    tokens_hash: LocalBlockHash(0),
+                                    mm_extra_info: None,
+                                })
+                                .collect(),
+                        }),
+                    },
+                )
+                .with_kv_cache_group(tag),
+            )
+            .await
+            .unwrap();
+        let _ = primary.flush().await;
+        let engine = ServedIndexerQueryEngine {
+            bindings: Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)]))),
+        };
+        for device_only in [false, true] {
+            let mut response = engine
+                .generate(SingleIn::new(IndexerQueryRequest {
+                    model_name: "m".to_string(),
+                    block_hashes: hashes.clone(),
+                    device_only,
+                    max_reusable_blocks: Some(1),
+                }))
+                .await
+                .unwrap();
+            let Some(IndexerQueryResponse::TieredScores(wire)) =
+                response.next().await.map(IndexerQueryResponse::from)
+            else {
+                panic!("scores");
+            };
+            assert_eq!(wire.device.scores, vec![(worker, 1)]);
+        }
+    }
+
+    #[tokio::test]
     async fn query_engine_supports_multiple_model_bindings() {
         let bindings = Arc::new(RwLock::new(HashMap::from([
             ("model-a".to_string(), Indexer::None),
@@ -574,6 +666,7 @@ mod tests {
             model_name: "model-b".to_string(),
             block_hashes: vec![LocalBlockHash(1)],
             device_only: false,
+            max_reusable_blocks: None,
         });
 
         let mut stream = engine.generate(request).await.unwrap();
@@ -634,6 +727,7 @@ mod tests {
                 model_name: "m".to_string(),
                 block_hashes,
                 device_only: false,
+                max_reusable_blocks: None,
             }))
             .await
             .unwrap();
@@ -706,6 +800,7 @@ mod tests {
                 model_name: "m".to_string(),
                 block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
                 device_only: false,
+                max_reusable_blocks: None,
             }))
             .await
             .unwrap();
@@ -809,6 +904,7 @@ mod tests {
                 model_name: "m".to_string(),
                 block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
                 device_only: true,
+                max_reusable_blocks: None,
             }))
             .await
             .unwrap();

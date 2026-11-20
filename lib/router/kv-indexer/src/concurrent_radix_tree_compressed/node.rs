@@ -654,12 +654,53 @@ impl Node {
         let edge_len = state.edge.len();
         let walk_len = edge_len.min(input.sequence.len() - input.seq_pos);
 
+        let all_workers_continue = !input.first_node
+            && state.worker_cutoffs.is_empty()
+            && input.active.same_members(&state.full_edge_workers);
+        let edge = crate::MatchEdge {
+            full_workers: &state.full_edge_workers,
+            worker_cutoffs: &state.worker_cutoffs,
+            first_node: input.first_node,
+        };
+        let fused = input
+            .observer
+            .as_deref_mut()
+            .is_some_and(|observer| observer.begin_edge(edge));
         let mut edge_match_len = 1;
-        for i in 1..walk_len {
-            if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
-                break;
+        if fused {
+            if let Some(observer) = input.observer.as_deref_mut() {
+                // The child lookup already matched the first block hash.
+                observer.observe_block(input.seq_pos + 1, state.edge[0].1);
+                for i in 1..walk_len {
+                    if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
+                        break;
+                    }
+                    edge_match_len += 1;
+                    observer.observe_block(input.seq_pos + i + 1, state.edge[i].1);
+                }
             }
-            edge_match_len += 1;
+        } else {
+            for i in 1..walk_len {
+                if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
+                    break;
+                }
+                edge_match_len += 1;
+            }
+        }
+        if !fused && let Some(observer) = input.observer.as_deref_mut() {
+            if input.first_node {
+                observer
+                    .reserve_workers(state.full_edge_workers.len() + state.worker_cutoffs.len());
+                for &worker in &state.full_edge_workers {
+                    observer.observe_worker(worker);
+                }
+                for &worker in state.worker_cutoffs.keys() {
+                    observer.observe_worker(worker);
+                }
+            }
+            for i in 0..edge_match_len {
+                observer.observe_block(input.seq_pos + i + 1, state.edge[i].1);
+            }
         }
 
         let edge_hash_at = |depth: usize| -> ExternalSequenceBlockHash {
@@ -727,7 +768,7 @@ impl Node {
                         false
                     }
                 });
-            } else if !input.active.same_members(&state.full_edge_workers) {
+            } else if !all_workers_continue {
                 // Matching size and fingerprint skip the intersection; see README
                 // "Equal-set skip".
                 input.active.retain(|worker| {

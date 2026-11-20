@@ -96,6 +96,9 @@ pub struct WireLowerTierMatchDetails {
 pub struct WireTieredMatchDetails {
     pub device: WireOverlapScores,
     pub lower_tier: Vec<(StorageTier, WireLowerTierMatchDetails)>,
+    /// Confirmed device resume caps, including zero for known hybrid workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hybrid_resume_caps: Vec<(WorkerWithDpRank, u32)>,
 }
 
 /// Precomputed hashes for recording a route-time indexer update.
@@ -115,6 +118,10 @@ impl RoutingDecisionHashes {
     }
 }
 
+/// Confirmed device resume caps per worker. Zero is a known cap; a worker
+/// without an entry has none.
+pub type HybridResumeCaps = FxHashMap<WorkerWithDpRank, u32>;
+
 /// Rich non-wire query result for router-local device tier lookups.
 #[derive(Debug, Clone, Default)]
 pub struct MatchDetails {
@@ -124,6 +131,8 @@ pub struct MatchDetails {
     pub last_matched_hashes: FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
     /// Optional root-aligned device candidates that KV copy sources are found from.
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    /// Confirmed device resume caps, including zero for known hybrid workers.
+    pub hybrid_resume_caps: HybridResumeCaps,
 }
 
 impl MatchDetails {
