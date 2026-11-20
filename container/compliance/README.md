@@ -50,7 +50,9 @@ The generator also writes `THIRD-PARTY.txt` into `/legal`: this run's NOTICES fi
 every component of the `--subtract-sbom` baseline with its licenses (Debian packages limited
 to those still installed when `dpkg` is scanned, each followed by its copyright file where
 the image ships one), then one canonical text per SPDX license. `--source-location <url>`
-adds a pointer to the published corresponding source.
+overrides the pointer to the published corresponding source; by default it names the Dynamo
+source archive on NGC for `--source-version`, which every image build passes from
+`pyproject.toml`.
 
 `BASELINE_SBOM_FILE` is rendered from `container/context.yaml`'s per-(framework, device)
 `baseline_sbom` key (see `render.py:_resolve_compliance_inputs`). When set, the generators

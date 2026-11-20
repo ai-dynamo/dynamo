@@ -134,6 +134,8 @@ runs:
         esac
         echo "baseline_stem=${BASELINE_STEM}" >> $GITHUB_OUTPUT
         echo "run_compliance=${RUN_COMPLIANCE}" >> $GITHUB_OUTPUT
+        # THIRD-PARTY.txt points at this version's source archive on NGC.
+        echo "dynamo_version=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
       uses: $/.github/actions/init-dynamo-builder
@@ -187,6 +189,7 @@ runs:
         # container/context.yaml). Empty stem (power-agent) → no compliance.
         if [[ "${{ steps.settings.outputs.run_compliance }}" == "true" ]]; then
           BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+          BUILD_ARGS+=("--build-arg" "DYNAMO_VERSION=${{ steps.settings.outputs.dynamo_version }}")
           BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}")
         fi
         while IFS= read -r build_arg; do
@@ -236,6 +239,7 @@ runs:
         # in sync with the build-and-push step above.
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
         BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+        BUILD_ARGS+=("--build-arg" "DYNAMO_VERSION=${{ steps.settings.outputs.dynamo_version }}")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
             BUILD_ARGS+=("--build-arg" "${build_arg}")
@@ -449,6 +453,7 @@ runs:
         mkdir -p /tmp/sources
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
         BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+        BUILD_ARGS+=("--build-arg" "DYNAMO_VERSION=${{ steps.settings.outputs.dynamo_version }}")
         BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=true")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then

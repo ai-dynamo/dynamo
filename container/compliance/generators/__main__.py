@@ -50,6 +50,27 @@ def _parse_ecosystems(raw: str) -> list[str]:
     return parsed
 
 
+# The NGC resource that publishes the corresponding source of every image.
+SOURCE_ARCHIVE = "nvidia/ai-dynamo/dynamo-dependency-source-archive"
+SOURCE_ARCHIVE_URL = (
+    "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/resources/"
+    "dynamo-dependency-source-archive"
+)
+
+
+def source_location(version: str | None) -> str:
+    """Return the NGC catalog page and download command for a version's source."""
+    if not version:
+        return (
+            f"{SOURCE_ARCHIVE_URL}\n"
+            f"ngc registry resource download-version {SOURCE_ARCHIVE}:<dynamo-version>"
+        )
+    return (
+        f"{SOURCE_ARCHIVE_URL}?version={version}\n"
+        f"ngc registry resource download-version {SOURCE_ARCHIVE}:{version}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="compliance.generators",
@@ -179,9 +200,15 @@ def main(argv: list[str] | None = None) -> int:
         "--source-location",
         default=None,
         help=(
-            "URL where the corresponding source for the image's open-source "
-            "software is published. Written into THIRD-PARTY.txt when given."
+            "Where the corresponding source for the image's open-source software "
+            "is published, written into THIRD-PARTY.txt. Default: the Dynamo "
+            "source archive on NGC for --source-version; an empty string omits it."
         ),
+    )
+    parser.add_argument(
+        "--source-version",
+        default=None,
+        help="Dynamo version whose NGC source archive THIRD-PARTY.txt points to.",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
@@ -335,7 +362,11 @@ def main(argv: list[str] | None = None) -> int:
     common.write_third_party(
         args.output_dir,
         args.ecosystem,
-        args.source_location,
+        (
+            source_location(args.source_version)
+            if args.source_location is None
+            else args.source_location
+        ),
         base_sbom=args.subtract_sbom,
         shipped_debs=shipped_debs,
         dpkg_root=args.dpkg_root,
