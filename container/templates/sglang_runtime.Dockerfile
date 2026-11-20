@@ -146,8 +146,10 @@ ${LD_LIBRARY_PATH:-}
 # shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
+# Remove the legacy distribution before aisim installs its shared compatibility files.
 {% if device == "xpu" %}
-RUN pip install --no-deps \
+RUN uv pip uninstall --python python3 aisimulate && \
+    pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/aisim-*.whl \
@@ -156,6 +158,7 @@ RUN pip install --no-deps \
 {% else %}
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
+    uv pip uninstall --python python3 aisimulate && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
