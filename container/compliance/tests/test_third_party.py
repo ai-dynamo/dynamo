@@ -149,7 +149,8 @@ def test_concatenates_notices_files(tmp_path: Path) -> None:
 def test_source_location_only_when_given(tmp_path: Path) -> None:
     url = "https://example.invalid/dynamo-sources.zip"
 
-    assert url not in write_third_party(tmp_path, []).read_text(encoding="utf-8")
+    omitted = write_third_party(tmp_path, []).read_text(encoding="utf-8")
+    assert "Source code for the open-source software" not in omitted
     text = write_third_party(tmp_path, [], source_location=url).read_text(
         encoding="utf-8"
     )
