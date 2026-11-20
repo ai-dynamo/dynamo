@@ -6,11 +6,8 @@ name: codeowners
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
     paths:
       - "**"
-  pull_request_review:
-    types: [submitted, dismissed]
   push:
     branches: [main]
     paths:
@@ -24,29 +21,21 @@ permissions:
 
 jobs:
   codeowners:
-    name: ${{ github.event_name == 'pull_request_review' && 'ownership-review-event' || 'codeowners' }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Forward review-state changes without replacing the structural result
-        if: github.event_name == 'pull_request_review'
-        run: echo "The trusted approval workflow reads the current review state."
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        if: github.event_name != 'pull_request_review'
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        if: github.event_name != 'pull_request_review'
         with:
           python-version: "3.12"
-      - run: pip install pyyaml pytest
-        if: github.event_name != 'pull_request_review'
+      - run: pip install pyyaml pytest pytest-timeout
 
       # Unit tests for the canonical matcher + the emitter's tree-independence
       # contract. These are the only piece the gates below trust -- if they
       # fail, nothing else means anything.
       - name: Unit tests (matcher + tree-independence)
-        if: github.event_name != 'pull_request_review'
         run: |
           python -m pytest .github/codeowners/ -v \
             -p no:cacheprovider \
@@ -80,7 +69,7 @@ jobs:
       # the maintenance assertion that every tracked file has a real owner, and
       # the only step that reads git ls-files without a diff filter.
       - name: Validate coverage and ownership contracts (strict, full tree)
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: |
           python .github/codeowners/build_codeowners.py \
             --areas .github/codeowners/areas.yaml \
@@ -94,7 +83,6 @@ jobs:
       # actually changed -- never because unrelated files moved on the base
       # branch.
       - name: Regenerate and check for drift
-        if: github.event_name != 'pull_request_review'
         run: |
           python .github/codeowners/emit_codeowners.py \
             --areas .github/codeowners/areas.yaml \
@@ -104,8 +92,28 @@ jobs:
           git diff --exit-code CODEOWNERS CONTRIBUTORS.md \
             || { echo "::error::CODEOWNERS/CONTRIBUTORS.md are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }
 
-      - name: Require the dedicated approval check before enabling delegation
-        if: github.event_name == 'pull_request'
+  ownership-consent:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Validate native consent files
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python .github/codeowners/native_consent.py --base "$BASE"
+      - name: Require the native consent job before activation
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python .github/codeowners/check_ownership_approvals.py --check-activation
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if python -c 'from pathlib import Path; import sys,yaml; sys.exit(yaml.safe_load(Path(".github/codeowners/areas.yaml").read_text()).get("meta", {}).get("native_policy_consents") is not True)'; then
+            branch=$(python -c 'import os; from urllib.parse import quote; print(quote(os.environ["BASE_REF"], safe=""))')
+            test "$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --jq 'any(.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]; .context == "ownership-consent" and .integration_id == 15368)')" = true
+          fi

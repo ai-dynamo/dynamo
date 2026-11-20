@@ -36,11 +36,13 @@ python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed
 python .github/codeowners/who_owns.py --codeowners CODEOWNERS <path> [<path> ...]
 ```
 
-The command reports team handles. To inspect a roster, use an authenticated
-GitHub API read with organization membership access, for example
-`gh api orgs/ai-dynamo/teams/dynamo-runtime-codeowners/members --paginate`.
-For ownership-policy changes, the `ownership-policy-approvals` check summarizes the
-required groups and whether their approvals cover the proposed policy.
+Add `--people` to expand each team to its member logins. This works only for
+NVIDIA org members with an authenticated `gh` - GitHub does not show team
+membership to non-members. Without it (or when the lookup fails), the team
+handles are the answer; the actual reviewers appear on the PR once it opens.
+For an open PR, the `codeowners-reviewers` workflow also posts this table
+(with member names when the org-read secret is configured) to its run summary
+in the Actions tab, visible to external contributors.
 
 ## Flow 2: The `codeowners` CI check failed
 
@@ -85,12 +87,11 @@ ordinary PRs.
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
 `shared:` entry (multi-team co-ownership), or adjust `classify.filetype_rules`.
 Then regenerate exactly as in Flow 2 step 4 and commit both files. When
-`meta.delegated_policy_reviews` is enabled, the required `ownership-policy-approvals`
-check replaces blanket reviews for these two files: every old and new effective
-owner approves the transfer, including retained owners receiving an alternative.
-Check its summary for the affected groups. Generator/checker/workflow changes
-still require Ops and Process; contracts and unresolved future scopes require
-Process. See `.github/codeowners/README.md` for the safe activation sequence.
+`meta.native_policy_consents` is enabled, also run
+`python .github/codeowners/native_consent.py --base origin/main --write`.
+GitHub requires native reviews on the affected teams' consent files. The installer
+keeps the current native policy owners until the separate activation step described
+in `.github/codeowners/README.md`.
 
 Semantics worth knowing before you file one:
 

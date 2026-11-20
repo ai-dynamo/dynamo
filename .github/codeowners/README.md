@@ -49,87 +49,29 @@ adding required approvals.
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
 
-### Approval of ownership changes
+### Native review of policy changes
 
-`meta.delegated_policy_reviews: true` delegates exactly `areas.yaml` and root
-`CODEOWNERS` to the required `ownership-policy-approvals` check. The generated file ends
-with exact ownerless rules for those two paths; all other files retain native
-CODEOWNERS review. The existing `codeowners` check continues to validate coverage,
-contracts, tests and generated-file drift.
+Each registered owner has one native CODEOWNERS-owned file under `consents/`.
+A routing change updates the consent files of every previous and proposed owner,
+including retained owners receiving an alternative. GitHub enforces those reviews;
+CI only checks the files. Existing GitHub approval-retention rules apply, and no
+extra protection against checks becoming stale after a base update is added.
 
-The approval check compares effective owners before and after the proposed merge,
-using the canonical last-match-wins matcher. For every changed owner set, each
-previous and proposed owner must approve:
+After regenerating CODEOWNERS, update and validate the affected consent files:
 
-| Ownership change | Required approvals |
-| --- | --- |
-| Ops → Ops + Runtime | Ops **and** Runtime |
-| Docs → Operator | Docs **and** Operator |
-| Ops + Runtime → Runtime | Ops **and** Runtime |
-| A + B → A + C | A, B **and** C |
+```bash
+python .github/codeowners/native_consent.py --base origin/main --write
+```
 
-One eligible reviewer can represent multiple groups. The PR author and bots cannot
-approve; current team membership and the latest decisive review are used. Comments
-do not revoke approvals, but dismissals and changes-requested reviews do. Named
-individual co-owners must approve personally; a sole individual owner who authors
-the PR cannot self-approve. Email-only owners cannot be resolved by this check;
-use GitHub team or user handles for delegated policy changes.
+Register new owners first with an empty area or contributor-area list. Existing
+consent files keep their native owner and cannot be deleted or reassigned here.
+New/removed or reordered broad scopes and contract/default changes require Process.
 
-Approvals count only for the current PR head commit. Every push or rebase requires
-fresh approvals. If policy or enforcement changes on `main` after branching, merge
-or rebase that change and obtain fresh head approvals. Source-only base changes
-do not invalidate consent. Changes to enforcement Python or its workflows additionally
-require Ops and Process. Contract/default/delegation-setting changes, added or
-removed directory/wildcard scopes, and reordered broad scopes also require Process:
-they can affect future files absent from the tracked tree. Reassigning an existing
-scope without reordering or adding an exact-file override uses the affected owners
-directly. Adding a shared directory rule can move it past other broad scopes and
-therefore require Process.
-
-The trusted workflow reads policy blobs as data and never checks out or executes
-PR code with membership/write credentials. Its separately named check cannot be
-satisfied by rerunning an old structural `codeowners` job. PR updates and
-submitted/dismissed reviews refresh the live PR; base-policy/tree changes refresh
-open policy PRs in one runner. Source-only base edits need no refresh. Missing
-API access or memberships blocks approval. Ownership-changing PRs sharing a head
-are blocked until they use distinct commits, because checks are commit-scoped.
-
-#### Rollout
-
-1. Merge this installer with `meta.delegated_policy_reviews: false`. Native owners
-   remain intact. There are no bootstrap approval results.
-2. Provide `ORG_READ_TOKEN`, limited to organization **Members: read**. Dispatch
-   the trusted workflow for one PR to publish its first real check.
-3. Require **`ownership-policy-approvals` from GitHub Actions (App ID 15368)** on
-   `main`, keeping `codeowners` and all other checks required. In the ruleset UI,
-   select GitHub Actions as the expected source after that first run. Alternatively,
-   [update the existing repository ruleset](https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset)
-   with `PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}`, preserving its other
-   rules and appending this entry to `required_status_checks`:
-
-   ```json
-   {"context": "ownership-policy-approvals", "integration_id": 15368}
-   ```
-
-4. In a separate activation PR, set `meta.delegated_policy_reviews: true` and
-   regenerate `CODEOWNERS`. The installed evaluator checks affected-owner consent;
-   the activation guard requires both check identities before native exceptions
-   can merge. Historical `ownership-approvals` bootstrap results cannot satisfy
-   the fresh `ownership-policy-approvals` requirement.
-5. Existing PRs are not automatically migrated. Re-run `codeowners` or dispatch
-   the trusted workflow with a single `pr` number. If their policy base is stale,
-   first merge/rebase `main`. This dispatch also refreshes membership changes.
-
-Branch-rule administration and secret provisioning are separate from changing
-repository files. Do not remove native protection or the activation guard before
-the required check is configured.
-
-All repository CI workflows remain under their existing Ops ownership. This
-design trusts that review boundary: App-ID pinning distinguishes GitHub Actions
-from user-posted statuses, but does not distinguish two workflows run by the same
-App. Someone authorized to change repository CI can change CI enforcement; an
-independent GitHub App or ruleset-required workflow would be needed to remove that
-existing trust relationship.
+Rollout: merge this installer with `meta.native_policy_consents: false`, require
+**`ownership-consent` from GitHub Actions** alongside `codeowners`, then set the
+flag to `true` and regenerate in a separate PR. This enables exactly two native
+exceptions (root CODEOWNERS and areas.yaml). The new required check prevents
+pre-installation green `codeowners` results from authorizing the new protocol.
 
 ### Add owners without dropping existing accountability
 
