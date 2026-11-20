@@ -212,7 +212,9 @@ def _base_image_label(sbom_path: Path) -> str:
         return sbom_path.name
     for entry in entries:
         if entry.get("baseline_sbom") == sbom_path.name:
-            return f"{entry['baseline_image']}:{entry['baseline_tag']}"
+            image, tag = entry.get("baseline_image"), entry.get("baseline_tag")
+            if image and tag:
+                return f"{image}:{tag}"
     return sbom_path.name
 
 
@@ -301,11 +303,14 @@ def render_base_section(sbom_path: Path, components: list[Component]) -> str:
     license_ids.discard(NOASSERTION)
     parts.append("# License texts\n\n")
     missing: list[str] = []
+    emitted: set[str] = set()
     for lid in sorted(license_ids, key=str.lower):
         text = spdx_license_text(lid)
         if text is None:
             missing.append(lid)
-        else:
+        elif text not in emitted:
+            # "MIT", "MIT License" and "(MIT)" all resolve to the same text.
+            emitted.add(text)
             parts.append("```\n" + text.rstrip() + "\n```\n\n")
     if missing:
         parts.append(
@@ -318,19 +323,22 @@ def render_base_section(sbom_path: Path, components: list[Component]) -> str:
 
 def write_third_party(
     output_dir: Path,
+    ecosystems: list[str],
     source_location: str | None = None,
     base_sbom: Path | None = None,
     dpkg_root: Path | None = None,
 ) -> Path:
-    """Write THIRD-PARTY.txt: the NOTICES-*.txt files plus the base image's components."""
+    """Write THIRD-PARTY.txt: this run's NOTICES files plus the base image's components."""
     parts = [_THIRD_PARTY_HEADER]
     if source_location:
         parts.append(
             "Source code for the open-source software in this container is "
             f"available at:\n{source_location}\n\n"
         )
-    for notices in sorted(output_dir.glob("NOTICES-*.txt")):
-        parts.append(notices.read_text(encoding="utf-8").rstrip() + "\n\n")
+    for eco in sorted(ecosystems):
+        notices = output_dir / f"NOTICES-{eco.capitalize()}.txt"
+        if notices.is_file():
+            parts.append(notices.read_text(encoding="utf-8").rstrip() + "\n\n")
     if base_sbom is not None:
         base = load_base_components(base_sbom, dpkg_root)
         parts.append(render_base_section(base_sbom, base).rstrip() + "\n")

@@ -319,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     common.write_cyclonedx(all_components, args.output_dir / "osrb.cdx.json")
     common.write_third_party(
         args.output_dir,
+        args.ecosystem,
         args.source_location,
         base_sbom=args.subtract_sbom,
         dpkg_root=args.dpkg_root,

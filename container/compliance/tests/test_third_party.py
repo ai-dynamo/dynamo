@@ -46,7 +46,7 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
             "name": "libb",
             "version": "2.0",
             "licenses": [
-                {"license": {"id": "MIT"}},
+                {"license": {"name": "MIT License"}},
                 {"license": {"name": "Apache 2.0"}},
             ],
         },
@@ -93,21 +93,23 @@ def _write_go_sbom(path: Path) -> Path:
 def test_concatenates_notices_files(tmp_path: Path) -> None:
     (tmp_path / "NOTICES-Go.txt").write_text("GO NOTICES BODY\n")
     (tmp_path / "NOTICES-Rust.txt").write_text("RUST NOTICES BODY\n")
+    (tmp_path / "NOTICES-Python.txt").write_text("STALE PYTHON NOTICES\n")
     (tmp_path / "osrb-deps.csv").write_text("not a notices file\n")
 
-    text = write_third_party(tmp_path).read_text()
+    text = write_third_party(tmp_path, ["rust", "go"]).read_text()
 
     assert text.startswith("THIRD-PARTY SOFTWARE NOTICES\n")
     assert text.index("GO NOTICES BODY") < text.index("RUST NOTICES BODY")
     assert "not a notices file" not in text
+    assert "STALE PYTHON NOTICES" not in text
     assert "BASE IMAGE" not in text
 
 
 def test_source_location_only_when_given(tmp_path: Path) -> None:
     url = "https://example.invalid/dynamo-sources.zip"
 
-    assert url not in write_third_party(tmp_path).read_text()
-    text = write_third_party(tmp_path, source_location=url).read_text()
+    assert url not in write_third_party(tmp_path, []).read_text()
+    text = write_third_party(tmp_path, [], source_location=url).read_text()
     assert f"available at:\n{url}\n" in text
 
 
@@ -117,7 +119,7 @@ def test_base_components_parsed(tmp_path: Path) -> None:
     comps = {c.name: c for c in load_base_components(sbom)}
 
     assert sorted(comps) == ["liba", "libb", "libnolicense", "zlib1g"]
-    assert comps["libb"].spdx == "MIT AND Apache 2.0"
+    assert comps["libb"].spdx == "MIT License AND Apache 2.0"
     assert comps["libnolicense"].spdx == NOASSERTION
 
 
@@ -126,7 +128,7 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     out = tmp_path / "legal"
     out.mkdir()
 
-    text = write_third_party(out, base_sbom=sbom).read_text()
+    text = write_third_party(out, [], base_sbom=sbom).read_text()
 
     assert "BASE IMAGE — nvcr.io/nvidia/base/ubuntu:noble-test" in text
     assert "## liba 1.0\n\nLicenses: MIT\n" in text
@@ -177,6 +179,8 @@ def test_main_writes_third_party_with_base_section(tmp_path: Path) -> None:
             str(sbom),
             "--source-location",
             url,
+            "--dpkg-root",
+            str(tmp_path / "empty-root"),
         ]
     )
 
@@ -185,3 +189,14 @@ def test_main_writes_third_party_with_base_section(tmp_path: Path) -> None:
     assert url in text
     assert text.index("## github.com/example/mod v1.2.3") < text.index("BASE IMAGE")
     assert "## zlib1g 1.3" in text
+
+
+def test_base_label_falls_back_to_filename(tmp_path: Path) -> None:
+    sbom = _write_base_sbom(tmp_path / "base_sboms")
+    (sbom.parent / "manifest.json").write_text(
+        json.dumps({"entries": [{"baseline_sbom": sbom.name}]})
+    )
+
+    text = write_third_party(tmp_path, [], base_sbom=sbom).read_text()
+
+    assert f"BASE IMAGE — {sbom.name}" in text
