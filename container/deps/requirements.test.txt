@@ -16,6 +16,10 @@ boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
 chardet<6
 coverage[toml]==7.13.1
 # For IFEval dataset loading in kvbm tests
+# 4.x holds huggingface-hub below vLLM 0.34's floor of 2; 5.x would let the
+# TensorRT-LLM test image take hub 2, which its Transformers 5.5.4 rejects.
+# When trtllm's runtime_image_tag in context.yaml moves, check its Transformers:
+# from 5.18.0 it accepts hub 2, so move to 5.x and rerun the TensorRT-LLM tests.
 datasets==4.4.1
 # Datadog Test Optimization pytest plugin (--ddtrace). Pre-installed rather than
 # letting Datadog's CI action pip-install it at run time: that installer needs
