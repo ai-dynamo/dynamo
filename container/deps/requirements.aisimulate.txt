@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Source-built AISim wheel staged into all release wheelhouses.
+# Published AISim wheel staged into all release wheelhouses through the PyPI stub.
 # Keep in sync with the aisim-core pins in Cargo.toml and lib/bindings/python/Cargo.toml.
-aisim==0.14.0
+aisim==0.14.0b1

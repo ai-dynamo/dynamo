@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep Dynamo on one source-pinned AISim release."""
+"""Keep Dynamo on matching published AISim wheel and crate versions."""
 
 from __future__ import annotations
 
-import re
-import runpy
-import subprocess
 import sys
 import tomllib
 from importlib import metadata
@@ -78,21 +75,24 @@ def _exact_version(requirement: Requirement) -> Version:
     return Version(specifiers[0].version)
 
 
-def _locked_cargo_version(path: Path, patch: dict) -> Version:
+def _locked_cargo_version(path: Path) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
     matches = [package for package in packages if package["name"] == "aisim-core"]
     assert len(matches) == 1, f"expected one aisim-core package in {path}"
 
     package = matches[0]
-    assert package.get("source") == (
-        f"git+{patch['git']}?rev={patch['rev']}#{patch['rev']}"
-    ), f"aisim-core must resolve from the exact RC source in {path}"
-    assert "checksum" not in package
+    assert (
+        package.get("source") == "registry+https://github.com/rust-lang/crates.io-index"
+    )
+    assert (
+        package.get("checksum")
+        == "54dd91ad674ac4593aad6e9963363ab0b6c9c1c4b3c5adcf1282370b60f098bc"
+    )
     return Version(str(package["version"]))
 
 
-def test_dynamo_pins_matching_aisim_rc_sources() -> None:
+def test_dynamo_pins_matching_published_aisim_versions() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
     python_version = _exact_version(python_requirement)
@@ -132,27 +132,38 @@ def test_dynamo_pins_matching_aisim_rc_sources() -> None:
     assert bindings_dependency["version"] == cargo_requirement
     assert cargo_dependency["package"] == bindings_dependency["package"] == "aisim-core"
 
-    patch = cargo["patch"]["crates-io"]["aisim-core"]
-    assert set(patch) == {"git", "rev"}
-    assert patch["git"] == "https://github.com/ai-dynamo/aisim.git"
-    assert re.fullmatch(r"[0-9a-f]{40}", patch["rev"])
-    for path in LOCKFILES[1:]:
-        with path.with_name("Cargo.toml").open("rb") as handle:
+    for path in (
+        ROOT / "Cargo.toml",
+        *(path.with_name("Cargo.toml") for path in LOCKFILES[1:]),
+    ):
+        with path.open("rb") as handle:
             manifest = tomllib.load(handle)
-        assert manifest["patch"]["crates-io"]["aisim-core"] == patch
+        assert "aisim-core" not in manifest.get("patch", {}).get("crates-io", {})
+    assert "aisim-core" not in cargo["workspace"].get("metadata", {}).get(
+        "artifactory", {}
+    ).get("dependencies", {})
     assert cargo_version == python_version
-    assert all(
-        _locked_cargo_version(path, patch) == cargo_version for path in LOCKFILES
-    )
+    assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
 
 
-def test_container_builds_the_matching_aisim_source_wheel() -> None:
+def test_container_stages_the_published_aisim_wheel_through_its_pypi_stub() -> None:
     wheel_builder = (ROOT / "container/templates/wheel_builder.Dockerfile").read_text()
-    assert "container/deps/build_aisimulate.py" in wheel_builder
-    assert "--root /opt/dynamo" in wheel_builder
-    assert "--output /opt/dynamo/dist" in wheel_builder
-    assert "pip download" not in wheel_builder
-    assert "pypi.nvidia.com/aisimulate" not in wheel_builder
+    assert "container/deps/build_aisimulate.py" not in wheel_builder
+    assert not (ROOT / "container/deps/build_aisimulate.py").exists()
+    assert "--source /opt/aisimulate-source" not in wheel_builder
+    assert "python -m pip wheel" in wheel_builder
+    assert (
+        "--no-deps" in wheel_builder and "--wheel-dir /opt/dynamo/dist" in wheel_builder
+    )
+    assert (
+        "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
+        in wheel_builder
+    )
+    assert "pypi.nvidia.com/aisim" not in wheel_builder
+    assert (
+        "for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisim-*.whl"
+        not in wheel_builder
+    )
     for name in (
         "planner",
         "sglang_runtime",
@@ -167,60 +178,12 @@ def test_container_builds_the_matching_aisim_source_wheel() -> None:
         assert "/opt/dynamo/wheelhouse/aisimulate*.whl" not in template
 
 
-@pytest.mark.parametrize(
-    "name,version",
-    [
-        ("aisim", "0.14.0"),
-        ("aisim", "0.14.0.dev1"),
-        ("aisim", "0.15.0"),
-        ("aisimulate", "0.14.0"),
-    ],
-)
-def test_source_wheel_build_validates_identity_before_compilation(
-    tmp_path, monkeypatch, name, version
-):
-    _, cargo = _root_configs()
-    patch = cargo["patch"]["crates-io"]["aisim-core"]
-    source, output = tmp_path / "source", tmp_path / "wheels"
-    commands = []
-
-    def run(command, **kwargs):
-        commands.append(command)
-        if "checkout" in command:
-            project = source / "python/aisimulate"
-            project.mkdir(parents=True)
-            (project / "pyproject.toml").write_text(
-                f'[project]\nname = "{name}"\nversion = "{version}"\n'
-            )
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    build = runpy.run_path(str(ROOT / "container/deps/build_aisimulate.py"))["build"]
-    if (name, version) == ("aisim", "0.14.0"):
-        build(ROOT, source, output)
-        assert commands[1] == [
-            "git",
-            "-C",
-            str(source),
-            "fetch",
-            "--depth=1",
-            patch["git"],
-            patch["rev"],
-        ]
-        assert commands[-1][0] == "maturin"
-        assert "--locked" in commands[-1]
-    else:
-        with pytest.raises(ValueError):
-            build(ROOT, source, output)
-        assert all(command[0] != "maturin" for command in commands)
-
-
-def test_wheel_smoke_requires_the_source_built_aisim_wheel(tmp_path, monkeypatch):
+def test_wheel_smoke_requires_the_published_aisim_wheel(tmp_path, monkeypatch):
     commands = []
     monkeypatch.setattr(smoke_install, "run", lambda command: commands.append(command))
     with pytest.raises(AssertionError, match="missing required 'aisim'"):
         smoke_install.pip_install(Path("python"), tmp_path, ["ai-dynamo"])
-    wheel = tmp_path / "aisim-0.14.0-cp311-abi3-manylinux_2_28_x86_64.whl"
+    wheel = tmp_path / "aisim-0.14.0b1-cp311-abi3-manylinux_2_28_x86_64.whl"
     wheel.touch()
     smoke_install.pip_install(Path("python"), tmp_path, ["ai-dynamo"])
     assert str(wheel) in commands[0]

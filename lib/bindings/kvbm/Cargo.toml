@@ -60,7 +60,3 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
-
-# Release-only AISim 0.14.0 RC4 source pin for Dynamo 1.7.0.
-[patch.crates-io]
-aisim-core = { git = "https://github.com/ai-dynamo/aisim.git", rev = "77d82652b2f83fd67afefc3141d69a5f06e630be" }

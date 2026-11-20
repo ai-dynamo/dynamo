@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -160,9 +161,8 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
             "#subdirectory=python/aisimulate"
         )
     else:
-        assert (
-            str(requirement.specifier).replace("==", "=").replace(".dev", "-dev.")
-            == canonical_core["version"]
+        assert Version(str(requirement.specifier).removeprefix("==")) == Version(
+            canonical_core["version"].removeprefix("=")
         )
 
 

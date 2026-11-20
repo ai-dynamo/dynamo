@@ -684,23 +684,14 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-# Build Python and Rust AISimulate from the same source revision. The published
-# Dynamo metadata keeps a version requirement so its wheel can upload to PyPI.
-COPY container/deps/build_aisimulate.py /opt/dynamo/container/deps/build_aisimulate.py
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env); \
-    fi && \
+# The PyPI stub fetches the published AISim wheel without compiling its Rust source.
+COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=shared \
     source ${VIRTUAL_ENV}/bin/activate && \
-    python /opt/dynamo/container/deps/build_aisimulate.py \
-        --root /opt/dynamo \
-        --source /opt/aisimulate-source \
-        --output /opt/dynamo/dist
+    python -m pip wheel \
+        --no-deps \
+        --wheel-dir /opt/dynamo/dist \
+        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
@@ -733,7 +724,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisim-*.whl; do \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
