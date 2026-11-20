@@ -59,6 +59,7 @@ pub use dynamo_kv_router::protocols;
 pub mod active_load;
 pub(crate) mod embedded;
 pub mod encoder_router;
+pub mod hints;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
@@ -645,6 +646,7 @@ pub struct KvRouter {
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::plugins::worker_selection::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
+    hints: Arc<hints::KvHints>,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -944,6 +946,7 @@ impl KvRouter {
             indexer,
             selection,
             required_worker_inputs,
+            hints: hints::KvHints::new(workers_with_configs.clone()),
             workers_with_configs,
             block_size,
             kv_router_config,
@@ -1020,6 +1023,10 @@ impl KvRouter {
     /// Get a reference to the client used by this KvRouter
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub(crate) fn hints(&self) -> &Arc<hints::KvHints> {
+        &self.hints
     }
 
     pub fn indexer(&self) -> &Indexer {

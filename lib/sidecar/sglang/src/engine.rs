@@ -13,6 +13,7 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
+use dynamo_llm::kv_router::hints::MOONCAKE_OBJECTS_RUNTIME_KEY;
 use dynamo_llm::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
@@ -364,6 +365,20 @@ impl LLMEngine for SglangSidecarEngine {
         // Before native HTTP readiness, which may spend the rest of the
         // startup deadline: the worker group's DNS lookup needs some of it.
         let kv_event_sources = discover_kv_event_sources(&node, &mut config, deadline).await?;
+        // For the router's tool-call pins.
+        if let (Some(page_size), Some(layout)) = (
+            node.engine.page_size,
+            client::mooncake_object_layout(&started[0].0, deadline).await,
+        ) {
+            config.runtime_data.insert(
+                MOONCAKE_OBJECTS_RUNTIME_KEY.into(),
+                serde_json::json!({
+                    "page_size": page_size,
+                    "is_eagle": sglang_eagle_enabled(node.engine.speculative_algorithm.as_deref()),
+                    "layout": layout,
+                }),
+            );
+        }
         let native_http = self.native_http(&started, &endpoints, deadline).await?;
         if native_http.is_some() {
             config

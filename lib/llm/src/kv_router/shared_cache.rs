@@ -822,7 +822,7 @@ fn mooncake_config_from_runtime(
     }
 }
 
-fn logical_page_hashes(tokens: &[u32], page_size: u32, is_eagle: bool) -> Vec<String> {
+pub(crate) fn logical_page_hashes(tokens: &[u32], page_size: u32, is_eagle: bool) -> Vec<String> {
     let page_size = page_size as usize;
     if page_size == 0 {
         return Vec::new();

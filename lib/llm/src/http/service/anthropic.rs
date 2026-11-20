@@ -534,6 +534,9 @@ async fn handler_anthropic_messages(
     if let Some(session_affinity) = session_affinity_from_headers(&headers) {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
+    if let Some(call) = crate::kv_router::hints::sim_tool_call_from_headers(&headers) {
+        request.insert(crate::kv_router::hints::SIM_TOOL_CALL_CONTEXT_KEY, call);
+    }
     super::openai::attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     let context = request.context();
 

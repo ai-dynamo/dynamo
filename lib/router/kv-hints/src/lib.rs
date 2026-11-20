@@ -18,6 +18,8 @@
 //!   ([`WorkerKvTransferKeys::from_worker`]), the once-per-config [`WorkerKvTransferKeysCache`],
 //!   the two plain data types a worker's runtime config speaks
 //!   ([`KvHintTransferWorkerMetadata`], [`KvTransferEnforcement`]).
+//! - [`pin`]: pinning a session's pages in the Mooncake store while it waits on a tool, so they
+//!   are not evicted before its next turn, and the master's `/api/v1/soft_pin` request body.
 //!
 //! Deliberately elsewhere: the transfer candidate vocabulary (`KvTransferCandidateSource`,
 //! `label_key`, `topology_keys`), `KvTransferCandidates`, `CacheOwnerKvTransferKeys`, and the
@@ -34,6 +36,7 @@
 //! hosts consume it; no stage depends on it.
 
 pub mod keys;
+pub mod pin;
 pub mod transfer;
 pub mod wire;
 
