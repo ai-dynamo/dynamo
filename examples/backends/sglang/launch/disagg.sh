@@ -56,6 +56,20 @@ fi
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
+# Under the test harness, DYN_NCCL_PORT{i} reserves worker i's rendezvous port.
+# Without --nccl-port, SGLang picks a random free one in 22000-29999, which can
+# take a port the harness reserved for a listener that has not bound yet.
+NCCL_ARGS_1=()
+NCCL_ARGS_2=()
+if [[ -n "${DYN_NCCL_PORT1:-}" ]]; then
+    NCCL_PORT_1=$(dyn_port DYN_NCCL_PORT 1 "")
+    NCCL_ARGS_1=(--nccl-port "$NCCL_PORT_1")
+fi
+if [[ -n "${DYN_NCCL_PORT2:-}" ]]; then
+    NCCL_PORT_2=$(dyn_port DYN_NCCL_PORT 2 "")
+    NCCL_ARGS_2=(--nccl-port "$NCCL_PORT_2")
+fi
+
 DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -67,9 +81,6 @@ OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
 # run prefill worker
-# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
-# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
-# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # Use DYN_SYSTEM_PORT1/2 instead of *_PREFILL/*_DECODE env names so test
 # harnesses can set one simple pair for disaggregated deployments.
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
@@ -82,6 +93,7 @@ python3 -m "$WORKER_MODULE" \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
+  "${NCCL_ARGS_1[@]}" \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --port 40000 \
@@ -101,6 +113,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m "$WORKER_MODULE" \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
+  "${NCCL_ARGS_2[@]}" \
   --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \

@@ -56,6 +56,20 @@ MODEL="Qwen/Qwen3-0.6B"
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
+# Under the test harness, DYN_NCCL_PORT{i} reserves worker i's rendezvous port.
+# Without --nccl-port, SGLang picks a random free one in 22000-29999, which can
+# take a port the harness reserved for a listener that has not bound yet.
+NCCL_ARGS_1=()
+NCCL_ARGS_2=()
+if [[ -n "${DYN_NCCL_PORT1:-}" ]]; then
+    NCCL_PORT_1=$(dyn_port DYN_NCCL_PORT 1 "")
+    NCCL_ARGS_1=(--nccl-port "$NCCL_PORT_1")
+fi
+if [[ -n "${DYN_NCCL_PORT2:-}" ]]; then
+    NCCL_PORT_2=$(dyn_port DYN_NCCL_PORT 2 "")
+    NCCL_ARGS_2=(--nccl-port "$NCCL_PORT_2")
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
@@ -85,6 +99,7 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   "${KV_EVENTS_ARGS_1[@]}" \
+  "${NCCL_ARGS_1[@]}" \
   --enable-metrics \
   --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
@@ -98,6 +113,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   "${KV_EVENTS_ARGS_2[@]}" \
+  "${NCCL_ARGS_2[@]}" \
   --enable-metrics \
   --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
