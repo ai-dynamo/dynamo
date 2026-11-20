@@ -124,6 +124,7 @@ fn response_mux_config() -> Result<MuxConfig> {
         flush_policy: FlushPolicy::Auto(AutoFlush {
             on_admission: batch_ms == 0,
             max_linger: (batch_ms != 0).then(|| Duration::from_millis(batch_ms)),
+            ..Default::default()
         }),
         ..Default::default()
     })
@@ -580,13 +581,10 @@ impl VeloResponseService {
         );
         // Item 0 is the JSON prologue; later items are response data. The
         // ticket carries the heartbeat interval to the worker.
-        let anchor = self
-            .velo
-            .anchor_manager()
-            .create_anchor_with_config::<Bytes>(AnchorConfig {
-                heartbeat_interval: Some(self.heartbeat),
-                ..Default::default()
-            });
+        let anchor = self.velo.create_anchor_with_config::<Bytes>(AnchorConfig {
+            heartbeat_interval: Some(self.heartbeat),
+            ..Default::default()
+        });
         let ticket = self
             .velo
             .prebind_anchor(anchor.handle())
@@ -1067,7 +1065,10 @@ mod tests {
                     config.flush_policy,
                     FlushPolicy::Auto(AutoFlush {
                         on_admission,
-                        max_linger
+                        max_linger,
+                        // Velo's early-write conditions stay off.
+                        on_complete: false,
+                        at_bytes: None,
                     })
                 );
             });
@@ -1662,7 +1663,7 @@ mod tests {
         assert!(receiver.rx.next().await.unwrap().is_ok());
         consumer
             .velo
-            .graceful_shutdown(velo::ShutdownPolicy::Timeout(Duration::from_secs(1)))
+            .shutdown(velo::ShutdownPolicy::Timeout(Duration::from_secs(1)))
             .await;
         tokio::time::timeout(Duration::from_secs(30), engine.killed())
             .await
