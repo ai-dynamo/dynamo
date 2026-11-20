@@ -22,7 +22,9 @@ and the booking lifecycle these rules protect.
   leases and releases them on completion or expiry.
 - `role_routing.rs`: the routing settings each worker role runs with: how a serving set's or
   prefill pool's advertised `router_config` combines with the frontend's, and each role's
-  session affinity (the frontend's policy file, then the card, then the flags).
+  session affinity (the frontend's policy file, then the card, then the flags). Advertising is
+  deprecated; `advertised_routing` is the one rule for when a host drops the card's
+  `router_config`, which the frontend applies at its discovery boundary.
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.

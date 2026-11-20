@@ -218,8 +218,9 @@ class RouterArgGroup(ArgGroup):
 
     def _session_affinity_deprecation(self, key: str) -> Optional[Deprecated]:
         # TODO(v1.9): Remove the frontend's --router-session-affinity-* flags.
-        # Only the frontend's flags move to the policy file. A worker still
-        # advertises its TTL and mode on its model card with them.
+        # Only the frontend's flags warn one by one. A worker's copies are
+        # covered by the single warning for its advertisement
+        # (_warn_worker_advertisement).
         if not self.include_frontend_only:
             return None
         # The router mode is not known when the flags are registered, so the
@@ -233,8 +234,8 @@ class RouterArgGroup(ArgGroup):
 
     def _busy_threshold_deprecation(self, key: str) -> Optional[Deprecated]:
         # TODO(v1.9): Remove the frontend's --active-decode-blocks-threshold and
-        # --active-prefill-tokens-threshold-frac. A worker still advertises its
-        # thresholds on its model card with them, so its copies do not warn.
+        # --active-prefill-tokens-threshold-frac. Only the frontend's flags warn
+        # one by one; see _session_affinity_deprecation.
         if not self.include_frontend_only:
             return None
         return Deprecated(
@@ -484,6 +485,8 @@ def resolve_router_mode(
 class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     """Router configuration a worker set advertises in its model card.
 
+    Deprecated: see ``_warn_worker_advertisement``.
+
     Same composition the frontend's config uses, so the two stay in step
     without duplicating field declarations.
     """
@@ -534,12 +537,50 @@ def register_worker_router_help(parser: argparse.ArgumentParser) -> None:
     source_parser = argparse.ArgumentParser(add_help=False)
     add_worker_router_arguments(source_parser)
     group = parser.add_argument_group(
-        "Router Advertisement Options. Declared in this worker's model card to "
-        "override the frontend's routing for this worker set only."
+        "Router Advertisement Options (deprecated, removed in v1.9). Declared in "
+        "this worker's model card to override the frontend's routing for this "
+        "worker set only. A frontend with --router-policy-config ignores them: "
+        "configure the role under worker_selection in that file"
     )
     for action in source_parser._actions:
         if action.option_strings:
             group._group_actions.append(action)
+
+
+# The worker-selection type that routes like each `--router-mode`. `direct` and
+# `device-aware-weighted` have none: a policy file cannot select them yet.
+_POLICY_TYPE_FOR_ROUTER_MODE: dict[str, str] = {
+    "kv": "dynamo-default-cost-fn",
+    "round-robin": "round-robin",
+    "random": "random",
+    "least-loaded": "least-loaded",
+}
+
+
+def _warn_worker_advertisement(router_mode: str) -> None:
+    # TODO(v1.9): Remove the worker-side router flags; workers then stop
+    # writing `router_config` on their model card.
+    # Warned where the advertisement is built, not where the flags are
+    # registered: the flags only take effect with --router-mode, and a worker
+    # can inherit other DYN_ROUTER_* variables it never asked for.
+    policy_type = _POLICY_TYPE_FOR_ROUTER_MODE.get(router_mode)
+    if policy_type is None:
+        replacement = (
+            f"--router-mode {router_mode} on the frontend, which a policy file "
+            "cannot select yet"
+        )
+    else:
+        replacement = (
+            "worker_selection in the frontend's --router-policy-config, for "
+            f"example `ROLE: {policy_type}` where ROLE is this worker's role "
+            "(aggregated, prefill or decode); a frontend with a policy file "
+            "already ignores the router flags of its workers"
+        )
+    Deprecated(replacement, remove_in="v1.9").warn(
+        "--router-mode on a worker (DYN_ROUTER_MODE), with the router flags it "
+        "advertises,",
+        stacklevel=2,
+    )
 
 
 class RouterConfigSource(Protocol):
@@ -569,6 +610,7 @@ def build_router_config(
     ``None`` means no mode was requested, leaving ``router_config`` off the card
     so the worker inherits the frontend's configuration. A ``None`` config means
     the same thing, so a backend can pass its optional advertisement directly.
+    A worker's config that does advertise warns that doing so is deprecated.
     The frontend passes its own config here too, after ``resolve_router_mode``
     has given it a mode, so it never gets ``None`` back. It sets ``frontend``,
     which only changes what the deprecation notice below recommends.
@@ -619,4 +661,8 @@ def build_router_config(
     kv_router_config = (
         KvRouterConfig(**config.kv_router_kwargs()) if mode == RouterMode.KV else None
     )
-    return RouterConfig(mode, kv_router_config, **router_kwargs)
+    router_config = RouterConfig(mode, kv_router_config, **router_kwargs)
+    # Last, so that a rejected advertisement reports its own error.
+    if isinstance(config, WorkerRouterConfig):
+        _warn_worker_advertisement(router_mode)
+    return router_config
