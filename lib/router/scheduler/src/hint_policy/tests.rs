@@ -9,12 +9,12 @@ use super::runtime::{BookedCopy, HintInputs, HintPolicySlot, compose_kv_hint};
 use super::*;
 use crate::kv_hints::{
     KvCopySource, KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceChoice,
-    MAX_KV_HINT_ACTIONS, kv_copy_locations,
+    kv_copy_locations,
 };
 use crate::protocols::WorkerConfigLike;
 use crate::resolve::{PluginConfigError, resolve_role};
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
-use dynamo_kv_hints::KvHintTransferWorkerMetadata;
+use dynamo_kv_hints::{KvHint, KvHintTransferWorkerMetadata, MAX_KV_HINT_ACTIONS};
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_worker_selection::{
@@ -449,7 +449,7 @@ fn copy() -> KvCopySource {
     )
 }
 
-fn ids_and_types(hint: &crate::kv_hints::KvHint) -> Vec<(String, String)> {
+fn ids_and_types(hint: &KvHint) -> Vec<(String, String)> {
     hint.actions
         .iter()
         .map(|action| (action.action_id.clone(), action.action_type.clone()))

@@ -18,24 +18,24 @@
 //! `RequestClassifierRuntime` are public for the kernel in another crate; hosts and plugins do
 //! not call them. `QueueMetadata` is also what offline replay enqueues with.
 
-pub mod classifier;
+mod classifier;
 pub mod host;
-pub mod placement;
-pub mod profile;
-pub mod queue;
+mod placement;
+mod profile;
+mod queue;
 
 pub use classifier::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyFuture, ClassifyRequest, NoWorkers, RequestClassifier, RequestClassifierContext,
-    RequestClassifierRuntime, RequestLifecycle, RequestProgress, RequestProgressUpdater,
-    WorkerCacheView, WorkerLoadView, WorkerView,
+    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
+    RequestProgress, RequestProgressUpdater, WorkerCacheView, WorkerLoadView, WorkerView,
 };
-pub use placement::WorkerPlacement;
+pub use placement::LaneKey;
 pub use profile::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,
 };
 pub use queue::{
-    DispatchCharge, PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLimitKind, QueueMetadata,
-    QueueRejection, QueueSnapshot,
+    BlockReason, DispatchCharge, LaneCheck, PolicyQueue, PolicyQueueEntry, PolicyQueueStats,
+    QueueLane, QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot, RecheckScope,
 };

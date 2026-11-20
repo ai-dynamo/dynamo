@@ -71,7 +71,7 @@ deny_globs:
 # ffmpeg maintenance releases.
 deny_components:
   - name: ffmpeg
-    min_fixed_version: "9.0.1"
+    min_fixed_version: "9.0.2"
   - name: x264
   - name: x265
   - name: fdk-aac
@@ -142,14 +142,13 @@ exceptions:
       vendored ffmpeg that carries no software h264/hevc/aac, rather than one
       that does.
 
-      Enforcement lives at build time, not here. Two guards in
-      trtllm_runtime.Dockerfile enumerate every bundled libavcodec -- one in
-      runtime_full, and one after the overlay COPY,
-      which is the only stage where a missed whiteout can leave the base image's
-      older copy sitting beside the upgraded one -- and
+      Enforcement lives at build time, not here. A guard in
+      trtllm_runtime.Dockerfile enumerates every bundled libavcodec, and
       tests/dependencies/test_no_software_video_codecs.py repeats the check
-      against the shipped image. Both guards fail when their glob matches
-      nothing, because a loop over an empty glob checks nothing and exits 0.
+      against the shipped image. The build-time guard fails when its glob
+      matches nothing, because a loop over an empty glob checks nothing and
+      exits 0. The shipped-image test does not: with no bundled libavcodec it
+      checks nothing and passes.
 
       Deliberately NOT expressed as a deny_components version floor:
       nvidia-dali-cuda130 appears in the base-image SBOM and is therefore

@@ -23,6 +23,7 @@ from dynamo.planner.connectors.protocol import (
     ScaleResponse,
     ScaleStatus,
 )
+from dynamo.planner.core.types import WorkerCounts
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
@@ -375,6 +376,31 @@ class GlobalPlannerConnector(PlannerConnector):
             prefill_component_name=prefill_component_name,
             decode_component_name=decode_component_name,
         )
+
+    async def get_worker_inventory(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> Optional[WorkerCounts]:
+        """Read serving and pending startup inventory from the pool's own DGD.
+
+        Mirrors ``get_actual_worker_counts``: delegate to the pool-local
+        KubernetesConnector so startup can proceed while extra replicas wait
+        for capacity. Returns ``None`` out of cluster or on a Pod-list 403 so
+        callers fall back to ``get_actual_worker_counts``.
+        """
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return None
+        inventory = await local.get_worker_inventory(
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+        )
+        # This read replaces the count poll that refreshes managed status. On None
+        # the caller falls back to get_actual_worker_counts, which polls instead.
+        if inventory is not None and self.managed_allocation:
+            await self.get_allocation_status()
+        return inventory
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Resolve the pool-local worker runtime namespace when available."""
