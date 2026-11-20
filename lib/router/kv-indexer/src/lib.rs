@@ -14,13 +14,17 @@
 //! slice (`config`). `lib/router/kv-router` re-exports every item here at its old path and keeps the
 //! HTTP, ZMQ, peer-recovery, and Prometheus adapters.
 //!
-//! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, `dynamo-kv-hashing`, and
-//! `dynamo-tokens`. It
+//! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, `dynamo-kv-hashing`,
+//! `dynamo-kv-stream`, and `dynamo-tokens`. It
 //! owns what it emits with a match: the transfer candidate vocabulary
 //! (`kv_hints::KvTransferCandidateSource`, `label_key`, `topology_keys`) and the residency
 //! owner key (`residency::ResidencyOwnerKey`); `dynamo-kv-hints` imports them from here, never
 //! the reverse.
 //! The `export` feature enables the Prometheus counter vectors.
+//!
+//! [`stream`] is the engine-side half: it re-exports `dynamo-kv-stream` (one rank's KV event
+//! stream folded into a residency ledger, with replay and snapshots) and attaches this crate's
+//! prefix indexes to it.
 //!
 //! # KV RadixTree
 //!
@@ -86,6 +90,7 @@ mod resident_blocks;
 mod session_prefix_index;
 mod session_updates;
 mod shard_handle;
+pub mod stream;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub mod testing;
 mod thread_pool;
@@ -94,6 +99,8 @@ mod types;
 
 #[cfg(test)]
 mod local_tests;
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod tests;
 

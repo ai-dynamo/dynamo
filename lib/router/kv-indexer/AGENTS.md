@@ -2,6 +2,8 @@
 
 `dynamo-kv-indexer` is the KV indexer stage: it applies KV events to prefix indexes and answers which workers hold a request's prefix. Hosts outside `lib/router` import through `host` and the DC relay through `cuckoo`; the index design notes are in `src/README.md`.
 
+`stream` re-exports `dynamo-kv-stream` (`lib/kv-stream`, the ledger, replay window and snapshots that engines embed) and adds the adapters that feed a rank's stream into this crate's indexes. Anything that does not need a type from this crate belongs in `lib/kv-stream`, which must stay free of Dynamo dependencies.
+
 ## Performance
 
 PR numbers point to worked examples; open one only when you need to see how a rule was applied.
