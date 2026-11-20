@@ -501,20 +501,42 @@ pub async fn register_model_card(
     endpoint: &Endpoint,
     card: &ModelDeploymentCard,
 ) -> anyhow::Result<()> {
-    let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
-    let model_suffix = derive_lora_suffix(lora_name);
-
-    let discovery = endpoint.drt().discovery();
-    let wire_card = card.for_mdc_wire();
-    let spec = DiscoverySpec::from_model_with_suffix(
+    let spec = model_card_spec(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),
         endpoint.name().to_string(),
-        &wire_card,
-        model_suffix,
+        card,
     )?;
-    let _instance = discovery.register(spec).await?;
+    let _instance = endpoint.drt().discovery().register(spec).await?;
     Ok(())
+}
+
+/// The discovery record [`register_model_card`] publishes for `card`, for a
+/// worker whose instance id is `instance_id` rather than this process's.
+pub fn model_card_instance(
+    namespace: String,
+    component: String,
+    endpoint: String,
+    card: &ModelDeploymentCard,
+    instance_id: u64,
+) -> anyhow::Result<DiscoveryInstance> {
+    Ok(model_card_spec(namespace, component, endpoint, card)?.into_instance(instance_id))
+}
+
+fn model_card_spec(
+    namespace: String,
+    component: String,
+    endpoint: String,
+    card: &ModelDeploymentCard,
+) -> anyhow::Result<DiscoverySpec> {
+    let model_suffix = derive_lora_suffix(card.lora.as_ref().map(|info| info.name.as_str()));
+    DiscoverySpec::from_model_with_suffix(
+        namespace,
+        component,
+        endpoint,
+        &card.for_mdc_wire(),
+        model_suffix,
+    )
 }
 
 /// Replace the caller-managed taints on this worker's existing model card.

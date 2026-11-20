@@ -2058,7 +2058,7 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 /// carried by `WorkerType::Encode`.
 ///
 /// Everything else falls back to the parsed `endpoint_types`.
-fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
+pub(crate) fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
     }
@@ -2078,7 +2078,9 @@ fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
 /// `Encode` with `route_to_encoder=true`) are rejected upstream in
 /// `validate_route_to_encoder`; this function trusts that gate and only
 /// applies the flag when it is meaningful.
-fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
+pub(crate) fn resolve_worker_type_and_needs(
+    config: &WorkerConfig,
+) -> (WorkerType, Vec<Vec<WorkerType>>) {
     match config.disaggregation_mode {
         DisaggregationMode::Prefill => {
             let inner = if config.route_to_encoder {
@@ -2204,7 +2206,7 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
     }
 }
 
-async fn build_local_model(
+pub(crate) async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,

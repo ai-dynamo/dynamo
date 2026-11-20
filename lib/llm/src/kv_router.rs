@@ -281,6 +281,46 @@ impl ApproximateLruRankRegistry {
 
 type ApproximateLruRanks = Arc<parking_lot::Mutex<ApproximateLruRankRegistry>>;
 
+/// Report the index's cache policy and, for an approximate-LRU index, keep its
+/// per-rank capacities in step with the workers and export its stats.
+async fn start_index_upkeep(
+    indexer: &Indexer,
+    component: &dynamo_runtime::component::Component,
+    kv_router_config: &KvRouterConfig,
+    workers_with_configs: &RuntimeConfigWatch,
+    cancellation_token: &CancellationToken,
+) -> Result<ApproximateLruRanks> {
+    let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
+    let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
+    let effective_policy = if matches!(indexer, Indexer::None) {
+        "disabled"
+    } else if indexer.uses_approximate_lru() {
+        "lru"
+    } else {
+        "ttl"
+    };
+    approximate_lru_metrics.set_policies(&configured_policy, effective_policy);
+    let approximate_lru_ranks = Arc::new(parking_lot::Mutex::new(
+        ApproximateLruRankRegistry::default(),
+    ));
+    if indexer.uses_approximate_lru() {
+        let snapshot = workers_with_configs.borrow().clone();
+        reconcile_approximate_lru_snapshot(indexer, &snapshot, &approximate_lru_ranks).await?;
+        start_approximate_lru_reconciler(
+            indexer.clone(),
+            workers_with_configs.clone(),
+            Arc::clone(&approximate_lru_ranks),
+            cancellation_token.child_token(),
+        );
+        start_approximate_lru_metrics(
+            indexer.clone(),
+            approximate_lru_metrics,
+            cancellation_token.child_token(),
+        );
+    }
+    Ok(approximate_lru_ranks)
+}
+
 async fn reconcile_approximate_lru_snapshot(
     indexer: &Indexer,
     snapshot: &HashMap<WorkerId, ModelRuntimeConfig>,
@@ -647,6 +687,55 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
+/// KV events from engines the frontend dials directly: the ZMQ ingress, except
+/// that an engine advertising no publishers at all stays schedulable without
+/// prefix-cache scoring, as it does behind a sidecar. The plain ZMQ ingress
+/// holds such a worker back as incomplete.
+#[derive(Debug, Default)]
+struct DirectKvIngress(dynamo_kv_router::services::selection::ZmqDirectIngress);
+
+#[async_trait::async_trait]
+impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
+    fn attach(
+        &self,
+        index: &Arc<dynamo_scheduler::host::IndexRegistry>,
+        cancel_token: CancellationToken,
+    ) {
+        self.0.attach(index, cancel_token);
+    }
+
+    fn open(
+        &self,
+        index: &dynamo_scheduler::host::IndexRegistry,
+        key: &dynamo_router_protocol::identity::RoutingPartitionId,
+        block_size: u32,
+    ) -> Indexer {
+        self.0.open(index, key, block_size)
+    }
+
+    fn missing_metadata(
+        &self,
+        record: &dynamo_scheduler::host::WorkerCatalogRecord,
+    ) -> Vec<String> {
+        if record.listener_endpoints().is_empty() {
+            return Vec::new();
+        }
+        self.0.missing_metadata(record)
+    }
+
+    async fn reconcile(
+        &self,
+        previous: Option<&dynamo_scheduler::host::WorkerCatalogRecord>,
+        record: &dynamo_scheduler::host::WorkerCatalogRecord,
+    ) -> Result<(), SelectionError> {
+        self.0.reconcile(previous, record).await
+    }
+
+    async fn detach(&self, record: &dynamo_scheduler::host::WorkerCatalogRecord) {
+        self.0.detach(record).await;
+    }
+}
+
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -661,7 +750,7 @@ pub struct KvRouter {
     cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
-    ingress: Arc<indexer::RuntimeIngress>,
+    ingress: Option<Arc<indexer::RuntimeIngress>>,
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
     approximate_lru_ranks: ApproximateLruRanks,
@@ -762,6 +851,7 @@ impl KvRouter {
             lora_filter.map(crate::lora_routing::LoraKvPolicy::kv),
             scheduler_load,
             parent_token,
+            false,
         )
         .await
     }
@@ -784,6 +874,7 @@ impl KvRouter {
         admission_policy: Option<Arc<dyn crate::routing_policy::KvAdmissionPolicy>>,
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
+        direct_kv_events: bool,
     ) -> Result<Self> {
         let mut kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config
@@ -827,31 +918,31 @@ impl KvRouter {
             cache.attach_session_prefix_index(Arc::clone(index));
         }
 
-        let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
-            endpoint: &endpoint,
-            kv_router_config: &kv_router_config,
-            block_size,
-            model_name: model_name.as_deref(),
-            worker_role,
-            metric_worker_type,
-            worker_inputs: index_inputs,
-            kv_event_source_requirement,
-            kv_source_membership,
-            cancellation_token: cancellation_token.clone(),
-            session_prefix_index: session_prefix_index.clone(),
-        })
-        .await?;
-        let indexer = ingress.indexer().clone();
-        let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
-        let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
-        let effective_policy = if matches!(indexer, Indexer::None) {
-            "disabled"
-        } else if indexer.uses_approximate_lru() {
-            "lru"
+        // Engines the frontend dials directly publish KV events on their own ZMQ
+        // sockets, which the selection core subscribes to per worker rank;
+        // otherwise the runtime ingress feeds the index from the event plane.
+        let (ingress, runtime_ingress): (
+            Arc<dyn dynamo_scheduler::host::KvEventIngress>,
+            Option<Arc<indexer::RuntimeIngress>>,
+        ) = if direct_kv_events {
+            (Arc::new(DirectKvIngress::default()), None)
         } else {
-            "ttl"
+            let runtime_ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
+                endpoint: &endpoint,
+                kv_router_config: &kv_router_config,
+                block_size,
+                model_name: model_name.as_deref(),
+                worker_role,
+                metric_worker_type,
+                worker_inputs: index_inputs,
+                kv_event_source_requirement,
+                kv_source_membership,
+                cancellation_token: cancellation_token.clone(),
+                session_prefix_index: session_prefix_index.clone(),
+            })
+            .await?;
+            (runtime_ingress.clone(), Some(runtime_ingress))
         };
-        approximate_lru_metrics.set_policies(&configured_policy, effective_policy);
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -866,24 +957,23 @@ impl KvRouter {
                 })?;
         }
 
-        let approximate_lru_ranks = Arc::new(parking_lot::Mutex::new(
-            ApproximateLruRankRegistry::default(),
-        ));
-        if indexer.uses_approximate_lru() {
-            let snapshot = workers_with_configs.borrow().clone();
-            reconcile_approximate_lru_snapshot(&indexer, &snapshot, &approximate_lru_ranks).await?;
-            start_approximate_lru_reconciler(
-                indexer.clone(),
-                workers_with_configs.clone(),
-                Arc::clone(&approximate_lru_ranks),
-                cancellation_token.child_token(),
-            );
-            start_approximate_lru_metrics(
-                indexer.clone(),
-                approximate_lru_metrics,
-                cancellation_token.child_token(),
-            );
-        }
+        // The runtime ingress's index exists already. The ZMQ ingress builds its
+        // index when the selection core opens the partition, below.
+        let runtime_index = match &runtime_ingress {
+            Some(runtime_ingress) => {
+                let indexer = runtime_ingress.indexer().clone();
+                let approximate_lru_ranks = start_index_upkeep(
+                    &indexer,
+                    component,
+                    &kv_router_config,
+                    &workers_with_configs,
+                    &cancellation_token,
+                )
+                .await?;
+                Some((indexer, approximate_lru_ranks))
+            }
+            None => None,
+        };
 
         let client_for_overload = client.clone();
         let overloaded_worker_provider: OverloadedWorkerProvider =
@@ -931,7 +1021,7 @@ impl KvRouter {
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
                 lora_worker_filter: None,
-                ingress: Arc::clone(&ingress) as Arc<dyn dynamo_scheduler::host::KvEventIngress>,
+                ingress,
                 scheduler_load,
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
@@ -944,6 +1034,23 @@ impl KvRouter {
         )
         .await?;
         request_leases.set_scheduler(selection.scheduler().booking_cleanup());
+
+        let (indexer, approximate_lru_ranks) = match runtime_index {
+            Some(runtime_index) => runtime_index,
+            None => {
+                let indexer = selection.indexer().clone();
+                let approximate_lru_ranks = start_index_upkeep(
+                    &indexer,
+                    component,
+                    &kv_router_config,
+                    &workers_with_configs,
+                    &cancellation_token,
+                )
+                .await?;
+                (indexer, approximate_lru_ranks)
+            }
+        };
+
         // Inbound lifecycle events start only now that their consumer can
         // release bookings.
         replica_ingress.start().await;
@@ -961,7 +1068,7 @@ impl KvRouter {
             cancellation_token,
             client,
             is_eagle,
-            ingress,
+            ingress: runtime_ingress,
             tracking_hash,
             tracking_model_name,
             approximate_lru_ranks,
@@ -1023,7 +1130,9 @@ impl KvRouter {
         &mut self,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) {
-        self.ingress.set_task_guard(task_guard.clone());
+        if let Some(ingress) = &self.ingress {
+            ingress.set_task_guard(task_guard.clone());
+        }
         self.teardown_task_guard = Some(task_guard);
     }
 
@@ -2480,7 +2589,12 @@ mod tests {
                         } else {
                             let router = result.unwrap();
                             assert_eq!(matches!(router.indexer, Indexer::None), !wants_cache);
-                            assert!(!router.ingress.has_subscription());
+                            assert!(
+                                !router
+                                    .ingress
+                                    .as_ref()
+                                    .is_some_and(|ingress| ingress.has_subscription())
+                            );
                             router.cancellation_token.cancel();
                         }
                     }
@@ -2516,7 +2630,12 @@ mod tests {
                     .contains(WorkerInputs::CACHE)
             );
             assert!(matches!(router.indexer, Indexer::None));
-            assert!(!router.ingress.has_subscription());
+            assert!(
+                !router
+                    .ingress
+                    .as_ref()
+                    .is_some_and(|ingress| ingress.has_subscription())
+            );
             let tokens = vec![11, 12, 13, 14];
             for _ in 0..2 {
                 router
@@ -2605,7 +2724,12 @@ mod tests {
 
         assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
         assert!(matches!(router.indexer, Indexer::None));
-        assert!(!router.ingress.has_subscription());
+        assert!(
+            !router
+                .ingress
+                .as_ref()
+                .is_some_and(|ingress| ingress.has_subscription())
+        );
         assert!(router.shared_cache.is_none());
         assert!(matches!(
             router.dump_events().await,
@@ -2755,6 +2879,42 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn direct_kv_index_uses_the_configured_event_threads() {
+        let component = make_test_component("direct-kv-threads").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        let router = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                router_event_threads: 4,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(router.ingress.is_none());
+        assert!(matches!(router.indexer, Indexer::Concurrent { .. }));
+    }
+
     #[rstest::rstest]
     #[case::single(1)]
     #[case::concurrent(2)]
@@ -2798,7 +2958,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(router.ingress.has_subscription());
+        assert!(
+            router
+                .ingress
+                .as_ref()
+                .is_some_and(|ingress| ingress.has_subscription())
+        );
         let session_index = router.session_prefix_index.as_ref().unwrap();
         let worker = WorkerWithDpRank::new(7, 0);
         let tokens = [11, 12, 13, 14];

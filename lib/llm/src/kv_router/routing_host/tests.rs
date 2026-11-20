@@ -4309,6 +4309,7 @@ async fn two_worker_migration_harness(
         None,
         load_context.scheduler_load_sender(),
         load_context.cancellation_token(),
+        false,
     )
     .await
     .unwrap();
