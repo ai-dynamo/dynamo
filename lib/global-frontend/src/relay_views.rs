@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::{PoolSnapshot, RelayPoolState};
+use crate::{DiscoveredPools, PoolSnapshot, RelayPoolState};
 
 type View = Arc<RelayPoolState>;
 type Views = PoolViews<RelaySourceKey, PoolId, ReceivedView>;
@@ -224,15 +224,14 @@ impl RelayGatedPoolCatalog {
         };
         Self::build(discovery, cancel, Some(signals), models)
     }
-    /// For pools from [`crate::discover_pools`], which say nothing of what
-    /// they serve: each is routed for every model its live views report
-    /// ready, aliases and adapters included, and its load counts them all.
+    /// Routes each discovered pool for every model its live views report
+    /// ready, aliases and adapters included; its load counts them all.
     pub fn for_discovery(
-        discovery: watch::Receiver<Arc<PoolSnapshot>>,
+        discovered: DiscoveredPools,
         cancel: CancellationToken,
         signals: Option<Arc<PoolSignals>>,
     ) -> Self {
-        Self::build(discovery, cancel, signals, Models::Reported)
+        Self::build(discovered.0, cancel, signals, Models::Reported)
     }
     fn build(
         discovery: watch::Receiver<Arc<PoolSnapshot>>,
@@ -747,8 +746,11 @@ mod tests {
         let signals = Arc::new(PoolSignals::new(Arc::new(
             dynamo_global_router::InFlightTracker::new(),
         )));
-        let catalog =
-            RelayGatedPoolCatalog::for_discovery(candidates, cancel.clone(), Some(signals.clone()));
+        let catalog = RelayGatedPoolCatalog::for_discovery(
+            DiscoveredPools(candidates),
+            cancel.clone(),
+            Some(signals.clone()),
+        );
         let current = catalog.subscribe();
         let models = || {
             let snapshot = current.borrow();

@@ -22,7 +22,7 @@ mod relay_views;
 mod round_trip;
 
 pub use catalog::PoolSnapshot;
-pub use discovery::discover_pools;
+pub use discovery::{DiscoveredPools, discover_pools};
 pub use metrics::{Metrics, affinity_store_ms};
 pub use proxy::{app, app_with_selection_core, serve};
 pub use relay::follow_relays;

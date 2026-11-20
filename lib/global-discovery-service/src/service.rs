@@ -7,16 +7,20 @@
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
 //!   and each call is also the pool's heartbeat. A backend that finds pools
 //!   without registrations, as through MCS, answers `501`.
+//!
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to, and
 //!   whether the service takes `POST /pools`, so a PoolRelay knows whether to
 //!   register.
+//!
 //! - `POST /routers`: register or renew one router incarnation when explicitly
 //!   enabled. Static and MCS router directories answer `501`.
+//!
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: with registrations, for a lease
 //!   after a start or a store outage; with MCS, while its watch keeps failing.
 //!   A caller merges a partial list into its own, removing pools only on a
 //!   complete one ([`crate::pool_discovery`] has the rules).
+//!
 //! - `GET /healthz`: readiness. OK once the backend has answered, which with
 //!   DynamoDB follows the startup check of the table. A later failure of the
 //!   backend shows in the answers to requests, not here, so that an outage
@@ -84,8 +88,8 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Why `POST /pools` answers `501`. `GET /routers` tells PoolRelays not to
 /// call it, so only an older PoolRelay, or one that reads another replica of
 /// a service being reconfigured, gets this.
-const NO_POOL_REGISTRATIONS: &str = "pool registration is disabled: POST /pools is only for \
-     pool discovery from registrations, and this service finds pools through MCS";
+const NO_POOL_REGISTRATIONS: &str =
+    "pool registration is disabled: POST /pools is only for pool discovery from registrations";
 
 /// What the handlers share.
 struct Shared {

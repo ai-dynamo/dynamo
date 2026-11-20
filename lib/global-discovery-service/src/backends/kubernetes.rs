@@ -37,13 +37,8 @@
 //!
 //! ```ignore
 //! let regions = ClusterRegions::new(configured, Some(client.clone()));
-//! let backend = PoolDiscoveryBackend {
-//!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix, frontends, regions)?),
-//!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
-//!     registrar: None,
-//!     router_registrar: None,
-//! };
-//! service::serve(listener, backend, None, shutdown).await?;
+//! let pools = McsPoolDirectory::new(client.clone(), mcs, suffix, frontends, regions)?;
+//! let routers = McsReplicaDirectory::new(client, &router, mcs);
 //! ```
 
 mod cache;

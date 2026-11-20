@@ -119,7 +119,9 @@ async fn follow_service(
                 Plan::Registering => tracing::info!(
                     "Global Discovery takes pool registrations; registering the routing pool"
                 ),
-                Plan::Withheld(reason) if answer.is_some() => tracing::warn!(%reason),
+                Plan::Withheld(reason) if answer.is_some() => {
+                    tracing::warn!(%reason, "the routing pool is not registered")
+                }
                 Plan::Withheld(_) => {}
             }
         }

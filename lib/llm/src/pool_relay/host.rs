@@ -343,11 +343,10 @@ pub struct PoolRelayHealth {
     /// `healthy` or readiness.
     pub global_routers_stale_reason: Option<String>,
     /// Why the routing pool is not registered though Global Discovery takes
-    /// registrations: it has not said yet whether it does, the pool has no
-    /// region, or the last call failed. `None` while registered, and while
-    /// the service takes no registrations, as with MCS. Global Routers send an
-    /// unregistered pool nothing, but the Relay keeps serving and retrying,
-    /// so this does not affect `healthy` or readiness.
+    /// registrations: no answer yet, no region, or a failed call. `None` while
+    /// registered, or while the service takes none, as with MCS. Routers skip
+    /// an unregistered pool, but the Relay keeps serving and retrying, so this
+    /// does not affect `healthy` or readiness.
     pub routing_pool_unregistered_reason: Option<String>,
 }
 
@@ -713,13 +712,17 @@ impl PoolRelay {
                 pool.cluster_id() == cluster_id,
                 "routing pool cluster must match the Relay cluster"
             );
-            let region = config.routing_pool_region.clone();
-            anyhow::ensure!(
-                region
-                    .as_ref()
-                    .is_none_or(|region| !region.is_empty() && region.trim() == region),
-                "routing_pool_region must be non-empty, without surrounding whitespace"
-            );
+            // Without a region the pool registers nowhere, which MCS mode
+            // does not need.
+            let location = match config.routing_pool_region.clone() {
+                Some(region) => Some(PoolLocation::in_region(region).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "routing_pool_region must be non-empty, without surrounding whitespace \
+                         or control characters"
+                    )
+                })?),
+                None => None,
+            };
             for frontend in &config.routing_pool_frontends {
                 anyhow::ensure!(
                     matches!(frontend.scheme(), "http" | "https") && frontend.host_str().is_some(),
@@ -730,13 +733,7 @@ impl PoolRelay {
                 config.global_discovery_url.is_some() && transport_config.is_some(),
                 "routing_pool requires global_discovery_url and WAN transport"
             );
-            // Without a region the pool registers nowhere, which MCS mode
-            // does not need.
-            region.map(|region| PoolLocation {
-                region,
-                availability_zone: None,
-                datacenter: None,
-            })
+            location
         } else {
             anyhow::ensure!(
                 config.routing_pool_region.is_none() && config.routing_pool_frontends.is_empty(),

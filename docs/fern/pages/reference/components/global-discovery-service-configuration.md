@@ -62,6 +62,8 @@ no region is listed with its name as the region, and the service logs a warning 
 
 The service needs read access to `endpointslices`, and with `karmada`, to `clusters.cluster.karmada.io`
 for regions; without that access it logs a warning and uses `--cluster-region` or the cluster's name.
+When it reads a member cluster rather than the Karmada control plane, it finds no `Cluster` objects,
+logs that once, and takes every region from `--cluster-region`.
 `karmada` reads slices named the Karmada way, and `mcs` reads slices with the standard
 `multicluster.kubernetes.io` labels.
 
@@ -80,6 +82,24 @@ These flags work only with `--pool-discovery registrations`.
 | `--dynamodb-ensure-table` | Off | Create the table if it does not exist, and turn on its TTL if it is off. For development. Needs `dynamodb:CreateTable`, and for TTL `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive`; without those two it logs a warning and starts. |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
+
+## Upgrade from a release whose registrations named a model
+
+Routers must learn pools' models from their state streams before the service stops listing them, and
+the service must take registrations without a model before Pool Relays stop sending one:
+
+1. Upgrade the Global Routers.
+2. Upgrade the Global Discovery Service.
+   - With `karmada` or `mcs`, first remove `--registration-storage`, `--heartbeat-interval-secs`,
+     `--lease-duration-secs` and the DynamoDB flags: they now stop the service at startup.
+   - Also set each cluster's region, in Karmada's `Cluster.spec.region` or with `--cluster-region`.
+     Otherwise its pools are listed under the cluster's name, not the region their Pool Relays
+     registered.
+   - Replace every replica at once (`strategy: Recreate`). Older replicas list only registered pools,
+     under the registered regions, so a mix would list different pools from one request to the next.
+     Routers and Pool Relays keep their last lists while the service restarts.
+   - With `registrations`, a rolling update works.
+3. Upgrade the Pool Relays.
 
 ## Environment
 

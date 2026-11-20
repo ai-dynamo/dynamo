@@ -256,11 +256,10 @@ fn pool_kv(update: &KvPoolLoadUpdate) -> Option<(u64, u64)> {
 }
 
 /// The pool's requests in flight (waiting for a first token or generating)
-/// for `model`, or for every model with `None`, those generating, and how
-/// many its workers can run at once. `None` unless the request counts are
-/// reported: the Relay leaves them unset when its view is incomplete, and
-/// unset does not mean zero. A model the Relay names differently from the
-/// catalog still counts, as every model.
+/// for `model`, or every model with `None`, those generating, and how many
+/// its workers can run at once. `None` unless the counts are reported: an
+/// incomplete view leaves them unset, and unset is not zero. A model the
+/// Relay names differently from the catalog counts as every model.
 fn pool_report(update: &ServingLoadUpdate, model: Option<&str>) -> Option<LoadReport> {
     let named = update
         .models

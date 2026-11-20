@@ -3,15 +3,11 @@
 
 //! Global Discovery Service. See `dynamo_global_discovery_service::service`.
 //!
-//! Two flags choose the backend behind the API:
-//! - `--pool-discovery`: where the pool and router lists come from. Either
-//!   the registrations PoolRelays send (`registrations`), or the
-//!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
-//!   the standard way (`mcs`). With MCS, the service takes no registrations.
-//! - `--registration-storage`, with registrations: where they are kept.
-//!   Either in this process (`memory`), so run one replica, or in a DynamoDB
-//!   table that every replica shares (`dynamodb`), in one region or, through
-//!   a Global Table, in several.
+//! `--pool-discovery` chooses where pools and routers come from: PoolRelays'
+//! registrations (`registrations`), or the EndpointSlices that MCS imports,
+//! named the Karmada way (`karmada`) or the standard way (`mcs`). With
+//! registrations, `--registration-storage` keeps them in this process
+//! (`memory`, one replica) or in a shared DynamoDB table (`dynamodb`).
 //!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
@@ -41,7 +37,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
-use dynamo_global_common::Lease;
+use dynamo_global_common::{Lease, PoolKey, PoolLocation};
 use dynamo_global_discovery_service::backends::dynamodb::{
     ConnectError, DynamoDbConfig, DynamoDbPoolStore,
 };
@@ -133,7 +129,6 @@ struct Args {
     /// `_`, `-` or `.`. Needed with `--registration-storage dynamodb`.
     #[arg(
         long,
-        required_if_eq("registration_storage", "dynamodb"),
         value_parser = parse_dynamodb_table,
         help_heading = WITH_DYNAMODB
     )]
@@ -242,7 +237,7 @@ struct Args {
     /// Cluster's `spec.region` comes first; a cluster with no region is listed
     /// with its name as the region.
     #[arg(long = "cluster-region", value_parser = parse_cluster_region, help_heading = WITH_MCS)]
-    cluster_regions: Vec<(String, String)>,
+    cluster_regions: Vec<(String, PoolLocation)>,
 }
 
 /// The `--pool-discovery` values that read MCS, for clap's
@@ -308,19 +303,16 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
 
 /// `<cluster>=<region>`, each non-empty, without surrounding whitespace or
 /// control characters.
-fn parse_cluster_region(value: &str) -> Result<(String, String), String> {
+fn parse_cluster_region(value: &str) -> Result<(String, PoolLocation), String> {
     let (cluster, region) = value
         .split_once('=')
         .ok_or("expected <cluster>=<region>".to_owned())?;
-    for (part, what) in [(cluster, "cluster"), (region, "region")] {
-        if part.is_empty() || part.trim() != part || part.chars().any(char::is_control) {
-            return Err(format!(
-                "the {what} must be non-empty, without surrounding whitespace or control \
-                 characters"
-            ));
-        }
+    let rule = "must be non-empty, without surrounding whitespace or control characters";
+    if !PoolKey::is_valid_part(cluster) {
+        return Err(format!("the cluster {rule}"));
     }
-    Ok((cluster.to_owned(), region.to_owned()))
+    let location = PoolLocation::in_region(region).ok_or(format!("the region {rule}"))?;
+    Ok((cluster.to_owned(), location))
 }
 
 fn parse_dynamodb_endpoint(value: &str) -> Result<Url, String> {
@@ -395,6 +387,16 @@ where
     };
     if let Some(message) = conflict {
         return Err(command.error(ErrorKind::ArgumentConflict, message));
+    }
+    // Checked here rather than by clap, so that with MCS the storage flag is
+    // refused for its mode first.
+    if parsed.registration_storage == RegistrationStorage::Dynamodb
+        && parsed.dynamodb_table.is_none()
+    {
+        return Err(command.error(
+            ErrorKind::MissingRequiredArgument,
+            "--registration-storage dynamodb needs --dynamodb-table",
+        ));
     }
     if let Err(error) = Lease::new(parsed.heartbeat_interval_secs, parsed.lease_duration_secs) {
         return Err(command.error(
@@ -636,8 +638,8 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
-    // Karmada's control plane, where the imports are, also has its members'
-    // Cluster objects.
+    // With Karmada, the imports' API server, when it is the control plane,
+    // also has each member's Cluster object.
     let regions = ClusterRegions::new(
         args.cluster_regions
             .iter()
@@ -825,6 +827,7 @@ mod tests {
         // With MCS the service takes no registrations, so it keeps none.
         for flags in [
             &["--registration-storage", "memory"][..],
+            &["--registration-storage", "dynamodb"],
             &["--heartbeat-interval-secs", "5"],
             &["--lease-duration-secs", "30"],
             &[
@@ -850,12 +853,14 @@ mod tests {
             "--cluster-region=aws-west=us-west-2",
         ]))
         .unwrap();
+        let regions = args
+            .cluster_regions
+            .iter()
+            .map(|(cluster, location)| (cluster.as_str(), location.region.as_str()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            args.cluster_regions,
-            [
-                ("aws-ohio".to_owned(), "us-east-2".to_owned()),
-                ("aws-west".to_owned(), "us-west-2".to_owned())
-            ]
+            regions,
+            [("aws-ohio", "us-east-2"), ("aws-west", "us-west-2")]
         );
         for value in ["aws-ohio", "=us-east-2", "aws-ohio=", "aws-ohio= us-east-2"] {
             let error = parse_args(karmada(&["--cluster-region", value])).unwrap_err();

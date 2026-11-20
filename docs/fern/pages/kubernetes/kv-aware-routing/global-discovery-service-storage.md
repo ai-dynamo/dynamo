@@ -264,7 +264,9 @@ replica out of the Service at once:
   `POST /pools` and any replica answers `GET /pools`. A pool registered through one replica shows on
   the others at their next read of the table, within `--dynamodb-poll-interval-secs`.
 - **Rolling restarts.** Nothing special is needed. A new replica lists every live pool at once, with
-  `complete: false` for one lease, and Pool Relays keep heartbeating through the Service.
+  `complete: false` for one lease, and Pool Relays keep heartbeating through the Service. Replicas from
+  before registrations dropped `model` read the items newer replicas write, since those keep a stand-in
+  `model` for them.
 - **Moving to DynamoDB, or to another table.** During a rolling update, old and new replicas keep
   different registrations, and each Pool Relay keeps registering with the replica it is connected to. A
   new replica reports `complete: false` for only one lease, so replace all replicas at once
@@ -274,8 +276,8 @@ replica out of the Service at once:
   Pool Relay registers again on its next heartbeat. On-demand capacity absorbs the expected write rate,
   roughly `pools x relay replicas / heartbeat interval`, for example 80 writes per second for 200 pools
   with two relay replicas at a 5 second heartbeat.
-- **Several Pool Relays for one pool.** They must send the same registration: model, location, and
-  frontends, in any order. The last write wins, so if they differ, the pool's
+- **Several Pool Relays for one pool.** They must send the same registration: location and frontends,
+  in any order. The last write wins, so if they differ, the pool's
   listing switches between their versions at every heartbeat. The service logs a warning that names
   such a pool.
 - **Corrupt items.** An item that cannot be decoded is logged and skipped. The rest of the list is served.

@@ -49,7 +49,9 @@ imports, and `--cluster-id` must be the cluster name MCS uses.
 
 A registration does not name a model. In every mode, Global Routers route the
 pool for each model, alias and adapter its state stream reports ready, so a
-DGD may serve several models. The health field
+DGD may serve several models. Upgrade Pool Relays after the Global Routers and
+the Global Discovery Service: an older service refuses a registration without a
+model. The health field
 `routing_pool_unregistered_reason` says why the pool is not registered while
 the service takes registrations: the service has not answered yet, the pool
 has no region, or a call failed, which the Relay retries. On shutdown the Relay

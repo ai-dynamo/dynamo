@@ -38,12 +38,10 @@ pub enum RegistrationStatus {
 }
 
 /// Registers a pool with `POST /pools` and keeps it registered until
-/// cancelled or dropped. Stopping sends nothing: the service drops the pool
-/// once its lease passes.
-///
-/// Every failure is retried, a `501` included: a caller registers only with a
-/// service whose `GET /routers` says it takes registrations, so a `501` means
-/// its replicas disagree, as while it is being reconfigured.
+/// cancelled or dropped; the service then drops it once its lease passes.
+/// Every failure is retried, a `501` included: callers register only with a
+/// service that says it takes registrations, so a `501` means its replicas
+/// disagree, as while it is reconfigured.
 #[derive(Debug)]
 #[must_use = "dropping the heartbeat stops registering the pool"]
 pub struct PoolHeartbeat {

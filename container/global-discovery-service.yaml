@@ -5,6 +5,7 @@
 # cluster (not through Karmada). Replace IMAGE with the pushed image, for example
 # from the repository root:
 #   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" container/global-discovery-service.yaml | kubectl apply -f -
+#
 # It takes no registrations. It lists a pool while Karmada imports a Ready
 # endpoint of its `<DGD name>-pool-relay` Service; its frontends are the Ready
 # endpoints of its `<DGD name>-frontend` Service. Set the --router-* arguments
@@ -85,7 +86,8 @@ spec:
             - --router-namespace=global-discovery
             - --router-service=global-router
             - --router-port-name=http
-            # For a member Cluster without spec.region, by its member name.
+            # Reading this cluster rather than the Karmada control plane, give
+            # every pool cluster's region, by its member name.
             # - --cluster-region=aws-ohio=us-east-2
           env:
             - name: DYN_LOG

@@ -225,22 +225,18 @@ async fn run() -> Result<()> {
             dynamo_global_discovery_client::GlobalDiscoveryClient::new(url, Duration::from_secs(5))
         })
         .transpose()?;
-    let pools = if let Some(client) = &discovery {
-        discover_pools(
-            client.clone(),
-            Duration::from_secs(5),
-            shutdown.child_token(),
-        )
-    } else {
-        pools
-    };
     let in_flight = Arc::new(InFlightTracker::new());
     let signals = Arc::new(PoolSignals::new(in_flight.clone()));
     // Discovered pools take their models from their Relays' views; static
     // pools name theirs.
-    let relay_catalog = if discovery.is_some() {
+    let relay_catalog = if let Some(client) = &discovery {
+        let discovered = discover_pools(
+            client.clone(),
+            Duration::from_secs(5),
+            shutdown.child_token(),
+        );
         Some(Arc::new(RelayGatedPoolCatalog::for_discovery(
-            pools.clone(),
+            discovered,
             shutdown.child_token(),
             Some(signals.clone()),
         )))
