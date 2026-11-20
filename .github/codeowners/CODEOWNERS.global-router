@@ -11,13 +11,6 @@
 /lib/memory/
 /lib/tokens/
 /lib/kv-hashing/
-/lib/kvbm-common/
-/lib/kvbm-config/
-/lib/kvbm-engine/
-/lib/kvbm-kernels/
-/lib/kvbm-logical/
-/lib/kvbm-physical/
-/lib/kvbm-consolidator/
 /lib/llm/
 /lib/error/
 /lib/truthy/

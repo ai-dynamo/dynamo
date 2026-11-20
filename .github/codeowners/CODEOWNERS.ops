@@ -50,7 +50,6 @@ requirements.txt @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/http/
 /lib/llm/src/lora/
 /tests/benchmarks/
-/lib/bindings/kvbm/
 /lib/lora/src/routing/
 /lib/llm/src/kv_router/
 /lib/llm/src/protocols/
@@ -58,11 +57,9 @@ requirements.txt @ai-dynamo/dynamo-ops-codeowners
 /tests/fault_tolerance/
 /lib/llm/src/entrypoint/
 /lib/llm/src/pool_relay/
-/tests/kvbm_integration/
 /lib/runtime/src/metrics/
 /lib/llm/src/preprocessor/
 /tests/gpu_memory_service/
-/lib/llm/src/block_manager/
 /lib/mocker/servers/sglang/
 /lib/mocker/servers/trtllm/
 /tests/vllm_self_benchmark/
@@ -74,7 +71,6 @@ requirements.txt @ai-dynamo/dynamo-ops-codeowners
 /deploy/operator/internal/gms/
 /components/src/dynamo/common/rl/
 /components/src/dynamo/vllm/omni/
-/lib/bindings/kvbm/pyproject.toml @ai-dynamo/dynamo-ops-codeowners
 /components/src/dynamo/common/http/
 /lib/backend-common/examples/mocker/
 /deploy/operator/internal/checkpoint/
@@ -139,7 +135,6 @@ requirements.txt @ai-dynamo/dynamo-ops-codeowners
 /.github/workflows/xpu-ci.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/power-agent/Dockerfile @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-ops-codeowners
 /examples/diffusers/Dockerfile @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-ops-codeowners
-/lib/kvbm-logical/src/metrics/
 /lib/kv-hashing/src/multimodal/
 /tests/test_kustomize_matrix.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /.github/workflows/fern-docs.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners

@@ -16,18 +16,25 @@ of an existing set.
 Use `ModelDeploymentCard::mdcsum()` after existing discovery-boundary
 normalization and tokenizer overrides, before pipeline construction. Capture
 that checksum as `mdc_checksum` and use it throughout admission, construction,
-and status tracking. Keep the checksum algorithm and metadata-cache identity
-unchanged; do not introduce another normalized materialization hash or move
-its exclusions into `mdcsum()`. The independent LoRA projection fingerprint is
-separate from WorkerSet compatibility.
+and status tracking. `mdcsum()` remains the sole WorkerSet compatibility and
+metadata-cache identity; do not introduce another normalized materialization
+hash. Exclude the `source_path` field itself from `mdcsum()`, while preserving
+all other hashed inputs and their current encoding, defaults, and ordering.
+Keep `source_path` on the card for model loading, metadata resolution, and
+diagnostics. `mdcsum()` does not verify model-weight contents, so deployers are
+responsible for ensuring workers admitted to one WorkerSet serve the same
+weights. The independent LoRA projection fingerprint is separate from
+WorkerSet compatibility.
 
 Checksum equality is intentionally stricter than equivalent serving behavior.
-Different advertised router settings, absent versus explicit defaults, or
-different `source_path` values may reject a newcomer even if its effective
-serving configuration would match. Preserve supported wire decoding and the
-N-2 compatibility shims in the parent instructions. Legacy cards join when
-existing boundary normalization yields matching MDC checksums; equivalent
-representations receive no additional same-set compatibility exemption.
+Different advertised router settings or absent versus explicit defaults may
+reject a newcomer even if its effective serving configuration would match. A
+`source_path` difference alone does not change the checksum; differences in
+other hashed fields, including `display_name`, still do. Preserve supported
+wire decoding and the N-2 compatibility shims in the parent instructions.
+Legacy cards join when existing boundary normalization yields matching MDC
+checksums; equivalent representations receive no additional same-set
+compatibility exemption.
 
 ## Reservation and Succession
 

@@ -331,15 +331,10 @@ def parse_args() -> (
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
-            from vllm.utils import FlexibleArgumentParser
-        except ImportError:
-            try:
-                from vllm.utils.argparse_utils import FlexibleArgumentParser
-            except ModuleNotFoundError:
-                logger.exception(
-                    "Flag '--chat-processor vllm' requires vllm be installed."
-                )
-                sys.exit(1)
+            from vllm.utils.argparse_utils import FlexibleArgumentParser
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
 
         # On a host with no GPU and a CUDA-built wheel, vllm.platforms
         # auto-detection picks UnspecifiedPlatform and the

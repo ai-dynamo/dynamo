@@ -35,13 +35,6 @@
 /lib/memory/
 /lib/tokens/
 /lib/kv-hashing/
-/lib/kvbm-common/
-/lib/kvbm-config/
-/lib/kvbm-engine/
-/lib/kvbm-kernels/
-/lib/kvbm-logical/
-/lib/kvbm-physical/
-/lib/kvbm-consolidator/
 /benchmarks/omni/
 /benchmarks/multimodal/
 /examples/custom_encoder/
@@ -58,7 +51,6 @@
 /lib/llm/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/error/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/truthy/ @ai-dynamo/dynamo-runtime-codeowners
-/lib/llm/bin/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/ @ai-dynamo/dynamo-runtime-codeowners
 /tests/basic/ @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/ @ai-dynamo/dynamo-runtime-codeowners
@@ -88,7 +80,6 @@
 /tests/serve/launch/ @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/trtllm/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/bindings/python/ @ai-dynamo/dynamo-runtime-codeowners
-/lib/llm/src/kernels/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/benches/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/testkit/ @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/examples/ @ai-dynamo/dynamo-runtime-codeowners
@@ -239,7 +230,6 @@ requirements.txt
 /lib/llm/src/http/
 /lib/llm/src/lora/
 /tests/benchmarks/
-/lib/bindings/kvbm/
 /lib/llm/src/grpc.rs
 /lib/llm/src/http.rs
 /lib/llm/src/lora.rs
@@ -250,7 +240,6 @@ requirements.txt
 /tests/fault_tolerance/
 /lib/llm/src/entrypoint/
 /lib/llm/src/pool_relay/
-/tests/kvbm_integration/
 /lib/llm/src/kv_router.rs
 /lib/llm/src/protocols.rs
 /lib/runtime/src/metrics/
@@ -258,14 +247,11 @@ requirements.txt
 /lib/llm/src/pool_relay.rs
 /lib/llm/src/preprocessor/
 /tests/gpu_memory_service/
-/lib/llm/src/block_manager/
 /lib/runtime/src/metrics.rs
 /tests/vllm_self_benchmark/
 /lib/llm/src/lora_routing.rs
 /lib/llm/src/preprocessor.rs
 /lib/lora/src/huggingface.rs @ai-dynamo/dynamo-runtime-codeowners
-/lib/llm/src/block_manager.md
-/lib/llm/src/block_manager.rs
 /lib/llm/src/generate_format/
 /tests/serve/test_vllm_xpu.py
 /lib/llm/src/routing_policy.rs
@@ -315,12 +301,10 @@ requirements.txt
 /tests/test_kustomize_matrix.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/runtime/src/health_check.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.github/review-prompts/README.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-runtime-codeowners
-/lib/kvbm-config/src/messenger.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/system_health.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /.github/review-prompts/runtime.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/src/metrics.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/lib/kvbm-engine/src/pubsub/nats.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/src/telemetry.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/test_sample_diffusion.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /tests/fault_tolerance/etcd_ha/utils.py @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-runtime-codeowners
@@ -343,12 +327,10 @@ requirements.txt
 /components/src/dynamo/common/utils/image_utils.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/common/utils/video_utils.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/bindings/python/tests/test_sidecar_startup.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
-/lib/kvbm-consolidator/src/egress/zmq_publisher.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/backend/multimodal.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/tests/test_snapshot_* @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-gms-codeowners
 /lib/bindings/python/tests/test_kv_router_config.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/common/tests/test_rl_admin.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-rl-codeowners
-/lib/kvbm-consolidator/src/ingress/zmq_subscriber.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/forward_pass_metrics.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/common/backend/sample_diffusion_* @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/common/recv_forward_pass_metrics.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners

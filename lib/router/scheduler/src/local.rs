@@ -492,9 +492,15 @@ where
         classifier: Box<dyn RequestClassifier>,
         shutdown: CancellationToken,
     ) -> bool {
-        self.request_classifier
+        let gate = classifier.dispatch_gate();
+        let installed = self
+            .request_classifier
             .set(RequestClassifierRuntime::new(classifier, shutdown))
-            .is_ok()
+            .is_ok();
+        if installed && let Some(gate) = gate {
+            self.queue.install_dispatch_gate(gate);
+        }
+        installed
     }
 
     /// Start the installed classifier's lifecycle for `request_id`; `None` when no
@@ -713,9 +719,9 @@ where
         self.slots.publish_prefill_completed_if_booking(booking)
     }
 
-    /// Wait for an admission recheck when queueing is enabled and the actor is running.
-    /// This does not wait for blocked requests to finish or for the queue to empty.
-    /// With queueing disabled, return immediately without an admission barrier.
+    /// Wait for an admission recheck when a class queues on capacity or a dispatch gate is
+    /// installed, and the actor is running. This does not wait for blocked requests to finish
+    /// or for the queue to empty. Otherwise return immediately without an admission barrier.
     pub async fn update_queue(&self) {
         self.queue.update().await;
     }
@@ -864,8 +870,9 @@ mod tests {
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::types::{ScheduleMode, TierOverlapBlocks};
-    use dynamo_admission::ClassifyFuture;
-    use dynamo_admission::WorkerView;
+    use dynamo_admission::{
+        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, WorkerView,
+    };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
@@ -1271,6 +1278,360 @@ mod tests {
         cancel_token.cancel();
     }
 
+    /// A gate that holds the sessions in `held` and prefers `target` for everything it lets go.
+    struct TestGate {
+        held: parking_lot::Mutex<std::collections::HashSet<String>>,
+        hold_until: parking_lot::Mutex<Option<Instant>>,
+        /// Keep holding with `hold_until` after it passes, as a gate that names a stale
+        /// deadline would.
+        hold_past_until: std::sync::atomic::AtomicBool,
+        checks: AtomicUsize,
+        target: Option<WorkerWithDpRank>,
+        dispatched: parking_lot::Mutex<Vec<(String, Option<WorkerWithDpRank>)>>,
+        recheck: std::sync::OnceLock<DispatchRecheck>,
+    }
+
+    impl TestGate {
+        fn holding(sessions: &[&str], target: Option<WorkerWithDpRank>) -> Arc<Self> {
+            Arc::new(Self {
+                held: parking_lot::Mutex::new(sessions.iter().map(|s| (*s).to_owned()).collect()),
+                hold_until: parking_lot::Mutex::new(None),
+                hold_past_until: std::sync::atomic::AtomicBool::new(false),
+                checks: AtomicUsize::new(0),
+                target,
+                dispatched: parking_lot::Mutex::new(Vec::new()),
+                recheck: std::sync::OnceLock::new(),
+            })
+        }
+
+        fn dispatched_ids(&self) -> Vec<String> {
+            self.dispatched
+                .lock()
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+    }
+
+    impl DispatchGate for TestGate {
+        fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
+            self.checks.fetch_add(1, Ordering::Relaxed);
+            let held = head
+                .session_context()
+                .is_some_and(|session| self.held.lock().contains(session.session_id()));
+            if held {
+                let until = *self.hold_until.lock();
+                if self.hold_past_until.load(Ordering::Relaxed)
+                    || until.is_none_or(|until| Instant::now() < until)
+                {
+                    return DispatchDecision::Hold { until };
+                }
+            }
+            DispatchDecision::Go {
+                target: self.target,
+            }
+        }
+
+        fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
+            self.dispatched
+                .lock()
+                .push((head.request_id().unwrap_or_default().to_owned(), target));
+        }
+
+        fn attach(&self, recheck: DispatchRecheck) {
+            assert!(self.recheck.set(recheck).is_ok(), "attached once");
+        }
+    }
+
+    /// Keys each request's lane by its session id, as ThunderAgent does.
+    fn key_by_session(mut request: ClassifyRequest) -> ClassifyRequest {
+        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+            request.set_lane_key(&session);
+        }
+        request
+    }
+
+    /// A classifier that only keys lanes by session, for lane tests without a gate.
+    struct SessionLaneClassifier;
+
+    impl RequestClassifier for SessionLaneClassifier {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: &dyn WorkerView,
+        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            Ok(key_by_session(request))
+        }
+    }
+
+    struct GateClassifier(Arc<TestGate>);
+
+    impl RequestClassifier for GateClassifier {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: &dyn WorkerView,
+        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            Ok(key_by_session(request))
+        }
+
+        fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
+            Some(Arc::clone(&self.0) as Arc<dyn DispatchGate>)
+        }
+    }
+
+    fn session_request(request_id: &str, session_id: &str) -> ScheduleRequest {
+        let mut request = request(ScheduleMode::TrackedWithLifecycle {
+            request_id: request_id.into(),
+        });
+        request.session_context = Some(dynamo_router_protocol::session::SessionContext::new(
+            session_id.into(),
+            None,
+            None,
+            None,
+        ));
+        request
+    }
+
+    fn gated_scheduler(
+        gate: &Arc<TestGate>,
+    ) -> (
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
+        CancellationToken,
+    ) {
+        gated_scheduler_with_threshold(gate, Some(0.5))
+    }
+
+    /// As [`gated_scheduler`]; `None` leaves every class without busy thresholds, so only the
+    /// gate holds heads.
+    fn gated_scheduler_with_threshold(
+        gate: &Arc<TestGate>,
+        threshold_frac: Option<f64>,
+    ) -> (
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
+        CancellationToken,
+    ) {
+        let roomy = SimpleWorkerConfig {
+            max_num_batched_tokens: Some(10_000),
+            ..Default::default()
+        };
+        let (scheduler, _slots, _configs, cancel) = make_scheduler(
+            HashMap::from([(0, roomy.clone()), (1, roomy)]),
+            threshold_frac,
+            false,
+            None,
+        );
+        assert!(scheduler.install_request_classifier(
+            Box::new(GateClassifier(Arc::clone(gate))),
+            cancel.clone(),
+        ));
+        assert!(
+            gate.recheck.get().is_some(),
+            "install hands the gate its recheck handle"
+        );
+        (scheduler, cancel)
+    }
+
+    type Admission = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AdmittedSchedulingResponse, KvSchedulerError>>>,
+    >;
+
+    /// Submits a request and lets the actor process it; returns the still-pending future.
+    async fn submit(
+        scheduler: &Arc<
+            LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>,
+        >,
+        request: ScheduleRequest,
+    ) -> Admission {
+        // A request with a lifecycle is classified, so the installed classifier keys its
+        // lane; the lifecycle lives as long as the admission and ends when it resolves.
+        let lifecycle = match &request.mode {
+            ScheduleMode::TrackedWithLifecycle { request_id } => scheduler
+                .begin_request_lifecycle(request_id)
+                .expect("lifecycle begins"),
+            _ => None,
+        };
+        let owned = Arc::clone(scheduler);
+        let mut admission: Admission = Box::pin(async move {
+            let _lifecycle = lifecycle;
+            owned.schedule_request_admitted(request).await
+        });
+        assert!(poll_once(admission.as_mut()).is_pending());
+        scheduler.admission_barrier().await.unwrap();
+        admission
+    }
+
+    fn admitted_worker(admission: &mut Admission) -> Option<WorkerWithDpRank> {
+        match poll_once(admission.as_mut()) {
+            std::task::Poll::Ready(Ok(admitted)) => Some(admitted.response.best_worker),
+            std::task::Poll::Ready(Err(error)) => panic!("admission failed: {error}"),
+            std::task::Poll::Pending => None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_gate_holds_one_session_lane_and_releases_on_notify() {
+        let target = WorkerWithDpRank::new(1, 0);
+        let gate = TestGate::holding(&["a"], Some(target));
+        let (scheduler, cancel) = gated_scheduler(&gate);
+
+        // Session a's turns are held. They arrived first, yet session b dispatches: a held head
+        // blocks only its session's lane. The gate's target becomes the soft affinity target.
+        let mut a1 = submit(&scheduler, session_request("a1", "a")).await;
+        let mut a2 = submit(&scheduler, session_request("a2", "a")).await;
+        let mut b1 = submit(&scheduler, session_request("b1", "b")).await;
+        assert_eq!(admitted_worker(&mut b1), Some(target));
+        assert_eq!(admitted_worker(&mut a1), None);
+        assert_eq!(admitted_worker(&mut a2), None);
+        assert_eq!(scheduler.pending_count(), 2);
+        assert_eq!(gate.dispatched_ids(), ["b1"]);
+
+        // Nothing changes without a recheck.
+        scheduler.admission_barrier().await.unwrap();
+        assert_eq!(admitted_worker(&mut a1), None);
+
+        // The gate releases the session and wakes the queue: both held turns go, in order.
+        gate.held.lock().clear();
+        gate.recheck.get().unwrap().notify();
+        scheduler.admission_barrier().await.unwrap();
+        assert_eq!(admitted_worker(&mut a1), Some(target));
+        assert_eq!(admitted_worker(&mut a2), Some(target));
+        assert_eq!(scheduler.pending_count(), 0);
+        assert_eq!(gate.dispatched_ids(), ["b1", "a1", "a2"]);
+        assert!(
+            gate.dispatched
+                .lock()
+                .iter()
+                .all(|(_, target_seen)| *target_seen == Some(target))
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_gate_hold_until_wakes_the_queue_without_a_notify() {
+        let gate = TestGate::holding(&["a"], None);
+        let until = Instant::now() + Duration::from_secs(5);
+        *gate.hold_until.lock() = Some(until);
+        let (scheduler, cancel) = gated_scheduler(&gate);
+
+        let mut a1 = submit(&scheduler, session_request("a1", "a")).await;
+        assert_eq!(admitted_worker(&mut a1), None);
+
+        // The actor armed a timer for the hold. Once it fires, the actor rechecks on its own:
+        // no barrier, no notify, only yields so the actor task can run.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let mut admitted = None;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            admitted = admitted_worker(&mut a1);
+            if admitted.is_some() {
+                break;
+            }
+        }
+        assert!(admitted.is_some(), "the hold timer must wake the queue");
+        assert_eq!(gate.dispatched_ids(), ["a1"]);
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_change_leaves_a_gate_held_head_to_the_gate_without_busy_thresholds() {
+        let gate = TestGate::holding(&["a"], None);
+        let (scheduler, cancel) = gated_scheduler_with_threshold(&gate, None);
+
+        let mut b1 = submit(&scheduler, session_request("b1", "b")).await;
+        assert!(admitted_worker(&mut b1).is_some());
+        let mut a1 = submit(&scheduler, session_request("a1", "a")).await;
+        assert_eq!(admitted_worker(&mut a1), None);
+        let asked = gate.checks.load(Ordering::SeqCst);
+
+        // The gate would now let a go, but nothing has asked it: no notify, no timer. Only
+        // yields, so the actor runs without a barrier's full recheck.
+        gate.held.lock().clear();
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(admitted_worker(&mut a1), None);
+
+        // b1 frees its worker. A capacity change cannot release a head the gate holds, so the
+        // gate is not asked again and a stays queued.
+        scheduler.free("b1").await.unwrap();
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(admitted_worker(&mut a1), None);
+        assert_eq!(gate.checks.load(Ordering::SeqCst), asked);
+
+        // The gate's own wake is what re-asks its held lanes.
+        gate.recheck.get().expect("gate attached").notify();
+        let mut admitted = None;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            admitted = admitted_worker(&mut a1);
+            if admitted.is_some() {
+                break;
+            }
+        }
+        assert!(
+            admitted.is_some(),
+            "the gate's notify must recheck held lanes"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_update_rechecks_a_gate_without_busy_thresholds() {
+        let gate = TestGate::holding(&["a"], None);
+        let (scheduler, cancel) = gated_scheduler_with_threshold(&gate, None);
+
+        let mut a1 = submit(&scheduler, session_request("a1", "a")).await;
+        assert_eq!(admitted_worker(&mut a1), None);
+
+        // The gate would now let a go. The periodic and worker-config updates still recheck
+        // held heads when no class queues on capacity.
+        gate.held.lock().clear();
+        scheduler.update_queue().await;
+        assert!(admitted_worker(&mut a1).is_some());
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_gate_hold_until_in_the_past_arms_no_timer() {
+        let gate = TestGate::holding(&["a"], None);
+        *gate.hold_until.lock() = Some(Instant::now());
+        gate.hold_past_until.store(true, Ordering::Relaxed);
+        let (scheduler, cancel) = gated_scheduler(&gate);
+
+        let mut a1 = submit(&scheduler, session_request("a1", "a")).await;
+        assert_eq!(admitted_worker(&mut a1), None);
+
+        // A re-armed past deadline would wake the actor at once, ask the gate again, and loop.
+        let checks = gate.checks.load(Ordering::Relaxed);
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(gate.checks.load(Ordering::Relaxed), checks);
+        assert_eq!(admitted_worker(&mut a1), None);
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_gate_target_does_not_override_a_hard_pin() {
+        let pin = WorkerWithDpRank::new(0, 0);
+        let gate = TestGate::holding(&[], Some(WorkerWithDpRank::new(1, 0)));
+        let (scheduler, cancel) = gated_scheduler(&gate);
+
+        let mut pinned = session_request("p1", "p");
+        pinned.pinned_worker = Some(pin);
+        let mut p1 = submit(&scheduler, pinned).await;
+        assert_eq!(admitted_worker(&mut p1), Some(pin));
+        assert_eq!(*gate.dispatched.lock(), [("p1".to_owned(), Some(pin))]);
+        cancel.cancel();
+    }
+
     struct CountingClassifier {
         calls: Arc<AtomicUsize>,
     }
@@ -1280,10 +1641,10 @@ mod tests {
             &mut self,
             request: ClassifyRequest,
             workers: &dyn WorkerView,
-        ) -> ClassifyFuture {
+        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert!(workers.is_empty());
-            Box::pin(async move { Ok(request) })
+            Ok(request)
         }
     }
 
@@ -1374,10 +1735,10 @@ mod tests {
                 &mut self,
                 mut request: ClassifyRequest,
                 _workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 assert_eq!(request.ingress_at(), self.0);
                 request.set_due_at(self.0 + Duration::from_secs(1));
-                Box::pin(async move { Ok(request) })
+                Ok(request)
             }
         }
 
@@ -1423,7 +1784,7 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 // The queue's capacity check, run on the classifier's own rows.
                 let thresholds = BusyThresholds {
                     prefill_busy_threshold_frac: Some(0.5),
@@ -1447,7 +1808,7 @@ mod tests {
                         })
                         .collect(),
                 );
-                Box::pin(async move { Ok(request) })
+                Ok(request)
             }
         }
 
@@ -2116,6 +2477,96 @@ mod tests {
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 64);
 
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn required_taints_keep_their_own_room_answer() {
+        // Worker 0 carries zone-a and worker 1 nothing; both start full. Session a requires
+        // zone-a, session b requires nothing. When worker 1 frees, b must go: a's refusal is its
+        // own, not the class's shared answer, so a at the front of the queue cannot stand for b.
+        let zone_a = HashSet::from(["zone-a".to_string()]);
+        let workers = HashMap::from([
+            (
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    taints: zone_a.clone(),
+                    ..Default::default()
+                },
+            ),
+            (
+                1,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.5), true, None);
+        assert!(
+            scheduler
+                .install_request_classifier(Box::new(SessionLaneClassifier), cancel_token.clone())
+        );
+
+        let mut fill_a = request(ScheduleMode::Tracked {
+            request_id: "fill-a".to_string(),
+        });
+        fill_a.routing_constraints.required_taints = zone_a.clone();
+        assert_eq!(
+            scheduler
+                .schedule_request(fill_a)
+                .await
+                .unwrap()
+                .best_worker
+                .worker_id,
+            0
+        );
+        let mut fill_b = request(ScheduleMode::Tracked {
+            request_id: "fill-b".to_string(),
+        });
+        fill_b.allowed_worker_ids = Some(HashSet::from([1]));
+        assert_eq!(
+            scheduler
+                .schedule_request(fill_b)
+                .await
+                .unwrap()
+                .best_worker
+                .worker_id,
+            1
+        );
+
+        let tainted = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                let _lifecycle = scheduler.begin_request_lifecycle("a1").unwrap();
+                let mut request = session_request("a1", "a");
+                request.routing_constraints.required_taints = zone_a;
+                scheduler.schedule_request(request).await
+            })
+        };
+        wait_for_pending_count(&scheduler, 1).await;
+        let plain = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                let _lifecycle = scheduler.begin_request_lifecycle("b1").unwrap();
+                scheduler.schedule_request(session_request("b1", "b")).await
+            })
+        };
+        wait_for_pending_count(&scheduler, 2).await;
+
+        scheduler.free("fill-b").await.unwrap();
+        let response = tokio::time::timeout(Duration::from_millis(250), plain)
+            .await
+            .expect("the untainted session must dispatch when worker 1 frees")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.best_worker.worker_id, 1);
+        assert_eq!(scheduler.pending_count(), 1);
+        assert!(!tainted.is_finished());
+
+        tainted.abort();
         cancel_token.cancel();
     }
 
