@@ -453,13 +453,13 @@ class ChatPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert "choices" in result, (
-            f"Missing 'choices' in response. Response keys: {list(result.keys())}"
-        )
+        assert (
+            "choices" in result
+        ), f"Missing 'choices' in response. Response keys: {list(result.keys())}"
         assert len(result["choices"]) > 0, "Empty choices in response"
-        assert "message" in result["choices"][0], (
-            f"Missing 'message' in first choice. Choice keys: {list(result['choices'][0].keys())}"
-        )
+        assert (
+            "message" in result["choices"][0]
+        ), f"Missing 'message' in first choice. Choice keys: {list(result['choices'][0].keys())}"
 
         # Check for content in all possible fields where parsers might put output:
         # 1. content - standard message content
@@ -551,18 +551,18 @@ class EncoderImagePayload(ChatPayload):
         assert colors and colors[0] == self.color, content
         result = response.json()
         usage = result["usage"]
-        assert type(usage["prompt_tokens"]) is int and usage["prompt_tokens"] > 64, (
-            usage
-        )
+        assert (
+            type(usage["prompt_tokens"]) is int and usage["prompt_tokens"] > 64
+        ), usage
         assert (
             type(usage["completion_tokens"]) is int and usage["completion_tokens"] > 0
         ), usage
         assert (
             usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
         ), usage
-        assert (usage.get("prompt_tokens_details") or {}).get("cached_tokens") == 0, (
-            usage
-        )
+        assert (usage.get("prompt_tokens_details") or {}).get(
+            "cached_tokens"
+        ) == 0, usage
         assert self.baseline_path is not None
         observation = {
             "request": {k: v for k, v in self.body.items() if k != "model"},
@@ -770,9 +770,9 @@ def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
         assert isinstance(token_ids, list) and all(
             type(token) is int and token >= 0 for token in token_ids
         ), f"Missing or invalid {field}: {token_ids!r}"
-        assert len(token_ids) == count, (
-            f"{field} count does not match usage: {token_ids!r}, {usage!r}"
-        )
+        assert (
+            len(token_ids) == count
+        ), f"{field} count does not match usage: {token_ids!r}, {usage!r}"
     assert usage.get("total_tokens") == (
         usage["prompt_tokens"] + usage["completion_tokens"]
     ), f"Inconsistent total token usage: {usage!r}"
@@ -796,9 +796,9 @@ class DisaggregatedChatPayload(ChatPayload):
         if choices[0].get("finish_reason") not in {"stop", "length"}:
             raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
         if self.expected_finish_reason is not None:
-            assert choices[0]["finish_reason"] == self.expected_finish_reason, (
-                f"Expected finish reason {self.expected_finish_reason!r}: {choices[0]!r}"
-            )
+            assert (
+                choices[0]["finish_reason"] == self.expected_finish_reason
+            ), f"Expected finish reason {self.expected_finish_reason!r}: {choices[0]!r}"
 
         usage = result.get("usage")
         if not isinstance(usage, dict):
@@ -812,9 +812,9 @@ class DisaggregatedChatPayload(ChatPayload):
                 f"Expected decode to generate more than the prefill token: {usage!r}"
             )
         if self.expected_completion_tokens is not None:
-            assert completion_tokens == self.expected_completion_tokens, (
-                f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
-            )
+            assert (
+                completion_tokens == self.expected_completion_tokens
+            ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
             _validate_chat_token_usage(result)
         if self.body.get("logprobs"):
             logprobs = (choices[0].get("logprobs") or {}).get("content")
@@ -863,9 +863,9 @@ class KvTransferPayload(DisaggregatedChatPayload):
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
-        assert self._transfer_before is not None, (
-            "Missing pre-request transfer baseline"
-        )
+        assert (
+            self._transfer_before is not None
+        ), "Missing pre-request transfer baseline"
         self.transfer_metrics.wait_for_transfer(before=self._transfer_before)
         self.decode_metrics.wait_for_scheduler()
         self.prefill_metrics.wait_for_scheduler()
@@ -1182,9 +1182,9 @@ def _validate_chat_logprobs(content_logprobs) -> None:
             assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
             assert "bytes" in entry, f"Missing token bytes: {entry!r}"
             if entry["bytes"] is not None:
-                assert isinstance(entry["bytes"], list), (
-                    f"Invalid token bytes: {entry!r}"
-                )
+                assert isinstance(
+                    entry["bytes"], list
+                ), f"Invalid token bytes: {entry!r}"
 
 
 @dataclass
@@ -1204,65 +1204,65 @@ class ChatPayloadWithLogprobs(ChatPayload):
         logprobs_data = choice["logprobs"]
         requested_top_logprobs = self.body.get("top_logprobs") or 0
         if requested_top_logprobs > 0:
-            assert logprobs_data is not None, (
-                "Expected logprobs for top_logprobs request"
-            )
+            assert (
+                logprobs_data is not None
+            ), "Expected logprobs for top_logprobs request"
         if logprobs_data is not None:
             assert "content" in logprobs_data, "Missing 'content' in logprobs"
             content_logprobs = logprobs_data["content"]
             if requested_top_logprobs > 0:
-                assert content_logprobs, (
-                    "Expected logprobs content for top_logprobs request"
-                )
+                assert (
+                    content_logprobs
+                ), "Expected logprobs content for top_logprobs request"
 
             if content_logprobs:
                 # Validate structure of logprobs
                 for item in content_logprobs:
                     assert "token" in item, "Missing 'token' in logprobs content"
                     assert "logprob" in item, "Missing 'logprob' in logprobs content"
-                    assert "top_logprobs" in item, (
-                        "Missing 'top_logprobs' in logprobs content"
-                    )
+                    assert (
+                        "top_logprobs" in item
+                    ), "Missing 'top_logprobs' in logprobs content"
 
                     if requested_top_logprobs > 0:
-                        assert item["top_logprobs"], (
-                            "Expected top_logprobs alternatives"
-                        )
+                        assert item[
+                            "top_logprobs"
+                        ], "Expected top_logprobs alternatives"
 
                     # Sanity check: logprob should be valid (not nan/inf/positive)
                     logprob_val = item["logprob"]
                     assert not math.isnan(logprob_val), "logprob is NaN"
                     assert not math.isinf(logprob_val), "logprob is infinite"
-                    assert logprob_val <= 0, (
-                        f"logprob should be <= 0, got {logprob_val}"
-                    )
+                    assert (
+                        logprob_val <= 0
+                    ), f"logprob should be <= 0, got {logprob_val}"
 
                     # Validate bytes field is populated for the selected token
                     assert "bytes" in item, "Missing 'bytes' in logprobs content item"
                     token_str = item["token"]
                     if token_str:
-                        assert item["bytes"] is not None, (
-                            f"'bytes' should be populated for non-empty token {token_str!r}"
-                        )
-                        assert isinstance(item["bytes"], list), (
-                            f"'bytes' should be a list, got {type(item['bytes'])}"
-                        )
+                        assert (
+                            item["bytes"] is not None
+                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
+                        assert isinstance(
+                            item["bytes"], list
+                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
 
                     # Validate top_logprobs entries have token, logprob, and bytes
                     for top_lp in item["top_logprobs"]:
-                        assert "token" in top_lp, (
-                            "Missing 'token' in top_logprobs entry"
-                        )
-                        assert "logprob" in top_lp, (
-                            "Missing 'logprob' in top_logprobs entry"
-                        )
-                        assert "bytes" in top_lp, (
-                            "Missing 'bytes' in top_logprobs entry"
-                        )
+                        assert (
+                            "token" in top_lp
+                        ), "Missing 'token' in top_logprobs entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), "Missing 'logprob' in top_logprobs entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), "Missing 'bytes' in top_logprobs entry"
                         if top_lp["token"]:
-                            assert top_lp["bytes"] is not None, (
-                                f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
-                            )
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
 
                 logger.info(
                     f"Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
@@ -1298,9 +1298,9 @@ class StreamingChatPayload(BasePayload):
         fields = self.body.get("nvext", {}).get("extra_fields", [])
         deadline = time.monotonic() + self.timeout
         for line in response.iter_lines(chunk_size=1):
-            assert time.monotonic() < deadline, (
-                f"Chat stream exceeded its {self.timeout}s deadline"
-            )
+            assert (
+                time.monotonic() < deadline
+            ), f"Chat stream exceeded its {self.timeout}s deadline"
             if isinstance(line, bytes):
                 line = line.decode("utf-8")
             if not line.startswith("data:"):
@@ -1329,24 +1329,24 @@ class StreamingChatPayload(BasePayload):
                 if finish_reason is not None:
                     terminal_nvext = nvext
                 else:
-                    assert nvext.get("prompt_logprobs") is None, (
-                        "Prompt logprobs must appear only on the terminal chunk"
-                    )
+                    assert (
+                        nvext.get("prompt_logprobs") is None
+                    ), "Prompt logprobs must appear only on the terminal chunk"
             if chunk_ids or chunk_logprobs:
                 token_chunks += 1
             if "completion_token_ids" in fields and self.body.get("logprobs"):
-                assert [item["token_id"] for item in chunk_logprobs] == chunk_ids, (
-                    "Output logprobs do not match this chunk's completion token positions"
-                )
+                assert [
+                    item["token_id"] for item in chunk_logprobs
+                ] == chunk_ids, "Output logprobs do not match this chunk's completion token positions"
             if chunk.get("usage") is not None:
                 assert finish_reason is not None, "Usage arrived before completion"
                 assert usage is None, "Duplicate terminal usage"
                 usage = chunk["usage"]
 
         assert is_done, "Stream ended without [DONE]"
-        assert token_chunks >= self.min_token_chunks, (
-            f"Expected at least {self.min_token_chunks} token-bearing chunks, got {token_chunks}"
-        )
+        assert (
+            token_chunks >= self.min_token_chunks
+        ), f"Expected at least {self.min_token_chunks} token-bearing chunks, got {token_chunks}"
         assert finish_reason in {
             "stop",
             "length",
@@ -1367,9 +1367,9 @@ class StreamingChatPayload(BasePayload):
         if self.body.get("logprobs"):
             _validate_chat_logprobs(output_logprobs)
             if (self.body.get("top_logprobs") or 0) > 0:
-                assert all(item["top_logprobs"] for item in output_logprobs), (
-                    "Expected top_logprobs alternatives"
-                )
+                assert all(
+                    item["top_logprobs"] for item in output_logprobs
+                ), "Expected top_logprobs alternatives"
         if "completion_token_ids" in fields:
             assert completion_ids, "Missing requested completion token IDs"
             assert all(type(token) is int and token >= 0 for token in completion_ids)
@@ -1391,9 +1391,9 @@ class StreamingChatPayload(BasePayload):
             assert prompt_ids, "Missing requested prompt token IDs"
             assert all(type(token) is int and token >= 0 for token in prompt_ids)
             if usage is not None:
-                assert len(prompt_ids) == usage["prompt_tokens"], (
-                    "Incorrect prompt usage"
-                )
+                assert (
+                    len(prompt_ids) == usage["prompt_tokens"]
+                ), "Incorrect prompt usage"
         if "prompt_logprobs" in fields:
             prompt_ids = terminal_nvext.get("prompt_token_ids")
             prompt_logprobs = terminal_nvext.get("prompt_logprobs")
@@ -1407,9 +1407,9 @@ class StreamingChatPayload(BasePayload):
                 assert entries and str(token) in entries, "Missing prompt token logprob"
                 assert len(entries) >= (self.body.get("prompt_logprobs") or 0)
                 for candidate, entry in entries.items():
-                    assert int(candidate) >= 0, (
-                        f"Invalid prompt token ID: {candidate!r}"
-                    )
+                    assert (
+                        int(candidate) >= 0
+                    ), f"Invalid prompt token ID: {candidate!r}"
                     value = entry["logprob"]
                     assert math.isfinite(value) and -9999 < value <= 0, entry
                     if entry.get("rank") is not None:
@@ -1420,9 +1420,9 @@ class StreamingChatPayload(BasePayload):
 def _validate_single_tool_call(call: Dict[str, Any], arguments: Dict[str, Any]) -> None:
     assert call.get("type") == "function", f"Not a function call: {call}"
     assert call.get("id"), f"Tool call has no id: {call}"
-    assert json.loads(call["function"]["arguments"]) == arguments, (
-        f"Wrong arguments: {call}"
-    )
+    assert (
+        json.loads(call["function"]["arguments"]) == arguments
+    ), f"Wrong arguments: {call}"
 
 
 def _one_value(values: List[Any]) -> Any:
@@ -1482,9 +1482,9 @@ class ToolCallingChatPayload(ChatPayload):
         # If expected tool name is provided, validate it
         if self.expected_tool_name:
             tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
-            assert self.expected_tool_name in tool_names, (
-                f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
-            )
+            assert (
+                self.expected_tool_name in tool_names
+            ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
 
         # Check expected_response keywords against tool call arguments (OR logic)
@@ -2146,16 +2146,16 @@ class ImagesAccountingPayload(ImagesPayload):
         super().validate(response, content)
         result = response.json()
         requested = int(self.body.get("n", 1))
-        assert len(result["data"]) == requested, (
-            f"Expected {requested} images in 'data': {len(result['data'])}"
-        )
-        assert result.get("usage") is None, (
-            f"Token usage must stay null without backend token counts: {result['usage']!r}"
-        )
+        assert (
+            len(result["data"]) == requested
+        ), f"Expected {requested} images in 'data': {len(result['data'])}"
+        assert (
+            result.get("usage") is None
+        ), f"Token usage must stay null without backend token counts: {result['usage']!r}"
         assert result.get("size") == "1x1", f"Unexpected size: {result.get('size')!r}"
-        assert result.get("output_format") == "png", (
-            f"Unexpected output_format: {result.get('output_format')!r}"
-        )
+        assert (
+            result.get("output_format") == "png"
+        ), f"Unexpected output_format: {result.get('output_format')!r}"
         expected = {"output_images": requested, "input_images": 0}
         requested_steps = (self.body.get("nvext") or {}).get("num_inference_steps")
         if requested_steps is not None:
@@ -2183,9 +2183,9 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
         if requested_logprobs > 0:
             assert logprobs_data is not None, "Expected logprobs for logprobs request"
         if logprobs_data is not None:
-            assert "token_logprobs" in logprobs_data, (
-                "Missing 'token_logprobs' in logprobs"
-            )
+            assert (
+                "token_logprobs" in logprobs_data
+            ), "Missing 'token_logprobs' in logprobs"
             assert "tokens" in logprobs_data, "Missing 'tokens' in logprobs"
 
             token_logprobs = logprobs_data["token_logprobs"]
@@ -2194,30 +2194,30 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                 assert token_logprobs, "Expected token_logprobs for logprobs request"
                 top_logprobs = logprobs_data.get("top_logprobs")
                 assert top_logprobs, "Expected top_logprobs alternatives"
-                assert len(top_logprobs) == len(tokens), (
-                    "Expected alternatives for each token"
-                )
-                assert all(top_logprobs), (
-                    "Expected non-empty top_logprobs for each token"
-                )
+                assert len(top_logprobs) == len(
+                    tokens
+                ), "Expected alternatives for each token"
+                assert all(
+                    top_logprobs
+                ), "Expected non-empty top_logprobs for each token"
 
             if token_logprobs:
-                assert len(token_logprobs) == len(tokens), (
-                    "Mismatch between token_logprobs and tokens length"
-                )
+                assert len(token_logprobs) == len(
+                    tokens
+                ), "Mismatch between token_logprobs and tokens length"
 
                 # Sanity check: each logprob should be valid (not nan/inf/positive)
                 for i, logprob_val in enumerate(token_logprobs):
                     if logprob_val is not None:  # First token can be None
-                        assert not math.isnan(logprob_val), (
-                            f"logprob at index {i} is NaN"
-                        )
-                        assert not math.isinf(logprob_val), (
-                            f"logprob at index {i} is infinite"
-                        )
-                        assert logprob_val <= 0, (
-                            f"logprob at index {i} should be <= 0, got {logprob_val}"
-                        )
+                        assert not math.isnan(
+                            logprob_val
+                        ), f"logprob at index {i} is NaN"
+                        assert not math.isinf(
+                            logprob_val
+                        ), f"logprob at index {i} is infinite"
+                        assert (
+                            logprob_val <= 0
+                        ), f"logprob at index {i} should be <= 0, got {logprob_val}"
 
                 # Completions top_logprobs follow the OpenAI legacy format: one
                 # {token: logprob} map per generated token (unlike chat's records).
@@ -2225,9 +2225,9 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                 for i, token_top_lps in enumerate(top_logprobs_list):
                     if not token_top_lps:
                         continue
-                    assert isinstance(token_top_lps, dict), (
-                        f"top_logprobs[{i}] should be a token->logprob map, got {type(token_top_lps).__name__}"
-                    )
+                    assert isinstance(
+                        token_top_lps, dict
+                    ), f"top_logprobs[{i}] should be a token->logprob map, got {type(token_top_lps).__name__}"
                     # The sampled token can appear in addition to the top-k.
                     requested_logprobs = self.body.get("logprobs")
                     if requested_logprobs is not None:
@@ -2236,12 +2236,12 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                             f"expected at most {requested_logprobs + 1}"
                         )
                     for token, logprob in token_top_lps.items():
-                        assert math.isfinite(logprob), (
-                            f"top_logprobs[{i}][{token!r}] is not finite"
-                        )
-                        assert logprob <= 0, (
-                            f"top_logprobs[{i}][{token!r}] should be <= 0, got {logprob}"
-                        )
+                        assert math.isfinite(
+                            logprob
+                        ), f"top_logprobs[{i}][{token!r}] is not finite"
+                        assert (
+                            logprob <= 0
+                        ), f"top_logprobs[{i}][{token!r}] should be <= 0, got {logprob}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
@@ -2265,32 +2265,32 @@ class ResponsesPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert result.get("object") == "response", (
-            f"Expected object='response', got {result.get('object')}"
-        )
-        assert result.get("id", "").startswith("resp_"), (
-            f"Expected id to start with 'resp_', got {result.get('id')}"
-        )
-        assert result.get("status") == "completed", (
-            f"Expected status='completed', got {result.get('status')}"
-        )
+        assert (
+            result.get("object") == "response"
+        ), f"Expected object='response', got {result.get('object')}"
+        assert result.get("id", "").startswith(
+            "resp_"
+        ), f"Expected id to start with 'resp_', got {result.get('id')}"
+        assert (
+            result.get("status") == "completed"
+        ), f"Expected status='completed', got {result.get('status')}"
 
         output = result.get("output", [])
         assert len(output) > 0, "Response output is empty"
 
         msg = output[0]
-        assert msg.get("type") == "message", (
-            f"Expected output[0].type='message', got {msg.get('type')}"
-        )
-        assert msg.get("role") == "assistant", (
-            f"Expected role='assistant', got {msg.get('role')}"
-        )
+        assert (
+            msg.get("type") == "message"
+        ), f"Expected output[0].type='message', got {msg.get('type')}"
+        assert (
+            msg.get("role") == "assistant"
+        ), f"Expected role='assistant', got {msg.get('role')}"
 
         content_parts = msg.get("content", [])
         assert len(content_parts) > 0, "Message content is empty"
-        assert content_parts[0].get("type") == "output_text", (
-            f"Expected content[0].type='output_text', got {content_parts[0].get('type')}"
-        )
+        assert (
+            content_parts[0].get("type") == "output_text"
+        ), f"Expected content[0].type='output_text', got {content_parts[0].get('type')}"
 
         return content_parts[0].get("text", "")
 
@@ -2333,23 +2333,23 @@ class ResponsesStreamPayload(BasePayload):
 
         # Validate lifecycle event ordering
         assert len(event_types) >= 2, f"Too few events: {event_types}"
-        assert event_types[0] == "response.created", (
-            f"First event should be response.created, got {event_types[0]}"
-        )
-        assert event_types[1] == "response.in_progress", (
-            f"Second event should be response.in_progress, got {event_types[1]}"
-        )
+        assert (
+            event_types[0] == "response.created"
+        ), f"First event should be response.created, got {event_types[0]}"
+        assert (
+            event_types[1] == "response.in_progress"
+        ), f"Second event should be response.in_progress, got {event_types[1]}"
 
         non_done = [e for e in event_types if e != "done"]
-        assert non_done[-1] == "response.completed", (
-            f"Last real event should be response.completed, got {non_done[-1]}"
-        )
+        assert (
+            non_done[-1] == "response.completed"
+        ), f"Last real event should be response.completed, got {non_done[-1]}"
 
         # Validate text content events
         assert "response.output_item.added" in event_types, "Missing output_item.added"
-        assert "response.content_part.added" in event_types, (
-            "Missing content_part.added"
-        )
+        assert (
+            "response.content_part.added" in event_types
+        ), "Missing content_part.added"
         assert "response.output_text.delta" in event_types, "Missing output_text.delta"
         assert "response.output_text.done" in event_types, "Missing output_text.done"
         assert "response.content_part.done" in event_types, "Missing content_part.done"
@@ -2358,13 +2358,13 @@ class ResponsesStreamPayload(BasePayload):
         # Verify text deltas concatenate to the final text
         deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
         done_events = [e for e in events if e[0] == "response.output_text.done"]
-        assert len(done_events) == 1, (
-            f"Expected 1 output_text.done, got {len(done_events)}"
-        )
+        assert (
+            len(done_events) == 1
+        ), f"Expected 1 output_text.done, got {len(done_events)}"
         full_text = "".join(deltas)
-        assert done_events[0][1]["text"] == full_text, (
-            "Concatenated deltas don't match output_text.done text"
-        )
+        assert (
+            done_events[0][1]["text"] == full_text
+        ), "Concatenated deltas don't match output_text.done text"
 
         return full_text
 
@@ -2382,9 +2382,9 @@ def _validate_responses_logprobs(entries: Any, top_logprobs: int) -> None:
         # Output parts carry `bytes`; the text stream events do not.
         if "bytes" in entry:
             assert isinstance(entry["bytes"], list), f"Invalid token bytes: {entry!r}"
-        assert len(entry["top_logprobs"]) <= top_logprobs, (
-            f"More alternatives than requested: {entry!r}"
-        )
+        assert (
+            len(entry["top_logprobs"]) <= top_logprobs
+        ), f"More alternatives than requested: {entry!r}"
         for top in entry["top_logprobs"]:
             assert isinstance(top["token"], str), f"Invalid top token: {top!r}"
             assert math.isfinite(top["logprob"]) and top["logprob"] <= 0
@@ -2402,16 +2402,16 @@ class ResponsesPayloadWithLogprobs(ResponsesPayload):
         super().validate(response, content)
         result = response.json()
         top_logprobs = self.body.get("top_logprobs") or 0
-        assert result.get("top_logprobs") == top_logprobs, (
-            f"top_logprobs echo mismatch: {result.get('top_logprobs')} != {top_logprobs}"
-        )
+        assert (
+            result.get("top_logprobs") == top_logprobs
+        ), f"top_logprobs echo mismatch: {result.get('top_logprobs')} != {top_logprobs}"
         text_part = result["output"][0]["content"][0]
         entries = text_part.get("logprobs")
         _validate_responses_logprobs(entries, top_logprobs)
         output_tokens = result["usage"]["output_tokens"]
-        assert len(entries) == output_tokens, (
-            f"Expected {output_tokens} logprob entries, got {len(entries)}"
-        )
+        assert (
+            len(entries) == output_tokens
+        ), f"Expected {output_tokens} logprob entries, got {len(entries)}"
         logger.info(
             "Responses logprobs validation passed: %d entries, top_logprobs=%d",
             len(entries),
@@ -2445,35 +2445,35 @@ class ResponsesStreamPayloadWithLogprobs(ResponsesStreamPayload):
         top_logprobs = self.body.get("top_logprobs") or 0
         deltas = [e for t, e in events if t == "response.output_text.delta"]
         assert deltas, "Missing output_text.delta events"
-        assert all(isinstance(d.get("logprobs"), list) for d in deltas), (
-            "Every output_text.delta must carry a logprobs array"
-        )
+        assert all(
+            isinstance(d.get("logprobs"), list) for d in deltas
+        ), "Every output_text.delta must carry a logprobs array"
         delta_tokens = [lp["token"] for d in deltas for lp in d["logprobs"]]
         assert delta_tokens, "No logprobs on any output_text.delta"
 
         done_events = [e for t, e in events if t == "response.output_text.done"]
-        assert len(done_events) == 1, (
-            f"Expected 1 output_text.done, got {len(done_events)}"
-        )
+        assert (
+            len(done_events) == 1
+        ), f"Expected 1 output_text.done, got {len(done_events)}"
         done_entries = done_events[0]["logprobs"]
         _validate_responses_logprobs(done_entries, top_logprobs)
         done_tokens = [lp["token"] for lp in done_entries]
-        assert done_tokens[: len(delta_tokens)] == delta_tokens, (
-            "output_text.done logprobs must start with the delta logprobs"
-        )
+        assert (
+            done_tokens[: len(delta_tokens)] == delta_tokens
+        ), "output_text.done logprobs must start with the delta logprobs"
 
         completed = [e for t, e in events if t == "response.completed"]
-        assert len(completed) == 1, (
-            f"Expected 1 response.completed, got {len(completed)}"
-        )
+        assert (
+            len(completed) == 1
+        ), f"Expected 1 response.completed, got {len(completed)}"
         final = completed[0]["response"]
         assert final.get("top_logprobs") == top_logprobs, "top_logprobs echo mismatch"
         final_entries = final["output"][0]["content"][0]["logprobs"]
         assert [lp["token"] for lp in final_entries] == done_tokens
         output_tokens = final["usage"]["output_tokens"]
-        assert len(done_tokens) == output_tokens, (
-            f"Expected {output_tokens} logprob entries, got {len(done_tokens)}"
-        )
+        assert (
+            len(done_tokens) == output_tokens
+        ), f"Expected {output_tokens} logprob entries, got {len(done_tokens)}"
         logger.info(
             "Responses stream logprobs validation passed: %d on deltas, %d total",
             len(delta_tokens),
@@ -2494,15 +2494,15 @@ class AnthropicMessagesPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
 
-        assert result.get("type") == "message", (
-            f"Expected type='message', got {result.get('type')}"
-        )
-        assert result.get("id", "").startswith("msg_"), (
-            f"Expected id to start with 'msg_', got {result.get('id')}"
-        )
-        assert result.get("role") == "assistant", (
-            f"Expected role='assistant', got {result.get('role')}"
-        )
+        assert (
+            result.get("type") == "message"
+        ), f"Expected type='message', got {result.get('type')}"
+        assert result.get("id", "").startswith(
+            "msg_"
+        ), f"Expected id to start with 'msg_', got {result.get('id')}"
+        assert (
+            result.get("role") == "assistant"
+        ), f"Expected role='assistant', got {result.get('role')}"
         assert result.get("stop_reason") in (
             "end_turn",
             "max_tokens",
@@ -2512,9 +2512,9 @@ class AnthropicMessagesPayload(BasePayload):
 
         content = result.get("content", [])
         assert len(content) > 0, "Response content is empty"
-        assert content[0].get("type") == "text", (
-            f"Expected content[0].type='text', got {content[0].get('type')}"
-        )
+        assert (
+            content[0].get("type") == "text"
+        ), f"Expected content[0].type='text', got {content[0].get('type')}"
 
         usage = result.get("usage", {})
         assert "input_tokens" in usage, "Missing input_tokens in usage"
@@ -2558,20 +2558,20 @@ class AnthropicMessagesStreamPayload(BasePayload):
 
         # Validate lifecycle event ordering
         assert len(event_types) >= 3, f"Too few events: {event_types}"
-        assert event_types[0] == "message_start", (
-            f"First event should be message_start, got {event_types[0]}"
-        )
-        assert event_types[-1] == "message_stop", (
-            f"Last event should be message_stop, got {event_types[-1]}"
-        )
+        assert (
+            event_types[0] == "message_start"
+        ), f"First event should be message_start, got {event_types[0]}"
+        assert (
+            event_types[-1] == "message_stop"
+        ), f"Last event should be message_stop, got {event_types[-1]}"
 
         # Validate message_start structure
         msg_start = events[0][1]
         assert msg_start.get("type") == "message_start", "message_start missing type"
         message = msg_start.get("message", {})
-        assert message.get("id", "").startswith("msg_"), (
-            "message id should start with msg_"
-        )
+        assert message.get("id", "").startswith(
+            "msg_"
+        ), "message id should start with msg_"
         assert message.get("role") == "assistant", "message role should be assistant"
 
         # Validate required event types
@@ -2582,9 +2582,9 @@ class AnthropicMessagesStreamPayload(BasePayload):
 
         # Validate message_delta has stop_reason
         delta_events = [e for e in events if e[0] == "message_delta"]
-        assert len(delta_events) == 1, (
-            f"Expected 1 message_delta, got {len(delta_events)}"
-        )
+        assert (
+            len(delta_events) == 1
+        ), f"Expected 1 message_delta, got {len(delta_events)}"
         delta_body = delta_events[0][1].get("delta", {})
         assert delta_body.get("stop_reason") in (
             "end_turn",
@@ -2629,9 +2629,9 @@ class EmbeddingPayload(BasePayload):
         response.raise_for_status()
         result = response.json()
         assert "object" in result, "Missing 'object' in response"
-        assert result["object"] == "list", (
-            f"Expected object='list', got {result['object']}"
-        )
+        assert (
+            result["object"] == "list"
+        ), f"Expected object='list', got {result['object']}"
         assert "data" in result, "Missing 'data' in response"
         assert len(result["data"]) > 0, "Empty data in response"
 
@@ -2639,18 +2639,18 @@ class EmbeddingPayload(BasePayload):
         embeddings = []
         for item in result["data"]:
             assert "object" in item, "Missing 'object' in embedding item"
-            assert item["object"] == "embedding", (
-                f"Expected object='embedding', got {item['object']}"
-            )
+            assert (
+                item["object"] == "embedding"
+            ), f"Expected object='embedding', got {item['object']}"
             assert "embedding" in item, "Missing 'embedding' vector in item"
             raw = item["embedding"]
             if isinstance(raw, str):
                 # base64: decode to a float list so downstream dimension
                 # checks are uniform.
                 decoded = base64.b64decode(raw)
-                assert len(decoded) % 4 == 0, (
-                    f"base64 payload not f32-aligned: {len(decoded)} bytes"
-                )
+                assert (
+                    len(decoded) % 4 == 0
+                ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
                 count = len(decoded) // 4
                 vec = list(struct.unpack(f"<{count}f", decoded))
             elif isinstance(raw, list):
@@ -2680,9 +2680,9 @@ class ClassifyPayload(BasePayload):
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
         result = response.json()
-        assert result.get("object") == "list", (
-            f"Expected object='list', got {result.get('object')}"
-        )
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
         assert result.get("data"), "Empty classification data"
 
         for index, item in enumerate(result["data"]):
@@ -2753,9 +2753,9 @@ class PoolingPayload(BasePayload):
         Rejects a flattened vector, ragged rows, empty rows, and non-numeric
         values — every row is checked, not just the first.
         """
-        assert all(isinstance(row, list) for row in data), (
-            f"token-wise output must be a list of rows, got {data!r}"
-        )
+        assert all(
+            isinstance(row, list) for row in data
+        ), f"token-wise output must be a list of rows, got {data!r}"
 
         width = len(data[0])
         assert width, "token-wise rows must be non-empty"
@@ -2771,9 +2771,9 @@ class PoolingPayload(BasePayload):
 
     def _handle_json_response(self, response: Any) -> str:
         result = response.json()
-        assert result.get("object") == "list", (
-            f"Expected object='list', got {result.get('object')}"
-        )
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
         assert result.get("data"), "Empty pooling data"
 
         encoding_format = self.body.get("encoding_format", "float")
@@ -2827,9 +2827,9 @@ class PoolingPayload(BasePayload):
 
             shape = item.get("shape")
             assert shape, "bytes metadata entry is missing shape"
-            assert all(isinstance(dim, int) and dim > 0 for dim in shape), (
-                f"tensor {index} has a non-positive shape: {shape!r}"
-            )
+            assert all(
+                isinstance(dim, int) and dim > 0 for dim in shape
+            ), f"tensor {index} has a non-positive shape: {shape!r}"
 
             # Rank matters as much as the byte count: [2, 2] and [4] cover the
             # same span, but only one is the shape the task promises.
@@ -3784,9 +3784,9 @@ class ImageGenerationPayload(BasePayload):
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
         result = response.json()
-        assert "data" in result, (
-            f"Missing 'data' in response. Keys: {list(result.keys())}"
-        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in image response"
         entry = result["data"][0]
         if "url" in entry:
@@ -3813,9 +3813,9 @@ class VideoGenerationPayload(BasePayload):
             f"Video generation not completed. Status: {result.get('status')}, "
             f"Error: {result.get('error', 'none')}"
         )
-        assert "data" in result, (
-            f"Missing 'data' in response. Keys: {list(result.keys())}"
-        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in video response"
         entry = result["data"][0]
         if self.expected_video_shape is not None or self.expected_video_fps is not None:
@@ -3859,9 +3859,9 @@ class VideoGenerationPayload(BasePayload):
             )
         # FFprobe can return zero even after reporting decode errors. With
         # -v error, any stderr means that the clip did not decode cleanly.
-        assert result.returncode == 0 and not result.stderr.strip(), (
-            f"Could not decode video (ffprobe exit {result.returncode}): {result.stderr}"
-        )
+        assert (
+            result.returncode == 0 and not result.stderr.strip()
+        ), f"Could not decode video (ffprobe exit {result.returncode}): {result.stderr}"
         streams = json.loads(result.stdout)["streams"]
         assert len(streams) == 1, "Expected a video stream"
         metadata = streams[0]
@@ -3869,9 +3869,9 @@ class VideoGenerationPayload(BasePayload):
         assert frame_count > 0, "Decoded video contains no frames"
         if self.expected_video_fps is not None:
             fps = float(Fraction(metadata["avg_frame_rate"]))
-            assert fps == self.expected_video_fps, (
-                f"Expected {self.expected_video_fps} FPS, got {fps}"
-            )
+            assert (
+                fps == self.expected_video_fps
+            ), f"Expected {self.expected_video_fps} FPS, got {fps}"
         if self.expected_video_shape is not None:
             count, height, width = self.expected_video_shape
             assert (metadata["width"], metadata["height"]) == (width, height), (
@@ -3936,12 +3936,12 @@ class AudioSpeechPayload(BasePayload):
             self._validate_waveform(audio_bytes)
             return f"binary_audio_{len(audio_bytes)}_bytes"
         result = response.json()
-        assert result.get("status") != "failed", (
-            f"Audio generation failed: {result.get('error', 'unknown')}"
-        )
-        assert "data" in result, (
-            f"Missing 'data' in response. Keys: {list(result.keys())}"
-        )
+        assert (
+            result.get("status") != "failed"
+        ), f"Audio generation failed: {result.get('error', 'unknown')}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
         assert len(result["data"]) > 0, "Empty data in audio response"
         entry = result["data"][0]
         if "url" in entry and entry["url"]:
@@ -3967,9 +3967,9 @@ class AudioSpeechPayload(BasePayload):
             frames = wav.readframes(frame_count)
 
         if self.expected_sample_rate is not None:
-            assert sample_rate == self.expected_sample_rate, (
-                f"Expected {self.expected_sample_rate} Hz audio, got {sample_rate} Hz"
-            )
+            assert (
+                sample_rate == self.expected_sample_rate
+            ), f"Expected {self.expected_sample_rate} Hz audio, got {sample_rate} Hz"
 
         duration_s = frame_count / sample_rate if sample_rate else 0.0
         assert duration_s >= self.min_duration_s, (

@@ -338,9 +338,9 @@ class UuidPassthroughChatPayload(ChatPayload):
         return self._uuid_bodies[iteration]
 
     def final_validation(self) -> None:
-        assert self._uuid_iterations_requested == set(range(self.repeat_count)), (
-            "UUID passthrough payload did not send the expected request sequence"
-        )
+        assert self._uuid_iterations_requested == set(
+            range(self.repeat_count)
+        ), "UUID passthrough payload did not send the expected request sequence"
 
 
 def make_image_payload_uuid_passthrough(

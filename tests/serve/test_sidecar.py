@@ -868,9 +868,9 @@ def sidecar_config_test(
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     for name, indices in config.gpu_env.items():
         devices = map_cuda_visible_devices(indices, visible).split(",")
-        assert len(set(devices)) == len(indices) and "-1" not in devices, (
-            f"{name} requires {len(indices)} distinct visible GPU(s)"
-        )
+        assert (
+            len(set(devices)) == len(indices) and "-1" not in devices
+        ), f"{name} requires {len(indices)} distinct visible GPU(s)"
         monkeypatch.setenv(name, ",".join(devices))
     for name, (block_size, port_range) in config.port_env.items():
         ports = allocate_contiguous_ports(1, block_size, port_range.value)
@@ -919,9 +919,9 @@ def test_serve_deployment(
     monkeypatch,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
-    assert num_system_ports >= 2, (
-        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
-    )
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = sidecar_config_test
     if isinstance(config.request_payloads[0], EncoderImagePayload):
         payloads = [
