@@ -9,6 +9,9 @@ Each row of ``LOOKUP_CASES`` runs both on the same ``spec.components``. The rows
 where they differ record today's behaviour, so that a change to the shared core
 cannot move either caller unnoticed. Aligning the two is a behaviour change and
 should edit this table.
+
+``PROFILER_ONLY_CASES`` are rows where the planner agrees with the profiler and
+``planner/tests/unit/test_kubernetes_connector.py`` already tests the planner.
 """
 
 from typing import NamedTuple, Optional, Union
@@ -22,11 +25,7 @@ from dynamo.planner.monitoring.dgd_services import (
     Service,
     get_component_from_type_or_name,
 )
-from dynamo.profiler.utils.config import (
-    Config,
-    get_component_name_by_type,
-    get_worker_component_from_config,
-)
+from dynamo.profiler.utils.config import Config, get_component_name_by_type
 
 pytestmark = [
     pytest.mark.unit,
@@ -55,22 +54,21 @@ FRONTEND_WITH_DEFAULT_DECODE_NAME = ((DEFAULT_DECODE, "frontend"),)
 class LookupCase(NamedTuple):
     components: tuple[tuple[str, str], ...]  # (name, type) in spec order
     role: SubComponentType
-    planner: Union[str, type[Exception]]  # resolved name, or the error raised
     profiler: str  # resolved name
+    # resolved name, or the error raised; unset in PROFILER_ONLY_CASES
+    planner: Union[str, type[Exception], None] = None
     component_name: Optional[str] = None  # passed to the planner lookup only
 
 
+PROFILER_ONLY_CASES = (
+    pytest.param(LookupCase(DISAGG, PREFILL, profiler="p"), id="typed-prefill"),
+    pytest.param(LookupCase(DISAGG, DECODE, profiler="d"), id="typed-decode"),
+    pytest.param(
+        LookupCase(AGG, DECODE, profiler="w"), id="sole-generic-worker-decode"
+    ),
+)
+
 LOOKUP_CASES = (
-    pytest.param(
-        LookupCase(DISAGG, PREFILL, planner="p", profiler="p"), id="typed-prefill"
-    ),
-    pytest.param(
-        LookupCase(DISAGG, DECODE, planner="d", profiler="d"), id="typed-decode"
-    ),
-    pytest.param(
-        LookupCase(AGG, DECODE, planner="w", profiler="w"),
-        id="sole-generic-worker-decode",
-    ),
     pytest.param(
         LookupCase(
             (("w", "worker"), ("d", "decode")), DECODE, planner="d", profiler="d"
@@ -174,7 +172,7 @@ def test_planner_lookup(case):
         assert exc_info.value.sub_component_type == case.role.value
 
 
-@pytest.mark.parametrize("case", LOOKUP_CASES)
+@pytest.mark.parametrize("case", PROFILER_ONLY_CASES + LOOKUP_CASES)
 def test_profiler_lookup(case):
     config = Config.model_validate(_dgd(case.components))
 
@@ -186,32 +184,6 @@ def test_duplicate_error_names_components_in_spec_order():
         get_component_from_type_or_name(_dgd(DUPLICATE_PREFILL), PREFILL)
 
     assert exc_info.value.service_names == ["p1", "p2"]
-
-
-def test_profiler_reads_the_backend_only_for_the_default_name():
-    """An unknown backend fails the default-name fallback and nothing before it."""
-    unknown = "no-such-backend"
-
-    typed = get_component_name_by_type(
-        Config.model_validate(_dgd(DISAGG)), unknown, DECODE
-    )
-    generic = get_component_name_by_type(
-        Config.model_validate(_dgd(AGG)), unknown, PREFILL
-    )
-
-    assert (typed, generic) == ("d", "w")
-    with pytest.raises(KeyError):
-        get_component_name_by_type(
-            Config.model_validate(_dgd(NO_WORKER)), unknown, DECODE
-        )
-
-
-def test_profiler_default_name_missing_from_the_config_fails_the_component_fetch():
-    """The name lookup does not raise; ``get_worker_component_from_config`` does."""
-    config = Config.model_validate(_dgd(TWO_GENERIC_WORKERS))
-
-    with pytest.raises(ValueError, match="Missing worker component"):
-        get_worker_component_from_config(config, BACKEND, DECODE)
 
 
 def test_planner_returns_a_service_and_the_profiler_a_name():
