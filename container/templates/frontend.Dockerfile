@@ -207,7 +207,11 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     fi && \
     cd /workspace/benchmarks && \
     export UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install --overrides /tmp/overrides.frontend.txt .
+    uv pip install --overrides /tmp/overrides.frontend.txt . && \
+    # aiperf pulls in soundfile, which bundles libsndfile (LGPL-2.1) and its
+    # codecs. Nothing in this image uses it, so it does not ship.
+    uv pip uninstall soundfile && \
+    ! uv pip show soundfile >/dev/null 2>&1
 
 # Setup environment for all users
 USER root
