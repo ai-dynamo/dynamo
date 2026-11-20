@@ -2168,6 +2168,7 @@ dependencies = [
  "dashmap",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-stream",
  "dynamo-router-protocol",
  "dynamo-tokens",
  "fastrand",
@@ -2220,6 +2221,14 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "dynamo-kv-stream"
+version = "1.8.0"
+dependencies = [
+ "rustc-hash 2.1.2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
