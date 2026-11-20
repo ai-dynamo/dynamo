@@ -8,8 +8,12 @@ use dynamo_kv_router::plugins::prelude::*;
 struct PassThrough;
 
 impl RequestClassifier for PassThrough {
-    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
-        Box::pin(async move { Ok(request) })
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        Ok(request)
     }
 }
 

@@ -17,7 +17,7 @@ description = "Dynamo router scheduler kernel: runs the routing stages atomicall
 default = []
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
 testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
-bench = ["testing", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
+bench = ["testing", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-worker-selection/bench"]
 
 [dependencies]
 dynamo-admission = { workspace = true }
@@ -35,7 +35,6 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 crossbeam-queue = "0.3"
-derive_builder = { workspace = true }
 fastrand = "2"
 futures-util = { workspace = true }
 http = { workspace = true }
@@ -51,7 +50,6 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 uuid = { workspace = true }
 once_cell = { version = "1" }
-ordered-float = { workspace = true }
 
 [dev-dependencies]
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }

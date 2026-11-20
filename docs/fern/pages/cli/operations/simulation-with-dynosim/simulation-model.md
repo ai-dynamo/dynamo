@@ -23,7 +23,7 @@ vLLM-shaped core with a different capacity policy.
 | Scheduler model | Waiting and running queues with a shared token budget | Cache-aware waiting and running queues | vLLM-shaped core with capacity-first admission |
 | KV representation | Native block pool | Token pool and radix cache | Native block pool |
 | Memory pressure | LIFO or FIFO recompute preemption | Decode retraction with cached-prefix preservation | `GUARANTEED_NO_EVICT`; reserves prompt plus maximum output at admission |
-| Prefix reuse | Block-hash matching when prefix caching is enabled | Radix-prefix matching | Block-hash matching when prefix caching is enabled |
+| Prefix reuse | Block-hash matching when prefix caching is enabled | Radix-prefix matching; off on decode workers by default | Block-hash matching when prefix caching is enabled |
 | Default block or page size | 64 tokens | 1 token, or `sglang.page_size` | 32 tokens |
 | Aggregated simulation | Supported | Supported | Supported |
 | Prefill/decode disaggregation | Supported | Supported | Not supported |
@@ -42,8 +42,8 @@ events. The SGLang core uses its own token-pool and radix-cache implementation.
 Scheduler state determines the batch and cache-hit inputs to the timing source. Choose one timing
 source for each worker role with `engine.workers.<role>.timing.type`.
 
-The live Mocker CLI options for profile-derived interpolation and direct `--ais-*` configuration
-are separate from the unified CLI. In AISimulate configurations, use only the timing types accepted
+The live Mocker CLI options for profile-derived interpolation and `--ais-perf-model` are separate
+from the unified CLI. In AISimulate configurations, use only the timing types accepted
 by the AISimulate YAML schema.
 
 ### AISimulate Performance Model
