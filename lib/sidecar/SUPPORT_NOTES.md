@@ -43,10 +43,26 @@ Kimi K3/K3.1 process video as timestamped image chunks in unified serving. Dots3
 
 Chat also requires a compatible frontend tokenizer and chat template. For `moonshotai/Kimi-VL-A3B-Instruct`, the pinned Dynamo Rust tokenizer does not recognize the checkpoint's `kimi_vl` tiktoken configuration. Set `DYN_CHAT_PROCESSOR=sglang`, `DYN_ENDPOINT_TYPES=chat` and `DYN_TRUST_REMOTE_CODE=true` to use the checkpoint tokenizer with the SGLang chat processor in a frontend environment with SGLang installed. Pass `-- --trust-remote-code --skip-tokenizer-init` to the launcher. The Rust ingress then accepts the prepared token IDs, and the SGLang receiver still initializes the visual processor. Native `/generate` accepts pretokenized input when enabled with `DYN_SGLANG_ENABLE_GENERATE=1`.
 
+Qwen3-ASR-0.6B ships a vocabulary and merges. For a Rust tokenizer that requires `tokenizer.json`, export the same checkpoint tokenizer with `AutoTokenizer.from_pretrained(model_dir).backend_tokenizer.save(f"{model_dir}/tokenizer.json")`.
+
+For Chat with `Qwen/Qwen2-Audio-7B-Instruct`, place the official processor template beside `config.json` in the local model directory. The tokenizer's bundled template omits audio placeholders. Native `/generate` accepts token IDs produced with the processor template.
+
+```python
+from pathlib import Path
+from transformers import AutoProcessor
+
+model_dir = Path("/path/to/Qwen2-Audio-7B-Instruct")
+template = AutoProcessor.from_pretrained(model_dir).chat_template
+(model_dir / "chat_template.jinja").write_text(template, encoding="utf-8")
+```
+
 GPU validation covered the following checkpoints.
 
 | Checkpoint | Verified path |
 |---|---|
+| Qwen2-Audio-7B-Instruct | Single-clip and ordered two-clip questions on Chat and `/generate` passed in E/PD over NIXL and split E/P/D over ZMQ (16/16 requests). Reversing the WAVs reversed the answer. Chat used the official processor template. |
+| Qwen3-ASR-0.6B | Dynamo transcribed two distinct WAVs on Chat and `/generate` with split E/P/D over NIXL and E/PD over ZMQ (8/8 requests). |
+| Qwen3-Omni-30B-A3B-Instruct | All 876 official audio and vision tensors ran on E. NIXL reproduced the native embeddings on four audio/image orderings. The reconstructed token IDs, spans and M-RoPE positions matched the checkpoint processor. Full language generation is unverified. |
 | GLM-4.6V-Flash | E/PD with TP1 NIXL and TP4 ZMQ passed single-image, ordered two-image, video and mixed requests on Chat and `/generate`. Split E/P/D with TP4, ZMQ E→P and NIXL P→D passed mixed requests on both APIs. |
 | Kimi-VL-A3B-Instruct | TP1 E/PD with NIXL passed single-image and ordered two-image requests on both APIs using the tokenizer settings above. |
 | GLM-5.3-Flash | All 347 official vision tensors ran at E TP4. NIXL reproduced native encoder outputs byte-for-byte on seven image/video batches. Full language generation is unverified. |
