@@ -2152,12 +2152,12 @@ fn wrap_engine_control_callback(
                     }
                 }
                 EngineControlPolicy::RegisterAfter => {
-                    let _mutation = tokio::select! {
+                    let mutation = tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
                             return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
                         }
-                        mutation = route_mutation.lock() => mutation,
+                        mutation = route_mutation.lock_owned() => mutation,
                     };
                     let _lifecycle =
                         match acquire_engine_route_guard(route_lifecycle, &route_shutdown).await {
@@ -2180,25 +2180,35 @@ fn wrap_engine_control_callback(
                         }
                         return Ok(response);
                     }
-                    let register_result = tokio::select! {
-                        biased;
-                        _ = route_shutdown.cancelled() => {
-                            return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
+                    // A submitted registration can reach discovery even if the HTTP
+                    // request disconnects or shutdown cancels the route. Keep its
+                    // mutation guard until the write finishes so final withdrawal
+                    // cannot overtake it.
+                    tokio::spawn(async move {
+                        let _mutation = mutation;
+                        // The runtime owns any submitted publication. On terminal
+                        // shutdown its registration fence takes over, bounded by
+                        // the unregister allowance rather than the route lock.
+                        let result = tokio::select! {
+                            biased;
+                            _ = route_shutdown.cancelled() => {
+                                return engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown);
+                            }
+                            result = endpoint.register_endpoint_instance() => result,
+                        };
+                        if route_shutdown.is_cancelled() || endpoint.drt().runtime().is_shutting_down() {
+                            return engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown);
                         }
-                        result = endpoint.register_endpoint_instance() => result,
-                    };
-                    if let Err(e) = register_result {
-                        // The engine is serving-safe but absent from discovery. The
-                        // operation is idempotent: retrying /engine/control/{control_name}
-                        // re-registers without repeating the wake/resume work (the
-                        // controller short-circuits "already awake/resumed"), so surface
-                        // that it is safe to retry.
-                        return Ok(control_error_response(format!(
-                            "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
-                        )));
-                    }
-                    set_worker_health(&endpoint, HealthStatus::Ready);
-                    Ok(response)
+                        if let Err(error) = result {
+                            return control_error_response(format!(
+                                "engine resumed but re-registration failed after /engine/control/{control_name}: {error}; retry /engine/control/{control_name} to rejoin discovery"
+                            ));
+                        }
+                        set_worker_health(&endpoint, HealthStatus::Ready);
+                        response
+                    })
+                    .await
+                    .map_err(Into::into)
                 }
             }
         })
