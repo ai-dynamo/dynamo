@@ -1,0 +1,48 @@
+/benchmarks/omni/ @ai-dynamo/dynamo-multimodal-codeowners
+/benchmarks/multimodal/ @ai-dynamo/dynamo-multimodal-codeowners
+/examples/custom_encoder/ @ai-dynamo/dynamo-multimodal-codeowners
+/examples/nemotron_speech_cascaded_pipeline/ @ai-dynamo/dynamo-multimodal-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/tests/mm_router/ @ai-dynamo/dynamo-multimodal-codeowners
+/tests/benchmarks/multimodal/ @ai-dynamo/dynamo-multimodal-codeowners
+/lib/llm/src/preprocessor/media/ @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/vllm/omni/ @ai-dynamo/dynamo-multimodal-codeowners
+/lib/llm/src/preprocessor/media.rs @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/multimodal/ @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/multimodal/ @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/vllm/multimodal_utils/ @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/vllm/multimodal_handlers/ @ai-dynamo/dynamo-multimodal-codeowners
+/benchmarks/multimodal/image/ @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/multimodal/sweep/ @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
+/lib/kv-hashing/src/multimodal/ @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/vllm/omni/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/tests/serve/multimodal_profiles/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/llm/src/preprocessor/mm_routing/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
+/lib/llm/src/protocols/openai/audios/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/vllm/tests/omni/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/llm/src/preprocessor/media/rdma.rs @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/common/protocols/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/multimodal/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/kv-events/src/zmq_wire/extra_keys.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/tests/serve/multimodal_profiles/vllm_xpu.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/multimodal_utils/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/encode_helper.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/tests/multimodal/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/tests/multimodal/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/bindings/python/tests/test_mm_kv_router.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/sglang/init_multimodal.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/sglang/tests/*multimodal* @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/tests/*multimodal* @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/vllm/multimodal_handlers/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/backend/multimodal.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/tests/test_snapshot_*
+/components/src/dynamo/vllm/tests/multimodal_utils/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/multimodal_processor.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/multimodal/routing_utils.py @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/sglang/request_handlers/multimodal/ @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/tests/multimodal/test_routing_utils.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/common/backend/tests/test_multimodal_helpers.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/common/tests/memory/test_multimodal_embedding_cache_manager.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners

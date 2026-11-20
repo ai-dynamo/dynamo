@@ -1,0 +1,17 @@
+/lib/sidecar/lpx/ @ai-dynamo/dynamo-lpx-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/deploy/operator/internal/dynamo/lpx/ @ai-dynamo/dynamo-lpx-codeowners
+/deploy/operator/internal/controller/lpx/ @ai-dynamo/dynamo-lpx-codeowners
+/deploy/**/*lpx*
+/lib/sidecar/lpx/ @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/deploy/helm/**/*lpx* @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/deploy/operator/**/*podsnapshot*
+/deploy/operator/internal/dynamo/lpx/ @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/deploy/operator/internal/controller/lpx/ @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/lib/sidecar/testkit/tests/support/lpx.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/deploy/operator/internal/controller/*checkpoint*
+/deploy/operator/internal/dynamo/backend_vllm*.go
+/deploy/operator/internal/dynamo/backend_sglang*.go
+/deploy/operator/internal/dynamo/backend_trtllm*.go

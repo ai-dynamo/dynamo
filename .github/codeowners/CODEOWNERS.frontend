@@ -1,0 +1,71 @@
+/lib/lora/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/http-server/ @ai-dynamo/dynamo-frontend-codeowners
+/examples/chat_templates/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/generate-format-catalog/ @ai-dynamo/dynamo-frontend-codeowners
+/components/src/dynamo/frontend/ @ai-dynamo/dynamo-frontend-codeowners
+/components/src/dynamo/frontend/tests/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/global-*/**
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/lib/lora/tests/
+/tests/frontend/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/grpc/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/http/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/lora/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/grpc.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/http.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/lora.rs @ai-dynamo/dynamo-frontend-codeowners
+/tests/frontend/grpc/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/lora/src/routing/
+/lib/llm/src/protocols/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/entrypoint/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/grpc/protos/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/protocols.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/entrypoint.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/grpc/service/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/http/service/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/preprocessor/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/grpc/service.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/http/service.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/lora_routing.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/preprocessor.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/lora/src/huggingface.rs
+/lib/llm/src/generate_format/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/entrypoint/input/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/protocols/common/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/protocols/openai/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/generate_format.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/entrypoint/input.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/preprocessor/media/
+/lib/llm/src/preprocessor/tools/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/protocols/common.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/protocols/openai.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/protocols/anthropic/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/preprocessor/media.rs
+/components/src/dynamo/common/http/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/bindings/python/rust/parsers.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/tests/test_reasoning_parser.rs @ai-dynamo/dynamo-frontend-codeowners
+/components/src/dynamo/common/protocols/ @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/tests/test_streaming_tool_parsers.rs @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/entrypoint.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-epp-codeowners
+/lib/llm/src/lora_routing.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-router-codeowners
+/lib/http-server/src/metrics.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/llm/src/protocols/agents.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
+/.github/review-prompts/README.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/lib/llm/src/http/service/error.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-epp-codeowners
+/.github/review-prompts/frontend.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/http/service/metrics.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/llm/src/preprocessor/mm_routing/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
+/lib/llm/src/protocols/openai/audios/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/lib/llm/src/protocols/openai/images/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/llm/src/protocols/openai/videos/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/tests/frontend/agent_smoke_inputs.py @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
+/lib/llm/src/protocols/openai/images.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/llm/src/protocols/openai/videos.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/common/protocols/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/container/templates/frontend.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/container/deps/requirements.frontend.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/lib/runtime/src/metrics/frontend_perf.rs @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/lib/llm/src/http/service/busy_threshold.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-epp-codeowners
+/components/src/dynamo/trtllm/logits_processing/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-frontend-codeowners

@@ -46,17 +46,12 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import (  # noqa: E402
-    ResolvedModel,
-    anchor,
-    compute_resolution,
-    parse_codeowners,
-)
+from codeowners_match import ResolvedModel, anchor, compute_resolution  # noqa: E402
 from native_consent import (  # noqa: E402
     DELEGATED,
-    DIRECTORY,
-    receipt_path,
-    write_receipt,
+    render_team_files,
+    team_path,
+    write_team_file,
 )
 
 
@@ -313,7 +308,7 @@ def _render_codeowners(
     overrides.sort(key=lambda r: (len(r[0]), r[0]))
 
     all_paths = [p for p, _ in base_rules + shared_rules + ft_rules] + [
-        anchor(receipt_path(owner)) for owner in consent_owners
+        anchor(team_path(owner)) for owner in consent_owners
     ]
     all_paths = all_paths or ["*"]
     width = max(len(p) for p in all_paths) + 2
@@ -380,12 +375,12 @@ def _render_codeowners(
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
     if installed:
-        lines += ["", "# Native policy consent: one reviewable file per owner."]
-        lines += [fmt(anchor(receipt_path(owner)), owner) for owner in consent_owners]
+        lines += ["", "# Native review of each team's generated ownership entries."]
+        lines += [fmt(anchor(team_path(owner)), owner) for owner in consent_owners]
         if model.meta["native_policy_consents"]:
             lines += [
                 "",
-                "# Policy changes are reviewed through the affected consent files.",
+                "# Policy changes are reviewed through the affected team files.",
             ]
             lines += [anchor(path) for path in sorted(DELEGATED)]
 
@@ -443,11 +438,8 @@ def main() -> int:
 
     lines, stats = _render_codeowners(model, group=not args.no_group, external=external)
     Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    for pattern, _ in parse_codeowners("\n".join(lines)):
-        if pattern.startswith("/" + DIRECTORY):
-            path = Path(args.out).parent / pattern.lstrip("/")
-            if not path.exists():
-                write_receipt(path, "registered\n")
+    for path, value in render_team_files("\n".join(lines), spec).items():
+        write_team_file(Path(args.out).parent / path, value)
     total = (
         stats["base"]
         + stats["shared"]

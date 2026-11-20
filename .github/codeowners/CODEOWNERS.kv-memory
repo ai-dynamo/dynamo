@@ -1,0 +1,96 @@
+/lib/memory/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/tokens/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kv-hashing/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/bin/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-common/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-config/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/tokens/docs/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-kernels/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-physical/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/bin/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/nixl/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/numa/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/pool/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/docs/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-consolidator/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-kernels/cuda/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/docs/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/nixl.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-kernels/tests/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-physical/docs/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/scripts/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-kernels/examples/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/leader/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/object/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/pubsub/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/worker/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/pools/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/offload/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/runtime/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/testing/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/blocks/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/events/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/manager/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/metrics/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/testing/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-physical/src/layout/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/registry/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/sequence/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-physical/src/manager/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-physical/src/testing/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-physical/src/transfer/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-engine/src/collectives/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-logical/src/integrations/ @ai-dynamo/dynamo-kv-memory-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/tests/lmcache/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/bindings/kvbm/ @ai-dynamo/dynamo-kv-memory-codeowners
+/tests/kvbm_integration/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/ @ai-dynamo/dynamo-kv-memory-codeowners
+/deploy/pre-deployment/nixl/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager.md @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/v2/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/pool/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/v2.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/bindings/kvbm/pyproject.toml
+/lib/llm/src/block_manager/block/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/state/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/layout/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/pool.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/block.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/offload/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/state.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/storage/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/layout.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/connector/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/offload.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/storage.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/controller/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/connector.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/distributed/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/controller.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/distributed.rs @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/kv_consolidator/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/bindings/python/src/dynamo/nixl_connect/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/ @ai-dynamo/dynamo-kv-memory-codeowners
+/deploy/**/*lpx*
+/lib/kvbm-logical/src/metrics/ @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/kv-hashing/src/multimodal/ @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-config/src/messenger.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/vllm/main.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/kvbm-engine/src/pubsub/nats.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/lib/llm/src/kv_router/shared_cache.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/vllm/cache_info.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/sglang/publisher.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/trtllm/publisher.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/block_manager/metrics_kvbm.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/llm/src/http/service/busy_threshold.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-epp-codeowners
+/dev/observability/grafana_dashboards/kvbm.json @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/common/backend/publisher.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kvbm-consolidator/src/egress/zmq_publisher.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/lib/kvbm-consolidator/src/ingress/zmq_subscriber.rs @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/vllm/kv_connector_protocols.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners

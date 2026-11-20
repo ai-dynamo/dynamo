@@ -1,0 +1,54 @@
+/lib/sidecar/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/examples/backends/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/tests/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/utils/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/configs/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/engines/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/workers/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/request_handlers/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/logits_processing/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/lib/mocker/servers/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/multimodal/
+/components/src/dynamo/trtllm/request_handlers/diffusion/
+/lib/mocker/servers/
+/lib/sidecar/trtllm/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/tests/serve/trtllm/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/recipes/**/trtllm/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/.devcontainer/trtllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/recipes/**/tokenspeed/**
+/recipes/**/vllm/**/*xpu*
+/lib/mocker/servers/trtllm/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/tests/serve/test_trtllm.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/recipes/**/sglang/**/*Dockerfile*
+/recipes/**/tokenspeed/**/*Dockerfile*
+/container/deps/requirements.trtllm.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/metrics.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/trtllm/sidecar.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/components/src/dynamo/trtllm/multimodal/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/snapshot.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/trtllm/snapshot.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/trtllm/publisher.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/trtllm/health_check.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/trtllm/encode_helper.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/container/templates/trtllm_runtime.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/tests/serve/test_trtllm_mm_hashes_protocol.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/engine_monitor.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/trtllm/tests/*diffusion* @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/tests/multimodal/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/logits_processing/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/components/src/dynamo/trtllm/tests/*multimodal* @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/workers/llm_worker.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/deploy/operator/internal/dynamo/backend_trtllm*.go @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/components/src/dynamo/trtllm/multimodal_processor.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/trtllm/configs/diffusion_config.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/engines/diffusion_engine.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/request_handlers/diffusion/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/trtllm/workers/image_diffusion_worker.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/workers/video_diffusion_worker.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/tests/test_trtllm_sleep_wake_handlers.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners

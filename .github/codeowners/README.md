@@ -29,7 +29,9 @@ adding required approvals.
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
-| `emit_codeowners.py` | Generates root `CODEOWNERS` directly from declared policy globs, plus `CONTRIBUTORS.md`; it never reads the git tree. |
+| `emit_codeowners.py` | Generates root `CODEOWNERS`, `CODEOWNERS.<team>` and `CONTRIBUTORS.md` from the policy; it never reads the git tree. |
+| `CODEOWNERS.<team>` | Generated, readable entries for one team's native policy review. Commit these with the central policy. |
+| `native_consent.py` | Generates team entries and verifies that ownership changes preserve native review for the affected teams. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for matching, policy resolution, deterministic emission, precedence, and external-contributor co-ownership. |
 
@@ -51,27 +53,28 @@ adding required approvals.
 
 ### Native review of policy changes
 
-Each registered owner has one native CODEOWNERS-owned file under `consents/`.
-A routing change updates the consent files of every previous and proposed owner,
-including retained owners receiving an alternative. GitHub enforces those reviews;
-CI only checks the files. Existing GitHub approval-retention rules apply, and no
-extra protection against checks becoming stale after a base update is added.
+The generator also writes `CODEOWNERS.ops`, `CODEOWNERS.docs`, etc. in this
+directory. Each file has its own team as its sole native owner and contains that
+team's complete CODEOWNERS entries, including alternative owners. A later override
+that removes the team appears as an ownerless entry, so losing a subdirectory also
+changes the old team's file. Process additionally sees generator settings and
+ownership contracts as readable comments in its file.
 
-After regenerating CODEOWNERS, update and validate the affected consent files:
-
-```bash
-python .github/codeowners/native_consent.py --base origin/main --write
-```
+Regenerate with the command above and commit the team files together with the
+central policy. The existing `codeowners` action checks all generated files for
+drift and verifies that every affected old/new owner has a changed team file.
+Unrepresentable wildcard changes fail rather than bypassing an affected owner;
+split the owning glob in that case. There are no hashes or placeholder contents.
 
 Register new owners first with an empty area or contributor-area list. Existing
-consent files keep their native owner and cannot be deleted or reassigned here.
-New/removed or reordered broad scopes and contract/default changes require Process.
+team files cannot be deleted or reassigned through a routing change. GitHub
+enforces native reviews using the repository's existing approval-retention rules.
+No additional check freshness or base-update protection is added.
 
-Rollout: merge this installer with `meta.native_policy_consents: false`, require
-**`ownership-consent` from GitHub Actions** alongside `codeowners`, then set the
-flag to `true` and regenerate in a separate PR. This enables exactly two native
-exceptions (root CODEOWNERS and areas.yaml). The new required check prevents
-pre-installation green `codeowners` results from authorizing the new protocol.
+Rollout: merge the installer with `meta.native_policy_consents: false`, then set
+the flag to `true` and regenerate in a separate PR. This enables exactly two native
+exceptions (root CODEOWNERS and areas.yaml). The existing required `codeowners`
+action checks the team files; no new required check or branch setting is needed.
 
 ### Add owners without dropping existing accountability
 

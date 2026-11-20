@@ -86,12 +86,12 @@ ordinary PRs.
 
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
 `shared:` entry (multi-team co-ownership), or adjust `classify.filetype_rules`.
-Then regenerate exactly as in Flow 2 step 4 and commit both files. When
-`meta.native_policy_consents` is enabled, also run
-`python .github/codeowners/native_consent.py --base origin/main --write`.
-GitHub requires native reviews on the affected teams' consent files. The installer
-keeps the current native policy owners until the separate activation step described
-in `.github/codeowners/README.md`.
+Then regenerate exactly as in Flow 2 step 4 and commit the policy together with
+`CODEOWNERS` and the generated `CODEOWNERS.<team>` files. The existing `codeowners`
+action checks all outputs for drift. Once `meta.native_policy_consents` is enabled,
+GitHub requires native reviews on the changed team files. The installer keeps the
+current native policy owners until the separate activation step described in
+`.github/codeowners/README.md`.
 
 Semantics worth knowing before you file one:
 

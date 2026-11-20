@@ -1,0 +1,31 @@
+/examples/diffusers/ @ai-dynamo/dynamo-diffusion-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/components/src/dynamo/trtllm/request_handlers/diffusion/ @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/request_handlers/image_diffusion/ @ai-dynamo/dynamo-diffusion-codeowners
+/examples/diffusers/Dockerfile @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-ops-codeowners
+/lib/llm/src/protocols/openai/images/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/llm/src/protocols/openai/videos/ @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/tests/serve/test_sample_diffusion.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/llm/src/protocols/openai/images.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/llm/src/protocols/openai/videos.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/protocol.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/init_diffusion.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/tests/*diffusion* @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/tests/*diffusion* @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/tests/multimodal/
+/components/src/dynamo/sglang/tests/*multimodal*
+/components/src/dynamo/trtllm/tests/*multimodal*
+/components/src/dynamo/common/utils/image_utils.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/common/utils/video_utils.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/common/backend/sample_diffusion_* @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/configs/diffusion_config.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/engines/diffusion_engine.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/request_handlers/diffusion/ @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/request_handlers/image_diffusion/ @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/workers/image_diffusion_worker.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/trtllm/workers/video_diffusion_worker.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/request_handlers/video_generation/ @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/sglang/request_handlers/llm/diffusion_handler.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/common/backend/tests/test_sample_diffusion_engine.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners

@@ -76,7 +76,13 @@ jobs:
             --repo . \
             --strict
 
-      # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
+      - name: Validate native team ownership
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python .github/codeowners/native_consent.py --base "$BASE"
+
+      # Regenerate, then fail if CODEOWNERS, its team files or CONTRIBUTORS.md
       # drifted from what the sources produce. emit_codeowners.py is a PURE
       # FUNCTION of areas.yaml + external_contributors.yaml (no tree walk),
       # so this diff only ever fires when a policy input or a committed output
@@ -89,31 +95,5 @@ jobs:
             --out CODEOWNERS \
             --external .github/codeowners/external_contributors.yaml \
             --contributors-out CONTRIBUTORS.md
-          git diff --exit-code CODEOWNERS CONTRIBUTORS.md \
-            || { echo "::error::CODEOWNERS/CONTRIBUTORS.md are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }
-
-  ownership-consent:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        with:
-          python-version: "3.12"
-      - run: pip install pyyaml
-      - name: Validate native consent files
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: python .github/codeowners/native_consent.py --base "$BASE"
-      - name: Require the native consent job before activation
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          if python -c 'from pathlib import Path; import sys,yaml; sys.exit(yaml.safe_load(Path(".github/codeowners/areas.yaml").read_text()).get("meta", {}).get("native_policy_consents") is not True)'; then
-            branch=$(python -c 'import os; from urllib.parse import quote; print(quote(os.environ["BASE_REF"], safe=""))')
-            test "$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --jq 'any(.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]; .context == "ownership-consent" and .integration_id == 15368)')" = true
-          fi
+          git diff --exit-code CODEOWNERS CONTRIBUTORS.md '.github/codeowners/CODEOWNERS.*' \
+            || { echo "::error::Generated ownership files are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }
