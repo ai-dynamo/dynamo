@@ -34,7 +34,7 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 
 ## Choose the Policy Stage
 
-To defer or reject requests before they enter the scheduling queue, use a [request classifier](custom-admission-control.md). It can be combined with a worker-selection policy.
+To classify or reject requests before they enter the scheduling queue, or hold them in it, use a [request classifier](custom-admission-control.md). It can be combined with a worker-selection policy.
 
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
@@ -53,7 +53,7 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 |---|---|
 | `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, request context, worker signal accessors, configuration, and factories |
 | `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
-| `plugins::worker_selection::experimental` | Unstable extensions, such as the [resident block counts](#experimental-resident-block-counts). No compatibility guarantee |
+| `plugins::worker_selection::experimental` | Unstable extensions: the [resident block counts](#experimental-resident-block-counts), [KVCR occupancy](#kvcr-occupancy), and [decode progress](#experimental-decode-progress). No compatibility guarantee |
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
@@ -433,7 +433,7 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 | `ScoredWorkerCandidate::cost()` | Sum of all scorer contributions for the picker row |
 | `WorkerInputView::info(row)` | Picker row `WorkerInfo`, or `None` for an out-of-range row |
 
-`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` when it is unreported or reported as zero (vLLM's Ray data-parallel backend registers a zero placeholder); `total_kv_blocks()` is capacity, not free blocks. The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (32 bytes per rank) whenever a classifier declares an input group.
+`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` when it is unreported or reported as zero (vLLM's Ray data-parallel backend registers a zero placeholder); `total_kv_blocks()` is capacity, not free blocks. The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (40 bytes per rank) whenever a classifier declares an input group.
 
 ### Optional Worker Inputs
 
@@ -446,7 +446,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
 | `CACHE` | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
-| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
+| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits`, `hits_beyond(prefix)` (every hit at or past `prefix`), and `loadable_beyond(prefix)` (the unbroken run starting at `prefix`, or zero when it is shorter than the engine loads) |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |
@@ -604,30 +604,31 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 
 ## Request Classifier Sequence Hashes
 
-`ClassifyRequest::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot remains valid while the classification future is pending and does not grow with generated output.
+`ClassifyRequest::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot lives for the `classify` call and does not grow with generated output.
 
 Sequence hashes retain the host's tracking configuration. When KV reuse is disabled, they are randomized identities rather than reusable content hashes. Public and keyed hashes must stay within their respective tracking domains and configurations; matching values do not establish physical KV residency or a safe shared-budget discount. This accessor adds no hashing or scheduling overrides.
 
 Preparing a classifier input copies the supplied sequence on each eligible scheduling attempt, including retries that subsequently reuse cached classification overrides. Each nonempty snapshot allocates and copies `8 * hashes.len()` bytes. Missing and empty sequences need no hash-buffer allocation. Requests without a classifier skip this snapshot construction.
 
-For `P` retained inputs containing `H` hashes each, the added hash payload is `8 * P * H` bytes, plus request layout and allocator overhead. For example, 1,024 inputs of 32,768 tokens with 64-token tracking blocks retain 4 MiB of additional hash payload. The original scheduling hashes remain live separately. Snapshots are created before waiting for the classifier lock and remain live while classification is pending. Worker queue limits apply after classification; they do not bound these copies. There is no classifier-local pending-count limit or universal prompt-length limit here, so deployments must enforce both limits before this projection to bound its aggregate memory use.
+For `P` retained inputs containing `H` hashes each, the added hash payload is `8 * P * H` bytes, plus request layout and allocator overhead. For example, 1,024 inputs of 32,768 tokens with 64-token tracking blocks retain 4 MiB of additional hash payload. The original scheduling hashes remain live separately. Snapshots are created before waiting for the classifier lock and are freed when `classify` returns. Worker queue limits apply after classification; they do not bound these copies. There is no universal prompt-length limit here, so deployments must bound prompt length before this projection to bound its memory use.
 
-For example, a classifier can inspect the sequence while retaining the request in its future:
+For example, a classifier can inspect the sequence before it queues the request:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 
 struct InspectPrefixes;
 
 impl RequestClassifier for InspectPrefixes {
-    fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
-        Box::pin(async move {
-            let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
-            Ok(request)
-        })
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
+        Ok(request)
     }
 }
 ```
@@ -670,6 +671,54 @@ What the count contains, and whether router replicas agree on it, depends on the
 
 - **KV events:** the device-tier blocks the indexer currently tracks from engine events. Every router replica sees the same counts.
 - **Approximate routing:** the blocks routed to the rank within the TTL, or the distinct full blocks the LRU cache policy retains, which leaves out its partial tail blocks and duplicate copies. Each replica counts only the requests it routed, except a replica that serves its indexer (`serve_indexer`), whose counts also include the routing decisions other replicas send it.
+
+### KVCR Occupancy
+
+A KVCR instance is the host-memory KV cache attached to one worker rank. A policy that declares `RESIDENT_BLOCKS` can also read how many blocks the router has indexed for a worker's instance, and any policy can read the capacity the worker advertises for it; occupancy is the first divided by the second. The same traits carry the count: `candidate.cache_owner_blocks()` in a filter or scorer, and `input.cache_owner_blocks(row)` in a picker. `CacheOwnerCapacity` adds `cache_owner_capacity_blocks()` to `WorkerInfo`:
+
+```rust
+use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::{
+    CacheOwnerCapacity, ResidentBlocks,
+};
+
+let capacity = candidate.info().cache_owner_capacity_blocks();
+let occupancy = candidate.cache_owner_blocks().zip(capacity)
+    .map(|(blocks, capacity)| (blocks as f64 / capacity as f64).min(1.0));
+```
+
+- `cache_owner_blocks()` needs `RESIDENT_BLOCKS` and `CACHE`. It is the number of host-pinned blocks Dynamo's lower-tier index holds for the instance, built from KVCR's KV events and read live, so two reads in one selection can differ. Events are best effort: blocks KVCR is still filling and non-main KV groups are not counted, and a lost Removed event counts until the instance's next recovery. It is `None` when no instance is attached to the worker, before the router has received a host-pinned KV event, when the router uses a remote indexer, and in a request classifier.
+- `cache_owner_capacity_blocks()` needs no input group. A vLLM worker advertises its KVCR tier's `secondary_g2_slots` times the offload chunk size (the connector's `blocks_per_chunk` or `block_size`), in router blocks; a pool served by `kvcr-service` advertises none.
+
+Dynamo looks a count up only when a component calls the accessor, so a policy that reads only resident block counts pays nothing for it. KVCR evicts least-recently-used blocks, so a warm instance usually reads close to full.
+
+## Experimental Decode Progress
+
+A picker declares `DECODE_PROGRESS` in `required_worker_inputs()` and imports
+`DecodeProgressByRow` to read `input.decode_progress(row)`:
+
+```rust
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    DECODE_PROGRESS, DecodeProgressByRow,
+};
+```
+
+| Method | Value |
+|---|---|
+| `observed_requests()` | Number of active requests covered by the summary |
+| `remaining_token_budget()` | Sum of effective output limits minus observed output, in raw tokens. This is an upper bound. |
+| `observed_age()` | `Duration` since the oldest nonempty token observation. Apply your policy's freshness limit. |
+
+Collection supports single-choice aggregated requests with a positive effective
+output limit, including requests that can finish at EOS or a stop condition.
+If the frontend derives a limit from the remaining context, that limit counts too.
+
+A rank returns `None` if it is idle or any active request is prefilling, has no
+effective limit, or lacks a valid observation. An undeclared input or unsupported
+host, including the standalone EPP, also returns `None`. Choose a fallback for
+those cases.
+
+Observations are local to one frontend. LOAD and progress are advisory reads and
+can differ during concurrent updates.
 
 ## Policy Contract
 

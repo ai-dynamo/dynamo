@@ -15,3 +15,14 @@
 - Do not pass the full `SchedulingRequest`, worker maps, router configuration internals, default-score weights, or host-owned eligibility and reservation state to custom policies. Eligibility, picker-row validation, accounting, and reservation stay in the host path.
 - The builtin default policy lives in `lib/router-plugins/builtin` and uses only this public API; the kernel's reference selector is test- and benchmark-only. Plugins own their score calculation and worker choice.
 - Before each public API addition: search all accessors, re-exports, documentation, examples, and external-looking call sites; add one focused contract test that uses the new value through `WorkerFilter`, `WorkerScorer`, or `WorkerPicker`; update `docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx` and one canonical example; if the signal adds work, storage, allocation, or another scan to the selection path, run the worker-selection benchmark.
+
+## Performance
+
+PR numbers point to worked examples; open one only when you need to see how a rule was applied.
+
+On the KV path, filters, scorers, and pickers run at selection on the scheduler's queue actor, over every candidate row of every admission. `lib/router/scheduler/AGENTS.md` covers the actor; these cover rows and policies.
+
+- **Writing or changing a filter, scorer, or picker.** Compute per-request values once, before the row loop. Inside the loop, don't allocate, lock, look a worker up by id, or emit a log event.
+- **Adding a field to `CandidateData` or `WorkerLoadInput`.** Every rank carries it for every request. Keep the row at its documented size (`src/inputs.rs` holds the row at 128 bytes and asserts `WorkerLoadInput` at 40). If only some policies read the field, fill it only under the `WorkerInputs` group they declare, so the others don't pay; a new group needs the rules above.
+- **Declaring a component's inputs.** Declare only what it reads. `LOAD` adds a walk of the prompt trie to every admission; a picker that needs only request counts declares `ACTIVE_REQUESTS`. `KV_COPY` adds the copy-offer pass (#18528, #16701).
+- **Adding an input group** (under the rules above). Skip its computation when no component declares it, then run `cargo bench -p dynamo-kv-router --bench worker_selection --features bench` and compare the largest worker counts.

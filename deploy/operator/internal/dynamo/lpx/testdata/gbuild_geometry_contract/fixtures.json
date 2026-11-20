@@ -2,91 +2,67 @@
   "fixtures": [
     {
       "name": "subnode8",
-      "sha256": "904cd553ab100ffae21ffe2f77b5dc55293871b1a7277714a8ff5d799f20dd81",
+      "sha256": "7ddebfbd8cdb7eac288d81cd0c18c89d0397eb5236c3c84c99193773d1a200fb",
       "partitions": [
         {
           "id": 7,
           "topology": "opaque-v3-topology",
           "num_chips": 8,
-          "devices_per_node": 16,
-          "source_extent": [
-            8,
-            1,
-            1,
-            1
-          ]
+          "devices_per_node": 16
         }
       ],
-      "selected_chain": []
+      "unit_partition_ids": [
+        7
+      ]
     },
     {
       "name": "cross_hemi32",
-      "sha256": "afad7b3ed003f240110d68fb975b5d3fc77351cf877f0b02ac65df901251afc9",
+      "sha256": "39478265dcdec16e931e08ca78e31492fafd1023d6822ee891255ee3624cc81e",
       "partitions": [
         {
           "id": 7,
           "topology": "opaque-v3-topology",
           "num_chips": 32,
-          "devices_per_node": 16,
-          "source_extent": [
-            16,
-            1,
-            2,
-            1
-          ]
+          "devices_per_node": 16
         }
       ],
-      "selected_chain": []
+      "unit_partition_ids": [
+        7
+      ]
     },
     {
       "name": "rack256",
-      "sha256": "223423f19dd864331d9cd95c43cad6d42e41ae673519d6f6ff7bd6c876d77147",
+      "sha256": "a22a0fb14701d2d91ed70c1a1199e43678f5c6f746d6176050de3c246c2b35fb",
       "partitions": [
         {
           "id": 7,
           "topology": "opaque-v3-topology",
           "num_chips": 256,
-          "devices_per_node": 16,
-          "source_extent": [
-            16,
-            8,
-            2,
-            1
-          ]
+          "devices_per_node": 16
         }
       ],
-      "selected_chain": []
+      "unit_partition_ids": [
+        7
+      ]
     },
     {
       "name": "connected_chain",
-      "sha256": "df4bc04bd1c014bad668a55ce577109274df7b427f5b454600860b3bfc2d80b0",
+      "sha256": "676679069f3217bf8cd6a60c6cc202cd9574d197e920135386061d9e26db0077",
       "partitions": [
         {
           "id": 7,
           "topology": "opaque-v3-topology",
           "num_chips": 32,
-          "devices_per_node": 16,
-          "source_extent": [
-            16,
-            1,
-            2,
-            1
-          ]
+          "devices_per_node": 16
         },
         {
           "id": 8,
           "topology": "opaque-v3-topology",
           "num_chips": 16,
-          "devices_per_node": 16,
-          "source_extent": [
-            16,
-            1,
-            1,
-            1
-          ]
+          "devices_per_node": 16
         }
       ],
-      "selected_chain": [
+      "unit_partition_ids": [
         7,
         8
       ]

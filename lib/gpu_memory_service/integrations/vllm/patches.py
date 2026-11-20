@@ -101,9 +101,13 @@ def patch_request_memory() -> None:
         logger.debug("[GMS Patch] vllm.v1.worker.utils not available")
         return
 
-    def patched_request_memory(init_snapshot, cache_config):
-        requested_memory = int(
-            init_snapshot.total_memory * cache_config.gpu_memory_utilization
+    # Mirrors vllm.v1.worker.utils.request_memory, which also subtracts
+    # externally held weights, minus the free-memory check. The XPU worker
+    # still calls it with two arguments.
+    def patched_request_memory(init_snapshot, cache_config, external_weight_memory=0):
+        requested_memory = (
+            int(init_snapshot.total_memory * cache_config.gpu_memory_utilization)
+            - external_weight_memory
         )
         logger.info(
             "[GMS Patch] Shadow mode: bypassing memory check "
