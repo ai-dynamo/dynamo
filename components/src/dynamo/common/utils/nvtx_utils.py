@@ -284,7 +284,7 @@ def _attrs_or_none(attrs: dict) -> "dict[str, str] | None":
     return clean or None
 
 
-def request_mark(stage: str, request_id: str, **attrs: str) -> None:
+def request_mark(stage: str, request_id: str, **attrs: "str | None") -> None:
     """Emit an instantaneous request-scoped marker (no-op unless enabled)."""
     if not REQUEST_ENABLED:
         return
@@ -293,7 +293,7 @@ def request_mark(stage: str, request_id: str, **attrs: str) -> None:
         api[0](stage, request_id, _attrs_or_none(attrs))
 
 
-def start_request_range(stage: str, request_id: str, **attrs: str):
+def start_request_range(stage: str, request_id: str, **attrs: "str | None"):
     """Open a request-scoped range; returns a handle for end_request_range.
 
     Returns None when disabled or unavailable. The range also ends when the
@@ -314,7 +314,7 @@ def end_request_range(handle) -> None:
 
 
 @contextlib.contextmanager
-def request_range(stage: str, request_id: str, **attrs: str):
+def request_range(stage: str, request_id: str, **attrs: "str | None"):
     """Context manager form of start_request_range / end_request_range."""
     handle = start_request_range(stage, request_id, **attrs)
     try:
