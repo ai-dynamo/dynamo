@@ -37,8 +37,11 @@ class FrontendRouterProcess(ManagedProcess):
     """Manages a dynamo.frontend process with configurable --router-mode.
 
     Supports all router modes (round-robin, random, kv, direct) and all
-    KV-specific options (block size, thresholds, disagg).
-    block_size is only sent to the CLI when router_mode is "kv".
+    KV-specific options (block size, thresholds, disagg). With
+    router_policy_config and router_mode=None, the policy file alone selects
+    each role's policy.
+    block_size is only sent to the CLI when the KV router runs: router_mode is
+    "kv", or a policy file is given.
     """
 
     def __init__(
@@ -53,7 +56,8 @@ class FrontendRouterProcess(ManagedProcess):
         tokens_threshold_frac: float | str | None = None,
         router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
-        router_mode: str = "kv",
+        router_mode: str | None = "kv",
+        router_policy_config: str | None = None,
         min_initial_workers: int | None = None,
         router_ais_config: dict[str, str | int] | None = None,
         serve_indexer: bool = False,
@@ -66,8 +70,6 @@ class FrontendRouterProcess(ManagedProcess):
             sys.executable,
             "-m",
             "dynamo.frontend",
-            "--router-mode",
-            router_mode,
             "--http-port",
             str(frontend_port),
             "--discovery-backend",
@@ -76,7 +78,13 @@ class FrontendRouterProcess(ManagedProcess):
             namespace,
         ]
 
-        if router_mode == "kv":
+        if router_mode is not None:
+            command.extend(["--router-mode", router_mode])
+
+        if router_policy_config is not None:
+            command.extend(["--router-policy-config", router_policy_config])
+
+        if router_mode == "kv" or router_policy_config is not None:
             command.extend(["--kv-cache-block-size", str(block_size)])
 
         if blocks_threshold is not None:
@@ -140,7 +148,7 @@ class FrontendRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
-            display_name=f"dynamo-frontend-{router_mode}-{frontend_port}",
+            display_name=f"dynamo-frontend-{router_mode or 'policy-file'}-{frontend_port}",
         )
         self.port = frontend_port
         self.router_mode = router_mode
