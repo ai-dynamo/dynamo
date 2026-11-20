@@ -250,7 +250,9 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   readiness hold reports not ready whatever the list says. The runtime logs a warning whenever this
   variable is set.
 
-  **Operator preset:** `["generate"]` on worker, prefill, and decode pods.
+  **Operator preset:** `["generate"]` on standard worker containers, including prefill and decode
+  workers. GMS failover removes this variable from engine containers. Runtime sidecars check
+  dependencies for `/health` and always return `200` for `/live`.
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_ENABLED" type="boolean" default="false">
