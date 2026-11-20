@@ -13,6 +13,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/common.sh"
 
 # The sidecar needs SGLang's Rust server (sglang.api.v1).
 export SGLANG_RUST_SERVER=1
@@ -43,8 +45,8 @@ while [[ $# -gt 0 ]]; do
             echo "  CUDA_VISIBLE_DEVICES    GPU assignment, one per rank (default: 0,1)"
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
-            echo "  SGLANG_HTTP_PORT        SGLang HTTP port (default: 30000)"
-            echo "  SGLANG_GRPC_PORT        SGLang gRPC port (default: 30001)"
+            echo "  SGLANG_HTTP_PORT        First listener's SGLang HTTP port; rank N uses this port + N (default: 30000)"
+            echo "  SGLANG_GRPC_PORT        First listener's SGLang gRPC port; rank N uses this port + N (default: 30010)"
             echo "  SGLANG_KV_EVENT_PORT    First KV-event port; rank N publishes on this port + N (default: 5557)"
             echo "  SGLANG_DIST_INIT_PORT   Distributed-init port; SGLang also uses the ports after it (default: 29500)"
             echo "  SGLANG_NCCL_PORT        NCCL port (default: 29520)"
@@ -68,7 +70,7 @@ trap dynamo_exit_trap EXIT
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
 SGLANG_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_HTTP_PORT:-30000}")
-SGLANG_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_GRPC_PORT:-30001}")
+SGLANG_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_GRPC_PORT:-30010}")
 SGLANG_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${SGLANG_KV_EVENT_PORT:-5557}")
 SGLANG_DIST_INIT_PORT=$(dyn_port DYN_DIST_INIT_PORT 1 "${SGLANG_DIST_INIT_PORT:-29500}")
 SGLANG_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 1 "${SGLANG_NCCL_PORT:-29520}")
@@ -80,12 +82,13 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+sglang_check_listener_ports "$SGLANG_HTTP_PORT" "$SGLANG_GRPC_PORT" "$SGLANG_PARALLEL_SIZE"
 
 KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${SGLANG_KV_EVENT_PORT}\"}"
 
 print_launch_banner "Launching SGLang Native-gRPC Sidecar with DEP KV Routing (${SGLANG_PARALLEL_SIZE} GPUs)" "$MODEL" "$HTTP_PORT" \
-    "SGLang HTTP: http://${SGLANG_HOST}:${SGLANG_HTTP_PORT}" \
-    "SGLang gRPC: ${SGLANG_HOST}:${SGLANG_GRPC_PORT}" \
+    "SGLang HTTP: http://${SGLANG_HOST}:${SGLANG_HTTP_PORT} + rank" \
+    "SGLang gRPC: ${SGLANG_HOST}:${SGLANG_GRPC_PORT} + rank" \
     "KV events:   tcp://*:${SGLANG_KV_EVENT_PORT} + rank"
 
 python3 -m dynamo.frontend --router-mode kv &
@@ -99,9 +102,8 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --grpc-port "$SGLANG_GRPC_PORT" \
     --incremental-streaming-output \
     --tp-size "$SGLANG_PARALLEL_SIZE" \
-    --dp-size "$SGLANG_PARALLEL_SIZE" \
+    --attn-dp-size "$SGLANG_PARALLEL_SIZE" \
     --ep-size "$SGLANG_PARALLEL_SIZE" \
-    --enable-dp-attention \
     --page-size "$SGLANG_PAGE_SIZE" \
     --kv-events-config "$KV_EVENTS_CONFIG" \
     --dist-init-addr "${SGLANG_HOST}:${SGLANG_DIST_INIT_PORT}" \

@@ -15,13 +15,14 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "All nodes and the frontend must share Dynamo namespace, discovery and event services."
     echo
     echo "Example: run each command on its respective node (four nodes total):"
-    echo "  NODE_RANK=0 DIST_INIT_ADDR=prefill-leader:29500 SGLANG_BOOTSTRAP_HOST=prefill-leader bash $0 prefill"
+    echo "  NODE_RANK=0 DIST_INIT_ADDR=prefill-leader:29500 bash $0 prefill"
     echo "  NODE_RANK=1 DIST_INIT_ADDR=prefill-leader:29500 bash $0 prefill"
     echo "  NODE_RANK=0 DIST_INIT_ADDR=decode-leader:29500 bash $0 decode"
     echo "  NODE_RANK=1 DIST_INIT_ADDR=decode-leader:29500 bash $0 decode"
     echo
     echo "Start the frontend separately: python3 -m dynamo.frontend --router-mode kv"
-    echo "Use reachable leader addresses; NIXL requires connectivity between the two groups."
+    echo "Use reachable addresses; NIXL requires connectivity between the two groups."
+    echo "Prefill nodes advertise their own address; set SGLANG_BOOTSTRAP_HOST to override."
     echo "For model, topology and port overrides: bash $SCRIPT_DIR/multinode_kv_router_sidecar.sh --help"
     exit 0
 fi

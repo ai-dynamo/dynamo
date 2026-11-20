@@ -20,6 +20,8 @@ USER root
 # The NIM base removes some packages but keeps their conffiles (dpkg state rc).
 # Purge them so compliance does not attribute packages that no longer ship.
 RUN dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
+# Dynamo resets the NIM entrypoint and never starts the NIM nginx proxy.
+RUN rm -rf /opt/nim/.local/nginx
 {% endif %}
 
 {% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
