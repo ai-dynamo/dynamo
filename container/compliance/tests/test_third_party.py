@@ -134,7 +134,14 @@ def test_base_components_parsed(tmp_path: Path) -> None:
 
     comps = {c.name: c for c in load_base_components(sbom)}
 
-    assert sorted(comps) == ["liba", "libb", "libexpr", "libnolicense", "libremoved", "zlib1g"]
+    assert sorted(comps) == [
+        "liba",
+        "libb",
+        "libexpr",
+        "libnolicense",
+        "libremoved",
+        "zlib1g",
+    ]
     assert comps["libb"].spdx == "MIT License AND Apache 2.0"
     assert comps["libnolicense"].spdx == NOASSERTION
 
