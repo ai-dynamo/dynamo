@@ -4,7 +4,11 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -14,6 +18,7 @@ import (
 	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,10 +29,47 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
+type environmentSyncPredecessor struct {
+	SourceRevision       string                             `json:"sourceRevision"`
+	Origin               string                             `json:"origin"`
+	Graph                *v1beta1.DynamoGraphDeployment     `json:"graph"`
+	Component            *v1beta1.DynamoComponentDeployment `json:"component"`
+	PodCliqueSet         *grovev1alpha1.PodCliqueSet        `json:"podCliqueSet"`
+	DeploymentInput      *v1beta1.DynamoComponentDeployment `json:"deploymentInput"`
+	Deployment           *appsv1.Deployment                 `json:"deployment"`
+	LeaderWorkerSetInput *v1beta1.DynamoComponentDeployment `json:"leaderWorkerSetInput"`
+	LeaderWorkerSet      *leaderworkersetv1.LeaderWorkerSet `json:"leaderWorkerSet"`
+}
+
+func loadEnvironmentSyncPredecessor(t testing.TB, origin string) *environmentSyncPredecessor {
+	t.Helper()
+	name := origin
+	if name == "" {
+		name = "missing"
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "environment-sync", "origin-"+name+".json"))
+	require.NoError(t, err)
+	provenanceData, err := os.ReadFile(filepath.Join("testdata", "environment-sync", "provenance.json"))
+	require.NoError(t, err)
+	var provenance struct {
+		Fixtures map[string]struct {
+			SHA256 string `json:"sha256"`
+		} `json:"fixtures"`
+	}
+	require.NoError(t, json.Unmarshal(provenanceData, &provenance))
+	require.Equal(t, provenance.Fixtures["origin-"+name+".json"].SHA256, fmt.Sprintf("%x", sha256.Sum256(data)), "frozen predecessor bytes must retain their capture provenance")
+	var predecessor environmentSyncPredecessor
+	require.NoError(t, json.Unmarshal(data, &predecessor))
+	require.Equal(t, "8f1fdc45f043356fa2e15bfcd28f576ce44db555", predecessor.SourceRevision)
+	require.Equal(t, origin, predecessor.Origin)
+	require.Equal(t, environmentSyncGraph(origin), predecessor.Graph, "the frozen input is independent of current lowering")
+	return &predecessor
+}
+
 // environmentSyncGraph constructs an independently owned frontend-only graph so
 // worker-generation rotation cannot hide a missed order-only resource update.
 func environmentSyncGraph(origin string) *v1beta1.DynamoGraphDeployment {
-	return &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", UID: "graph-uid",
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns", UID: "graph-uid",
 		Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1)),
@@ -36,6 +78,10 @@ func environmentSyncGraph(origin string) *v1beta1.DynamoGraphDeployment {
 			}}}},
 		}}},
 	}
+	if origin == "" {
+		dgd.Annotations = nil
+	}
+	return dgd
 }
 
 func requireEnvironmentOrder(t *testing.T, env []corev1.EnvVar, forward bool) {
@@ -57,17 +103,11 @@ func TestEnvironmentOrderThroughDCDSync(t *testing.T) {
 	for _, origin := range []string{"1.8.0", "1.7.0", ""} {
 		for _, auxiliary := range []bool{false, true} {
 			t.Run(fmt.Sprintf("origin=%s/DS-auxiliary=%t", origin, auxiliary), func(t *testing.T) {
-				t.Log("Seed the predecessor's exact DCD and legacy hash bookkeeping")
-				dgd := environmentSyncGraph(origin)
-				children, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{})
-				require.NoError(t, err)
-				existing := children["frontend"]
-				existing.UID, existing.Generation = "dcd-uid", 7
-				existing.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
-				legacyHash, err := common.GetSpecHash(existing)
-				require.NoError(t, err)
-				existing.Annotations[common.NvidiaAnnotationHashKey] = legacyHash
-				existing.Annotations[common.NvidiaAnnotationGenerationKey] = "7"
+				t.Log("Seed the frozen actual predecessor's DCD and its original hash bookkeeping")
+				predecessor := loadEnvironmentSyncPredecessor(t, origin)
+				dgd, existing := predecessor.Graph, predecessor.Component
+				var children map[string]*v1beta1.DynamoComponentDeployment
+				var err error
 				kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(dgd, existing).Build()
 				require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: existing.Name, Namespace: existing.Namespace}, existing))
 				original := existing.DeepCopy()
@@ -115,22 +155,12 @@ func TestEnvironmentOrderThroughDCDSync(t *testing.T) {
 func TestEnvironmentOrderThroughGroveSync(t *testing.T) {
 	for _, origin := range []string{"1.8.0", "1.7.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
-			t.Log("Seed a frontend-only PCS with the predecessor's list-insensitive hash")
-			dgd := environmentSyncGraph(origin)
+			t.Log("Seed the frozen actual predecessor's frontend-only PCS and its own hash")
+			predecessor := loadEnvironmentSyncPredecessor(t, origin)
+			dgd, existing := predecessor.Graph, predecessor.PodCliqueSet
 			config := &configv1alpha1.OperatorConfiguration{}
 			runtimeConfig := &common.RuntimeConfig{Gate: features.Gates{Grove: true}}
 			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
-			existing, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil)
-			require.NoError(t, err)
-			existing.UID, existing.Generation = "pcs-uid", 7
-			existing.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
-			legacyHash, err := common.GetSpecHash(existing)
-			require.NoError(t, err)
-			if existing.Annotations == nil {
-				existing.Annotations = map[string]string{}
-			}
-			existing.Annotations[common.NvidiaAnnotationHashKey] = legacyHash
-			existing.Annotations[common.NvidiaAnnotationGenerationKey] = "7"
 			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(existing).Build()
 			require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: existing.Name, Namespace: existing.Namespace}, existing))
 			original := existing.DeepCopy()
@@ -166,11 +196,14 @@ func TestEnvironmentOrderThroughGroveSync(t *testing.T) {
 
 func TestEnvironmentOrderThroughDCDWorkloadSync(t *testing.T) {
 	type originCase struct {
-		name, origin, templateOrigin string
-		child, mixedRoles, ordered   bool
+		name, origin, templateOrigin       string
+		child, mixedRoles, ordered, frozen bool
 	}
 	for _, multinode := range []bool{false, true} {
 		cases := []originCase{
+			{name: "frozen semantic predecessor", origin: "1.8.0", templateOrigin: "1.8.0", ordered: true, frozen: true},
+			{name: "frozen legacy predecessor", origin: "1.7.0", templateOrigin: "1.7.0", frozen: true},
+			{name: "frozen missing-origin predecessor", frozen: true},
 			{name: "standalone semantic origin is authoritative", origin: "1.8.0", templateOrigin: "1.7.0", ordered: true},
 			{name: "standalone legacy origin is authoritative", origin: "1.7.0", templateOrigin: "1.8.0"},
 			{name: "standalone missing origin is authoritative", templateOrigin: "1.8.0"},
@@ -182,7 +215,7 @@ func TestEnvironmentOrderThroughDCDWorkloadSync(t *testing.T) {
 		}
 		for _, test := range cases {
 			t.Run(fmt.Sprintf("multinode=%t/%s", multinode, test.name), func(t *testing.T) {
-				t.Log("Render the predecessor workload using the authoritative standalone or inherited origin")
+				t.Log("Prepare authoritative-origin cases independently from frozen upgrade cases")
 				template := environmentSyncGraph(test.templateOrigin).Spec.Components[0].PodTemplate
 				template.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: test.templateOrigin}
 				template.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
@@ -205,6 +238,14 @@ func TestEnvironmentOrderThroughDCDWorkloadSync(t *testing.T) {
 					dcd.Spec.PodTemplate = nil
 					dcd.Spec.Roles = []v1beta1.ComponentRoleSpec{{Name: "leader", PodTemplate: leader}, {Name: "worker", PodTemplate: template}}
 				}
+				var predecessor *environmentSyncPredecessor
+				if test.frozen {
+					predecessor = loadEnvironmentSyncPredecessor(t, test.origin)
+					dcd = predecessor.DeploymentInput
+					if multinode {
+						dcd = predecessor.LeaderWorkerSetInput
+					}
+				}
 				require.Equal(t, test.ordered, dynamo.DCDUsesOrderedEnvironment(dcd))
 				scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 				require.NoError(t, appsv1.AddToScheme(scheme))
@@ -214,31 +255,49 @@ func TestEnvironmentOrderThroughDCDWorkloadSync(t *testing.T) {
 				var originalDeployment *appsv1.Deployment
 				var originalLWS *leaderworkersetv1.LeaderWorkerSet
 				if multinode {
-					workload, _, err := reconciler.generateLeaderWorkerSet(t.Context(), option, leaderWorkerSetName(dcd))
-					require.NoError(t, err)
-					workload.UID, workload.Generation = "lws-uid", 7
-					workload.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}
-					hash, err := common.GetSpecHash(workload)
-					require.NoError(t, err)
-					workload.Annotations = map[string]string{common.NvidiaAnnotationHashKey: hash, common.NvidiaAnnotationGenerationKey: "7"}
+					var workload *leaderworkersetv1.LeaderWorkerSet
+					if predecessor != nil {
+						workload = predecessor.LeaderWorkerSet
+					} else {
+						// This seed checks origin policy/hash bookkeeping, not previous lowering.
+						var err error
+						workload, _, err = reconciler.generateLeaderWorkerSet(t.Context(), option, leaderWorkerSetName(dcd))
+						require.NoError(t, err)
+						workload.UID, workload.Generation = "lws-uid", 7
+						workload.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}
+						hash, err := common.GetSpecHash(workload)
+						require.NoError(t, err)
+						workload.Annotations = map[string]string{common.NvidiaAnnotationHashKey: hash, common.NvidiaAnnotationGenerationKey: "7"}
+					}
 					require.NoError(t, kubeClient.Create(t.Context(), workload))
 					require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: workload.Name, Namespace: workload.Namespace}, workload))
 					originalLWS = workload.DeepCopy()
 				} else {
-					workload, _, err := reconciler.generateDeployment(t.Context(), option)
-					require.NoError(t, err)
-					workload.UID, workload.Generation = "deployment-uid", 7
-					workload.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}
-					hash, err := common.GetSpecHash(workload)
-					require.NoError(t, err)
-					workload.Annotations[common.NvidiaAnnotationHashKey] = hash
-					workload.Annotations[common.NvidiaAnnotationGenerationKey] = "7"
+					var workload *appsv1.Deployment
+					if predecessor != nil {
+						workload = predecessor.Deployment
+					} else {
+						// This seed checks origin policy/hash bookkeeping, not previous lowering.
+						var err error
+						workload, _, err = reconciler.generateDeployment(t.Context(), option)
+						require.NoError(t, err)
+						workload.UID, workload.Generation = "deployment-uid", 7
+						workload.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}
+						hash, err := common.GetSpecHash(workload)
+						require.NoError(t, err)
+						workload.Annotations[common.NvidiaAnnotationHashKey] = hash
+						workload.Annotations[common.NvidiaAnnotationGenerationKey] = "7"
+					}
 					require.NoError(t, kubeClient.Create(t.Context(), workload))
 					require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: workload.Name, Namespace: workload.Namespace}, workload))
 					originalDeployment = workload.DeepCopy()
 				}
 
-				for _, phase := range []string{"operator upgrade", "unchanged reconcile", "order-only input edit"} {
+				firstPhase := "current-code hash bookkeeping transition"
+				if predecessor != nil {
+					firstPhase = "operator upgrade from frozen predecessor"
+				}
+				for _, phase := range []string{firstPhase, "unchanged reconcile", "order-only input edit"} {
 					t.Log(phase)
 					edit := phase == "order-only input edit"
 					if edit {

@@ -1,0 +1,1020 @@
+{
+  "component": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/dcd-spec": "{\"version\":1,\"spec\":{\"envs\":[{\"name\":\"B\",\"value\":\"$(A)\"},{\"name\":\"A\",\"value\":\"x\"}],\"extraPodSpec\":{\"mainContainer\":{\"name\":\"\",\"resources\":{}}}},\"rawJSON\":[{\"path\":\"serviceName\",\"nil\":true}]}",
+        "nvidia.com/last-applied-generation": "7",
+        "nvidia.com/last-applied-hash": "f2d9f3628cd100856a4da674d2e28c31dceba2ea9b0559fcf0126d96a3ac83bf"
+      },
+      "generation": 7,
+      "labels": {
+        "nvidia.com/dynamo-component": "frontend",
+        "nvidia.com/dynamo-graph-deployment-name": "graph",
+        "nvidia.com/dynamo-namespace": "ns-graph"
+      },
+      "name": "graph-frontend",
+      "namespace": "ns",
+      "ownerReferences": [
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "blockOwnerDeletion": true,
+          "controller": true,
+          "kind": "DynamoGraphDeployment",
+          "name": "graph",
+          "uid": "graph-uid"
+        }
+      ],
+      "uid": "dcd-uid"
+    },
+    "spec": {
+      "backendFramework": "vllm",
+      "name": "frontend",
+      "podTemplate": {
+        "metadata": {
+          "annotations": {
+            "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+          }
+        },
+        "spec": {
+          "containers": [
+            {
+              "env": [
+                {
+                  "name": "B",
+                  "value": "$(A)"
+                },
+                {
+                  "name": "A",
+                  "value": "x"
+                }
+              ],
+              "image": "runtime:1.7.0",
+              "name": "main"
+            }
+          ]
+        }
+      },
+      "replicas": 1,
+      "type": "frontend"
+    }
+  },
+  "deployment": {
+    "metadata": {
+      "name": "worker",
+      "namespace": "ns",
+      "uid": "deployment-uid",
+      "generation": 7,
+      "labels": {
+        "nvidia.com/dynamo-component": "worker",
+        "nvidia.com/dynamo-namespace": "ns-worker"
+      },
+      "annotations": {
+        "nvidia.com/last-applied-generation": "7",
+        "nvidia.com/last-applied-hash": "225b1f30a621ed4968407abf15693490205ee1fc7ea18991d34b7e1fe590d179"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "worker",
+          "uid": "dcd-uid",
+          "controller": true,
+          "blockOwnerDeletion": true
+        }
+      ]
+    },
+    "spec": {
+      "replicas": 1,
+      "selector": {
+        "matchLabels": {
+          "nvidia.com/selector": "worker"
+        }
+      },
+      "template": {
+        "metadata": {
+          "labels": {
+            "nvidia.com/dynamo-component": "worker",
+            "nvidia.com/dynamo-component-type": "worker",
+            "nvidia.com/dynamo-namespace": "ns-worker",
+            "nvidia.com/metrics-enabled": "true",
+            "nvidia.com/selector": "worker"
+          }
+        },
+        "spec": {
+          "volumes": [
+            {
+              "name": "shared-memory",
+              "emptyDir": {
+                "medium": "Memory",
+                "sizeLimit": "8Gi"
+              }
+            }
+          ],
+          "containers": [
+            {
+              "name": "main",
+              "image": "runtime:1.7.0",
+              "command": [
+                "python3",
+                "-m",
+                "dynamo.vllm"
+              ],
+              "args": [
+                "--model",
+                "test-model"
+              ],
+              "ports": [
+                {
+                  "name": "system",
+                  "containerPort": 9090,
+                  "protocol": "TCP"
+                },
+                {
+                  "name": "nixl",
+                  "containerPort": 19090,
+                  "protocol": "TCP"
+                }
+              ],
+              "env": [
+                {
+                  "name": "A",
+                  "value": "x"
+                },
+                {
+                  "name": "B",
+                  "value": "$(A)"
+                },
+                {
+                  "name": "DYN_COMPONENT",
+                  "value": "worker"
+                },
+                {
+                  "name": "DYN_DISCOVERY_BACKEND",
+                  "value": "kubernetes"
+                },
+                {
+                  "name": "DYN_FORWARDPASS_METRIC_PORT",
+                  "value": "20380"
+                },
+                {
+                  "name": "DYN_HEALTH_CHECK_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "DYN_NAMESPACE",
+                  "value": "ns-worker"
+                },
+                {
+                  "name": "DYN_PARENT_DGD_K8S_NAME",
+                  "value": "worker"
+                },
+                {
+                  "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                  "value": "ns"
+                },
+                {
+                  "name": "DYN_SYSTEM_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "DYN_SYSTEM_PORT",
+                  "value": "9090"
+                },
+                {
+                  "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                  "value": "[\"generate\"]"
+                },
+                {
+                  "name": "NIXL_TELEMETRY_ENABLE",
+                  "value": "n"
+                },
+                {
+                  "name": "NIXL_TELEMETRY_EXPORTER",
+                  "value": "prometheus"
+                },
+                {
+                  "name": "NIXL_TELEMETRY_PROMETHEUS_PORT",
+                  "value": "19090"
+                },
+                {
+                  "name": "POD_NAME",
+                  "valueFrom": {
+                    "fieldRef": {
+                      "fieldPath": "metadata.name"
+                    }
+                  }
+                },
+                {
+                  "name": "POD_NAMESPACE",
+                  "valueFrom": {
+                    "fieldRef": {
+                      "fieldPath": "metadata.namespace"
+                    }
+                  }
+                },
+                {
+                  "name": "POD_UID",
+                  "valueFrom": {
+                    "fieldRef": {
+                      "fieldPath": "metadata.uid"
+                    }
+                  }
+                }
+              ],
+              "resources": {},
+              "volumeMounts": [
+                {
+                  "name": "shared-memory",
+                  "mountPath": "/dev/shm"
+                }
+              ],
+              "livenessProbe": {
+                "httpGet": {
+                  "path": "/live",
+                  "port": "system"
+                },
+                "timeoutSeconds": 4,
+                "periodSeconds": 5,
+                "failureThreshold": 3
+              },
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": "system"
+                },
+                "timeoutSeconds": 4,
+                "periodSeconds": 10,
+                "failureThreshold": 3
+              },
+              "startupProbe": {
+                "httpGet": {
+                  "path": "/live",
+                  "port": "system"
+                },
+                "timeoutSeconds": 5,
+                "periodSeconds": 10,
+                "failureThreshold": 720
+              }
+            }
+          ],
+          "restartPolicy": "Always",
+          "terminationGracePeriodSeconds": 60,
+          "serviceAccountName": "default",
+          "securityContext": {
+            "fsGroup": 1000
+          }
+        }
+      },
+      "strategy": {
+        "type": "RollingUpdate",
+        "rollingUpdate": {
+          "maxUnavailable": "25%",
+          "maxSurge": "25%"
+        }
+      }
+    },
+    "status": {}
+  },
+  "deploymentInput": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+      },
+      "name": "worker",
+      "namespace": "ns",
+      "resourceVersion": "999",
+      "uid": "dcd-uid"
+    },
+    "spec": {
+      "backendFramework": "vllm",
+      "name": "worker",
+      "podTemplate": {
+        "metadata": {
+          "annotations": {
+            "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+          }
+        },
+        "spec": {
+          "containers": [
+            {
+              "args": [
+                "--model",
+                "test-model"
+              ],
+              "command": [
+                "python3",
+                "-m",
+                "dynamo.vllm"
+              ],
+              "env": [
+                {
+                  "name": "B",
+                  "value": "$(A)"
+                },
+                {
+                  "name": "A",
+                  "value": "x"
+                }
+              ],
+              "image": "runtime:1.7.0",
+              "name": "main"
+            }
+          ]
+        }
+      },
+      "replicas": 1,
+      "type": "worker"
+    }
+  },
+  "graph": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+      },
+      "name": "graph",
+      "namespace": "ns",
+      "uid": "graph-uid"
+    },
+    "spec": {
+      "backendFramework": "vllm",
+      "components": [
+        {
+          "name": "frontend",
+          "podTemplate": {
+            "spec": {
+              "containers": [
+                {
+                  "env": [
+                    {
+                      "name": "B",
+                      "value": "$(A)"
+                    },
+                    {
+                      "name": "A",
+                      "value": "x"
+                    }
+                  ],
+                  "image": "runtime:1.7.0",
+                  "name": "main"
+                }
+              ]
+            }
+          },
+          "replicas": 1,
+          "type": "frontend"
+        }
+      ]
+    },
+    "status": {
+      "state": ""
+    }
+  },
+  "leaderWorkerSet": {
+    "metadata": {
+      "name": "worker-0",
+      "namespace": "ns",
+      "uid": "lws-uid",
+      "generation": 7,
+      "labels": {
+        "nvidia.com/dynamo-component": "worker",
+        "nvidia.com/dynamo-namespace": "ns-worker"
+      },
+      "annotations": {
+        "nvidia.com/last-applied-generation": "7",
+        "nvidia.com/last-applied-hash": "2bc229ab10586011da4bd9a9c6fc52b646e07f4bf6b039f843029e928ab9047b"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "worker",
+          "uid": "dcd-uid",
+          "controller": true,
+          "blockOwnerDeletion": true
+        }
+      ]
+    },
+    "spec": {
+      "replicas": 1,
+      "leaderWorkerTemplate": {
+        "leaderTemplate": {
+          "metadata": {
+            "labels": {
+              "nvidia.com/dynamo-component": "worker",
+              "nvidia.com/dynamo-component-type": "worker",
+              "nvidia.com/dynamo-namespace": "ns-worker",
+              "nvidia.com/metrics-enabled": "true",
+              "role": "leader"
+            }
+          },
+          "spec": {
+            "volumes": [
+              {
+                "name": "shared-memory",
+                "emptyDir": {
+                  "medium": "Memory",
+                  "sizeLimit": "8Gi"
+                }
+              }
+            ],
+            "containers": [
+              {
+                "name": "main",
+                "image": "runtime:1.7.0",
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.vllm"
+                ],
+                "args": [
+                  "--model",
+                  "test-model"
+                ],
+                "ports": [
+                  {
+                    "name": "system",
+                    "containerPort": 9090,
+                    "protocol": "TCP"
+                  },
+                  {
+                    "name": "nixl",
+                    "containerPort": 19090,
+                    "protocol": "TCP"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "A",
+                    "value": "x"
+                  },
+                  {
+                    "name": "B",
+                    "value": "$(A)"
+                  },
+                  {
+                    "name": "DYNAMO_LEADER_ADDRESS",
+                    "value": "$(LWS_LEADER_ADDRESS)"
+                  },
+                  {
+                    "name": "DYNAMO_RANK",
+                    "value": "$(LWS_WORKER_INDEX)"
+                  },
+                  {
+                    "name": "DYN_COMPONENT",
+                    "value": "worker"
+                  },
+                  {
+                    "name": "DYN_DISCOVERY_BACKEND",
+                    "value": "kubernetes"
+                  },
+                  {
+                    "name": "DYN_FORWARDPASS_METRIC_PORT",
+                    "value": "20380"
+                  },
+                  {
+                    "name": "DYN_HEALTH_CHECK_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "DYN_NAMESPACE",
+                    "value": "ns-worker"
+                  },
+                  {
+                    "name": "DYN_PARENT_DGD_K8S_NAME",
+                    "value": "worker"
+                  },
+                  {
+                    "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                    "value": "ns"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_PORT",
+                    "value": "9090"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    "value": "[\"generate\"]"
+                  },
+                  {
+                    "name": "NIXL_TELEMETRY_ENABLE",
+                    "value": "n"
+                  },
+                  {
+                    "name": "NIXL_TELEMETRY_EXPORTER",
+                    "value": "prometheus"
+                  },
+                  {
+                    "name": "NIXL_TELEMETRY_PROMETHEUS_PORT",
+                    "value": "19090"
+                  },
+                  {
+                    "name": "POD_NAME",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.name"
+                      }
+                    }
+                  },
+                  {
+                    "name": "POD_NAMESPACE",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.namespace"
+                      }
+                    }
+                  },
+                  {
+                    "name": "POD_UID",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.uid"
+                      }
+                    }
+                  },
+                  {
+                    "name": "VLLM_NIXL_SIDE_CHANNEL_HOST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "status.podIP"
+                      }
+                    }
+                  }
+                ],
+                "resources": {},
+                "volumeMounts": [
+                  {
+                    "name": "shared-memory",
+                    "mountPath": "/dev/shm"
+                  }
+                ],
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/live",
+                    "port": "system"
+                  },
+                  "timeoutSeconds": 4,
+                  "periodSeconds": 5,
+                  "failureThreshold": 3
+                },
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": "system"
+                  },
+                  "timeoutSeconds": 4,
+                  "periodSeconds": 10,
+                  "failureThreshold": 3
+                },
+                "startupProbe": {
+                  "httpGet": {
+                    "path": "/live",
+                    "port": "system"
+                  },
+                  "timeoutSeconds": 5,
+                  "periodSeconds": 10,
+                  "failureThreshold": 720
+                }
+              }
+            ],
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 60,
+            "serviceAccountName": "default",
+            "securityContext": {
+              "fsGroup": 1000
+            }
+          }
+        },
+        "workerTemplate": {
+          "metadata": {
+            "labels": {
+              "nvidia.com/dynamo-component": "worker",
+              "nvidia.com/dynamo-component-type": "worker",
+              "nvidia.com/dynamo-namespace": "ns-worker",
+              "nvidia.com/metrics-enabled": "true",
+              "role": "worker"
+            }
+          },
+          "spec": {
+            "volumes": [
+              {
+                "name": "shared-memory",
+                "emptyDir": {
+                  "medium": "Memory",
+                  "sizeLimit": "8Gi"
+                }
+              }
+            ],
+            "containers": [
+              {
+                "name": "main",
+                "image": "runtime:1.7.0",
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.vllm"
+                ],
+                "args": [
+                  "--model",
+                  "test-model"
+                ],
+                "ports": [
+                  {
+                    "name": "system",
+                    "containerPort": 9090,
+                    "protocol": "TCP"
+                  },
+                  {
+                    "name": "nixl",
+                    "containerPort": 19090,
+                    "protocol": "TCP"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "A",
+                    "value": "x"
+                  },
+                  {
+                    "name": "B",
+                    "value": "$(A)"
+                  },
+                  {
+                    "name": "DYNAMO_LEADER_ADDRESS",
+                    "value": "$(LWS_LEADER_ADDRESS)"
+                  },
+                  {
+                    "name": "DYNAMO_RANK",
+                    "value": "$(LWS_WORKER_INDEX)"
+                  },
+                  {
+                    "name": "DYN_COMPONENT",
+                    "value": "worker"
+                  },
+                  {
+                    "name": "DYN_DISCOVERY_BACKEND",
+                    "value": "kubernetes"
+                  },
+                  {
+                    "name": "DYN_FORWARDPASS_METRIC_PORT",
+                    "value": "20380"
+                  },
+                  {
+                    "name": "DYN_HEALTH_CHECK_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "DYN_NAMESPACE",
+                    "value": "ns-worker"
+                  },
+                  {
+                    "name": "DYN_PARENT_DGD_K8S_NAME",
+                    "value": "worker"
+                  },
+                  {
+                    "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                    "value": "ns"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_PORT",
+                    "value": "9090"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    "value": "[\"generate\"]"
+                  },
+                  {
+                    "name": "NIXL_TELEMETRY_ENABLE",
+                    "value": "n"
+                  },
+                  {
+                    "name": "NIXL_TELEMETRY_EXPORTER",
+                    "value": "prometheus"
+                  },
+                  {
+                    "name": "NIXL_TELEMETRY_PROMETHEUS_PORT",
+                    "value": "19090"
+                  },
+                  {
+                    "name": "POD_NAME",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.name"
+                      }
+                    }
+                  },
+                  {
+                    "name": "POD_NAMESPACE",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.namespace"
+                      }
+                    }
+                  },
+                  {
+                    "name": "POD_UID",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.uid"
+                      }
+                    }
+                  },
+                  {
+                    "name": "VLLM_NIXL_SIDE_CHANNEL_HOST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "status.podIP"
+                      }
+                    }
+                  }
+                ],
+                "resources": {},
+                "volumeMounts": [
+                  {
+                    "name": "shared-memory",
+                    "mountPath": "/dev/shm"
+                  }
+                ]
+              }
+            ],
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 60,
+            "serviceAccountName": "default",
+            "securityContext": {
+              "fsGroup": 1000
+            }
+          }
+        },
+        "size": 2
+      },
+      "rolloutStrategy": {
+        "type": ""
+      },
+      "startupPolicy": "LeaderCreated"
+    },
+    "status": {}
+  },
+  "leaderWorkerSetInput": {
+    "metadata": {
+      "annotations": {
+        "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+      },
+      "name": "worker",
+      "namespace": "ns",
+      "uid": "dcd-uid"
+    },
+    "spec": {
+      "backendFramework": "vllm",
+      "multinode": {
+        "nodeCount": 2
+      },
+      "name": "worker",
+      "podTemplate": {
+        "metadata": {
+          "annotations": {
+            "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+          }
+        },
+        "spec": {
+          "containers": [
+            {
+              "args": [
+                "--model",
+                "test-model"
+              ],
+              "command": [
+                "python3",
+                "-m",
+                "dynamo.vllm"
+              ],
+              "env": [
+                {
+                  "name": "B",
+                  "value": "$(A)"
+                },
+                {
+                  "name": "A",
+                  "value": "x"
+                }
+              ],
+              "image": "runtime:1.7.0",
+              "name": "main"
+            }
+          ]
+        }
+      },
+      "replicas": 1,
+      "type": "worker"
+    }
+  },
+  "origin": "1.7.0",
+  "podCliqueSet": {
+    "metadata": {
+      "name": "graph",
+      "namespace": "ns",
+      "uid": "pcs-uid",
+      "generation": 7,
+      "labels": {
+        "nvidia.com/dynamo-graph-deployment-name": "graph"
+      },
+      "annotations": {
+        "nvidia.com/last-applied-generation": "7",
+        "nvidia.com/last-applied-hash": "ca5cb0e64c64313fa18cc64915eba665e8d4a78a2f5a1e0fd85809c990afa252"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "graph",
+          "uid": "graph-uid",
+          "controller": true,
+          "blockOwnerDeletion": true
+        }
+      ]
+    },
+    "spec": {
+      "replicas": 1,
+      "template": {
+        "cliques": [
+          {
+            "name": "frontend",
+            "labels": {
+              "nvidia.com/dynamo-component": "frontend",
+              "nvidia.com/dynamo-component-type": "frontend",
+              "nvidia.com/dynamo-graph-deployment-name": "graph",
+              "nvidia.com/dynamo-namespace": "ns-graph",
+              "nvidia.com/metrics-enabled": "true",
+              "nvidia.com/selector": "graph-frontend"
+            },
+            "annotations": {
+              "nvidia.com/dynamo-operator-origin-version": "1.7.0"
+            },
+            "spec": {
+              "roleName": "frontend",
+              "podSpec": {
+                "volumes": [
+                  {
+                    "name": "shared-memory",
+                    "emptyDir": {
+                      "medium": "Memory",
+                      "sizeLimit": "8Gi"
+                    }
+                  }
+                ],
+                "containers": [
+                  {
+                    "name": "main",
+                    "image": "runtime:1.7.0",
+                    "command": [
+                      "python3"
+                    ],
+                    "args": [
+                      "-m",
+                      "dynamo.frontend"
+                    ],
+                    "ports": [
+                      {
+                        "name": "http",
+                        "containerPort": 8000,
+                        "protocol": "TCP"
+                      }
+                    ],
+                    "env": [
+                      {
+                        "name": "A",
+                        "value": "x"
+                      },
+                      {
+                        "name": "B",
+                        "value": "$(A)"
+                      },
+                      {
+                        "name": "DYNAMO_PORT",
+                        "value": "8000"
+                      },
+                      {
+                        "name": "DYN_COMPONENT",
+                        "value": "frontend"
+                      },
+                      {
+                        "name": "DYN_DISCOVERY_BACKEND",
+                        "value": "kubernetes"
+                      },
+                      {
+                        "name": "DYN_HTTP_PORT",
+                        "value": "8000"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE",
+                        "value": "ns-graph"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE_PREFIX",
+                        "value": "ns-graph"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE_PREFIX_STRICT",
+                        "value": "true"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAME",
+                        "value": "graph"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                        "value": "ns"
+                      },
+                      {
+                        "name": "POD_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.name"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_NAMESPACE",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.namespace"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_UID",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.uid"
+                          }
+                        }
+                      }
+                    ],
+                    "resources": {},
+                    "volumeMounts": [
+                      {
+                        "name": "shared-memory",
+                        "mountPath": "/dev/shm"
+                      }
+                    ],
+                    "livenessProbe": {
+                      "httpGet": {
+                        "path": "/live",
+                        "port": "http"
+                      },
+                      "initialDelaySeconds": 15,
+                      "timeoutSeconds": 1,
+                      "periodSeconds": 10,
+                      "failureThreshold": 3
+                    },
+                    "readinessProbe": {
+                      "httpGet": {
+                        "path": "/health",
+                        "port": "http"
+                      },
+                      "initialDelaySeconds": 10,
+                      "timeoutSeconds": 3,
+                      "periodSeconds": 10,
+                      "failureThreshold": 3
+                    },
+                    "startupProbe": {
+                      "httpGet": {
+                        "path": "/live",
+                        "port": "http"
+                      },
+                      "timeoutSeconds": 1,
+                      "periodSeconds": 10,
+                      "failureThreshold": 30
+                    }
+                  }
+                ],
+                "restartPolicy": "Always",
+                "terminationGracePeriodSeconds": 60,
+                "securityContext": {
+                  "fsGroup": 1000
+                }
+              },
+              "replicas": 1,
+              "minAvailable": 1
+            }
+          }
+        ],
+        "cliqueStartupType": "CliqueStartupTypeAnyOrder",
+        "headlessServiceConfig": {
+          "publishNotReadyAddresses": true
+        }
+      }
+    },
+    "status": {
+      "updatedReplicas": 0,
+      "availableReplicas": 0
+    }
+  },
+  "sourceRevision": "8f1fdc45f043356fa2e15bfcd28f576ce44db555"
+}
