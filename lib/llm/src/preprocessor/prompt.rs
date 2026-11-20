@@ -41,6 +41,21 @@ pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&serde_json::Value>;
 }
 
+/// Match Kimi K3 in a served model name or parser hint, ignoring case, dashes,
+/// and underscores.
+pub fn is_kimi_k3_prompt_hint(hint: &str) -> bool {
+    let mut normalized = hint
+        .chars()
+        .filter(|ch| !matches!(ch, '-' | '_'))
+        .flat_map(char::to_lowercase);
+    while normalized.any(|ch| ch == 'k') {
+        if normalized.clone().take(5).eq("imik3".chars()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Parse a JSON object string into a serde_json Map, preserving the exact
 /// spelling of numbers that cannot be round-tripped through f64 without loss.
 /// Numbers that survive f64 conversion unchanged are kept as `Value::Number`;

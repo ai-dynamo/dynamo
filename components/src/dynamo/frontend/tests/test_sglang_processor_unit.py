@@ -5407,6 +5407,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         ("model", "tool_parser", "reasoning_parser", "is_kimi"),
         [
             ("moonshotai/Kimi-K3.1-Pro", None, None, True),
+            ("team/Kimi--K3", None, None, True),
             ("local-model", "kimi_k3", None, True),
             ("local-model", None, "kimi-k3", True),
             ("moonshotai/Kimi-K2.5", None, "kimi_k2", False),

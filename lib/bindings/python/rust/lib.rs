@@ -361,6 +361,10 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        llm::preprocessor::_is_kimi_k3_prompt_hint,
+        m
+    )?)?;
     #[cfg(feature = "mm-routing")]
     m.add_function(wrap_pyfunction!(resolve_routing_image_token_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
