@@ -393,12 +393,19 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
 
   <Accordion title="Mistral">
     <AccordionGroup>
-      <Accordion title="Mistral, Mixtral, Mistral-Nemo, and Magistral">
-        **Parser:** `mistral`
+      <Accordion title="Mistral tokenizers before v11, including Mistral 7B, Mixtral, and Mistral-Nemo">
+        **Parser:** `mistral` with `DYN_PARSER_VERSION=1`
 
         **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
-        **Notes:** `[TOOL_CALLS]...[/TOOL_CALLS]`
+        **Notes:** `[TOOL_CALLS] [{"name": ..., "arguments": ...}]` calls. Under `auto` or `2`, `mistral` selects the v11+ parser below, and a tokenizer without `[ARGS]` is rejected at registration: the frontend logs the error and the model never appears in `/v1/models`. `DYN_PARSER_VERSION=1` applies to every model on the frontend.
+      </Accordion>
+      <Accordion title="Mistral v11+ tokenizers (tekken.json), including Mistral Large 4">
+        **Parser:** `mistral`, served by the `dynamo-parsers-v2` unified family `mistral_4`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `[TOOL_CALLS]NAME[ARGS]{json}` calls with `[THINK]` reasoning; pair with `--dyn-reasoning-parser mistral`. The tokenizer must have `[ARGS]`, which Mistral tokenizers have from v11 on; an older tokenizer is rejected at registration unless `DYN_PARSER_VERSION=1` selects the parser above. On dynamo.vllm with the `auto` or `guidance` structured-output backend, mistral-common's grammar holds forced `tool_choice`, `auto` with tools, and a reply JSON schema. Other workers parse the native format but do not enforce a forced `tool_choice`. See the [Mistral Large 4 recipe](../../recipes/model-recipes/mistral-large-4.mdx).
       </Accordion>
     </AccordionGroup>
   </Accordion>
