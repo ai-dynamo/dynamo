@@ -101,6 +101,11 @@ struct RegisterRequest {
     /// are excluded.
     #[serde(default)]
     engine_owned_mm_identity: bool,
+    /// The source sends one remove per block however many times it stored the block
+    /// (SGLang), so repeated stores are not counted. Otherwise each store needs its own
+    /// remove before the block leaves the index (vLLM).
+    #[serde(default)]
+    idempotent_stores: bool,
     /// Optional per-tenant salt (Mooncake RFC #1403 `additionalsalt`).
     /// Currently accepted but not yet mixed into hashes — engines apply
     /// their own salt internally. Plumbed for forward compatibility.
@@ -187,6 +192,7 @@ async fn register(
             req.block_size,
             req.replay_endpoint,
             req.engine_owned_mm_identity,
+            req.idempotent_stores,
         )
         .await
     {
@@ -745,6 +751,7 @@ mod tests {
                 4,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -759,6 +766,7 @@ mod tests {
                 "other".to_string(),
                 8,
                 None,
+                false,
                 false,
             )
             .await
@@ -883,6 +891,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_passes_idempotent_stores_to_the_listener() {
+        let registry = Arc::new(WorkerRegistry::new(1));
+        registry.signal_ready();
+        let app = create_router(Arc::new(AppState {
+            registry,
+            access_log_sink: None,
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+
+        let body = serde_json::json!({
+            "instance_id": 30,
+            "endpoint": "tcp://127.0.0.1:15593",
+            "model_name": "sglang-model",
+            "block_size": 4,
+            "idempotent_stores": true,
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/register")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let workers: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        let listener = &workers[0]["listeners"]["0"];
+        assert_eq!(listener["idempotent_stores"], true);
+        assert_eq!(listener["engine_owned_mm_identity"], false);
+    }
+
+    #[tokio::test]
     async fn reopen_logs_returns_ok_without_writers() {
         let app = empty_indexer_router(false);
         let response = app
@@ -928,6 +987,7 @@ mod tests {
                 "default".to_string(),
                 4,
                 None,
+                false,
                 false,
             )
             .await
