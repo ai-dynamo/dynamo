@@ -800,9 +800,9 @@ def sidecar_config_test(
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     for name, indices in config.gpu_env.items():
         devices = map_cuda_visible_devices(indices, visible).split(",")
-        assert (
-            len(set(devices)) == len(indices) and "-1" not in devices
-        ), f"{name} requires {len(indices)} distinct visible GPU(s)"
+        assert len(set(devices)) == len(indices) and "-1" not in devices, (
+            f"{name} requires {len(indices)} distinct visible GPU(s)"
+        )
         monkeypatch.setenv(name, ",".join(devices))
     for name, (block_size, port_range) in config.port_env.items():
         ports = allocate_contiguous_ports(1, block_size, port_range.value)
@@ -813,7 +813,6 @@ def sidecar_config_test(
     return config
 
 
-@pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports
@@ -824,7 +823,17 @@ def sidecar_config_test(
         pytest.param(
             *case.values,
             *sidecar_configs[case.values[0]].runtime_transports,
-            marks=case.marks,
+            marks=[
+                *case.marks,
+                *(
+                    []
+                    if any(
+                        mark.name in {"multimodal", "router", "fault_tolerance", "core"}
+                        for mark in case.marks
+                    )
+                    else [pytest.mark.core]
+                ),
+            ],
             id=case.values[0],
         )
         for case in params_with_model_mark(sidecar_configs)
@@ -840,9 +849,9 @@ def test_serve_deployment(
     predownload_models,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 2, (
+        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    )
     run_serve_deployment(
         sidecar_config_test,
         request,
