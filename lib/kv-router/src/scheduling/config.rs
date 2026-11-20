@@ -1257,7 +1257,8 @@ fn validate_sita_config(config: &KvRouterConfig) -> Result<(), String> {
     }
     if config.sita_boundary_2 != 0 && config.sita_boundary_2 <= config.sita_boundary_1 {
         return Err(
-            "sita_boundary_2 must be 0 (two-band split) or greater than sita_boundary_1".to_string(),
+            "sita_boundary_2 must be 0 (two-band split) or greater than sita_boundary_1"
+                .to_string(),
         );
     }
     if !(config.sita_small_band_share > 0.0 && config.sita_small_band_share < 1.0) {
@@ -2840,7 +2841,11 @@ models:
         // still read it, and an absent field must deserialize to the default.
         let serialized = serde_json::to_string(&config).unwrap();
         assert!(!serialized.contains("sita_"), "{serialized}");
-        assert!(!serde_json::from_str::<KvRouterConfig>("{}").unwrap().sita_enabled);
+        assert!(
+            !serde_json::from_str::<KvRouterConfig>("{}")
+                .unwrap()
+                .sita_enabled
+        );
 
         let enabled: KvRouterConfig = serde_json::from_str(
             r#"{"sita_enabled": true, "sita_boundary_1": 2048, "sita_boundary_2": 0,

@@ -226,7 +226,14 @@ fn sita_apply_spill(
         return target;
     }
 
-    let widened = if sita_band_occupancy(loads, target) > spill_threshold {
+    // Only a saturated band spills or borrows. A band below the threshold keeps
+    // its own workers even if band 0 happens to be idle: parking a long request
+    // there would delay later short requests without relieving anything.
+    if sita_band_occupancy(loads, target) <= spill_threshold {
+        return target;
+    }
+
+    let widened = {
         // Prefer the band above; the top band falls back to the one below, which
         // is band 1 (never band 0, since reaching here needs `band >= 2`).
         let neighbor_band = if band + 1 < band_count {
@@ -245,8 +252,6 @@ fn sita_apply_spill(
             }
             _ => target,
         }
-    } else {
-        target
     };
 
     sita_borrow_idle_short_band(widened, slices, loads, spill_threshold)
@@ -361,32 +366,57 @@ fn sita_worker_id_bounds<C: WorkerConfigLike>(
     }
     worker_ids.sort_unstable();
 
-    // Reuse the scoring path's notion of cache credit: the best overlap any
-    // eligible worker offers is the prefill this request can actually skip.
-    let mut best_cached_tokens = 0;
+    // Reuse the scoring path's notion of cache credit: the best overlap a worker
+    // offers is the prefill this request can actually skip there. Keep it per
+    // worker (best across its dp ranks) so a band is sized only from cache its
+    // own workers hold.
+    let mut cached_tokens = vec![0usize; worker_ids.len()];
     eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-        best_cached_tokens = best_cached_tokens.max(request.effective_cached_tokens_for(worker));
+        if let Ok(index) = worker_ids.binary_search(&worker.worker_id) {
+            cached_tokens[index] =
+                cached_tokens[index].max(request.effective_cached_tokens_for(worker));
+        }
     });
-    let effective_prefill_tokens = crate::scheduling::prefill_load::effective_prefill_tokens(
-        request.isl_tokens,
-        best_cached_tokens,
-    );
-    let output_tokens = request
-        .expected_output_tokens
-        .map_or(0.0, |tokens| kv_router_config.sita_osl_weight * tokens as f64);
-    let size = effective_prefill_tokens.saturating_add(output_tokens as usize);
+    let best_cached_in = |(start, end): SitaSlice| -> usize {
+        cached_tokens[start..end].iter().copied().max().unwrap_or(0)
+    };
+    let output_tokens = request.expected_output_tokens.map_or(0.0, |tokens| {
+        kv_router_config.sita_osl_weight * tokens as f64
+    });
+    let size_with_cache = |cached: usize| -> usize {
+        crate::scheduling::prefill_load::effective_prefill_tokens(request.isl_tokens, cached)
+            .saturating_add(output_tokens as usize)
+    };
+    let band_for = |size: usize| {
+        sita_band_for_size(
+            size,
+            kv_router_config.sita_boundary_1,
+            kv_router_config.sita_boundary_2,
+        )
+    };
 
     let band_count = sita_band_count(kv_router_config.sita_boundary_2);
-    let band = sita_band_for_size(
-        size,
-        kv_router_config.sita_boundary_1,
-        kv_router_config.sita_boundary_2,
-    );
     let slices = sita_band_slices(
         worker_ids.len(),
         kv_router_config.sita_small_band_share,
         band_count,
     );
+    // Start from the best cache anywhere in the pool, then check that the
+    // chosen band's own workers can deliver it. If they cannot, the request
+    // would prefill cold there, so move it to the band its real size implies.
+    // Size only grows as cache is lost, so this climbs at most to the top band.
+    let mut band = band_for(size_with_cache(best_cached_in((0, worker_ids.len()))));
+    let mut best_cached_tokens = best_cached_in(slices[band]);
+    let mut size = size_with_cache(best_cached_tokens);
+    loop {
+        let actual_band = band_for(size);
+        if actual_band <= band {
+            break;
+        }
+        band = actual_band;
+        best_cached_tokens = best_cached_in(slices[band]);
+        size = size_with_cache(best_cached_tokens);
+    }
     let loads = sita_worker_loads(&worker_ids, workers, request, block_size);
     let spilled = sita_apply_spill(
         band,
@@ -663,10 +693,12 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 1.0
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let stock_overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
+        // Worker-local credit: the device, host and disk tiers that together make
+        // up `effective_overlap_blocks`, and therefore `overlap_frac` below.
+        let local_overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
-            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
-            + shared_overlap_blocks;
+            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks;
+        let stock_overlap_credit_blocks = local_overlap_credit_blocks + shared_overlap_blocks;
         // How much of this request's prompt the worker already holds. The stock
         // credit is linear in the absolute overlap; expressing it as a fraction
         // of the request lets `score_overlap_gamma` bend that response curve and
@@ -677,31 +709,54 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             (effective_overlap_blocks / context.request_blocks as f64).clamp(0.0, 1.0)
         };
         // `overlap_frac^gamma * request_blocks` from the contract equals
-        // `overlap_frac^(gamma-1)` times the linear credit, so shaping the stock
-        // credit multiplicatively reproduces it while keeping the host, disk and
-        // shared tiers on the same curve. At the neutral knobs the factor is
-        // exactly 1.0 and this reduces to the stock credit bit for bit.
+        // `overlap_frac^(gamma-1)` times the linear credit, so shaping the local
+        // credit multiplicatively reproduces it while keeping the host and disk
+        // tiers on the same curve. Shared-cache hits are not part of
+        // `overlap_frac`, so the cutoff and the curve leave them alone: a worker
+        // with no local overlap still earns its weighted shared-cache credit. At
+        // the neutral knobs the factor is exactly 1.0 and this reduces to the
+        // stock credit bit for bit.
         let overlap_credit_blocks = if kv_router_config.score_enabled {
-            if overlap_frac < kv_router_config.score_min_overlap_frac {
-                0.0
-            } else {
-                let shape = if kv_router_config.score_overlap_gamma == 1.0 {
-                    1.0
+            let shaped_local_credit_blocks =
+                if overlap_frac < kv_router_config.score_min_overlap_frac {
+                    0.0
+                } else if kv_router_config.score_overlap_gamma == 1.0 {
+                    local_overlap_credit_blocks
                 } else if overlap_frac > 0.0 {
                     overlap_frac.powf(kv_router_config.score_overlap_gamma - 1.0)
+                        * local_overlap_credit_blocks
                 } else {
-                    // `0^negative` is infinite; a zero-overlap worker earns
-                    // nothing under any gamma, so pin the shaped credit to zero.
+                    // `0^negative` is infinite; a zero-overlap worker earns no
+                    // local credit under any gamma, so pin it to zero.
                     0.0
                 };
-                kv_router_config.score_overlap_weight * shape * stock_overlap_credit_blocks
-            }
+            kv_router_config.score_overlap_weight
+                * (shaped_local_credit_blocks + shared_overlap_blocks)
         } else {
             stock_overlap_credit_blocks
         };
         let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
             kv_router_config.decode_active_request_weight * load.active_requests as f64;
+        // Charge the decode-side backlog convexly relative to the pool average so
+        // a worker that is already hotter than its peers pays more than its
+        // linear share. Computed before the decode branch below so both return
+        // paths honor the configured shaping.
+        let load_scale = if kv_router_config.score_enabled {
+            let load_term = decode_cost_blocks + active_request_cost_blocks;
+            let shape = if kv_router_config.score_load_gamma == 1.0
+                || default_context.mean_pool_load <= 0.0
+                || load_term <= 0.0
+            {
+                1.0
+            } else {
+                (load_term / default_context.mean_pool_load)
+                    .powf(kv_router_config.score_load_gamma - 1.0)
+            };
+            kv_router_config.score_load_weight * shape
+        } else {
+            1.0
+        };
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
@@ -714,9 +769,12 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // Clamp at zero because downstream taint multipliers assume non-negative scores.
             // This loses ordering between workers whose overlap fully offsets decode load, but
             // avoids inverting taint preference among negative-score workers.
+            // `load_scale` shapes the decode-side load before the overlap credit is
+            // subtracted, matching the prefill path where credit is unscaled.
+            // Multiplying by 1.0 is exact, so the stock case is unchanged.
             let overlap_adjusted_decode_blocks =
-                (decode_cost_blocks - overlap_credit_blocks).max(0.0);
-            let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+                (load_scale * decode_cost_blocks - overlap_credit_blocks).max(0.0);
+            let logit = overlap_adjusted_decode_blocks + load_scale * active_request_cost_blocks;
             // Stamped for the same reason as the two rows below: this row is emitted from the
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
@@ -734,24 +792,6 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
 
         let adjusted_prefill_blocks = (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
-        // Charge the decode-side backlog convexly relative to the pool average so
-        // a worker that is already hotter than its peers pays more than its
-        // linear share.
-        let load_scale = if kv_router_config.score_enabled {
-            let load_term = decode_cost_blocks + active_request_cost_blocks;
-            let shape = if kv_router_config.score_load_gamma == 1.0
-                || default_context.mean_pool_load <= 0.0
-                || load_term <= 0.0
-            {
-                1.0
-            } else {
-                (load_term / default_context.mean_pool_load)
-                    .powf(kv_router_config.score_load_gamma - 1.0)
-            };
-            kv_router_config.score_load_weight * shape
-        } else {
-            1.0
-        };
         // A unit scale is the stock case (shaping off, or neutral knobs). Keep
         // the original summation order there so the result is bit-identical
         // rather than merely close: float addition is not associative.
@@ -863,9 +903,8 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         input.context.block_size as usize,
     );
     let in_sita_band = |worker: WorkerWithDpRank| {
-        sita_bounds.is_none_or(|(first, last)| {
-            worker.worker_id >= first && worker.worker_id <= last
-        })
+        sita_bounds
+            .is_none_or(|(first, last)| worker.worker_id >= first && worker.worker_id <= last)
     };
 
     let temperature = input
@@ -1078,13 +1117,8 @@ mod tests {
         };
 
         let config = KvRouterConfig::default();
-        let default_context = DefaultScoringContext::new(
-            &workers,
-            &request,
-            request.eligibility(),
-            weights,
-            &config,
-        );
+        let default_context =
+            DefaultScoringContext::new(&workers, &request, request.eligibility(), weights, &config);
         assert_eq!(default_context.min_active_prefill_tokens, 7);
 
         let weights_without_decay = LogitWeights {
@@ -2374,13 +2408,17 @@ mod tests {
     /// `sita_widen_uncached_long_band`), which would otherwise mask the
     /// behavior under test.
     /// The overlap is deliberately tiny so it does not move the request across a
-    /// band boundary — only its presence matters here.
+    /// band boundary — only its presence matters here. It is placed on every
+    /// worker so whichever band the request lands in holds it, since SITA only
+    /// counts cache that the band's own workers can serve.
     fn sita_cached_request(isl_tokens: usize) -> SchedulingRequest {
         let mut request = base_request(isl_tokens);
-        request
-            .overlap
-            .effective_cached_tokens
-            .insert(WorkerWithDpRank::from_worker_id(0), 64);
+        for worker_id in 0..8 {
+            request
+                .overlap
+                .effective_cached_tokens
+                .insert(WorkerWithDpRank::from_worker_id(worker_id), 64);
+        }
         request
     }
 
@@ -2545,9 +2583,8 @@ mod tests {
     #[test]
     fn sita_uncached_long_request_borrows_band_0_only_while_it_is_idle() {
         let slices = sita_band_slices(8, 0.5, 3);
-        let widen = |loads: &[f64], spill| {
-            sita_widen_uncached_long_band(2, &slices, 8, 0, loads, spill)
-        };
+        let widen =
+            |loads: &[f64], spill| sita_widen_uncached_long_band(2, &slices, 8, 0, loads, spill);
 
         // Band 0 idle (occupancy 0.02 < 2 * (1 - 0.85) = 0.30): lend it out.
         let idle = [0.02, 0.02, 0.02, 0.02, 1.0, 1.0, 1.0, 1.0];
@@ -2672,6 +2709,42 @@ mod tests {
         assert!(
             worker.worker_id < 4,
             "overlap-adjusted size should map to band 0"
+        );
+    }
+
+    /// Cache held only outside the would-be band must not shrink the request
+    /// into it: the band's own workers would prefill it cold.
+    #[test]
+    fn sita_cache_outside_band_does_not_shrink_request_into_it() {
+        // share 0.5 over 8 workers => band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
+        let workers = sita_workers(8, 1_000);
+        let warm_worker = WorkerWithDpRank::from_worker_id(7);
+        // 1,800 cached tokens would leave a band-0 prefill, but only worker 7
+        // holds them and worker 7 is not in band 0.
+        let mut request = base_request(2_048);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(warm_worker, 1_800);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(warm_worker, 1_800.0 / 64.0);
+
+        let worker = DefaultWorkerSelector::new(Some(sita_config(0.5)), "test")
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                64,
+            ))
+            .unwrap()
+            .worker;
+
+        assert!(
+            worker.worker_id >= 4,
+            "a request whose cache is outside band 0 must not be sent to a cold band-0 worker, got {}",
+            worker.worker_id
         );
     }
 
@@ -2875,6 +2948,47 @@ mod tests {
         assert!(
             saturate_long(950).worker_id >= 4,
             "a busy band 0 keeps its workers reserved for short requests"
+        );
+    }
+
+    /// An idle band 0 is lent only to a band that needs relief. A long band
+    /// below the spill threshold keeps its own workers.
+    #[test]
+    fn sita_unsaturated_long_band_does_not_borrow_idle_band_0() {
+        // share 0.5 over 8 workers => band 0 = 0..4, band 1 = 4..6, band 2 = 6..8.
+        let workers = sita_workers(8, 1_000);
+        let mut request = sita_cached_request(9_000);
+        // Band 0 idle; band 2 occupancy = 100 / (100 + 200/6) = 0.75 <= 0.85.
+        for worker_id in 4..8 {
+            request.worker_loads.insert(
+                WorkerWithDpRank::from_worker_id(worker_id),
+                crate::sequences::WorkerLoadProjection {
+                    active_decode_blocks: 100,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let worker = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                sita_spill_threshold: 0.85,
+                ..sita_config(0.5)
+            }),
+            "test",
+        )
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            64,
+        ))
+        .unwrap()
+        .worker;
+
+        assert!(
+            worker.worker_id >= 6,
+            "an unsaturated top band must stay in its own slice, got {}",
+            worker.worker_id
         );
     }
 
@@ -3089,6 +3203,85 @@ mod tests {
         assert_eq!(above_cutoff, no_credit);
     }
 
+    /// Shared-cache hits are not part of `overlap_frac`, so neither the
+    /// minimum-overlap cutoff nor the overlap curve may discard them.
+    #[test]
+    fn score_overlap_shaping_keeps_shared_cache_credit() {
+        // 4 request blocks at block_size 1, no local overlap, 4 shared hits.
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(4);
+        #[allow(clippy::single_range_in_vec_init)]
+        let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
+        request.shared_cache_hits = Some(shared_hits);
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.5,
+        };
+        let logit = |config: KvRouterConfig| {
+            let selector = DefaultWorkerSelector::new(Some(config), "test");
+            worker_logit(&selector, &request, worker, 1, weights)
+        };
+
+        // Stock: 4 prefill blocks - 0.5 * 4 shared blocks = 2.
+        let stock = logit(KvRouterConfig::default());
+        assert_eq!(stock, 2.0);
+        let shaped = KvRouterConfig {
+            score_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            logit(KvRouterConfig {
+                score_min_overlap_frac: 0.5,
+                ..shaped.clone()
+            }),
+            stock,
+            "the cutoff must not drop shared-cache credit"
+        );
+        assert_eq!(
+            logit(KvRouterConfig {
+                score_overlap_gamma: 2.0,
+                ..shaped
+            }),
+            stock,
+            "the overlap curve must not zero shared-cache credit"
+        );
+    }
+
+    /// Decode routers with a positive overlap credit return from their own
+    /// branch, which must still honor load shaping.
+    #[test]
+    fn score_load_shaping_applies_to_decode_overlap_branch() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        let logit = |config: KvRouterConfig| {
+            let selector = DefaultWorkerSelector::new(Some(config), "decode");
+            worker_logit(&selector, &request, worker, 16, score_weights())
+        };
+
+        // Stock: max(0, 10 - 3) = 7.
+        assert_eq!(logit(KvRouterConfig::default()), 7.0);
+        // Load weight 2 doubles the decode load before the credit: 2 * 10 - 3.
+        assert_eq!(
+            logit(KvRouterConfig {
+                score_enabled: true,
+                score_load_weight: 2.0,
+                ..Default::default()
+            }),
+            17.0
+        );
+    }
+
     /// The fixture's overlap fraction is below 1.0, so raising the exponent
     /// shrinks the credit and raising load gamma above 1.0 charges a
     /// hotter-than-average worker more.
@@ -3107,7 +3300,10 @@ mod tests {
 
         // overlap_frac = 0.25 < 1, so frac^gamma decreases as gamma grows,
         // shrinking the credit and increasing the cost.
-        let costs: Vec<f64> = [0.5, 1.0, 1.5, 2.0].into_iter().map(overlap_logit).collect();
+        let costs: Vec<f64> = [0.5, 1.0, 1.5, 2.0]
+            .into_iter()
+            .map(overlap_logit)
+            .collect();
         for pair in costs.windows(2) {
             assert!(
                 pair[1] > pair[0],
