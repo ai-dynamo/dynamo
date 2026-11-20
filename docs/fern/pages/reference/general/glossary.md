@@ -43,8 +43,6 @@ subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV ca
 **Inter-Token Latency (ITL)** - The latency between consecutive output tokens during the decode phase; typically paired with TTFT to define performance SLAs.
 
 ## K
-**KV Block Manager (KVBM)** - Dynamo's scalable runtime component that handles memory allocation, management, and remote sharing of Key-Value blocks across heterogeneous and distributed environments.
-
 **KV Cache** - Key-Value cache that stores computed attention states from previous tokens to avoid recomputation during inference.
 
 **KV Router** - Dynamo's intelligent routing system that directs requests to workers with the highest cache overlap to maximize KV cache reuse. Determines routing based on KV cache hit rates and worker metrics.

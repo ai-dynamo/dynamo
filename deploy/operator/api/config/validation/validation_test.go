@@ -19,6 +19,7 @@ package validation
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,4 +362,36 @@ func TestValidateInfrastructure_TLS(t *testing.T) {
 			t.Fatalf("expected tcpTLSServerName error, got %v", errs)
 		}
 	})
+}
+
+func TestValidateKaiSchedulerName(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		valid bool
+	}{
+		{name: "", valid: true},
+		{name: "kai-scheduler", valid: true},
+		{name: "runai-scheduler", valid: true},
+		{name: "scheduler.example.com", valid: true},
+		{name: "Runai-Scheduler"},
+		{name: " runai-scheduler "},
+		{name: "runai_scheduler"},
+		{name: strings.Repeat("a", 254)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Validate the configured KAI scheduler name")
+			cfg := validConfig()
+			cfg.Orchestrators.KaiScheduler.SchedulerName = tc.name
+			errs := ValidateOperatorConfiguration(cfg)
+
+			t.Log("Verify scheduler validation reports the configuration field")
+			if tc.valid {
+				if len(errs) != 0 {
+					t.Fatalf("unexpected validation errors: %v", errs)
+				}
+			} else if len(errs) == 0 || errs[0].Field != "orchestrators.kaiScheduler.schedulerName" {
+				t.Fatalf("expected schedulerName error, got %v", errs)
+			}
+		})
+	}
 }
