@@ -348,10 +348,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 "--isolate-tool-call-markers requires --dyn-chat-processor=sglang"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
-            raise ValueError(
-                "--ais-perf-config requires --router-prefill-load-model=ais"
-            )
+        self.validate_ais_perf_inputs()
         if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(

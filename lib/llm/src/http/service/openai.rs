@@ -45,7 +45,7 @@ use super::{
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{HttpError, invalid_argument},
+    error::{ContextLengthDetails, HttpError, Protocol, invalid_argument, public_message_for},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -260,6 +260,11 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    /// Typed context-length bounds for protocol re-rendering. Skipped on the
+    /// wire: `details` already carries the same bounds, and re-parsing it here
+    /// would silently fall back to the OpenAI wording if the shape ever drifts.
+    #[serde(skip)]
+    context_length: Option<ContextLengthDetails>,
     #[serde(skip)]
     metric_error_type: Option<ErrorType>,
 }
@@ -267,6 +272,10 @@ pub(crate) struct ErrorMessage {
 impl ErrorMessage {
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn context_length_details(&self) -> Option<ContextLengthDetails> {
+        self.context_length
     }
 
     pub(crate) fn is_overload(&self) -> bool {
@@ -472,6 +481,7 @@ fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
                 .to_string(),
             code: status.as_u16(),
             details: None,
+            context_length: None,
             metric_error_type: Some(ErrorType::UnsupportedModality),
         }),
     ))
@@ -614,6 +624,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -654,6 +665,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -675,6 +687,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -697,6 +710,7 @@ impl ErrorMessage {
                 error_type: reason,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Cancelled),
             }),
         )
@@ -714,6 +728,7 @@ impl ErrorMessage {
                 error_type: bad_request_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -738,6 +753,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -765,6 +781,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -813,6 +830,7 @@ impl ErrorMessage {
                 error_type,
                 code: status.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type,
             }),
         )
@@ -853,6 +871,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -875,6 +894,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
@@ -891,6 +911,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -939,7 +960,8 @@ impl ErrorMessage {
         Some((
             status,
             Json(ErrorMessage {
-                message: error.public_message().unwrap_or(public_message).to_string(),
+                message: public_message_for(error, Protocol::OpenAi)
+                    .unwrap_or_else(|| public_message.to_string()),
                 error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
                 details: error
@@ -952,6 +974,9 @@ impl ErrorMessage {
                     })
                     .and_then(|details| serde_json::to_value(details).ok())
                     .map(Box::new),
+                context_length: error
+                    .public_details()
+                    .and_then(ContextLengthDetails::from_public_details),
                 metric_error_type: Some(metric_error_type_for_class(error.class())),
             }),
         ))
@@ -972,6 +997,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    context_length: None,
                     metric_error_type: None,
                 }),
             );
@@ -987,6 +1013,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: Some(ErrorType::Cancelled),
                 }),
             );
@@ -1067,6 +1094,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: None,
                 }),
             ),
@@ -1123,6 +1151,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            context_length: None,
             metric_error_type: None,
         }
     }
@@ -1156,6 +1185,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: bad_request_error_type(),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: None,
             }),
         )
@@ -3557,6 +3587,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    context_length: None,
                     metric_error_type: None,
                 }),
             )
@@ -5537,6 +5568,7 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorRespo
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            context_length: None,
             metric_error_type: None,
         }),
     )
@@ -7952,6 +7984,7 @@ mod tests {
             error_type: "Unprocessable Entity".to_string(),
             code: 422,
             details: None,
+            context_length: None,
             metric_error_type: None,
         })
         .unwrap();
@@ -8665,6 +8698,7 @@ mod tests {
                 error_type: "service_unavailable".to_string(),
                 code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 details: None,
+                context_length: None,
                 metric_error_type: Some(ErrorType::Overload),
             }),
         );
@@ -9093,6 +9127,154 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[test]
+    fn frontend_context_length_rejection_renders_limit_and_actual() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL=/srv/preprocessor.rs:42")
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
+        );
+        assert!(
+            response
+                .1
+                .message
+                .contains("maximum context length is 8192 tokens"),
+            "message must carry LiteLLM's context-overflow substring, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("9000 tokens"),
+            "message must carry the actual token count, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("requested output"),
+            "a combined input and output budget must not blame the messages alone, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        assert_eq!(
+            response.1.context_length_details(),
+            Some(ContextLengthDetails {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+        );
+        let details: dynamo_runtime::error::PublicDetails =
+            serde_json::from_value(*response.1.details.clone().expect("details are preserved"))
+                .expect("context details deserialize");
+        assert_eq!(
+            details,
+            dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            }
+        );
+    }
+
+    /// The native Generate endpoints render through the same helper, so a
+    /// context overflow there must not fall back to "Invalid request".
+    #[test]
+    fn frontend_context_length_rejection_reaches_generate_format_policy() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let message =
+            crate::generate_format::WorkerError::canonical_invalid_request_message(&error)
+                .expect("context overflow is an invalid-request error");
+
+        assert!(
+            message.contains("maximum context length is 8192 tokens"),
+            "native Generate endpoints must classify overflows, got: {message}"
+        );
+        assert!(message.contains("9000 tokens"), "got: {message}");
+    }
+
+    #[test]
+    fn frontend_context_length_prompt_at_limit_reports_no_room_for_output() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 64,
+                actual: Some(64),
+                prompt_tokens: Some(64),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "This model's maximum context length is 64 tokens. However, your messages resulted \
+             in 64 tokens, which leaves no room for output. Please reduce the length of the \
+             messages."
+        );
+    }
+
+    /// For a combined budget, `actual` includes the requested output, so the
+    /// count attributed to the messages must be the prompt count.
+    #[test]
+    fn frontend_context_length_prompt_overflow_reports_prompt_tokens() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8200),
+                prompt_tokens: Some(8193),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .1
+                .message
+                .contains("your messages resulted in 8193 tokens"),
+            "a prompt-only overflow must report prompt tokens, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("8200 tokens"));
+    }
+
+    #[test]
+    fn frontend_context_length_without_actual_falls_back_to_class_message() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: None,
+                prompt_tokens: None,
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "Invalid request");
+        assert!(!response.1.message.contains("None tokens"));
     }
 
     #[test]
