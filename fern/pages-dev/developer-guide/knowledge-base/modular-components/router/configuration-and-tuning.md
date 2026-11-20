@@ -19,7 +19,7 @@ Every replica admitted to a worker set must have the same model deployment card 
 
 When a worker set advertises `--router-mode kv`, restate every non-default setting that it needs. An omitted worker flag selects the shared default, not the Frontend's tuned value. This distinction matters most when the Frontend and workers receive different environment variables, such as separate Kubernetes services.
 
-For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
+For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. The Frontend logs the resolved configuration of each worker role when it activates the role's router: check the `Activating router` line for an aggregated or decode worker set and the `Activating prefill router` line for the prefill hop.
 
 ### Worker-Set Admission and Succession
 
