@@ -2461,9 +2461,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd946b8d59920320e43e2d1b48b2bbb6553d50bc9c23b511293615714008476a"
+checksum = "f1211739971e54b388ccfe341e9cabb5cb77dfe0c17c43effae542d5c76640ec"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2664,7 +2664,6 @@ dependencies = [
  "async-trait",
  "blake3",
  "crossbeam-queue",
- "derive_builder",
  "dynamo-admission",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -2679,7 +2678,6 @@ dependencies = [
  "futures-util",
  "http 1.4.1",
  "once_cell",
- "ordered-float 4.6.0",
  "parking_lot",
  "rmp-serde",
  "rustc-hash 2.1.2",
