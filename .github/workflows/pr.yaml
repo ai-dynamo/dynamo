@@ -900,6 +900,8 @@ jobs:
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
+      # Datadog attempt-to-fix repeats a selected test 20 times.
+      gpu_test_timeout_minutes: ${{ contains(github.event.head_commit.message, 'DD_') && 60 || 30 }}
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
