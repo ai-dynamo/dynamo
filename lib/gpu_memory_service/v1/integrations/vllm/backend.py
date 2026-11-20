@@ -62,6 +62,12 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         """
         if tuple(tags) != ("kv_cache",):
             raise ValueError(f"GMS V1 can discard only the KV cache, not {tags}")
+        # TODO(upstream-vllm): This env gate stands in for "this discard comes
+        # from checkpoint prepare". In vLLM 0.34, checkpoint_prepare() goes
+        # through release_kv_cache_memory(), so the backend sees the same
+        # discard(("kv_cache",)) from both callers and cannot tell them apart.
+        # The proper fix is in vLLM, e.g. a backend hook that checkpoint prepare
+        # calls instead of the generic discard(). Once it exists, drop the gate.
         if not os.environ.get(_SNAPSHOT_CONTROL_DIR_ENV):
             raise RuntimeError(
                 "GMS V1 cannot discard the KV cache without suspending the "
