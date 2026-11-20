@@ -47,11 +47,11 @@ def error_kinds(errors: list[dict]) -> set[str]:
     return {str(item.get("kind")) for item in errors}
 
 
-def test_qualification_uses_the_same_61_generic_cases_for_inline_profiles() -> None:
+def test_qualification_uses_the_same_64_generic_cases_for_inline_profiles() -> None:
     expected_ids = qualification_generic_case_ids()
 
-    assert len(expected_ids) == 61
-    assert len(set(expected_ids)) == 61
+    assert len(expected_ids) == 64
+    assert len(set(expected_ids)) == 64
     generic_cases = probe.build_cases("generic")
     assert {case.case_id for case in generic_cases} == set(expected_ids)
     assert all(case.profiles == ("generic",) for case in generic_cases)
@@ -1231,3 +1231,74 @@ def test_truncation_probes_do_not_schema_validate_the_partial_call() -> None:
         )
         errors, _ = probe.validate_result(case, partial)
         assert errors == [], (case_id, errors)
+
+
+def test_include_reasoning_false_cases_hide_reasoning_but_keep_the_call() -> None:
+    """dynamo #18491: with include_reasoning=false the frontend may start the tool
+    grammar at the first token while GLM keeps <think> open; the call must survive
+    and no reasoning may reach the response."""
+    cases = probe.build_cases("generic")
+    hidden = [
+        case_by_id(cases, "named_include_reasoning_false_hides_reasoning"),
+        case_by_id(cases, "required_include_reasoning_false_hides_reasoning"),
+        case_by_id(cases, "named_include_reasoning_false_zero_arg_tool"),
+    ]
+    for case in hidden:
+        assert case.request_overrides["include_reasoning"] is False
+        assert case.expect_reasoning_hidden is True
+        assert case.expect_reasoning is None
+        assert case.exact_tool_calls == 1
+
+    named = hidden[0]
+    clean = probe.ChatResult(
+        finish_reason="tool_calls",
+        tool_calls=[_call("calculate", {"expression": "937 * 18 + 42"})],
+    )
+    errors, _ = probe.validate_result(named, clean)
+    assert errors == []
+
+    leaked = probe.ChatResult(
+        finish_reason="tool_calls",
+        reasoning_content="The user wants 937 * 18 + 42.",
+        tool_calls=[_call("calculate", {"expression": "937 * 18 + 42"})],
+    )
+    errors, _ = probe.validate_result(named, leaked)
+    assert "reasoning_leaked_when_hidden" in error_kinds(errors)
+    assert probe.classify_failure_detail(named, leaked, errors) == (
+        "dynamo_api",
+        "reasoning_routing",
+    )
+
+    # The JSON swallowed as hidden reasoning: no call, finish_reason stop.
+    dropped = probe.ChatResult(finish_reason="stop", content="")
+    errors, _ = probe.validate_result(named, dropped)
+    kinds = error_kinds(errors)
+    assert kinds & {
+        "too_few_tool_calls",
+        "wrong_tool_call_count",
+        "unexpected_finish_reason",
+        "missing_expected_tool",
+    }
+    assert probe.classify_failure_detail(named, dropped, errors)[0] == "dynamo_api"
+
+    # Reasoning folded into content next to the forced call is caught too.
+    folded = probe.ChatResult(
+        finish_reason="tool_calls",
+        content=(
+            "The user wants me to compute 937 * 18 + 42 with the calculator tool. "
+            "I need to call calculate with that expression and nothing else, so let "
+            "me produce the call exactly as the schema asks."
+        ),
+        tool_calls=[_call("calculate", {"expression": "937 * 18 + 42"})],
+    )
+    errors, _ = probe.validate_result(named, folded)
+    assert "reasoning_text_in_content" in error_kinds(errors)
+
+    zero = hidden[2]
+    ok, _ = probe.validate_result(
+        zero,
+        probe.ChatResult(
+            finish_reason="tool_calls", tool_calls=[_call("get_server_time", {})]
+        ),
+    )
+    assert ok == []

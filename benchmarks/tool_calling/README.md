@@ -33,7 +33,7 @@ benchmark scores.
 
 | Suite | Fixed coverage | Target |
 |---|---:|---:|
-| Custom | 61 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 10–12 min |
+| Custom | 64 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 10–12 min |
 | BFCL | 50 BFCL v3 cases across 8 categories | 3–5 min |
 | tau2 | 9 tasks: 3 each from airline, retail, and telecom | 10–12 min |
 
@@ -64,6 +64,7 @@ The generic selection groups into:
 | Long and repeated tool results | `followup_after_long_tool_result`, `history_three_round_trips_then_answer`, `followup_tool_result_as_content_parts` | agent traces |
 | Context isolation and markers | `*_echo_*`, `customer_*marker*`, `customer_truncated_tool_markup_hidden` | customer regressions |
 | Vendor-verifier scenarios | `auto_parameter_order_recall` | MiniMax Provider Verifier scenario check |
+| Hidden reasoning with forced calls | `named_include_reasoning_false_hides_reasoning`, `required_include_reasoning_false_hides_reasoning`, `named_include_reasoning_false_zero_arg_tool` | dynamo #18491 (Raytorin's CPU replay) |
 
 Every record also runs response-wide checks that need no case opt-in: tool and
 reasoning delimiters in `content`, OpenAI-shaped tool-call JSON leaked into
@@ -79,6 +80,17 @@ forced tool call comes back with thinking disabled and `content` reads like a
 thinking block, the record fails with `reasoning_text_in_content`: the
 template ignored the flag and the frontend folded the reasoning into content
 (dynamo #17521, #17578).
+
+The `*_include_reasoning_false_*` cases send `include_reasoning: false` with a
+named or `required` tool choice. The frontend then tells the worker reasoning
+has ended, so the tool grammar may start at the first token while a template
+such as GLM's still has `<think>` open; on GLM-5.3-Flash (template ignores the
+thinking flag) this is exactly the shape of dynamo #18491. The record must carry
+exactly one call with the expected arguments and `finish_reason: tool_calls`,
+and no reasoning may reach the response in either mode
+(`reasoning_leaked_when_hidden`); stream mode covers the JSON arriving split
+across chunks. `customer_named_calculator_choice` (thinking on, reasoning
+expected) is the deferred-grammar control.
 
 ### Failure taxonomy
 
@@ -101,7 +113,7 @@ first one in the table order raised by an error of that category.
 ```mermaid
 flowchart LR
     M[Served model ID] --> P[Resolve model profile]
-    G[61 generic cases] --> S[Exact selection]
+    G[64 generic cases] --> S[Exact selection]
     P --> X[Matching model-specific cases]
     X --> S
     P --> F[Optional complete model profile]
