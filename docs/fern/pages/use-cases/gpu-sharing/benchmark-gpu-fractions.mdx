@@ -27,7 +27,7 @@ In both shared configurations, each model gets half of the GPU's memory. Under H
 
 These steps reproduce the GPU fractions row. The baseline and KAI + HAMi rows have their own guides: [Deploy the Baseline Experiment](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/deploy-baseline.md) and [Deploy the KAI + HAMi Experiment](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/deploy-kai-hami.md).
 
-You need the cluster from [Deploy Models on GPU Fractions](deploy-models-on-gpu-fractions.mdx), with one node of eight A100 40GB GPUs and no other GPU work on it, and a second node with 16 free CPUs and 32 GiB of memory for the load generator. Run the commands from `examples/gpu-sharing`, with `GPU_NODE` set.
+You need the GPU fractions cluster from [Deploy Models with GPU Sharing](deploy-models-with-gpu-sharing.mdx), with one node of eight A100 40GB GPUs and no other GPU work on it, and a second node with 16 free CPUs and 32 GiB of memory for the load generator. Run the commands from `examples/gpu-sharing`, with `GPU_NODE` set.
 
 <Steps toc={true}>
 <Step title="Deploy all sixteen models" id="deploy-all-sixteen-models">
