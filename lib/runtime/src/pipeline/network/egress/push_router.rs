@@ -650,7 +650,10 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
 struct TransportDispatch<T, U> {
     request_plane: Arc<AddressedPushRouter>,
     drt: crate::DistributedRuntime,
-    _phantom: PhantomData<(T, U)>,
+    /// The registered direct dispatch, cached on first use so the request path
+    /// does not take the registry lock. A miss is not cached, so a dispatch
+    /// registered after this router is built is still found.
+    direct: std::sync::OnceLock<Arc<dyn StreamingDispatch<T, U>>>,
 }
 
 impl<T, U> TransportDispatch<T, U>
@@ -658,10 +661,18 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    fn registered_direct(&self) -> Option<&Arc<dyn StreamingDispatch<T, U>>> {
+        if let Some(dispatch) = self.direct.get() {
+            return Some(dispatch);
+        }
+        let dispatch = self.drt.direct_dispatch::<T, U>()?;
+        Some(self.direct.get_or_init(|| dispatch))
+    }
+
     /// A missing registration is a process misconfiguration, not a worker
     /// fault: `Internal` fails the request without reporting the worker down.
-    fn direct(&self, instance_id: u64) -> Result<Arc<dyn StreamingDispatch<T, U>>, Error> {
-        self.drt.direct_dispatch::<T, U>().ok_or_else(|| {
+    fn direct(&self, instance_id: u64) -> Result<&Arc<dyn StreamingDispatch<T, U>>, Error> {
+        self.registered_direct().ok_or_else(|| {
             DynamoError::builder()
                 .error_type(ErrorType::Internal)
                 .message(format!(
@@ -716,14 +727,14 @@ where
 
     async fn on_instance_removed(&self, id: &EndpointInstanceId) {
         StreamingDispatch::<T, U>::on_instance_removed(self.request_plane.as_ref(), id).await;
-        if let Some(direct) = self.drt.direct_dispatch::<T, U>() {
+        if let Some(direct) = self.registered_direct() {
             direct.on_instance_removed(id).await;
         }
     }
 
     async fn on_instance_added(&self, id: &EndpointInstanceId) {
         StreamingDispatch::<T, U>::on_instance_added(self.request_plane.as_ref(), id).await;
-        if let Some(direct) = self.drt.direct_dispatch::<T, U>() {
+        if let Some(direct) = self.registered_direct() {
             direct.on_instance_added(id).await;
         }
     }
@@ -847,7 +858,7 @@ where
             None => Arc::new(TransportDispatch {
                 request_plane: addressed_router(&client.endpoint).await?,
                 drt: client.endpoint.drt().clone(),
-                _phantom: PhantomData,
+                direct: std::sync::OnceLock::new(),
             }),
         };
 
