@@ -2852,6 +2852,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-stream"
+version = "1.8.0"
+dependencies = [
+ "rustc-hash 2.1.2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "1.8.0"
 dependencies = [

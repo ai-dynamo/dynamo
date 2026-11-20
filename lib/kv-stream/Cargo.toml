@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kv-stream"
+description = "One rank's KV cache event stream as an exact residency ledger, with cursor replay and snapshots, for an engine's Rust frontend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+exclude = ["AGENTS.md", "CLAUDE.md", "clippy.toml"]
+
+# Engines build this crate with their own toolchain and audit every dependency it brings, so
+# it depends on nothing in the Dynamo workspace, and its version requirements are its own
+# rather than the workspace's. Keep it that way.
+[dependencies]
+rustc-hash = "2.1.1"
+thiserror = "2"

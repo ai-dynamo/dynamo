@@ -44,6 +44,7 @@ HOT_PATH_RULES = (
     ("lib/router/kv-router/src/scheduling", 7, "kv-router scheduling config"),
     ("lib/router/slot-tracker/src", 8, "slot-tracker sequence tracker"),
     ("lib/router/kv-indexer/src", 8, "kv-indexer"),
+    ("lib/kv-stream/src", 8, "kv-stream ledger"),
     ("lib/runtime/src/component", 7, "runtime component path"),
     ("lib/runtime/src/pipeline", 7, "runtime pipeline path"),
     ("lib/runtime/src/transports", 7, "runtime transport path"),
