@@ -89,16 +89,8 @@ pub(crate) fn body_affinity(body: &Value) -> Option<&str> {
     .find(|value| !value.is_empty())
 }
 
-/// Kimi numbers results within the most recent assistant call batch.
-/// Merge split results within a run, then retain unmatched output as user notes.
-pub(super) fn kimi_history(messages: Vec<Message>) -> Vec<Message> {
-    if !messages
-        .iter()
-        .any(|message| matches!(message, Message::Tool(_)))
-    {
-        return messages;
-    }
-
+/// Coalesce chunks for the same call without crossing a non-tool message.
+fn merge_split_tool_results(messages: Vec<Message>) -> Vec<Message> {
     let mut merged = Vec::with_capacity(messages.len());
     let mut run: HashMap<String, usize> = HashMap::new();
     for message in messages {
@@ -116,7 +108,19 @@ pub(super) fn kimi_history(messages: Vec<Message>) -> Vec<Message> {
             merged.push(message);
         }
     }
+    merged
+}
 
+/// Positional renderers number results relative to the latest assistant batch.
+pub(super) fn positional_tool_history(messages: Vec<Message>) -> Vec<Message> {
+    if !messages
+        .iter()
+        .any(|message| matches!(message, Message::Tool(_)))
+    {
+        return messages;
+    }
+
+    let merged = merge_split_tool_results(messages);
     let mut settled = Vec::with_capacity(merged.len());
     let mut notes = Vec::new();
     let mut calls = HashSet::new();
@@ -235,14 +239,14 @@ mod tests {
                 {"role":"tool","tool_call_id":"a","content":"continued"}
             ]))
             .unwrap();
-        let normalized = kimi_history(messages);
+        let normalized = positional_tool_history(messages);
         let value = serde_json::to_value(&normalized).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 4);
         assert_eq!(value[1]["content"], "first\ncontinued");
         assert_eq!(value[2]["tool_call_id"], "b");
         assert_eq!(value[3]["role"], "user");
         assert_eq!(value[3]["content"][1]["text"], "orphan");
-        assert_eq!(kimi_history(normalized.clone()), normalized);
+        assert_eq!(positional_tool_history(normalized.clone()), normalized);
     }
 
     #[test]
@@ -256,11 +260,11 @@ mod tests {
                 {"role":"tool","tool_call_id":"a","content":"late result"}
             ]))
             .unwrap();
-        let normalized = kimi_history(messages);
+        let normalized = positional_tool_history(messages);
         let value = serde_json::to_value(&normalized).unwrap();
         assert_eq!(value[2]["role"], "user");
         assert_eq!(value[2]["content"][1]["text"], "late result");
-        assert_eq!(kimi_history(normalized.clone()), normalized);
+        assert_eq!(positional_tool_history(normalized.clone()), normalized);
     }
 
     #[test]

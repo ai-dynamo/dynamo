@@ -13,7 +13,6 @@ pub struct ResponsesToolContext {
     pub tools: Vec<RequestTool>,
     pub declared_tools: Vec<RequestTool>,
     pub(super) native: bool,
-    pub(super) kimi_replay: bool,
     pub names: ToolNameMap,
     pub(super) legacy_history: Option<Vec<ChatCompletionRequestMessage>>,
     pub(super) phase_history: Option<(
@@ -24,6 +23,13 @@ pub struct ResponsesToolContext {
     pub(super) history_tool_calls: HashMap<String, Vec<HistoricalToolCall>>,
     pub(super) tool_choice_name: Option<String>,
     pub(super) selected_tools: Option<HashSet<(Option<String>, String)>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ResponsesToolHistory {
+    #[default]
+    AsProvided,
+    Positional,
 }
 
 const KIMI_BARE_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v2_";
@@ -375,18 +381,6 @@ impl NvCreateChatCompletionRequest {
         validate_tools(&Some(definitions.as_slice()))
     }
 
-    /// Preserve Kimi call spelling and result binding when agent history is replayed.
-    pub(crate) fn normalize_kimi_replay(&mut self) {
-        self.inner.messages =
-            super::request_compat::kimi_history(std::mem::take(&mut self.inner.messages));
-        if let Some(context) = &mut self.responses_tools {
-            context.kimi_replay = true;
-            // Responses conversion has already selected the legacy view as the
-            // active history. Keep the normalized view when phases are disabled.
-            context.legacy_history = None;
-        }
-    }
-
     /// Phase replay is a model capability, independent of namespace rendering.
     pub(crate) fn normalize_responses_history_phases(&mut self, enabled: bool) {
         if let Some(context) = &mut self.responses_tools
@@ -403,6 +397,14 @@ impl NvCreateChatCompletionRequest {
     }
 
     pub(crate) fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
+        self.normalize_responses_tools_for_renderer(native, ResponsesToolHistory::AsProvided)
+    }
+
+    pub(crate) fn normalize_responses_tools_for_renderer(
+        &mut self,
+        native: bool,
+        history: ResponsesToolHistory,
+    ) -> anyhow::Result<()> {
         // Parser capability selects phase replay independently of tool rendering.
         if let Some(context) = &mut self.responses_tools {
             context.native = native;
@@ -410,6 +412,11 @@ impl NvCreateChatCompletionRequest {
         let Some(context) = &self.responses_tools else {
             return Ok(());
         };
+        if history == ResponsesToolHistory::Positional {
+            self.inner.messages = super::request_compat::positional_tool_history(std::mem::take(
+                &mut self.inner.messages,
+            ));
+        }
         let inner: Vec<_> = context
             .tools
             .iter()
@@ -448,12 +455,13 @@ impl NvCreateChatCompletionRequest {
                     let original = historical
                         .map(|call| &call.name)
                         .unwrap_or(&call.function.name);
-                    call.function.name =
-                        if context.kimi_replay && historical.is_some_and(|call| call.kimi_bare) {
-                            context.names.decode(original).1.to_string()
-                        } else {
-                            resolve(original)
-                        };
+                    call.function.name = if history == ResponsesToolHistory::Positional
+                        && historical.is_some_and(|call| call.kimi_bare)
+                    {
+                        context.names.decode(original).1.to_string()
+                    } else {
+                        resolve(original)
+                    };
                     *occurrence += 1;
                 }
             }
@@ -476,6 +484,41 @@ impl NvCreateChatCompletionRequest {
     ) -> Result<serde_json::Value, serde_json::Error> {
         let mut value = serde_json::to_value(self)?;
         if let Some(context) = &self.responses_tools {
+            // Python selects the renderer at request time. Prepare an alternate
+            // view only for deployments that can select the positional encoder.
+            let can_select_positional_encoder = [
+                Some(self.inner.model.as_str()),
+                runtime_config.tool_call_parser.as_deref(),
+                runtime_config.reasoning_parser.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|hint| {
+                let bytes = hint.as_bytes();
+                bytes
+                    .windows(6)
+                    .any(|part| part.eq_ignore_ascii_case(b"kimik3"))
+                    || bytes.windows(7).any(|part| {
+                        part.eq_ignore_ascii_case(b"kimi-k3")
+                            || part.eq_ignore_ascii_case(b"kimi_k3")
+                    })
+            });
+            if can_select_positional_encoder
+                && (!context.history_tool_calls.is_empty()
+                    || self
+                        .inner
+                        .messages
+                        .iter()
+                        .any(|message| matches!(message, ChatCompletionRequestMessage::Tool(_))))
+            {
+                let mut positional = self.clone();
+                positional
+                    .normalize_responses_tools_for_renderer(false, ResponsesToolHistory::Positional)
+                    .map_err(serde::ser::Error::custom)?;
+                value["responses_positional_tool_history"] =
+                    serde_json::to_value(positional.inner.messages)?;
+            }
+
             if let Some(template_tools) = self.native_template_tools() {
                 // This catalog is renderer-only: Python chooses it after resolving
                 // the active template. Keep worker serialization unchanged and

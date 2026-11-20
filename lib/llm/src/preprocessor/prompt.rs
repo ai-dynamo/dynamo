@@ -26,6 +26,7 @@ use dynamo_renderer::{
 use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+    responses::ResponsesToolHistory,
 };
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
@@ -395,6 +396,12 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    prompt_formatter_with_history_from_mdc(mdc).map(|(formatter, _)| formatter)
+}
+
+pub(super) fn prompt_formatter_with_history_from_mdc(
+    mdc: &ModelDeploymentCard,
+) -> Result<(PromptFormatter, ResponsesToolHistory)> {
     // Prefer the authoritative `model_type` from config.json — it's set by the
     // model author and survives any `--served-model-name` rename. An empty
     // `model_type` carries no signal — normalize to `None` so the display-name
@@ -412,14 +419,14 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         &display_name_lower,
         mdc.runtime_config.exclude_tools_when_tool_choice_none,
     ) {
-        return Ok(formatter);
+        return Ok((formatter, ResponsesToolHistory::Positional));
     }
 
     if let Some(formatter) = native_formatter_for(&model_type_lower, &display_name_lower) {
-        return Ok(formatter);
+        return Ok((formatter, ResponsesToolHistory::AsProvided));
     }
 
-    match mdc
+    let formatter = match mdc
         .prompt_formatter
         .as_ref()
         .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
@@ -499,7 +506,8 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
             "prompt_formatter should not have type HfChatTemplate*"
         )),
-    }
+    }?;
+    Ok((formatter, ResponsesToolHistory::AsProvided))
 }
 
 const CONTINUE_FINAL_MESSAGE_NOT_FOUND: &str =
