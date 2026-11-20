@@ -3,8 +3,10 @@
 
 """Tests for output_formatter.py — modality-specific formatters."""
 
+import asyncio
 import base64
 import io
+import json
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -16,6 +18,12 @@ import pytest
 from PIL import Image
 
 from dynamo.common.storage import get_fs
+from dynamo.common.utils.cmaf_video import (
+    CMAF_INIT_TAG,
+    CMAF_METADATA_TAG,
+    CMAF_SEGMENT_TAG_PREFIX,
+    segment_tag,
+)
 from dynamo.common.utils.output_modalities import RequestType
 
 try:
@@ -1858,3 +1866,409 @@ class TestDiffusionFormatterVideoOutputFormat:
         assert result is not None
         assert result["data"][0]["url"] == "http://x/v.mp4"
         mock_upload.assert_called_once()
+
+
+# ── CMAF streaming ──────────────────────────────────────────
+
+
+def _video_stage(num_frames=20, *, label="image", images=None, **multimodal_output):
+    """A diffusion stage output holding one generated clip of float frames."""
+    if images is None:
+        images = [np.zeros((num_frames, 8, 8, 3), dtype=np.float32)]
+    stage = SimpleNamespace(final_output_type=label, images=images)
+    if multimodal_output:
+        stage.multimodal_output = multimodal_output
+    return stage
+
+
+async def _collect(stream):
+    """Drain an async generator into a list."""
+    return [item async for item in stream]
+
+
+def _cmaf_metadata(frame):
+    """Decode the JSON payload of a ``cmaf:metadata`` frame."""
+    return json.loads(base64.b64decode(frame["data"][0]["b64_json"]))
+
+
+class TestDiffusionFormatterCmafFrames:
+    """The tagged response the frontend route deserializes."""
+
+    def test_frame_carries_the_tag_and_the_payload(self):
+        """A frame carries its tag and payload, base64 on the internal hop."""
+        f = _make_diffusion_formatter()
+        frame = f.cmaf_frame("req-1", CMAF_INIT_TAG, b"\x00\x01ftyp")
+
+        assert frame["cmaf"] == CMAF_INIT_TAG
+        assert frame["status"] == "completed"
+        # base64 for the internal hop only; the frontend emits the raw bytes.
+        assert base64.b64decode(frame["data"][0]["b64_json"]) == b"\x00\x01ftyp"
+
+    def test_error_frame_is_a_failed_response(self):
+        """After a failure a bare end of stream would look like success."""
+        f = _make_diffusion_formatter()
+        frame = f.cmaf_error("req-1", "ffmpeg exited 1")
+
+        assert frame["status"] == "failed"
+        assert frame["error"] == "ffmpeg exited 1"
+        assert frame["data"] == []
+        assert frame["cmaf"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_batch_response_carries_no_tag(self):
+        """The tag is the CMAF route's alone; an ordinary response leaves it unset."""
+        f = _make_diffusion_formatter()
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"mp4",
+        ):
+            result = await f.format(
+                _video_stage(),
+                "req-1",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert result["cmaf"] is None
+
+
+class TestDiffusionFormatterStreamCmaf:
+    """Frame order, clip selection and encoder lifecycle, with the encoder faked."""
+
+    @pytest.mark.asyncio
+    async def test_metadata_leads_then_init_then_segments(self, fake_cmaf_encoder):
+        """Metadata leads, then init, then only segments."""
+        f = _make_diffusion_formatter()
+        out = await _collect(
+            f.stream_cmaf(_video_stage(20), "req-1", fps=16, gop_frames=8)
+        )
+
+        tags = [frame["cmaf"] for frame in out]
+        # The client needs the codec string before it can append anything, and
+        # the codec string is read out of the init segment.
+        assert tags == [
+            CMAF_METADATA_TAG,
+            CMAF_INIT_TAG,
+            segment_tag(1),
+            segment_tag(2),
+            segment_tag(3),
+        ]
+
+        meta = _cmaf_metadata(out[0])
+        assert meta["mime_type"] == 'video/mp4; codecs="vp09.00.10.08"'
+        assert (meta["width"], meta["height"], meta["fps"]) == (8, 8, 16)
+        assert meta["target_duration"] == 0.5
+        assert meta["segment_count"] == 3  # 20 frames at 8: 8 + 8 + 4
+
+    @pytest.mark.asyncio
+    async def test_metadata_still_leads_when_init_only_surfaces_in_finish(
+        self, fake_cmaf_encoder
+    ):
+        """push() drains only what ffmpeg has already written; on a short clip or
+        a slow encoder every fragment, init included, can arrive in finish()."""
+
+        class _LateInit(fake_cmaf_encoder.cls):
+            async def push(self, frames):
+                """Accept the chunk and emit nothing."""
+                self.chunks.append(frames)
+                return
+                yield  # unreachable; keeps push an async generator
+
+            async def finish(self):
+                """Emit init and the only fragment."""
+                yield CMAF_INIT_TAG, b"ftyp-moov"
+                yield segment_tag(1), b"moof-mdat"
+
+        fake_cmaf_encoder.cls = _LateInit
+        f = _make_diffusion_formatter()
+        out = await _collect(
+            f.stream_cmaf(_video_stage(8), "req-1", fps=16, gop_frames=8)
+        )
+
+        assert [frame["cmaf"] for frame in out] == [
+            CMAF_METADATA_TAG,
+            CMAF_INIT_TAG,
+            segment_tag(1),
+        ]
+        assert (
+            _cmaf_metadata(out[0])["mime_type"] == 'video/mp4; codecs="vp09.00.10.08"'
+        )
+
+    @pytest.mark.asyncio
+    async def test_chunks_follow_the_gop_and_reach_the_encoder_as_uint8(
+        self, fake_cmaf_encoder
+    ):
+        """The clip is cut at the GOP and normalized like the batch response."""
+        f = _make_diffusion_formatter()
+        await _collect(f.stream_cmaf(_video_stage(20), "req-1", fps=16, gop_frames=8))
+
+        enc = fake_cmaf_encoder.enc
+        assert [len(chunk) for chunk in enc.chunks] == [8, 8, 4]
+        assert all(chunk.dtype == np.uint8 for chunk in enc.chunks)
+        assert (enc.width, enc.height, enc.gop_frames) == (8, 8, 8)
+        assert enc.started and enc.closed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metadata",
+        [{"fps": 24}, {"metadata": {"video": {"fps": 24}}}],
+        ids=["top-level", "nested"],
+    )
+    async def test_the_generated_frame_rate_wins_over_the_fallback(
+        self, fake_cmaf_encoder, metadata
+    ):
+        """A clip the model made at 24 fps must not be streamed at the 16 fps
+        fallback: it would play 50% longer than through the batch endpoint."""
+        f = _make_diffusion_formatter()
+        out = await _collect(
+            f.stream_cmaf(_video_stage(24, **metadata), "req-1", fps=16, gop_frames=8)
+        )
+
+        assert fake_cmaf_encoder.enc.fps == 24
+        meta = _cmaf_metadata(out[0])
+        assert meta["fps"] == 24
+        assert meta["target_duration"] == pytest.approx(8 / 24)
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_frame_rate_applies_without_metadata(
+        self, fake_cmaf_encoder
+    ):
+        """With no generated frame rate the request's is used."""
+        f = _make_diffusion_formatter()
+        await _collect(f.stream_cmaf(_video_stage(8), "req-1", fps=12, gop_frames=8))
+        assert fake_cmaf_encoder.enc.fps == 12
+
+    @pytest.mark.asyncio
+    async def test_a_video_carried_only_in_the_metadata_is_streamed(
+        self, fake_cmaf_encoder
+    ):
+        """Some stages leave ``images`` empty and put the clip in
+        ``multimodal_output['video']``; the batch response reads it from there."""
+        clip = np.zeros((16, 8, 8, 3), dtype=np.float32)
+        stage = _video_stage(images=[], video=clip, fps=24)
+        f = _make_diffusion_formatter()
+        out = await _collect(f.stream_cmaf(stage, "req-1", fps=16, gop_frames=8))
+
+        assert [len(chunk) for chunk in fake_cmaf_encoder.enc.chunks] == [8, 8]
+        assert _cmaf_metadata(out[0])["segment_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_stream_and_the_batch_response_select_the_same_clip(
+        self, fake_cmaf_encoder
+    ):
+        """Both paths go through one selection, so they agree on rate and length."""
+        stage = _video_stage(24, fps=24)
+        f = _make_diffusion_formatter()
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"mp4",
+        ) as encode:
+            batch = await f.format(
+                stage,
+                "req-1",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="b64_json",
+            )
+        await _collect(f.stream_cmaf(stage, "req-1", fps=16, gop_frames=8))
+
+        assert batch["data"][0]["fps"] == fake_cmaf_encoder.enc.fps == 24
+        batch_frames = encode.call_args.args[0]
+        stream_frames = np.concatenate(fake_cmaf_encoder.enc.chunks)
+        assert np.array_equal(batch_frames, stream_frames)
+
+    @pytest.mark.asyncio
+    async def test_no_video_is_an_error_not_an_empty_stream(self, fake_cmaf_encoder):
+        """A stage with nothing to stream raises before any encoder starts."""
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="No video outputs"):
+            await _collect(f.stream_cmaf(_video_stage(images=[]), "req-1", fps=16))
+        assert fake_cmaf_encoder.enc is None
+
+    @pytest.mark.asyncio
+    async def test_several_videos_are_refused(self, fake_cmaf_encoder):
+        """A CMAF stream has one video track."""
+        videos = [np.zeros((8, 8, 8, 3), dtype=np.float32) for _ in range(2)]
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="one video per request, got 2"):
+            await _collect(f.stream_cmaf(_video_stage(images=videos), "req-1", fps=16))
+        assert fake_cmaf_encoder.enc is None
+
+    @pytest.mark.asyncio
+    async def test_generated_audio_is_reported_and_the_video_still_streams(
+        self, fake_cmaf_encoder
+    ):
+        """Audio is outside a single-track stream; dropping it is logged, not silent."""
+        stage = _video_stage(8, audio=np.zeros((1, 2, 8000), dtype=np.float32))
+        f = _make_diffusion_formatter()
+        with patch("dynamo.vllm.omni.output_formatter.logger") as log:
+            out = await _collect(f.stream_cmaf(stage, "req-1", fps=16, gop_frames=8))
+
+        assert any(
+            "audio is not carried" in call.args[0]
+            for call in log.warning.call_args_list
+        )
+        assert [frame["cmaf"] for frame in out][:2] == [
+            CMAF_METADATA_TAG,
+            CMAF_INIT_TAG,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_encoder_is_closed_when_encoding_fails(self, fake_cmaf_encoder):
+        """The exception is the caller's to report, but ffmpeg must not outlive it."""
+
+        class _Failing(fake_cmaf_encoder.cls):
+            async def push(self, frames):
+                """Fail like an ffmpeg exit."""
+                raise RuntimeError("ffmpeg exited 1")
+                yield  # unreachable; keeps push an async generator
+
+        fake_cmaf_encoder.cls = _Failing
+        f = _make_diffusion_formatter()
+        with pytest.raises(RuntimeError, match="ffmpeg exited 1"):
+            await _collect(f.stream_cmaf(_video_stage(8), "req-1", fps=16))
+
+        assert fake_cmaf_encoder.enc.closed
+
+    @pytest.mark.asyncio
+    async def test_the_encoder_is_closed_when_the_consumer_goes_away(
+        self, fake_cmaf_encoder
+    ):
+        """A client disconnect closes the generator mid-stream; so must the encoder."""
+        f = _make_diffusion_formatter()
+        stream = f.stream_cmaf(_video_stage(40), "req-1", fps=16, gop_frames=8)
+
+        first = await stream.__anext__()
+        assert first["cmaf"] == CMAF_METADATA_TAG
+        assert not fake_cmaf_encoder.enc.closed
+        await stream.aclose()
+
+        assert fake_cmaf_encoder.enc.closed
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_request_stops_the_encoder_without_being_pulled(
+        self, fake_cmaf_encoder
+    ):
+        """After a disconnect nothing may be pulling frames any more, so the
+        session has to end on the request's own cancellation signal."""
+        f = _make_diffusion_formatter()
+        cancelled = asyncio.get_running_loop().create_future()
+        stream = f.stream_cmaf(
+            _video_stage(40),
+            "req-1",
+            fps=16,
+            gop_frames=8,
+            cancelled=lambda: cancelled,
+        )
+
+        first = await stream.__anext__()
+        assert first["cmaf"] == CMAF_METADATA_TAG
+        assert not fake_cmaf_encoder.enc.closed
+
+        cancelled.set_result(True)
+        for _ in range(10):  # let the watcher run; the stream is not advanced
+            await asyncio.sleep(0)
+            if fake_cmaf_encoder.enc.closed:
+                break
+
+        assert fake_cmaf_encoder.enc.closed
+        await stream.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_request_ends_the_stream_quietly(self, fake_cmaf_encoder):
+        """The failure the teardown causes in the encoder is the cancellation,
+        not an error to report."""
+
+        class _DiesWhenClosed(fake_cmaf_encoder.cls):
+            async def push(self, frames):
+                """Fail like ffmpeg does once it has been killed."""
+                if self.closed:
+                    raise RuntimeError("ffmpeg libvpx-vp9 CMAF encode failed (exit -9)")
+                async for item in super().push(frames):
+                    yield item
+
+        fake_cmaf_encoder.cls = _DiesWhenClosed
+        f = _make_diffusion_formatter()
+        cancelled = asyncio.get_running_loop().create_future()
+        stream = f.stream_cmaf(
+            _video_stage(40),
+            "req-1",
+            fps=16,
+            gop_frames=8,
+            cancelled=lambda: cancelled,
+        )
+
+        out = [await stream.__anext__()]
+        cancelled.set_result(True)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        out += [frame async for frame in stream]  # must end, not raise
+
+        assert fake_cmaf_encoder.enc.closed
+        assert len(out) < 2 + 5  # the 40-frame clip was not streamed to its end
+
+    @pytest.mark.asyncio
+    async def test_an_encoder_failure_is_still_raised_when_not_cancelled(
+        self, fake_cmaf_encoder
+    ):
+        """Only a teardown the watcher caused is swallowed."""
+
+        class _Failing(fake_cmaf_encoder.cls):
+            async def finish(self):
+                """Fail like an ffmpeg exit."""
+                raise RuntimeError("ffmpeg exited 1")
+                yield  # unreachable; keeps finish an async generator
+
+        fake_cmaf_encoder.cls = _Failing
+        f = _make_diffusion_formatter()
+        cancelled = asyncio.get_running_loop().create_future()
+        with pytest.raises(RuntimeError, match="ffmpeg exited 1"):
+            await _collect(
+                f.stream_cmaf(
+                    _video_stage(8), "req-1", fps=16, cancelled=lambda: cancelled
+                )
+            )
+        assert fake_cmaf_encoder.enc.closed
+
+
+class TestOutputFormatterStreamCmaf:
+    """Dispatch: which stages are streamed."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label", ["image", "video"])
+    async def test_a_diffusion_stage_streams_under_either_label(
+        self, fake_cmaf_encoder, label
+    ):
+        """vLLM-Omni labels a video diffusion stage ``image`` in some releases and
+        ``video`` in others; ``format`` accepts both and so must the stream."""
+        f = OutputFormatter(model_name="test-model")
+        out = await _collect(
+            f.stream_cmaf(_video_stage(16, label=label), "req-1", fps=16, gop_frames=8)
+        )
+
+        tags = [frame["cmaf"] for frame in out]
+        assert tags[:2] == [CMAF_METADATA_TAG, CMAF_INIT_TAG]
+        assert all(tag.startswith(CMAF_SEGMENT_TAG_PREFIX) for tag in tags[2:])
+        assert len(tags) == 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label", ["text", "audio", "unknown", None])
+    async def test_any_other_stage_yields_nothing(self, fake_cmaf_encoder, label):
+        """Only a diffusion stage carries frames; the rest have no CMAF form."""
+        f = OutputFormatter(model_name="test-model")
+        out = await _collect(f.stream_cmaf(_video_stage(label=label), "req-1", fps=16))
+
+        assert out == []
+        assert fake_cmaf_encoder.enc is None
+
+    def test_cmaf_error_is_a_failed_video_response(self):
+        """The dispatcher exposes the terminal error the router yields."""
+        frame = OutputFormatter(model_name="test-model").cmaf_error("req-1", "boom")
+        assert (frame["status"], frame["error"], frame["object"]) == (
+            "failed",
+            "boom",
+            "video",
+        )

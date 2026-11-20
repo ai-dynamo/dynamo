@@ -167,6 +167,13 @@
             ],
             "format": "double",
             "description": "Inference time in seconds"
+          },
+          "cmaf": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CMAF frame tag, set by a worker answering the CMAF route and absent on\nevery other path: `cmaf:metadata`, `cmaf:init`, or `cmaf:segment:{n}`.\nThe frame's payload travels in `data[0].b64_json`."
           }
         }
       },

@@ -80,11 +80,39 @@ pub struct NvCreateVideoRequest {
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
+/// `extra_args` key that selects CMAF output on a video request.
+///
+/// Only the CMAF route sets it. `extra_args` is never deserialized from a
+/// request body, and [`NvCreateVideoRequest::nest_passthrough`] puts every
+/// unknown client field under `extra_args["media_passthrough"]`, so no client
+/// input can produce this key. Must match `CMAF_STREAM_EXTRA_ARG` in
+/// `components/src/dynamo/common/utils/cmaf_video.py`.
+pub const CMAF_STREAM_EXTRA_ARG: &str = "cmaf_stream";
+
 impl NvCreateVideoRequest {
     /// Nest captured top-level unknowns under `extra_args["media_passthrough"]`
     /// for dispatch to a worker.
     pub fn nest_passthrough(&mut self) {
         super::nest_media_passthrough(&mut self.passthrough, &mut self.extra_args);
+    }
+
+    /// Ask the worker for CMAF frames instead of a complete video. Called by
+    /// the CMAF route only; see [`CMAF_STREAM_EXTRA_ARG`].
+    pub fn mark_cmaf_stream(&mut self) {
+        self.extra_args
+            .get_or_insert_with(serde_json::Map::new)
+            .insert(
+                CMAF_STREAM_EXTRA_ARG.to_string(),
+                serde_json::Value::Bool(true),
+            );
+    }
+
+    /// Whether [`Self::mark_cmaf_stream`] was called on this request.
+    pub fn is_cmaf_stream(&self) -> bool {
+        self.extra_args
+            .as_ref()
+            .and_then(|extra_args| extra_args.get(CMAF_STREAM_EXTRA_ARG))
+            == Some(&serde_json::Value::Bool(true))
     }
 }
 
@@ -150,6 +178,12 @@ pub struct NvVideosResponse {
     /// Inference time in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_time_s: Option<f64>,
+
+    /// CMAF frame tag, set by a worker answering the CMAF route and absent on
+    /// every other path: `cmaf:metadata`, `cmaf:init`, or `cmaf:segment:{n}`.
+    /// The frame's payload travels in `data[0].b64_json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmaf: Option<String>,
 }
 
 fn default_object_type() -> String {
@@ -176,6 +210,7 @@ impl NvVideosResponse {
             data: vec![],
             error: None,
             inference_time_s: None,
+            cmaf: None,
         }
     }
 }
@@ -349,6 +384,80 @@ mod tests {
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
         assert!(req.extra_args.is_none());
         assert_eq!(req.passthrough["extra_args"]["x"], serde_json::json!(1));
+    }
+
+    // --- CMAF route flag ---
+
+    #[test]
+    fn cmaf_stream_flag_is_set_only_by_the_route() {
+        let json = r#"{"prompt":"cat","model":"wan"}"#;
+        let mut req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        req.nest_passthrough();
+        assert!(!req.is_cmaf_stream());
+
+        req.mark_cmaf_stream();
+        assert!(req.is_cmaf_stream());
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["extra_args"]["cmaf_stream"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn cmaf_stream_flag_keeps_the_client_passthrough() {
+        let json = r#"{"prompt":"cat","model":"cosmos","generate_sound":true}"#;
+        let mut req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        req.nest_passthrough();
+        req.mark_cmaf_stream();
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["extra_args"]["cmaf_stream"], serde_json::json!(true));
+        assert_eq!(
+            out["extra_args"]["media_passthrough"]["generate_sound"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_set_the_cmaf_stream_flag() {
+        // Every place a client could try: the flag as a top-level field, inside
+        // its own `extra_args`, and the annotation an earlier design used. The
+        // ordinary routes call nest_passthrough() and nothing else, so none of
+        // these may leave the request marked.
+        let json = r#"{
+            "prompt": "cat",
+            "model": "wan",
+            "cmaf_stream": true,
+            "extra_args": {"cmaf_stream": true},
+            "nvext": {"annotations": ["cmaf", "cmaf_stream"]}
+        }"#;
+        let mut req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.is_cmaf_stream());
+
+        req.nest_passthrough();
+        assert!(!req.is_cmaf_stream());
+        let out = serde_json::to_value(&req).unwrap();
+        assert!(out["extra_args"].get("cmaf_stream").is_none());
+        // What the client sent is still forwarded, namespaced where the worker
+        // treats it as an untrusted knob.
+        assert_eq!(
+            out["extra_args"]["media_passthrough"]["cmaf_stream"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn videos_response_cmaf_tag_round_trips_and_is_absent_by_default() {
+        let json = r#"{"id":"v1","model":"wan","created":0}"#;
+        let response: NvVideosResponse = serde_json::from_str(json).unwrap();
+        assert!(response.cmaf.is_none());
+        assert!(!serde_json::to_string(&response).unwrap().contains("cmaf"));
+
+        let json = r#"{"id":"v1","model":"wan","created":0,"cmaf":"cmaf:segment:3"}"#;
+        let response: NvVideosResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.cmaf.as_deref(), Some("cmaf:segment:3"));
+        assert!(
+            serde_json::to_string(&response)
+                .unwrap()
+                .contains(r#""cmaf":"cmaf:segment:3""#)
+        );
     }
 
     #[test]

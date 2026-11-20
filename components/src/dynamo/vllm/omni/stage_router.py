@@ -6,6 +6,7 @@
 import json
 import logging
 import uuid
+from contextlib import aclosing
 from typing import Any, AsyncGenerator, Dict, List
 
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
@@ -14,6 +15,7 @@ from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.storage import get_fs
+from dynamo.common.utils.cmaf_video import is_cmaf_request
 from dynamo.common.utils.output_modalities import (
     RequestType,
     get_output_modalities,
@@ -224,6 +226,21 @@ class OmniStageRouter:
         if output_format is not None:
             fmt_ctx["output_format"] = output_format
 
+        # Set by the frontend's CMAF route only: nothing a client sends can
+        # select CMAF output on another route.
+        if request_type == RequestType.VIDEO_GENERATION and is_cmaf_request(
+            request.get("extra_args")
+        ):
+            async for chunk in self._stream_cmaf(
+                final,
+                request_id,
+                fmt_ctx,
+                final_stage_id=self.stage_configs[-1].stage_id,
+                context=context,
+            ):
+                yield chunk
+            return
+
         async for chunk in self._format_output(
             final,
             request_id,
@@ -242,6 +259,80 @@ class OmniStageRouter:
         final_stage_id: int = 0,
     ) -> AsyncGenerator[dict, None]:
         """Read OmniRequestOutput from connector (multi-node) or SHM (single-node) and format."""
+        try:
+            result = await self._fetch_final_output(
+                stage_output, request_id, final_stage_id
+            )
+        except RuntimeError as e:
+            yield {"error": str(e), "finished": True}
+            return
+        if result is None:
+            return
+        chunk = await self._formatter.format(
+            result, request_id, request_type=request_type, **ctx
+        )
+        if chunk:
+            yield chunk
+        else:
+            final_output_type = getattr(result, "final_output_type", "unknown")
+            logger.warning(
+                "Router: formatter returned None, final_output_type=%s",
+                final_output_type,
+            )
+            yield {
+                "error": f"Formatter returned no output for type '{final_output_type}'",
+                "finished": True,
+            }
+
+    async def _stream_cmaf(
+        self,
+        stage_output: StageOutput,
+        request_id: str,
+        ctx: dict,
+        final_stage_id: int = 0,
+        context: Any = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Stream the final stage's clip to the frontend as CMAF frames.
+
+        The whole clip arrives from the final stage in one piece, so encoding
+        and chunking happen on this side of the stage boundary. A failure, at
+        any point, becomes a terminal failed response: a bare end of stream
+        would be indistinguishable from success. See DEP 0017.
+        """
+        try:
+            result = await self._fetch_final_output(
+                stage_output, request_id, final_stage_id
+            )
+            if result is None:
+                raise RuntimeError("Final stage produced no output")
+            cmaf_ctx = {"fps": ctx["fps"]} if "fps" in ctx else {}
+            if context is not None:
+                # The stages are done; the encode session watches the request.
+                cmaf_ctx["cancelled"] = context.async_killed_or_stopped
+            async with aclosing(
+                self._formatter.stream_cmaf(result, request_id, **cmaf_ctx)
+            ) as frames:
+                async for frame in frames:
+                    yield frame
+        except Exception as e:
+            logger.error("Router: CMAF stream failed for %s: %s", request_id, e)
+            yield self._formatter.cmaf_error(request_id, str(e))
+
+    async def _fetch_final_output(
+        self,
+        stage_output: StageOutput,
+        request_id: str,
+        final_stage_id: int = 0,
+    ) -> Any:
+        """Read the final stage's output from the connector (multi-node) or SHM (single-node).
+
+        Returns:
+            Any: The stage output, or ``None`` when the stage output references
+                no payload at all.
+
+        Raises:
+            RuntimeError: If the connector cannot deliver the payload.
+        """
         # --- Connector path (multi-node: router and final stage on different machines) ---
         router_connector = getattr(self, "connectors", {}).get(
             _connector_key(final_stage_id, "router")
@@ -278,33 +369,15 @@ class OmniStageRouter:
                 )
             except Exception as e:
                 logger.error("Router: connector.get() failed for %s: %s", request_id, e)
-                yield {
-                    "error": f"Router connector.get() failed: {e}",
-                    "finished": True,
-                }
-                return
+                raise RuntimeError(f"Router connector.get() failed: {e}") from e
         else:
             # --- SHM fallback (single-node: router and final stage on same machine) ---
             shm_meta = stage_output.shm_meta
             if not shm_meta:
                 logger.warning("Router: no shm_meta in stage output")
-                return
+                return None
             result = shm_deserialize(shm_meta)
-        chunk = await self._formatter.format(
-            result, request_id, request_type=request_type, **ctx
-        )
-        if chunk:
-            yield chunk
-        else:
-            final_output_type = getattr(result, "final_output_type", "unknown")
-            logger.warning(
-                "Router: formatter returned None, final_output_type=%s",
-                final_output_type,
-            )
-            yield {
-                "error": f"Formatter returned no output for type '{final_output_type}'",
-                "finished": True,
-            }
+        return result
 
 
 async def init_omni_stage_router(

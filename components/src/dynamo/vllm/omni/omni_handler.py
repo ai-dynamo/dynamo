@@ -37,6 +37,7 @@ from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
 from dynamo.common.rl import RLAdminValidationError
+from dynamo.common.utils.cmaf_video import is_cmaf_request
 from dynamo.common.utils.output_modalities import (
     RequestType,
     get_output_modalities,
@@ -393,6 +394,12 @@ class OmniHandler(BaseOmniHandler):
             parsed_request_raw,
         )
 
+        # Set by the frontend's CMAF route only: nothing a client sends can
+        # select CMAF output on another route.
+        cmaf = request_type == RequestType.VIDEO_GENERATION and is_cmaf_request(
+            getattr(parsed_request, "extra_args", None)
+        )
+
         async def preload_inputs() -> EngineInputs:
             """Load request media and build the inputs before generation starts."""
             # Pre-load input image for I2V requests (async I/O before sync build)
@@ -474,6 +481,33 @@ class OmniHandler(BaseOmniHandler):
                     per_request_kwargs["lora_request"] = admitted_lora_request
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
+                if cmaf:
+                    # The formatter streams a diffusion stage, whichever way the
+                    # runtime labels it, and yields nothing for any other stage.
+                    # A failure raises: the frontend reports it in the stream's
+                    # terminal error frame.
+                    async with aclosing(
+                        self.output_formatter.stream_cmaf(
+                            stage_output,
+                            request_id,
+                            fps=inputs.fps,
+                            # Generation is over, so the abort monitor has
+                            # nothing left to stop: the encode session watches
+                            # the request itself.
+                            cancelled=(
+                                context.async_killed_or_stopped
+                                if context is not None
+                                else None
+                            ),
+                        )
+                    ) as frames:
+                        async for frame in frames:
+                            yield {
+                                "stage_output": stage_output,
+                                "formatted_chunk": frame,
+                            }
+                    continue
+
                 chunk = await self.output_formatter.format(
                     stage_output,
                     request_id,
