@@ -14,6 +14,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -24,10 +25,12 @@ import (
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
@@ -154,7 +157,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 			By("failing the DS write and persisting the returned restart status")
-			conflictingClient := &dsRestartWriteConflictClient{Client: k8sClient, failWrite: true}
+			conflictingClient := &restartWriteConflictClient{Client: k8sClient, gvk: disaggregatedSetGVK, failWrite: true}
 			reconciler.Client = conflictingClient
 			program := reconciler.newDisaggregatedSetProgram()
 			result, err := program.Reconcile(ctx, workloadProgramRequest{DGD: current})
@@ -218,7 +221,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 
 		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
 	})
 
 	It("fails the graph while a non-DisaggregatedSet DCD reports a crash-looping container", func() {
@@ -380,7 +383,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(eligibility.Reason).To(Equal("UnsupportedIntent"))
 		Expect(eligibility.Message).To(ContainSubstring("scalingAdapter"))
 		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(BeEmpty())
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
 	})
 
 	It("rejects mixed DS and single-node DCD workers without changing existing workloads", func() {
@@ -404,7 +407,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		rollingUpdateCtx := dynamo.RollingUpdateContext{}
 		normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(current, nil, nil, rollingUpdateCtx)
 		Expect(err).NotTo(HaveOccurred())
-		selection, reason := selectDisaggregatedSetComponents(current)
+		selection, reason := disaggregatedset.Select(current)
 		Expect(reason).To(BeEmpty())
 		componentRenderer := newDCDWorkloadRenderer(
 			k8sClient,
@@ -460,18 +463,50 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 	})
 })
 
-type dsRestartWriteConflictClient struct {
+// restartWriteConflictClient fails non-dry-run writes of one workload kind so
+// tests can persist the restart status chosen before a failed first write.
+type restartWriteConflictClient struct {
 	client.Client
+	gvk       schema.GroupVersionKind
 	failWrite bool
 }
 
-func (c *dsRestartWriteConflictClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
-	patchOptions := &client.PatchOptions{}
-	for _, option := range options {
-		option.ApplyToPatch(patchOptions)
+// injectConflict rejects real writes of the selected workload kind while
+// allowing dry runs and unrelated resources to reach the underlying client.
+func (c *restartWriteConflictClient) injectConflict(object client.Object, dryRun []string) error {
+	if !c.failWrite || len(dryRun) > 0 {
+		return nil
 	}
-	if c.failWrite && object.GetObjectKind().GroupVersionKind() == disaggregatedSetGVK && len(patchOptions.DryRun) == 0 {
-		return apierrors.NewConflict(disaggregatedsetv1.Resource("disaggregatedsets"), object.GetName(), fmt.Errorf("injected restart write conflict"))
+	gvk, err := apiutil.GVKForObject(object, c.Scheme())
+	if err != nil || gvk != c.gvk {
+		return nil
+	}
+	return apierrors.NewConflict(schema.GroupResource{Group: gvk.Group, Resource: gvk.Kind}, object.GetName(), fmt.Errorf("injected restart write conflict"))
+}
+
+func (c *restartWriteConflictClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	createOptions := &client.CreateOptions{}
+	createOptions.ApplyOptions(options)
+	if err := c.injectConflict(object, createOptions.DryRun); err != nil {
+		return err
+	}
+	return c.Client.Create(ctx, object, options...)
+}
+
+func (c *restartWriteConflictClient) Update(ctx context.Context, object client.Object, options ...client.UpdateOption) error {
+	updateOptions := &client.UpdateOptions{}
+	updateOptions.ApplyOptions(options)
+	if err := c.injectConflict(object, updateOptions.DryRun); err != nil {
+		return err
+	}
+	return c.Client.Update(ctx, object, options...)
+}
+
+func (c *restartWriteConflictClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	patchOptions := &client.PatchOptions{}
+	patchOptions.ApplyOptions(options)
+	if err := c.injectConflict(object, patchOptions.DryRun); err != nil {
+		return err
 	}
 	return c.Client.Patch(ctx, object, patch, options...)
 }
@@ -528,7 +563,7 @@ func fetchTypedDisaggregatedSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *disaggregatedsetv1.DisaggregatedSet {
 	raw := newDisaggregatedSetObject()
-	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, raw)).To(Succeed())
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}, raw)).To(Succeed())
 	typed := &disaggregatedsetv1.DisaggregatedSet{}
 	Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(raw.Object, typed)).To(Succeed())
 	return typed
@@ -539,7 +574,7 @@ func markDisaggregatedSetReady(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) {
 	ds := newDisaggregatedSetObject()
-	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)).To(Succeed())
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedset.Name(dgd), Namespace: dgd.Namespace}, ds)).To(Succeed())
 	typedDS := &disaggregatedsetv1.DisaggregatedSet{}
 	Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(ds.Object, typedDS)).To(Succeed())
 	revision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)

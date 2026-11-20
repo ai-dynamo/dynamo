@@ -70,6 +70,15 @@ pub struct HealthCheckTarget {
     pub payload: serde_json::Value,
 }
 
+/// The two signals an endpoint sends its health check task.
+#[derive(Clone, Default)]
+struct EndpointNotifiers {
+    /// A successful response: resets the idle timer and marks the endpoint ready.
+    activity: Arc<tokio::sync::Notify>,
+    /// A completed engine forward pass: restarts a waiting canary's timeout.
+    progress: Arc<tokio::sync::Notify>,
+}
+
 /// Current Health Status
 /// If use_endpoint_health_status is set then
 /// initialize the endpoint_health hashmap to the
@@ -80,8 +89,8 @@ pub struct SystemHealth {
     endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
     /// Maps endpoint subject to health check target (instance + payload)
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
-    /// Maps endpoint subject to its specific health check notifier
-    health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Maps endpoint subject to its specific health check notifiers
+    health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, EndpointNotifiers>>>,
     /// Endpoints whose owner publishes readiness itself. Transport registration
     /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
     readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
@@ -198,8 +207,15 @@ impl SystemHealth {
         endpoint_health.insert(endpoint.to_string(), status);
     }
 
-    /// Returns the overall health status and endpoint health statuses
-    /// System health is determined by ALL endpoints that have registered health checks
+    /// Returns the overall health status and endpoint health statuses.
+    /// Overall health is decided in this order:
+    /// 1. Any readiness hold makes the process not ready.
+    /// 2. A nonempty `use_endpoint_health_status` list is ready only when every listed
+    ///    endpoint is ready; a listed endpoint is ready only once it has registered, or when
+    ///    it was seeded ready from the starting status.
+    /// 3. Otherwise, registered health check targets must all be ready.
+    /// 4. Otherwise, with canaries enabled and endpoints known, all known endpoints must be ready.
+    /// 5. Otherwise, the process-wide system health status decides.
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
         let health_check_targets = self.health_check_targets.read().unwrap();
         let endpoint_health = self.endpoint_health.read().unwrap();
@@ -284,12 +300,10 @@ impl SystemHealth {
             return;
         }
 
-        // Create and store a unique notifier for this endpoint (idempotent).
+        // Create and store the notifiers for this endpoint (idempotent).
         {
             let mut notifiers = self.health_check_notifiers.write().unwrap();
-            notifiers
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
+            notifiers.entry(key.clone()).or_default();
         }
 
         // Initialize endpoint health status conservatively to NotReady.
@@ -349,7 +363,21 @@ impl SystemHealth {
         endpoint_subject: &str,
     ) -> Option<Arc<tokio::sync::Notify>> {
         let notifiers = self.health_check_notifiers.read().unwrap();
-        notifiers.get(endpoint_subject).cloned()
+        notifiers.get(endpoint_subject).map(|n| n.activity.clone())
+    }
+
+    /// Get the notifier an engine fires when it completes a forward pass.
+    ///
+    /// A canary waiting for its response restarts its timeout on it: a long
+    /// prefill streams nothing until it ends, and a canary queued behind it is
+    /// not answered until then. Firing it never changes the endpoint's health
+    /// status or the idle timer.
+    pub fn get_endpoint_progress_notifier(
+        &self,
+        endpoint_subject: &str,
+    ) -> Option<Arc<tokio::sync::Notify>> {
+        let notifiers = self.health_check_notifiers.read().unwrap();
+        notifiers.get(endpoint_subject).map(|n| n.progress.clone())
     }
 
     /// Take the receiver for new endpoint registrations (can only be called once)
@@ -404,8 +432,8 @@ mod tests {
     fn system_health(health_check_enabled: bool) -> SystemHealth {
         SystemHealth::new(
             HealthStatus::NotReady,
-            // Deprecated and ignored in practice (see RuntimeConfig::from_settings),
-            // so the realistic case is an empty vector.
+            // An empty list skips the configured-endpoint override, so these tests
+            // exercise the registered-target and fallback paths.
             Vec::new(),
             health_check_enabled,
             "/health".to_string(),
@@ -577,5 +605,23 @@ mod tests {
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
         );
+    }
+
+    /// Engine progress must not reach the activity notifier, which marks the
+    /// endpoint ready: a completed forward pass is not a successful response.
+    #[test]
+    fn engine_progress_does_not_notify_activity() {
+        use futures::FutureExt;
+
+        let health = system_health(true);
+        assert!(health.get_endpoint_progress_notifier(ENDPOINT).is_none());
+
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let activity = health.get_endpoint_health_check_notifier(ENDPOINT).unwrap();
+        let progress = health.get_endpoint_progress_notifier(ENDPOINT).unwrap();
+
+        progress.notify_one();
+        assert!(activity.notified().now_or_never().is_none());
+        assert!(progress.notified().now_or_never().is_some());
     }
 }

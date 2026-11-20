@@ -108,7 +108,7 @@ class WorkerShutdown:
         self._deadline = 0.0
         self._hard_deadline = 0.0
         self._started = False
-        self._requested = asyncio.Event()
+        self.requested_event = asyncio.Event()
         self._caps: dict[str, float] = {}
         self._metrics = None
         self._child_deadline_fd: int | None = None
@@ -186,7 +186,7 @@ class WorkerShutdown:
                 self._child_deadline_fd, struct.pack("d", self._drain_deadline), 0
             )
         logger.info("Received signal %s; starting worker shutdown", signum)
-        self._requested.set()
+        self.requested_event.set()
         # A synchronous signal handler can interrupt an idle selector, which
         # Python then retries. Write the loop's wakeup fd so shutdown runs now.
         asyncio.get_running_loop().call_soon_threadsafe(self._start_sequence)
@@ -411,7 +411,7 @@ class WorkerShutdown:
                     sig, lambda signum, _frame: self.request_shutdown(signum)
                 )
         self._worker = asyncio.create_task(worker)
-        requested = asyncio.create_task(self._requested.wait())
+        requested = asyncio.create_task(self.requested_event.wait())
         try:
             try:
                 await asyncio.wait(

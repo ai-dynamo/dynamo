@@ -180,6 +180,7 @@ async def worker(argv: list[str] | None = None):
                 shutdown=shutdown,
                 snapshot_engine=snapshot_engine,
                 attached_engine=attached_engine,
+                terminal_event=shutdown.requested_event,
             )
         else:
             await init_prefill(
@@ -190,6 +191,7 @@ async def worker(argv: list[str] | None = None):
                 shutdown=shutdown,
                 snapshot_engine=snapshot_engine,
                 attached_engine=attached_engine,
+                terminal_event=shutdown.requested_event,
             )
 
     with defer_engine_signals(loop, shutdown) as deferred:

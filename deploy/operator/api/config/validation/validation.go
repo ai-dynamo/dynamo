@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -237,6 +238,13 @@ func validateOrchestrators(orch *configv1alpha1.OrchestratorConfiguration, fldPa
 
 	if orch.Grove.TerminationDelay.Duration < 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("grove", "terminationDelay"), orch.Grove.TerminationDelay.Duration, "must not be negative"))
+	}
+
+	// Scheduler names use the same DNS subdomain validation as PodSpec.schedulerName.
+	if name := orch.KaiScheduler.SchedulerName; name != "" {
+		for _, message := range kubevalidation.IsDNS1123Subdomain(name) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("kaiScheduler", "schedulerName"), name, message))
+		}
 	}
 
 	return allErrs

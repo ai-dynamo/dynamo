@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
@@ -1042,6 +1042,30 @@ def test_p4_accepts(args, env):
     assert report.p4_ok, report.reasons
 
 
+@pytest.mark.parametrize(
+    "worker_type",
+    ["prefill", {"valueFrom": {"configMapKeyRef": {"name": "c", "key": "t"}}}],
+)
+def test_worker_type_env_is_not_a_violation(worker_type):
+    # The variable only chooses the entry of an AIS perf model, and the load
+    # model here is 'none'.
+    env = {"DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE": worker_type}
+    args = (*KV_ARGS, "--router-prefill-load-model", "none")
+
+    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    assert report.p4_ok, report.reasons
+
+    # Another router variable next to it is still reported, alone.
+    env["DYN_ROUTER_POSITIONAL_SEARCH_MODE"] = "x"
+    report = evaluate(with_frontend(args=args, env=trace_env(**env)))
+    reasons = reasons_matching(report, "P4:")
+    assert not report.p4_ok
+    assert any("DYN_ROUTER_POSITIONAL_SEARCH_MODE" in reason for reason in reasons)
+    assert not any(
+        "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE" in reason for reason in report.reasons
+    )
+
+
 def test_p4_unsearched_knob_when_router_domain_is_pinned():
     # A scalar still searches (pins) the knob: it stays in the domain.
     config = planner_config(
@@ -2036,7 +2060,7 @@ def uncached_model_warning():
 
 @pytest.mark.usefixtures("uncached_model_warning")
 def test_p6_without_aisimulate_is_not_checked(monkeypatch):
-    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", None)
+    monkeypatch.setitem(sys.modules, "aisim_core.sdk.common", None)
     assert fc._model_warning("acme/private-model") is None
 
 
@@ -2045,9 +2069,9 @@ def test_p6_broken_aisimulate_warns(monkeypatch, caplog):
     def broken(name: str) -> Any:
         raise RuntimeError("broken install")
 
-    module = types.ModuleType("aisimulate_core.sdk.common")
+    module = types.ModuleType("aisim_core.sdk.common")
     module.__getattr__ = broken  # type: ignore[method-assign]
-    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", module)
+    monkeypatch.setitem(sys.modules, "aisim_core.sdk.common", module)
     warning = fc._model_warning(MODEL)
     assert warning is not None and warning.startswith("P6: cannot check")
     assert "RuntimeError: broken install" in warning

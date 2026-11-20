@@ -12,8 +12,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
+use dynamo_scheduler::host::PrefillLoadEstimator;
 use serde::{Deserialize, Serialize};
 
 use crate::{

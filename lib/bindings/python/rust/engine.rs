@@ -39,7 +39,8 @@ use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{
-    http_like_error_to_dynamo, py_exception_to_backend_error, worker_unavailable_to_dynamo,
+    http_like_error_to_dynamo, py_exception_to_backend_error, routed_engine_error_to_dynamo,
+    worker_unavailable_to_dynamo,
 };
 use crate::python_payload::{
     EncodedPythonResponse, PythonPayload, PythonResponseItem, WaitClassification,
@@ -460,7 +461,8 @@ where
         Some(
             Context::new(ctx.clone(), current_trace_context, None, metadata)
                 .with_session_affinity_from(&context)
-                .map_err(anyhow::Error::msg)?,
+                .map_err(anyhow::Error::msg)?
+                .with_response_headers_from(&context),
         )
     } else {
         None
@@ -538,16 +540,16 @@ where
 
 pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
     Python::with_gil(|py| {
-        if error.is_instance_of::<crate::errors::WorkerDraining>(py) {
-            return dynamo_backend_common::lifecycle::draining_error(
-                dynamo_backend_common::lifecycle::DRAINING_MESSAGE,
-            );
-        }
         error.display(py);
 
         // Checked before the backend mapping, whose `DynamoException` fallback
         // would otherwise classify it as `Unknown`.
         if let Some(error) = worker_unavailable_to_dynamo(py, &error) {
+            return error;
+        }
+        // A `RoutedEngineError` a chat engine let escape keeps its backend's
+        // class and status. No worker endpoint can hold one.
+        if let Some(error) = routed_engine_error_to_dynamo(py, &error) {
             return error;
         }
 

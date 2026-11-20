@@ -22,6 +22,10 @@ from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.drain_controls import (
+    configure_worker_drain,
+    unregister_worker_drain_controls,
+)
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
     gateway_child_index,
@@ -196,6 +200,7 @@ async def init_decode(
     snapshot_engine: Optional[sgl.Engine] = None,
     attached_engine: Optional[object] = None,
     shutdown: WorkerShutdown | None = None,
+    terminal_event: asyncio.Event | None = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -288,7 +293,7 @@ async def init_decode(
             logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
         if server_args.node_rank >= 1:
-            await handle_non_leader_node(engine, publisher, metrics_task)
+            await handle_non_leader_node(runtime, engine, publisher, metrics_task)
             return
 
         ready_event = asyncio.Event()
@@ -314,11 +319,6 @@ async def init_decode(
             enable_frontend_decoding=dynamo_args.frontend_decoding,
             first_token_source=first_token_source,
         )
-        handler.register_engine_routes(runtime)
-        if attached_engine is not None:
-            if shutdown is not None:
-                shutdown.pre_unregister = handler.wait_for_discovery_sync
-            handler.follow_shared_pause_state()
 
         if config.serving_mode == DisaggregationMode.DECODE:
             health_check_payload = SglangDisaggHealthCheckPayload(
@@ -349,14 +349,35 @@ async def init_decode(
 
         body_failed = True
         state_agent = StateAgentLifecycle()
+        drain = None
         try:
+            drain = configure_worker_drain(
+                handler,
+                runtime,
+                ready_event,
+                shutdown_event,
+                terminal_event or shutdown_event,
+                enable_admin=(
+                    decode_worker_type == WorkerType.Aggregated
+                    and attached_engine is None
+                ),
+            )
+            handler.register_engine_routes(runtime)
+            if attached_engine is not None:
+                if shutdown is not None:
+                    shutdown.pre_unregister = handler.wait_for_discovery_sync
+                handler.follow_shared_pause_state()
             await state_agent.start(engine, config, generate_endpoint)
             gather_tasks = [
                 serve_endpoint(
                     generate_endpoint,
-                    handler.generate,
+                    drain.wrap(handler.generate),
                     shutdown=shutdown,
                     graceful_shutdown=True,
+                    track_response_completion=(
+                        getattr(handler, "_drain_controls_enabled", False)
+                        and dynamo_args.response_plane == "tcp"
+                    ),
                     metrics_labels=metrics_labels,
                     health_check_payload=health_check_payload,
                 ),
@@ -412,14 +433,19 @@ async def init_decode(
                 engine_closed = True
 
             try:
-                await state_agent.close()
+                if drain is not None:
+                    unregister_worker_drain_controls(handler, runtime)
+                    await drain.close()
             finally:
-                await finish_worker_teardown(
-                    metrics_task,
-                    cleanup_engine,
-                    run_deferred_handlers,
-                    body_failed=body_failed,
-                )
+                try:
+                    await state_agent.close()
+                finally:
+                    await finish_worker_teardown(
+                        metrics_task,
+                        cleanup_engine,
+                        run_deferred_handlers,
+                        body_failed=body_failed,
+                    )
     finally:
         if not engine_closed:
             engine.shutdown()
@@ -434,6 +460,7 @@ async def init_prefill(
     snapshot_engine: Optional[sgl.Engine] = None,
     attached_engine: Optional[object] = None,
     shutdown: WorkerShutdown | None = None,
+    terminal_event: asyncio.Event | None = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -517,7 +544,7 @@ async def init_prefill(
             publisher.component_gauges.set_model_load_time(load_time)
 
         if server_args.node_rank >= 1:
-            await handle_non_leader_node(engine, publisher, metrics_task)
+            await handle_non_leader_node(runtime, engine, publisher, metrics_task)
             return
 
         await _warmup_prefill_engine(engine, server_args, metrics_task)
@@ -525,11 +552,6 @@ async def init_prefill(
         handler = PrefillWorkerHandler(
             engine, config, publisher, generate_endpoint, shutdown_event
         )
-        handler.register_engine_routes(runtime)
-        if attached_engine is not None:
-            if shutdown is not None:
-                shutdown.pre_unregister = handler.wait_for_discovery_sync
-            handler.follow_shared_pause_state()
 
         health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
@@ -537,12 +559,26 @@ async def init_prefill(
 
         body_failed = True
         state_agent = StateAgentLifecycle()
+        drain = None
         try:
+            drain = configure_worker_drain(
+                handler,
+                runtime,
+                ready_event,
+                shutdown_event,
+                terminal_event or shutdown_event,
+                enable_admin=False,
+            )
+            handler.register_engine_routes(runtime)
+            if attached_engine is not None:
+                if shutdown is not None:
+                    shutdown.pre_unregister = handler.wait_for_discovery_sync
+                handler.follow_shared_pause_state()
             await state_agent.start(engine, config, generate_endpoint)
             await asyncio.gather(
                 serve_endpoint(
                     generate_endpoint,
-                    handler.generate,
+                    drain.wrap(handler.generate),
                     shutdown=shutdown,
                     graceful_shutdown=True,
                     metrics_labels=metrics_labels,
@@ -607,14 +643,19 @@ async def init_prefill(
                 engine_closed = True
 
             try:
-                await state_agent.close()
+                if drain is not None:
+                    unregister_worker_drain_controls(handler, runtime)
+                    await drain.close()
             finally:
-                await finish_worker_teardown(
-                    metrics_task,
-                    cleanup_engine,
-                    run_deferred_handlers,
-                    body_failed=body_failed,
-                )
+                try:
+                    await state_agent.close()
+                finally:
+                    await finish_worker_teardown(
+                        metrics_task,
+                        cleanup_engine,
+                        run_deferred_handlers,
+                        body_failed=body_failed,
+                    )
     finally:
         if not engine_closed:
             engine.shutdown()

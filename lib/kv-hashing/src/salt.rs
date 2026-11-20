@@ -10,7 +10,7 @@
 //! # Router parity
 //!
 //! This function is the shared seed derivation used by
-//! `dynamo_kv_router::protocols::compute_block_hash_for_seq` and canonical
+//! `dynamo_kv_hashing::routing::compute_block_hash_for_seq` and canonical
 //! pre-hashed producers:
 //!
 //! ```text
@@ -22,7 +22,7 @@
 //! Producer events whose `block_hash` is `compute_block_hash(tokens, salt_hash)` therefore
 //! match the router's `compute_block_hash_for_seq(tokens, _, BlockHashOptions { .. })`
 //! byte-for-byte — required for kv-router's indexers (which key on
-//! both `tokens_hash` and the `seq_hash` chain) to find matches against consolidator-emitted
+//! both `tokens_hash` and the `seq_hash` chain) to find matches against producer-emitted
 //! events.
 //!
 //! Multimodal data is **not** part of the salt — it is folded into per-block hashing
@@ -36,8 +36,8 @@ use crate::error::KvHashingError;
 /// Computes the canonical [`SaltHash`] from `(salt, lora_name)`.
 ///
 /// Empty strings (`Some("")`) are normalized to `None` for both `salt` and `lora_name`
-/// before hashing. This matches the router's existing behavior at
-/// `lib/kv-router/src/protocols.rs:79` (`options.lora_name.filter(|n| !n.is_empty())`)
+/// before hashing. This matches the routing hash's behavior in
+/// `lib/kv-hashing/src/routing.rs` (`compute_salt_hash` filters an empty `lora_name`)
 /// so a client that sends `lora_name = ""` shares the cache with a client that sends
 /// `lora_name = None`.
 ///
