@@ -873,8 +873,26 @@ impl Model {
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        self.get_chat_engine_with_input_policy()
+            .map(|(engine, parsing, _)| (engine, parsing))
+    }
+
+    pub(crate) fn get_chat_engine_with_input_policy(
+        &self,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        ),
+        ModelManagerError,
+    > {
+        self.select_worker_set_with(|ws| {
+            ws.chat_engine
+                .clone()
+                .map(|engine| (engine, ws.parsing_options(), ws.input_policy()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     /// Select a chat engine from a WorkerSet that advertises `capability`.
@@ -1373,6 +1391,69 @@ mod tests {
         assert!(model.get_tensor_engine().is_err());
         assert!(model.get_realtime_engine().is_err());
         assert!(model.get_generate_engine().is_err());
+    }
+
+    struct StubChatEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> for StubChatEngine {
+        async fn generate(&self, _: SingleIn<crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest>)
+            -> Result<ManyOut<Annotated<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>>, Error> {
+            unreachable!("selection must not generate")
+        }
+    }
+
+    #[test]
+    fn chat_selection_keeps_engine_parsing_and_input_policy_atomic() {
+        use crate::chat_input::ChatInputPolicy;
+        let model = Model::new("chat-policy".into());
+        let make_set = |namespace: &str, native: bool| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.tool_call_parser = native.then(|| "mistral".into());
+            let mut set = WorkerSet::new(namespace.into(), namespace.into(), card);
+            let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(StubChatEngine);
+            set.chat_engine = Some(engine.clone());
+            let policy = if native {
+                ChatInputPolicy::Mistral
+            } else {
+                ChatInputPolicy::Standard
+            };
+            set.set_input_policy(policy.clone());
+            let (tx, rx) = watch::channel(vec![1]);
+            set.set_instance_watcher(rx);
+            (Arc::new(set), engine, policy, tx)
+        };
+        let (standard, standard_engine, standard_policy, standard_tx) = make_set("standard", false);
+        let (native, native_engine, native_policy, native_tx) = make_set("native", true);
+        model.add_worker_set("standard".into(), standard);
+        model.add_worker_set("native".into(), native);
+        for native_active in [false, true] {
+            standard_tx.send_replace(if native_active { vec![] } else { vec![1] });
+            native_tx.send_replace(if native_active { vec![2] } else { vec![] });
+            let (engine, parsing, policy) = model.get_chat_engine_with_input_policy().unwrap();
+            assert!(Arc::ptr_eq(
+                &engine,
+                if native_active {
+                    &native_engine
+                } else {
+                    &standard_engine
+                }
+            ));
+            assert_eq!(
+                policy,
+                if native_active {
+                    native_policy.clone()
+                } else {
+                    standard_policy.clone()
+                }
+            );
+            assert_eq!(
+                parsing.tool_call_parser.as_deref(),
+                native_active.then_some("mistral")
+            );
+        }
     }
 
     #[test]

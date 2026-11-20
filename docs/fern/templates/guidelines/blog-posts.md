@@ -56,7 +56,8 @@ commit authorship are not substitutes for editorial authorship. Authors without 
 render with an initials avatar and name tooltip.
 
 The `category` selects the article's generated editorial cover palette and flow labels. Supporting
-images in the article body receive the standard focus-to-sharp scroll reveal automatically.
+images in the article body receive the standard focus-to-sharp scroll reveal automatically. Pass
+`revealImages={false}` to `BlogArticleMeta` to show a post's images at once instead.
 
 ## Step 2: Add the Post to the Blog Navigation
 
