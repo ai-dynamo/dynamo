@@ -154,7 +154,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 #        docker run --gpus all -v /path/to/dynamo:/workspace ...
 #
 #   2) Build from source inside the container:
-#        cargo build --features dynamo-llm/block-manager
+#        cargo build
 #        cd /workspace/lib/bindings/python && maturin develop --uv
 #        uv pip install --no-deps -e /workspace
 #

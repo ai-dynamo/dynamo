@@ -10,7 +10,6 @@
 *.[Zz][Ii][Pp]      binary
 *.[Tt][Gg][Zz]      binary
 *.[Gg][Zz]          binary
-*.fatbin            binary
 *.mp4               binary
 *.woff2             binary -eol
 
