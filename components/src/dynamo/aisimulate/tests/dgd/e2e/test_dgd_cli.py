@@ -75,8 +75,9 @@ def _assert_dgd_golden(golden: Path, manifests: list[dict[str, Any]]) -> None:
 
 
 def _assert_dgd_outputs(
-    config_path: Path, options: dict[str, Any], output: Path
+    config_path: Path, input_config: dict[str, Any], output: Path
 ) -> None:
+    options = input_config["dgd"]
     result = SweepResult.model_validate_json(
         (output / "recommendation.json").read_text()
     )
@@ -183,6 +184,13 @@ def _assert_dgd_outputs(
             role = roles[component["type"]]
             prefix = "" if role == "agg" else f"{role}_"
             assert component["replicas"] == config[f"{prefix}replicas"]
+
+            # Preserve the requested block size through Candidate creation and rendering.
+            worker_config = input_config["engine"]["workers"][
+                "aggregated" if role == "agg" else role
+            ]
+            block_size = worker_config["kv_cache"].get("block_size")
+            assert config.get(f"{role}_block_size") == block_size
             args = container["args"]
             for flag, expected in {
                 "--model": config["model_name"],
@@ -192,11 +200,14 @@ def _assert_dgd_outputs(
                 "--max-model-len": config["context_length"],
                 "--max-num-seqs": config[f"{role}_max_num_seqs"],
                 "--max-num-batched-tokens": config[f"{role}_max_num_batched_tokens"],
-                "--block-size": config[f"{role}_block_size"],
+                "--block-size": block_size,
                 "--num-gpu-blocks-override": config[f"{role}_num_gpu_blocks"],
             }.items():
-                assert args.count(flag) == 1
-                assert args[args.index(flag) + 1] == str(expected)
+                if expected is None:
+                    assert flag not in args
+                else:
+                    assert args.count(flag) == 1
+                    assert args[args.index(flag) + 1] == str(expected)
             assert ("--no-enable-prefix-caching" in args) != config[
                 f"{role}_enable_prefix_caching"
             ]
@@ -249,4 +260,4 @@ def test_dgd_cli_cases(config_path: Path, tmp_path: Path) -> None:
     )
     assert json.loads(result.stdout)
     assert "router AIC payload requires" not in result.stderr
-    _assert_dgd_outputs(config_path, config["dgd"], output)
+    _assert_dgd_outputs(config_path, config, output)

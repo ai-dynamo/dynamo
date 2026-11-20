@@ -537,17 +537,23 @@ jobs:
         compile_bench active-sequences --bench active_sequences_bench
         compile_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         compile_bench dc-ckf-relay --bench dc_ckf_relay_bench
+        compile_bench selection-replay --bench selection_replay_bench
 
         cargo test --locked --no-default-features -p dynamo-bench \
           --features request-trace-to-mooncake --test request_trace_to_mooncake
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features selection-replay --test selection_replay
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
     - name: Run NVTX feature tests
       # Only this step and "Lint the NVTX feature" turn on the nvtx feature here.
       # The lint step and the image builds compile it but run no tests. So this
-      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs.
-      run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
+      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs
+      # and lib/runtime/tests/nvtx_payload.rs, which records what reaches NVTX.
+      run: |
+        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::
+        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload
 
   rust-clippy:
     needs: changed-files
@@ -610,6 +616,7 @@ jobs:
         lint_bench active-sequences --bench active_sequences_bench
         lint_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         lint_bench dc-ckf-relay --bench dc_ckf_relay_bench
+        lint_bench selection-replay --bench selection_replay_bench --test selection_replay
 
         cargo clippy --locked --no-deps -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench -- -D warnings
