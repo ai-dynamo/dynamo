@@ -5,6 +5,10 @@
 //! The payload is encoded UTF-8, not encrypted, and carries no authentication.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use dynamo_protocols::types::responses::{
+    CountInputTokensRequest, InputItem, InputParam, InputReasoningItem, Item, SummaryPart,
+    SummaryTextContent,
+};
 
 const PREFIX: &str = "trtllm-reasoning-v1:";
 
@@ -27,6 +31,41 @@ pub(super) fn decode(value: &str) -> anyhow::Result<Option<String>> {
         )
         .into()
     })
+}
+
+pub(super) fn input_content(item: &InputReasoningItem) -> anyhow::Result<Option<String>> {
+    if let Some(text) = item
+        .content
+        .as_ref()
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<String>()
+        })
+        .filter(|text| !text.is_empty())
+    {
+        return Ok(Some(text));
+    }
+    match item.encrypted_content.as_deref() {
+        Some(payload) => decode(payload),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn estimate_input_tokens(mut request: CountInputTokensRequest) -> anyhow::Result<u32> {
+    if let InputParam::Items(items) = &mut request.input {
+        for item in items {
+            if let InputItem::Item(Item::Reasoning(reasoning)) = item
+                && let Some(text) = input_content(reasoning)?
+            {
+                // The protocol estimator measures summary bytes. Put the
+                // selected replay text there to reuse its message grouping.
+                reasoning.summary = vec![SummaryPart::SummaryText(SummaryTextContent { text })];
+            }
+        }
+    }
+    Ok(request.estimate_tokens())
 }
 
 #[cfg(test)]

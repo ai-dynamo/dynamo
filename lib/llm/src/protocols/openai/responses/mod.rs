@@ -15,6 +15,7 @@ pub use template_tools::ResponsesToolContext;
 pub(crate) use template_tools::effective_response_tools;
 use template_tools::*;
 
+pub(crate) use reasoning_replay::estimate_input_tokens;
 pub use tool_names::ToolNameMap;
 
 use std::collections::{HashMap, HashSet};
@@ -674,32 +675,12 @@ fn convert_input_items_to_messages(
                     ));
                 }
                 Item::Reasoning(r) => {
-                    let content = r
-                        .content
-                        .as_ref()
-                        .map(|parts| {
-                            parts
-                                .iter()
-                                .map(|part| part.text.as_str())
-                                .collect::<String>()
-                        })
-                        .filter(|text| !text.is_empty());
-                    let summary = || {
+                    let text = reasoning_replay::input_content(r)?.unwrap_or_else(|| {
                         r.summary
                             .iter()
                             .map(|SummaryPart::SummaryText(part)| part.text.as_str())
                             .collect::<String>()
-                    };
-                    let decoded = if content.is_none() {
-                        r.encrypted_content
-                            .as_deref()
-                            .map(reasoning_replay::decode)
-                            .transpose()?
-                            .flatten()
-                    } else {
-                        None
-                    };
-                    let text = content.or(decoded).unwrap_or_else(summary);
+                    });
                     pending.push_reasoning(&text);
                 }
                 other => {
@@ -1300,22 +1281,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         let fallback_names = ToolNameMap::new(&inner_tools, Some(&resp.inner.input));
-        let mut history_tool_names: HashMap<String, Vec<String>> = HashMap::new();
-        // Backends may restart call IDs each turn. Preserve each occurrence's
-        // identity rather than renaming all earlier calls to the last one.
-        for call in messages
-            .iter()
-            .filter_map(|message| match message {
-                ChatCompletionRequestMessage::Assistant(message) => message.tool_calls.as_ref(),
-                _ => None,
-            })
-            .flatten()
-        {
-            history_tool_names
-                .entry(call.id.clone())
-                .or_default()
-                .push(call.function.name.clone());
-        }
+        let history_tool_calls = template_tools::history_tool_calls(&resp.inner.input, &names);
         let tool_choice_name = match &tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(choice)) => {
                 Some(choice.function.name.clone())
@@ -1345,7 +1311,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             history_phases,
             legacy_history,
             phase_history,
-            history_tool_names,
+            history_tool_calls,
             tool_choice_name,
             selected_tools,
         });
@@ -4959,18 +4925,25 @@ mod tests {
 
     #[test]
     fn kimi_replay_preserves_historical_tool_identity() {
-        let marked = template_tools::encode_kimi_bare_call_id("call_1");
-        for (id, name, expected) in [
-            ("call_1", "exec", "exec"),
-            (marked.as_str(), "exec", "exec"),
-            ("call_1_bare", "functions.exec", "functions.exec"),
-            ("call_1_bare", "exec", "exec"),
-            ("dynamo_kimi_bare_v1_!", "functions.exec", "functions.exec"),
+        for (call_id, namespace, expected) in [
+            ("call_1", None, "exec"),
+            ("call_1_bare", Some("functions"), "functions.exec"),
+            (
+                "dynamo_kimi_bare_v1_Y2FsbF8x",
+                Some("functions"),
+                "functions.exec",
+            ),
+            (
+                "dynamo_kimi_bare_v2_fc_other",
+                Some("functions"),
+                "functions.exec",
+            ),
         ] {
             let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
                 "model":"m", "tools":[{"type":"namespace","name":"functions","tools":[
                     {"type":"function","name":"exec","parameters":{"type":"object"}}
-                ]}], "input":[{"type":"function_call","call_id":id,"name":name,"arguments":"{}"}]
+                ]}], "input":[{"type":"function_call","id":"fc_1","call_id":call_id,
+                    "name":"exec","namespace":namespace,"arguments":"{}"}]
             }))
             .unwrap();
             let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
@@ -5007,10 +4980,11 @@ mod tests {
             preserve_tool_spelling: true,
             ..Default::default()
         };
-        for original_id in ["call_1", "dynamo_kimi_bare_v1_Y2FsbF8x"] {
+        for (item_id, original_id) in [("fc_1", "call_1"), ("fc_2", "dynamo_kimi_bare_v1_Y2FsbF8x")]
+        {
             let item = params
                 .tool_output(
-                    "fc_1".into(),
+                    item_id.into(),
                     original_id.into(),
                     "exec",
                     "{}",
@@ -5020,13 +4994,17 @@ mod tests {
             let OutputItem::FunctionCall(call) = &item else {
                 panic!("missing function call");
             };
-            assert_eq!(
-                call.call_id,
-                template_tools::encode_kimi_bare_call_id(original_id)
-            );
+            assert_eq!(call.call_id, format!("dynamo_kimi_bare_v2_{item_id}"));
             assert_eq!(call.namespace.as_deref(), Some("functions"));
             let mut body = serde_json::to_value(&request).unwrap();
-            body["input"] = serde_json::json!([item]);
+            let call_id = call.call_id.clone();
+            body["input"] = serde_json::json!([
+                item,
+                {"type":"function_call_output","call_id":call_id,"output":"first"},
+                {"type":"function_call","id":"fc_unrelated","call_id":call_id,
+                    "namespace":"functions","name":"exec","arguments":"{}"},
+                {"type":"function_call_output","call_id":call_id,"output":"second"}
+            ]);
             let replay: NvCreateResponse = serde_json::from_value(body).unwrap();
             let mut chat: NvCreateChatCompletionRequest = replay.try_into().unwrap();
             chat.normalize_kimi_replay();
@@ -5036,9 +5014,13 @@ mod tests {
             };
             let call = &assistant.tool_calls.as_ref().unwrap()[0];
             assert_eq!(call.function.name, "exec");
+            assert_eq!(call.id, call_id);
+            let ChatCompletionRequestMessage::Assistant(second) = &chat.inner.messages[2] else {
+                panic!("missing second assistant");
+            };
             assert_eq!(
-                call.id,
-                template_tools::encode_kimi_bare_call_id(original_id)
+                second.tool_calls.as_ref().unwrap()[0].function.name,
+                "functions.exec"
             );
         }
     }

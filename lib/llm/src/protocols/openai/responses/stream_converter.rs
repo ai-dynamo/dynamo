@@ -87,8 +87,7 @@ pub struct ResponseStreamConverter {
     // The message as published in `output_item.done`, reused for the closed
     // list and the terminal response instead of rebuilding its scores.
     finished_message: Option<OutputMessage>,
-    // Ordered reasoning spans; a new item opens when reasoning resumes after
-    // a tool call.
+    // Ordered reasoning spans separated by visible output or tool calls.
     reasoning_items: Vec<ReasoningState>,
     active_reasoning_index: Option<usize>,
     // Function call tracking
@@ -740,13 +739,22 @@ impl ResponseStreamConverter {
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
+            let reasoning = delta.reasoning_content.as_deref().filter(|text| {
+                !text.is_empty()
+                    && self.reasoning_output_enabled
+                    && (!self.message_started || self.reasoning_replay_enabled)
+            });
+            if reasoning.is_some() && self.message_started {
+                // Close the preceding visible item before publishing the next
+                // replay span. Scores on this choice belong to the new span.
+                let phase = self.message_phase;
+                self.resolve_unclassified_logprobs(true);
+                self.close_current_message(events);
+                self.message_phase = phase;
+            }
             self.queue_choice_logprobs(choice, end_boundary);
 
-            if let Some(reasoning) = delta.reasoning_content.as_deref()
-                && !reasoning.is_empty()
-                && !self.message_started
-                && self.reasoning_output_enabled
-            {
+            if let Some(reasoning) = reasoning {
                 self.append_reasoning_delta(reasoning, events);
             }
 
@@ -1958,6 +1966,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn replay_keeps_reasoning_after_visible_output_in_order() {
+        let params = ResponseParams {
+            legacy_reasoning_replay: true,
+            include: Some(vec![super::super::IncludeEnum::ReasoningEncryptedContent]),
+            ..default_params()
+        };
+        let mut converter = ResponseStreamConverter::new("test-model".into(), params);
+        let mut events: Vec<_> = [
+            reasoning_chunk("first"),
+            text_chunk("answer"),
+            reasoning_chunk(" second"),
+        ]
+        .iter()
+        .flat_map(|chunk| converter.process_chunk(chunk))
+        .collect();
+        events.extend(converter.emit_end_events());
+
+        let done: Vec<_> = events
+            .iter()
+            .filter(|event| event_type(event) == "response.output_item.done")
+            .map(event_json)
+            .collect();
+        assert_eq!(done.len(), 3);
+        let response = event_json(events.last().unwrap());
+        let output = response["response"]["output"].as_array().unwrap();
+        assert_eq!(output.len(), done.len());
+        for (index, event) in done.iter().enumerate() {
+            assert_eq!(event["output_index"], index);
+            assert_eq!(event["item"], output[index]);
+        }
+        assert_eq!(output[1]["content"][0]["text"], "answer");
+        for (index, text) in [(0, "first"), (2, " second")] {
+            let item = &output[index];
+            let replay = item["encrypted_content"].as_str().unwrap();
+            assert_eq!(
+                super::super::reasoning_replay::decode(replay)
+                    .unwrap()
+                    .as_deref(),
+                Some(text)
+            );
+            assert!(item["content"].is_null());
+        }
+        assert!(
+            events
+                .iter()
+                .all(|event| !event_type(event).starts_with("response.reasoning_text."))
+        );
     }
 
     #[test]

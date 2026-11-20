@@ -62,12 +62,14 @@ use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
     decode_base64_to_floats,
 };
-use crate::protocols::agents::agent_context_header_values_for_session;
+use crate::protocols::agents::{
+    agent_context_header_values_for_session, session_affinity_header_value,
+};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
     agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
-    session_affinity_from_headers, upstream_elapsed_from_headers,
+    upstream_elapsed_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
@@ -1271,11 +1273,12 @@ where
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, headers);
     if let Some(mut agent_context) = agent_context {
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new(agent_context.session_id.as_str()),
+        );
         agent_context.input_trigger = classify_input_trigger(request.content());
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
-    }
-    if let Some(session_affinity) = session_affinity_from_headers(headers) {
-        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
 }
@@ -4946,31 +4949,29 @@ async fn handler_responses_input_tokens(
     let body = normalize_responses_input("responses input_tokens", &body)?;
     let request: CountInputTokensRequest =
         serde_json::from_value(body).map_err(json_deserialize_error)?;
-    Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
+    let tokens = crate::protocols::openai::responses::estimate_input_tokens(request)
+        .map_err(responses_conversion_error_response)?;
+    Ok(Json(CountInputTokensResponse::new(tokens)).into_response())
 }
 
-fn apply_responses_body_affinity(
-    request: &mut Context<NvCreateResponse>,
+fn responses_context_from_headers(
+    request: NvCreateResponse,
+    request_id: String,
     headers: &HeaderMap,
-    affinity: Option<String>,
-    explicit: bool,
-) {
-    if !explicit && session_affinity_from_headers(headers).is_some() {
-        return;
-    }
-    let Some(affinity) = affinity else {
-        return;
+    body_affinity: Option<String>,
+    explicit_body_affinity: bool,
+) -> Result<Context<NvCreateResponse>, ErrorResponse> {
+    let session_id = if explicit_body_affinity {
+        body_affinity
+    } else {
+        session_affinity_header_value(headers).or(body_affinity)
     };
-    let mut agent = AgentContext::from(agent_context_header_values_for_session(
-        headers,
-        affinity.clone(),
-    ));
-    agent.input_trigger = Some(classify_response_request(request.content()));
-    request.insert(
-        SESSION_AFFINITY_CONTEXT_KEY,
-        SessionAffinityId::new(affinity),
-    );
-    request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent);
+    let agent = session_id.map(|session_id| {
+        AgentContext::from(agent_context_header_values_for_session(headers, session_id))
+    });
+    context_from_headers_with_agent_context(request, request_id, headers, agent, |request| {
+        Some(classify_response_request(request))
+    })
 }
 
 fn normalize_responses_input(
@@ -5043,16 +5044,13 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request =
-        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
-            Some(classify_response_request(request))
-        })?;
-    apply_responses_body_affinity(
-        &mut request,
+    let mut request = responses_context_from_headers(
+        request,
+        request_id,
         &headers,
         body_affinity,
         explicit_body_affinity,
-    );
+    )?;
     attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
@@ -7028,21 +7026,74 @@ pub fn audios_router(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn body_affinity_obeys_explicit_body_then_header_then_fallback_precedence() {
-        for (header, explicit, expected, expected_parent) in [
-            (None, false, "body", Some("header")),
-            (Some("x-session-id"), false, "header", None),
-            (Some("x-session-id"), true, "body", Some("header")),
-            (Some("x-dynamo-session-id"), true, "body", Some("header")),
+    fn responses_affinity_preserves_canonical_parent_for_the_selected_session() {
+        for (session_header, body, explicit, canonical_parent, expected, expected_parent) in [
+            (
+                None,
+                Some("body"),
+                false,
+                Some("parent"),
+                "body",
+                Some("parent"),
+            ),
+            (
+                Some("x-session-id"),
+                None,
+                false,
+                Some("parent"),
+                "child",
+                Some("parent"),
+            ),
+            (
+                Some("x-session-id"),
+                Some("body"),
+                false,
+                Some("child"),
+                "child",
+                None,
+            ),
+            (
+                Some("x-session-id"),
+                Some("body"),
+                false,
+                None,
+                "child",
+                Some("native-parent"),
+            ),
+            (
+                Some("x-session-id"),
+                Some("body"),
+                true,
+                Some("parent"),
+                "body",
+                Some("parent"),
+            ),
+            (
+                Some("x-dynamo-session-id"),
+                Some("body"),
+                true,
+                Some("parent"),
+                "body",
+                Some("parent"),
+            ),
         ] {
             let mut headers = HeaderMap::new();
-            if let Some(name) = header {
-                headers.insert(name, "header".parse().unwrap());
+            if let Some(name) = session_header {
+                headers.insert(name, "child".parse().unwrap());
+                headers.insert("x-parent-session-id", "native-parent".parse().unwrap());
             }
-            headers.insert("x-dynamo-parent-session-id", "header".parse().unwrap());
-            let mut context =
-                context_from_headers(NvCreateResponse::default(), "r".into(), &headers).unwrap();
-            apply_responses_body_affinity(&mut context, &headers, Some("body".into()), explicit);
+            if let Some(parent) = canonical_parent {
+                headers.insert("x-dynamo-parent-session-id", parent.parse().unwrap());
+            }
+            headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+            let context = responses_context_from_headers(
+                NvCreateResponse::default(),
+                "r".into(),
+                &headers,
+                body.map(str::to_owned),
+                explicit,
+            )
+            .unwrap();
             let affinity = context
                 .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
                 .unwrap();
@@ -7052,6 +7103,7 @@ mod tests {
                 .unwrap();
             assert_eq!(agent.session_id, expected);
             assert_eq!(agent.parent_session_id.as_deref(), expected_parent);
+            assert_eq!(agent.session_final, Some(true));
         }
     }
 
@@ -7069,9 +7121,14 @@ mod tests {
             let affinity =
                 crate::protocols::openai::responses::request_compat::body_affinity(&body)
                     .map(str::to_owned);
-            let mut request =
-                context_from_headers(NvCreateResponse::default(), "r".into(), &headers).unwrap();
-            apply_responses_body_affinity(&mut request, &headers, affinity, conversation.is_some());
+            let request = responses_context_from_headers(
+                NvCreateResponse::default(),
+                "r".into(),
+                &headers,
+                affinity,
+                conversation.is_some(),
+            )
+            .unwrap();
             assert_eq!(
                 request
                     .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
