@@ -32,7 +32,6 @@ from dynamo.common.forward_pass_metrics import FPM_VERSION, ForwardPassMetrics
 
 logger = logging.getLogger(__name__)
 
-# The file that names the saved states, in the output directory.
 DOCUMENT_NAME = "ais_perf_model.json"
 # What AISimulate accepts for an identity fact that the producer does not know.
 _UNKNOWN = "unknown"

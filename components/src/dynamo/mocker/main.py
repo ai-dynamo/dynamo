@@ -83,7 +83,6 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
-    # A lookup-table file, or the AIS perf model tuned with a profile results dir
     profile_data_result = use_planner_profile_data(args)
 
     try:

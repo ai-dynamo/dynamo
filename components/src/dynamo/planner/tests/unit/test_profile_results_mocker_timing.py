@@ -213,7 +213,6 @@ def test_written_file_names_one_saved_model_for_each_worker_type(tmp_path):
     for _, worker_type in WORKER_TYPES:
         config = engine_perf_config(str(perf_model), worker_type)
         assert config["deployment_limits"]["max_kv_tokens"] == MAX_KV_TOKENS
-        # The saved state is next to the file.
         snapshot = config["estimator_config"]["state_snapshot"]
         assert Path(snapshot["path"]) == perf_model.parent / worker_type
 

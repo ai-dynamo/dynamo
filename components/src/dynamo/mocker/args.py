@@ -96,12 +96,10 @@ def resolve_planner_profile_data(
         write_ais_perf_model,
     )
 
-    # Case 1: Already a mocker-format NPZ file
     if is_mocker_format_npz(planner_profile_data):
         logger.info(f"Using mocker-format NPZ file: {planner_profile_data}")
         return ProfileDataResult(npz_path=planner_profile_data, tmpdir=None)
 
-    # Case 2: Profiler-style results directory - tune an AIS perf model with it
     if is_profile_results_dir(planner_profile_data):
         logger.info(
             "Detected profiler-style results directory at %s, tuning an AIS perf "
@@ -124,7 +122,6 @@ def resolve_planner_profile_data(
             npz_path=None, tmpdir=tmpdir, ais_perf_model=ais_perf_model
         )
 
-    # Case 3: Invalid path - neither mocker-format NPZ nor profiler-style directory
     raise FileNotFoundError(
         f"Path '{planner_profile_data}' is neither a mocker-format NPZ file nor a valid profiler results directory.\n"
         f"Expected either:\n"
