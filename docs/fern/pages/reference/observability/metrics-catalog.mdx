@@ -530,7 +530,7 @@ Recorded only with `--shared-cache-type hicache`. These carry a `router_id` labe
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_router_shared_cache_hit_rate` | histogram | — | Fraction of request blocks found in the shared KV cache. | |
-| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | — | Shared-cache blocks beyond the selected worker's device overlap. | |
+| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | — | Shared-cache blocks the selected worker can load past its local (device, host, and disk) prefix: the unbroken run, or zero below the engine's minimum load. | |
 | `dynamo_router_shared_cache_errors_total` | counter | — | Failed shared-cache queries and subscriber errors. Frontend only; carries only `router_id`, like the [routing overhead](#per-request-routing-overhead) metrics. | |
 
 ### Active Sequence Synchronization
