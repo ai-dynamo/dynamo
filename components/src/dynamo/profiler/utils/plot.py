@@ -204,7 +204,7 @@ def plot_prefill_interpolation(
 
 def _save_3d_surface_plot(plot_path: str) -> None:
     # matplotlib 3.11 overflows projecting undrawn 3D padding (matplotlib#32272);
-    # ignoring it leaves the image unchanged. Remove once matplotlib#32310 ships.
+    # ignoring it leaves the image unchanged. Removal: Dynamo#19281 (matplotlib#32310).
     with np.errstate(over="ignore"):
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
 
