@@ -14,7 +14,9 @@
 //! adapter in-process.
 //!
 //! An engine that stops serving ([`LLMEngine::engine_lost`]) leaves discovery and
-//! is probed again until it serves, then registered again.
+//! is probed again until it serves, then registered again. An engine whose
+//! configuration this frontend rejects is logged as an error and not probed
+//! again.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -140,7 +142,9 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 /// every engine's supervisor runs, without waiting for any engine to serve; an
 /// engine that is down is probed with backoff until it serves, and the others
 /// serve meanwhile. Fails only on configuration errors, including an engine the
-/// factory cannot build.
+/// factory cannot build. An engine that starts but whose configuration this
+/// frontend rejects (an `InvalidArgument` error, such as KV events it cannot
+/// subscribe to) is logged as an error and not probed again.
 ///
 /// `config` is the worker configuration a sidecar for these engines would run
 /// with. Each engine's role comes from its spec, not from `config`.
@@ -247,16 +251,19 @@ impl DirectEngineHost {
     /// Start the engine, make it dispatchable, then publish it. Nothing cancels
     /// `engine.start()`: the `LLMEngine` contract makes `cleanup` safe only once
     /// `start` has returned, and `Worker` never cancels it either.
-    async fn start(&self, engine: Arc<dyn LLMEngine>) -> Result<HostedEngine, DynamoError> {
+    async fn start(&self, engine: Arc<dyn LLMEngine>) -> Result<HostedEngine, ProbeError> {
         let records = match engine.start(self.instance_id).await {
-            Ok(engine_config) => self.discovery_records(&engine, &engine_config).await,
-            Err(start_error) => Err(start_error),
+            Ok(engine_config) => self
+                .discovery_records(&engine, &engine_config)
+                .await
+                .map_err(ProbeError::NotRegistered),
+            Err(start_error) => Err(ProbeError::NotServing(start_error)),
         };
         let (endpoint, model) = match records {
             Ok(records) => records,
-            Err(start_error) => {
+            Err(probe_error) => {
                 self.cleanup(&engine).await;
-                return Err(start_error);
+                return Err(probe_error);
             }
         };
 
@@ -280,10 +287,10 @@ impl DirectEngineHost {
                 Ok(registered) => hosted.registered.push(registered),
                 Err(register_error) => {
                     self.stop(hosted).await;
-                    return Err(error(
+                    return Err(ProbeError::NotRegistered(error(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("register engine {}: {register_error}", self.spec.url),
-                    ));
+                    )));
                 }
             }
         }
@@ -317,24 +324,51 @@ impl DirectEngineHost {
     /// Probe the engine until it serves, keep it published while it serves, and
     /// when it stops, withdraw it and probe again. Probes back off from
     /// `REPROBE_INITIAL_DELAY` to `REPROBE_MAX_DELAY`. A probe's start runs to
-    /// completion even on shutdown; the engine is then released.
+    /// completion even on shutdown; the engine is then released. Stops probing,
+    /// with an error, when the engine cannot be built or its configuration is
+    /// rejected, since every later probe would fail the same way.
     async fn supervise(self, engine: Arc<dyn LLMEngine>, shutdown: CancellationToken) {
         let mut engine = Some(engine);
         loop {
             let mut delay = REPROBE_INITIAL_DELAY;
             let hosted = loop {
-                let started = match engine.take().map_or_else(|| (self.factory)(&self.spec), Ok) {
-                    Ok(engine) => self.start(engine).await,
-                    Err(build_error) => Err(build_error),
+                let engine = match engine.take().map_or_else(|| (self.factory)(&self.spec), Ok) {
+                    Ok(engine) => engine,
+                    Err(build_error) => {
+                        tracing::error!(
+                            url = %self.spec.url,
+                            %build_error,
+                            "engine cannot be built; no longer probing it"
+                        );
+                        return;
+                    }
                 };
-                match started {
+                match self.start(engine).await {
                     Ok(hosted) => break hosted,
-                    Err(probe_error) => {
+                    Err(ProbeError::NotServing(probe_error)) => {
                         tracing::warn!(
                             url = %self.spec.url,
                             %probe_error,
                             retry_in = ?delay,
                             "engine is not serving yet"
+                        );
+                    }
+                    Err(ProbeError::NotRegistered(rejected))
+                        if is_configuration_error(&rejected) =>
+                    {
+                        tracing::error!(
+                            url = %self.spec.url,
+                            %rejected,
+                            "engine configuration is rejected; no longer probing it"
+                        );
+                        return;
+                    }
+                    Err(ProbeError::NotRegistered(register_error)) => {
+                        tracing::error!(
+                            url = %self.spec.url,
+                            %register_error,
+                            retry_in = ?delay,
+                            "engine serves but could not be registered"
                         );
                     }
                 }
@@ -427,6 +461,23 @@ impl DirectEngineHost {
     }
 }
 
+/// Why a probe did not leave its engine serving. The engine is released either way.
+enum ProbeError {
+    /// `engine.start()` failed: the engine does not serve yet.
+    NotServing(DynamoError),
+    /// The engine started, but this frontend could not register it.
+    NotRegistered(DynamoError),
+}
+
+/// An error every later probe would repeat: the engine's configuration, not
+/// its state, is wrong.
+fn is_configuration_error(error: &DynamoError) -> bool {
+    matches!(
+        error.error_type(),
+        ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+    )
+}
+
 /// Name the engine's ZMQ KV-event publishers in its runtime data, by rank, so
 /// the frontend subscribes to them itself.
 fn record_kv_event_sources(
@@ -513,6 +564,8 @@ mod tests {
         starts: AtomicUsize,
         start_hangs: AtomicBool,
         start_released: Notify,
+        /// Advertise an in-process KV-event source, which a frontend rejects.
+        kv_push: AtomicBool,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -578,6 +631,12 @@ mod tests {
         }
 
         async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+            if self.state.kv_push.load(Ordering::SeqCst) {
+                return Ok(vec![KvEventSource::Push {
+                    on_ready: Box::new(|_| Ok(())),
+                    dp_rank: 0,
+                }]);
+            }
             Ok(self
                 .state
                 .kv_events
@@ -876,6 +935,44 @@ mod tests {
         a.up.store(true, Ordering::SeqCst);
         frontend.chat_until(|f| f.served(A) > 0).await;
         assert!(frontend.listed(A).await);
+    }
+
+    #[tokio::test]
+    async fn an_engine_whose_configuration_is_rejected_is_not_probed_again() {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        // `A` starts, but advertises KV events a frontend cannot subscribe to.
+        let state = Arc::new(EngineState {
+            up: AtomicBool::new(true),
+            kv_push: AtomicBool::new(true),
+            ..EngineState::default()
+        });
+        let factory_state = state.clone();
+        let factory: DirectEngineFactory = Arc::new(move |_: &DirectEngineSpec| {
+            Ok(Arc::new(FakeEngine {
+                state: factory_state.clone(),
+                fail_next: Arc::default(),
+                hold_next: Arc::default(),
+                held: Arc::default(),
+            }) as Arc<dyn LLMEngine>)
+        });
+        let spec = DirectEngineSpec {
+            url: A.to_string(),
+            mode: DisaggregationMode::Aggregated,
+        };
+        let dispatch = serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), dispatch.stopped())
+            .await
+            .expect("a rejected engine must not be probed again");
+        assert_eq!(state.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cleanups.load(Ordering::SeqCst), 1);
+        drt.shutdown();
     }
 
     #[tokio::test]
