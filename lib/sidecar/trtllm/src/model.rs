@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{EngineConfig, LlmRegistration};
+use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 
 /// Model identity and registration metadata for the TensorRT-LLM sidecar.
 #[derive(Clone, Debug, Default)]
@@ -29,6 +30,18 @@ impl ConfiguredModel {
             "grpc_service".to_string(),
             serde_json::Value::String("openengine.v1.Inference".to_string()),
         );
+        if let Some(combined_limit) = self.context_length {
+            // TensorRT-LLM rejects prompt overflow but clamps oversized output budgets.
+            let token_budget = TokenBudget {
+                combined_limit,
+                reject_prompt_overflow: true,
+                reject_total_overflow: false,
+            };
+            runtime_data.insert(
+                TOKEN_BUDGET_RUNTIME_KEY.to_string(),
+                serde_json::to_value(token_budget).expect("token budget is serializable"),
+            );
+        }
 
         EngineConfig {
             model: self.source.clone(),

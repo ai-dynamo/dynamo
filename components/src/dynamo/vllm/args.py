@@ -9,18 +9,13 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
-from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import (
     AsyncEngineArgs,
     is_cloud_storage,
     maybe_override_with_speculators,
 )
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups.router_args import (
@@ -96,6 +91,46 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
         DynamoRuntimeConfig.validate(self)
         self._resolve_realtime_endpoint_type()
         DynamoVllmConfig.validate(self)
+
+    def _validate_systemone_serial(self) -> None:
+        super()._validate_systemone_serial()
+        if not self.systemone_serial:
+            return
+        if _forward_pass_metrics_enabled(self):
+            setting = (
+                "DYN_FORWARDPASS_METRIC_PORT"
+                if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+                else "--fpm-trace/DYN_FPM_TRACE"
+            )
+            raise ValueError(f"--systemone-serial is incompatible with {setting}")
+        engine = self.engine_args
+        for name, expected in (
+            ("max_num_seqs", 1),
+            ("logprobs_mode", "raw_logprobs"),
+            ("data_parallel_size", 1),
+        ):
+            if getattr(engine, name) != expected:
+                raise ValueError(
+                    f"--systemone-serial requires --{name.replace('_', '-')}={expected}"
+                )
+        for name in (
+            "enable_lora",
+            "speculative_config",
+            "kv_transfer_config",
+            "ec_transfer_config",
+        ):
+            if getattr(engine, name):
+                raise ValueError(
+                    f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
+                )
+        if engine.scheduler_cls not in (
+            None,
+            "vllm.v1.core.sched.scheduler.Scheduler",
+            "vllm.v1.core.sched.async_scheduler.AsyncScheduler",
+        ):
+            raise ValueError(
+                "--systemone-serial does not support custom --scheduler-cls"
+            )
 
     def _resolve_realtime_endpoint_type(self) -> None:
         """Move the vLLM-only ``realtime`` endpoint type onto ``realtime``.
@@ -443,8 +478,7 @@ def update_engine_config_with_dynamo(
         "disable_log_stats": False,
     }
 
-    if hasattr(engine_config, "runner"):
-        logger.debug(f"Using runner={engine_config.runner} from engine args")
+    logger.debug(f"Using runner={engine_config.runner} from engine args")
 
     kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
@@ -669,9 +703,6 @@ def create_kv_events_config(
 def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
     """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
     Dynamo's KV indexers hash only each block's own tokens."""
-    # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
-    if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
-        return
     spec = engine_config.speculative_config
     if (
         spec is None

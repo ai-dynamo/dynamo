@@ -64,7 +64,7 @@ multiturn = [
   "dep:rand",
 ]
 offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
-router-bench = ["dynamo-kv-router/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench"]
+router-bench = ["dynamo-kv-router/bench", "dynamo-kv-indexer/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
   "router-bench",

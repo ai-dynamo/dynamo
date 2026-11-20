@@ -12,6 +12,7 @@
 mod default;
 mod kv_capacity_aware;
 pub mod kv_fetch;
+mod output_length;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;
@@ -51,6 +52,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     two_tier_cost_fn::register(registry)?;
     kv_capacity_aware::register(registry)?;
     thunderagent::register(registry)?;
+    output_length::register(registry)?;
     Ok(())
 }
 

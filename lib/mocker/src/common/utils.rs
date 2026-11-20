@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use std::sync::Once;
 
-use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
+use aisim_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
 
 use crate::common::handoff::HandoffTransferTiming;
 use crate::common::protocols::{KvTransferTimingMode, MockerConfig, WorkerType};
