@@ -57,6 +57,7 @@ def _make_request_output(
     output.text = text
     output.finish_reason = finish_reason
     output.token_ids = [1, 2, 3]  # 3 completion tokens
+    output.cumulative_token_ids = None  # plain vLLM output, not vLLM-Omni
     ro = MagicMock()
     ro.outputs = [output]
     ro.prompt_token_ids = [
@@ -1106,6 +1107,13 @@ class TestAudioFormatterFormat:
         }
         # DELTA output can retain sr after the engine drains the audio key.
         assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        # Qwen3-TTS also keeps its running codec_frames, so a step that decoded
+        # no new samples arrives as codec_frames and sr alone.
+        codec_only = {
+            "codec_frames": torch.zeros((1, 16), dtype=torch.long),
+            "sr": 24000,
+        }
+        assert await formatter.format(codec_only, "req-1", **context) is None
         response = await formatter.format(
             {"audio": np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
             "req-1",
@@ -1123,10 +1131,14 @@ class TestAudioFormatterFormat:
     async def test_delta_metadata_alone_cannot_complete_audio(self):
         formatter = AudioFormatter("test", None, None)
         state = AudioAggregateState()
-        assert (
-            await formatter.format({"sr": 24000}, "req-1", audio_aggregate_state=state)
-            is None
-        )
+        for payload in (
+            {"sr": 24000},
+            {"codec_frames": torch.zeros((1, 16), dtype=torch.long), "sr": 24000},
+        ):
+            assert (
+                await formatter.format(payload, "req-1", audio_aggregate_state=state)
+                is None
+            )
         response = await formatter.finish_aggregate("req-1", state)
         assert response["status"] == "failed"
         assert "No audio generated" in response["error"]
@@ -1579,9 +1591,10 @@ class TestOutputFormatter:
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
-        stage = MagicMock()
-        stage.final_output_type = "text"
-        stage.request_output = _make_request_output("hello world")
+        stage = SimpleNamespace(
+            final_output_type="text",
+            outputs=_make_request_output("hello world").outputs,
+        )
         chunk = await f.format(
             stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
         )
@@ -1633,15 +1646,55 @@ class TestOutputFormatter:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_text_without_request_output_returns_none(self):
+    async def test_text_without_outputs_returns_none(self):
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
-        stage = MagicMock()
-        stage.final_output_type = "text"
-        stage.request_output = None
+        stage = SimpleNamespace(final_output_type="text", outputs=[])
         result = await f.format(stage, "req-1")
         assert result is None
+
+
+class TestOutputFormatterRealOmniText:
+    """Text formatting against the real vLLM-Omni output class.
+
+    Since vLLM-Omni 0.28, ``OmniRequestOutput`` carries ``outputs`` directly and
+    has no ``request_output``. This is the single cumulative final object the
+    disaggregated stage router formats.
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_cumulative_output(self):
+        omni_outputs = pytest.importorskip("vllm_omni.outputs")
+        from vllm.outputs import CompletionOutput
+
+        real = omni_outputs.OmniRequestOutput(
+            request_id="req-1",
+            final_output_type="text",
+            prompt_token_ids=[10, 20, 30, 40, 50],
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="Hello world",
+                    token_ids=[1, 2, 3],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+        )
+
+        chunk = await OutputFormatter(model_name="test-model").format(
+            real, "req-1", request_type=RequestType.CHAT_COMPLETION
+        )
+
+        assert chunk is not None
+        choice = chunk["choices"][0]
+        assert choice["delta"]["content"] == real.outputs[0].text
+        assert choice["finish_reason"] == "stop"
+        assert chunk["usage"]["prompt_tokens"] == len(real.prompt_token_ids)
+        assert chunk["usage"]["completion_tokens"] == len(real.outputs[0].token_ids)
+        assert chunk["usage"]["total_tokens"] == 8
 
 
 # ── AudioFormatter — output_format field (new branch behavior) ──────────────

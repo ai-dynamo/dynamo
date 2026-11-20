@@ -11,10 +11,6 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints,
-};
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
@@ -23,16 +19,19 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::{PrefillLoadEstimator, RouterConfigOverride, RoutingConstraints};
+use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-        timing::{RequestPhase, RequestTracker},
+        timing::RequestPhase,
     },
     protocols::response_merge::{
         PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
@@ -42,6 +41,7 @@ use crate::{
 
 mod activation;
 mod admission;
+mod cancellation;
 mod conditional_bypass;
 mod handoff;
 mod query;
@@ -74,6 +74,33 @@ impl PrefillLifecycleState {
     fn from_atomic(value: u8) -> Self {
         Self::try_from(value)
             .unwrap_or_else(|value| panic!("invalid prefill lifecycle state: {value}"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefillDispatchErrorClass {
+    Cancelled,
+    AtCapacity,
+    Failed,
+}
+
+fn classify_prefill_dispatch_error(
+    error: &(dyn std::error::Error + 'static),
+) -> PrefillDispatchErrorClass {
+    if matches!(
+        error.downcast_ref::<PrefillError>(),
+        Some(PrefillError::Cancelled)
+    ) || match_error_chain(error, &[ErrorType::Cancelled], &[])
+    {
+        PrefillDispatchErrorClass::Cancelled
+    } else if match_error_chain(
+        error,
+        &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
+        &[],
+    ) {
+        PrefillDispatchErrorClass::AtCapacity
+    } else {
+        PrefillDispatchErrorClass::Failed
     }
 }
 
@@ -249,6 +276,8 @@ pub struct PrefillRouter {
     /// lives on [`PrefillBinding::prefill_router_mode`].
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
+    decode_supports_prefill_cancellation: bool,
+
     session_affinity_mode: SessionAffinityMode,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
@@ -454,6 +483,8 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
+        crate::routing_policy::check_stage(&req, crate::routing_policy::ExecutionStage::Prefill)?;
+
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
@@ -476,9 +507,7 @@ impl
                     );
 
                     let mut conditional_request = conditional_request;
-                    if conditional_request.tracker.is_none() {
-                        conditional_request.tracker = Some(Arc::new(RequestTracker::new()));
-                    }
+                    conditional_request.ensure_tracker();
                     if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
@@ -521,9 +550,7 @@ impl
 
         // Ensure tracker exists for routing decisions in disaggregated mode.
         // Create one if not provided by the upstream DeltaGenerator.
-        if req.tracker.is_none() {
-            req.tracker = Some(Arc::new(RequestTracker::new()));
-        }
+        req.ensure_tracker();
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
@@ -540,6 +567,7 @@ impl
 
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
+        let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
@@ -587,7 +615,22 @@ impl
                 booking,
             } = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
+                    let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
+                    let prefill_supports_cancellation =
+                        self.model_manager.worker_supports_runtime_capability(
+                            endpoint_id,
+                            prepared.worker_id,
+                            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                        );
+                    if let Some(guard) = cancellation::arm_for(
+                        prefill_supports_cancellation,
+                        self.decode_supports_prefill_cancellation,
+                        engine_ctx.clone(),
+                        Arc::downgrade(&prefill_ctx),
+                    ) {
+                        prefill_ctx.retain(guard);
+                    }
+                    Ok(prepared)
                 })
                 .await?;
             if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
@@ -640,18 +683,17 @@ impl
         let (outcome, topology_constraints) = match prefill_result {
             Ok(result) => result,
             Err(error) => {
-                use dynamo_runtime::error::{ErrorType, match_error_chain};
-                if match_error_chain(
-                    error.as_ref(),
-                    &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
-                    &[],
-                ) {
-                    tracing::warn!(
+                match classify_prefill_dispatch_error(error.as_ref()) {
+                    PrefillDispatchErrorClass::Cancelled => {
+                        tracing::debug!(error = %error, "Remote prefill cancelled");
+                    }
+                    PrefillDispatchErrorClass::AtCapacity => tracing::warn!(
                         error = %error,
                         "request rejected by prefill worker (at capacity)"
-                    );
-                } else {
-                    tracing::error!(error = %error, "Remote prefill failed, failing request");
+                    ),
+                    PrefillDispatchErrorClass::Failed => {
+                        tracing::error!(error = %error, "Remote prefill failed, failing request");
+                    }
                 }
                 return Err(error);
             }
@@ -878,8 +920,9 @@ fn merge_decode_topology_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
+    use dynamo_scheduler::host::RouterConfigOverride;
     use futures::StreamExt;
     use std::{
         collections::{HashMap, HashSet},
@@ -890,7 +933,7 @@ mod tests {
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
-        timing::RoutingData,
+        timing::{RequestTracker, RoutingData},
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
@@ -911,10 +954,10 @@ mod tests {
             assert!(request.get_annotation_value("query_instance_id").is_some());
             self.requests.fetch_add(1, Ordering::Relaxed);
             let output = Annotated::from_data(LLMEngineOutput {
-                routing_data: Some(RoutingData {
+                routing_data: Some(Box::new(RoutingData {
                     token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             });
             Ok(ResponseStream::new(
@@ -1184,6 +1227,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prefill_dispatch_errors_distinguish_cancellation_from_worker_failure() {
+        use dynamo_runtime::error::DynamoError;
+
+        let cancelled: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client disconnected")
+            .build()
+            .into();
+        let at_capacity: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("worker at capacity")
+            .build()
+            .into();
+        let failed = anyhow::anyhow!("transport failed");
+
+        assert_eq!(
+            classify_prefill_dispatch_error(cancelled.as_ref()),
+            PrefillDispatchErrorClass::Cancelled
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(&PrefillError::Cancelled),
+            PrefillDispatchErrorClass::Cancelled
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(at_capacity.as_ref()),
+            PrefillDispatchErrorClass::AtCapacity
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(failed.as_ref()),
+            PrefillDispatchErrorClass::Failed
+        );
+    }
+
     #[tokio::test]
     async fn precomputed_bootstrap_observes_initial_and_late_prefill_failures() {
         for after_handoff in [false, true] {
@@ -1193,9 +1270,9 @@ mod tests {
             let mut outputs = Vec::new();
             if after_handoff {
                 outputs.push(Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 }));
             }
@@ -1561,10 +1638,10 @@ mod tests {
         let output = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![2],
             finish_reason: Some(FinishReason::EoS),
-            disaggregated_params: Some(serde_json::json!({
+            disaggregated_params: Some(Box::new(serde_json::json!({
                 "ctx_request_id": null,
                 "request_type": "context_only",
-            })),
+            }))),
             ..Default::default()
         });
 

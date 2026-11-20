@@ -24,7 +24,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ## Purpose
 
-Find `.clone()` calls in Dynamo Rust request, scheduling, KV, block-manager, and
+Find `.clone()` calls in Dynamo Rust request, scheduling, KV, and
 runtime hot paths that can be removed without changing ownership semantics. This
 is an audit-first workflow, not a blanket clone-removal tool.
 
@@ -57,7 +57,7 @@ Use narrower paths when the user names a subsystem:
 
 ```bash
 python3 .agents/skills/dynamo-clone-hotpath-audit/scripts/clone_inventory.py \
-  --paths lib/kv-router/src/scheduling lib/llm/src/backend.rs \
+  --paths lib/router/scheduler/src lib/llm/src/backend.rs \
   --only-actionable
 ```
 
@@ -70,13 +70,11 @@ Prioritize in this order:
 
 1. per-request LLM paths: `lib/llm/src/backend.rs`, preprocessor, HTTP/gRPC
    services, protocol conversion, migration
-2. KV routing and scheduling: `lib/kv-router/src/scheduling`,
-   `lib/kv-router/src/sequences`, `lib/kv-router/src/indexer`
-3. KV/block manager event paths: `lib/llm/src/block_manager`,
-   `lib/bindings/kvbm/src/block_manager`, `lib/kvbm-engine/src/offload`
-4. runtime request/transport paths: `lib/runtime/src/component`,
+2. KV routing and scheduling: `lib/router/scheduler/src`, `lib/router/worker-selection/src`,
+   `lib/router/admission/src`, `lib/router/slot-tracker/src`, `lib/router/kv-indexer/src`
+3. runtime request/transport paths: `lib/runtime/src/component`,
    `lib/runtime/src/pipeline`, `lib/runtime/src/transports`
-5. tests, examples, debug paths, and benchmark setup only after hot paths
+4. tests, examples, debug paths, and benchmark setup only after hot paths
 
 ### 3. Use Independent Review Roles
 

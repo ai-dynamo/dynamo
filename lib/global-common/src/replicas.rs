@@ -14,7 +14,7 @@ use crate::watch::WatchEvent;
 pub struct RouterReplicaId(pub String);
 
 /// A Global Router replica and the address workload clusters reach it at.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RouterReplica {
     pub replica: RouterReplicaId,
     pub url: Url,

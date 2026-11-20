@@ -344,7 +344,7 @@ class Orchestrator:
             )
 
         # TODO(global-planner): Make an approved plan equivalent to execution:
-        # apply same-DGD targets atomically and confirm downscale capacity is
+        # apply same-DGD targets transactionally and confirm downscale capacity is
         # released before dependent upscales (especially with blocking=False),
         # so intermediate or partial state cannot exceed the hard ceiling.
         # Apply: request + selected partners (may be empty), grouped by
@@ -506,7 +506,7 @@ class Orchestrator:
         # TODO(global-planner): Rework boundary and partner selection to allow
         # monotonic recovery from an already-out-of-bounds state, compute
         # tolerance only from selected pools, and prefer an already-valid
-        # standalone request, and preserve same-participant priority during sorting.
+        # standalone request.
         # Multi-partner packing: pack as many opposite-direction cached intents
         # as fit within the band, partially consuming one over-sized candidate if
         # needed.
@@ -692,27 +692,26 @@ class Orchestrator:
 
     def _iter_pair_partners(
         self,
-        request_participant_id: str,
         request_pool_keys: set[tuple[str, str]],
         all_pools: PoolSnapshot,
         request_net_delta_gpu: int,
     ) -> Iterator[PartnerTransfer]:
-        """Yield qualifying pair-partner candidates, same-participant first.
+        """Yield qualifying pair-partner candidates in unspecified order.
 
         A candidate qualifies when it (a) is not in the requesting pool set, (b)
         has a fresh cached intent (within TTL) whose desired differs from current
         replicas, and (c) the partner delta points opposite to the request's net
         delta.
 
-        Yields in two passes: same-participant candidates first (atomic-patch
-        preference), then cross-participant candidates. The caller picks the first
-        one whose pair total actually lands in the budget band.
+        Ordering belongs to :meth:`_find_pair_partner_set`, which sorts these
+        candidates before packing them. This used to yield same-participant
+        candidates ahead of cross-participant ones, but that grouping was
+        discarded by the caller's sort, so the preference now lives in the sort
+        key where it actually takes effect.
         """
         if request_net_delta_gpu == 0:
             return
         now = self._now()
-        same: list[PartnerTransfer] = []
-        cross: list[PartnerTransfer] = []
         for pid, pools in all_pools.items():
             for sub_type, spec in pools.items():
                 if (pid, sub_type) in request_pool_keys:
@@ -735,13 +734,7 @@ class Orchestrator:
                     request_net_delta_gpu < 0 and partner_delta_gpu <= 0
                 ):
                     continue
-                candidate = PartnerTransfer(pid, sub_type, intent.last_desired, spec)
-                if pid == request_participant_id:
-                    same.append(candidate)
-                else:
-                    cross.append(candidate)
-        yield from same
-        yield from cross
+                yield PartnerTransfer(pid, sub_type, intent.last_desired, spec)
 
     def _partial_partner(
         self,
@@ -828,7 +821,6 @@ class Orchestrator:
 
         all_candidates = list(
             self._iter_pair_partners(
-                request_participant_id,
                 request_pool_keys,
                 all_pools,
                 request_net_delta_gpu,
@@ -869,12 +861,15 @@ class Orchestrator:
         # fail loudly -- the two ordering tests cover both directions.
         direction = 1 if request_net_delta_gpu > 0 else -1
 
-        # Then ascending |delta_gpu|, preserving the existing ordering among
-        # equal-priority pools. The stable sort retains the iterator's locality
-        # preference only when both priority and delta are tied.
+        # Then same-participant, which shares the request's connector call,
+        # and ascending |delta_gpu| since smaller pieces overshoot less.
+        # The connector patches components separately, so locality is not an
+        # atomicity guarantee. With no priority config this is the previous
+        # ordering.
         all_candidates.sort(
             key=lambda c: (
                 direction * priorities[(c.participant_id, c.sub_type)].priority,
+                c.participant_id != request_participant_id,
                 abs(cand_delta(c)),
             )
         )
@@ -1020,13 +1015,13 @@ class Orchestrator:
         targets: list[TargetReplica],
         pools: dict[str, PoolSpec],
     ) -> bool:
-        """True if the request contains both up and down directions across pools."""
+        """True if pools in the request have both positive and negative GPU deltas."""
         has_up = False
         has_down = False
         for target in targets:
             sub_type = target.sub_component_type.value
             spec = pools.get(sub_type)
-            if spec is None:
+            if spec is None or spec.gpu_per_replica == 0:
                 continue
             direction = self._direction(target.desired_replicas, spec.current_replicas)
             if direction == "up":

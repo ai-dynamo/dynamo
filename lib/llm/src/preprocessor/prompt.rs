@@ -19,11 +19,13 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, deepseek_formatter_for,
-    kimi_k3_formatter_for, may_be_fix_tool_schema,
+    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, kimi_k3_formatter_for,
+    may_be_fix_tool_schema, native_formatter_for,
 };
 
-use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+use crate::model_card::{
+    ModelDeploymentCard, PromptFormatterArtifact, TekkenMetadata, TokenizerKind,
+};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
@@ -258,7 +260,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         if let Some(tools) = self.declared_template_tools() {
             return may_be_fix_tool_schema(tools);
         }
-        let tools = self.inner.tools.as_ref()?;
+        let tools = self
+            .chat_template_tools
+            .as_deref()
+            .or(self.inner.tools.as_deref())?;
         // Custom tools use the function schema before template-specific repair.
         may_be_fix_tool_schema(
             serde_json::to_value(
@@ -273,6 +278,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn template_tools(&self) -> Option<minijinja::value::Value> {
         self.native_template_tools()
+    }
+
+    fn raw_tools(&self) -> Option<Value> {
+        self.inner.tools.as_ref().map(Value::from_serialize)
     }
 
     fn tool_choice(&self) -> Option<Value> {
@@ -390,11 +399,42 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 
 /// Build a [`PromptFormatter`] from a [`ModelDeploymentCard`].
 ///
-/// Model families whose HF repos ship no Jinja `chat_template` get a native
-/// Rust formatter; everything else loads the
+/// Mistral checkpoints with a `tekken.json` tokenizer, and model families whose
+/// HF repos ship no Jinja `chat_template`, get a native Rust formatter;
+/// everything else loads the
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    // Mistral checkpoints with a tekken.json tokenizer get Mistral's own renderer.
+    // It builds each prompt exactly the way the mistral-common library does, which
+    // is also what stock vLLM uses for these checkpoints by default.
+    //
+    // The public mistralai/Mistral-Large-4-1T-A52B and
+    // mistralai/Mistral-Large-4-1T-A52B-NVFP4 also ship a Hugging Face
+    // chat_template.jinja and tokenizer.json. We don't use them, for two reasons:
+    // - The NVFP4 checkpoint has no config.json, so its card has no Hugging Face
+    //   tokenizer or template to use.
+    // - Their prompts can differ from mistral-common's. The template copies each
+    //   tool exactly as the client sent it, while mistral-common rewrites every
+    //   tool into one fixed shape, so a tool with `"strict": true`, no description,
+    //   or its keys in another order gives different tokens. And tokenizer.json
+    //   reads `[INST]` typed by a user as the real `[INST]` marker, while
+    //   mistral-common keeps it as plain text.
+    //
+    // A checkpoint that has config.json can still use its template: pass it as a
+    // custom chat template, and the card then skips tekken.json.
+    if let Some(checked_file) = mdc.tokenizer.as_ref().and_then(TokenizerKind::tekken_file) {
+        let metadata = TekkenMetadata::from_checked_file(checked_file)?;
+        let version = metadata
+            .version()
+            .context("tekken.json has no numeric version")?;
+        let formatter = dynamo_renderer::mistral::MistralFormatter::new(
+            version,
+            metadata.model_settings_builder(),
+        )?;
+        return Ok(PromptFormatter::OAI(std::sync::Arc::new(formatter)));
+    }
+
     // Prefer the authoritative `model_type` from config.json — it's set by the
     // model author and survives any `--served-model-name` rename. An empty
     // `model_type` carries no signal — normalize to `None` so the display-name
@@ -415,7 +455,7 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         return Ok(formatter);
     }
 
-    if let Some(formatter) = deepseek_formatter_for(&model_type_lower, &display_name_lower) {
+    if let Some(formatter) = native_formatter_for(&model_type_lower, &display_name_lower) {
         return Ok(formatter);
     }
 
@@ -720,6 +760,49 @@ fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPromp
 #[cfg(test)]
 mod tests {
     use super::normalize_tool_call_arguments;
+
+    #[test]
+    fn chat_allowed_tools_renders_catalog_and_constrains_generation_to_subset() {
+        use crate::protocols::openai::{
+            chat_completions::allowed_tools::AllowedToolsRequest, tools::get_json_schema_from_tools,
+        };
+        use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
+        use serde_json::json;
+
+        let template: ChatTemplate = serde_json::from_value(json!({
+            "chat_template": "{% for tool in tools %}{{ tool.function.name }} {% endfor %}"
+        }))
+        .unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(template, ContextMixins::new(&[]), true).unwrap();
+        let wire: AllowedToolsRequest = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "Look it up"}],
+            "tools": [
+                {"type": "function", "function": {"name": "lookup"}},
+                {"type": "function", "function": {"name": "delete"}}
+            ],
+            "tool_choice": {"type": "allowed_tools", "allowed_tools": {
+                "mode": "required", "tools": [{"type": "function", "function": {"name": "lookup"}}]
+            }}
+        }))
+        .unwrap();
+        let (request, _) = wire.normalize().unwrap();
+        assert_eq!(formatter.render(&request).unwrap().trim(), "lookup delete");
+        let schema = get_json_schema_from_tools(
+            request.inner.tool_choice.as_ref(),
+            request.inner.tools.as_deref(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let alternatives = schema["items"]["anyOf"].as_array().unwrap();
+        assert_eq!(alternatives.len(), 1);
+        assert_eq!(
+            alternatives[0]["properties"]["name"]["enum"],
+            json!(["lookup"])
+        );
+    }
 
     #[test]
     fn chat_tool_deferral_reaches_prompt_and_python_request() {

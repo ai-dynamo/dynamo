@@ -464,6 +464,8 @@ def download_models(model_list=None, ignore_weights=False):
 
     Args:
         model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+            An ID written as ``repo_id@revision`` downloads that revision instead
+            of the default branch.
         ignore_weights: If True, skips downloading model weight files. Default is False.
     """
     if model_list is None:
@@ -490,6 +492,7 @@ def download_models(model_list=None, ignore_weights=False):
 
     failures = []
     for model_id in model_list:
+        repo_id, _, revision = model_id.partition("@")
         logging.info(
             f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )
@@ -507,13 +510,15 @@ def download_models(model_list=None, ignore_weights=False):
 
                 # Download everything except weight files
                 snapshot_download(
-                    repo_id=model_id,
+                    repo_id=repo_id,
+                    revision=revision or None,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
-                    repo_id=model_id,
+                    repo_id=repo_id,
+                    revision=revision or None,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
@@ -690,7 +695,6 @@ def pytest_collection_modifyitems(config, items):
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
         "sglang": "sglang",
-        "kvbm": "kvbm",
         "lmcache": "lmcache",
     }
     for marker_name, module_name in framework_markers.items():
@@ -787,8 +791,11 @@ def pytest_collection_modifyitems(config, items):
         ):
             continue
         for model_mark in item.iter_markers("model"):
+            # model(repo_id, revision=...) pins the download, so a test that
+            # loads a fixed revision finds it cached once HF_HUB_OFFLINE is set.
+            revision = model_mark.kwargs.get("revision")
             for repo_id in model_mark.args:
-                models_to_download.add(repo_id)
+                models_to_download.add(f"{repo_id}@{revision}" if revision else repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
@@ -796,13 +803,11 @@ def pytest_collection_modifyitems(config, items):
 
 
 class EtcdServer(ManagedProcess):
-    def __init__(self, request, port=2379, timeout=300):
+    def __init__(self, request, port=2379, timeout=300, *, start_port=2380):
         # Allocate free ports if port is 0
         use_random_port = port == 0
         if use_random_port:
-            # Need two ports: client port and peer port for parallel execution
-            # Start from 2380 (etcd default 2379 + 1)
-            port, peer_port = allocate_ports(2, 2380)
+            port, peer_port = allocate_ports(2, start_port)
         else:
             peer_port = None
 
@@ -1006,8 +1011,8 @@ class SharedManagedProcess:
         self.port_file = root_tmp / f"{resource_name}_port"
         self.lock_file = str(self.port_file) + ".lock"
 
-    def _create_server(self, port: int) -> ManagedProcess:
-        """Create the underlying server instance. Must be implemented by subclasses."""
+    def _create_server(self) -> tuple[ManagedProcess, int]:
+        """Create the server and return its client port."""
         raise NotImplementedError
 
     def _is_port_in_use(self, port: int) -> bool:
@@ -1053,10 +1058,9 @@ class SharedManagedProcess:
                     logging.warning(
                         f"[{self.resource_name}] Stale port file: port {stored_port} not in use, starting fresh"
                     )
-                self.port = allocate_port(self.start_port)
-                self._write_port(self.port)
-                self._server = self._create_server(self.port)
+                self._server, self.port = self._create_server()
                 self._server.__enter__()
+                self._write_port(self.port)
                 logging.info(
                     f"[{self.resource_name}] Started process on port {self.port}"
                 )
@@ -1076,12 +1080,13 @@ class SharedEtcdServer(SharedManagedProcess):
         # Create a log directory for session-scoped servers
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
 
-    def _create_server(self, port: int) -> ManagedProcess:
-        """Create EtcdServer instance."""
-        server = EtcdServer(self.request, port=port, timeout=self.timeout)
-        # Override log_dir since request.node.name is empty in session scope
+    def _create_server(self) -> tuple[ManagedProcess, int]:
+        # Reserve both ports so the client cannot collide with the peer listener.
+        server = EtcdServer(
+            self.request, port=0, timeout=self.timeout, start_port=self.start_port
+        )
         server.log_dir = self._log_dir
-        return server
+        return server, server.port
 
 
 class SharedNatsServer(SharedManagedProcess):
@@ -1100,8 +1105,8 @@ class SharedNatsServer(SharedManagedProcess):
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
         self._disable_jetstream = disable_jetstream
 
-    def _create_server(self, port: int) -> ManagedProcess:
-        """Create NatsServer instance."""
+    def _create_server(self) -> tuple[ManagedProcess, int]:
+        port = allocate_port(self.start_port)
         server = NatsServer(
             self.request,
             port=port,
@@ -1110,7 +1115,7 @@ class SharedNatsServer(SharedManagedProcess):
         )
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
-        return server
+        return server, port
 
 
 @pytest.fixture
@@ -1338,12 +1343,15 @@ def dynamo_dynamic_ports(
         engine_grpc_ports: list[int] = []
         engine_kv_replay_ports: list[int] = []
         if request.node.get_closest_marker("engine_ports"):
-            engine_http_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            # One block each, so a single-worker test's DP engine can bind the
+            # first port + rank, up to num_system_ports ranks. With several
+            # workers, worker N's rank k would take worker N+k's port.
+            engine_http_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_http_ports)
-            engine_grpc_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            engine_grpc_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_grpc_ports)
             # One block, so a data-parallel engine can replay on the first port + rank.

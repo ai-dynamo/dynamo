@@ -20,9 +20,11 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pmdarima
 import pytest
 
 from dynamo.planner.core.load.predictors import (
+    ARIMAPredictor,
     ConstantPredictor,
     KalmanPredictor,
     ProphetPredictor,
@@ -109,6 +111,89 @@ class TestConstantPredictor:
         predictor.add_data_point(10.0)
         predictor.add_data_point(float("nan"))
         assert predictor.predict_next() == 0
+
+
+class TestARIMAPredictor:
+    @pytest.mark.parametrize("log1p", [False, True])
+    def test_nearly_constant_lengths_then_variation(self, log1p):
+        predictor = ARIMAPredictor(_make_config(load_predictor_log1p=log1p))
+        for value in [26.0] * 6 + [math.nextafter(26.0, 0.0)]:
+            predictor.add_data_point(value)
+            assert predictor.predict_next() == pytest.approx(26.0)
+        predictor.prepare()
+        assert predictor.model is None
+
+        for value in [26.1, 25.9, 26.2]:
+            predictor.add_data_point(value)
+            assert 25.0 < predictor.predict_next() < 27.0
+        assert predictor.model is not None
+
+    @pytest.mark.parametrize("log1p", [False, True])
+    def test_nearly_constant_in_log_space_does_not_fit(self, log1p):
+        predictor = ARIMAPredictor(_make_config(load_predictor_log1p=log1p))
+        values = [1e12 + i for i in range(6)]
+        for value in values:
+            predictor.add_data_point(value)
+        with patch("dynamo.planner.core.load.predictors.pmdarima.auto_arima") as fit:
+            assert predictor.predict_next() == pytest.approx(values[-1])
+            fit.assert_not_called()
+
+    def test_preserves_raw_mean_model(self):
+        predictor = ARIMAPredictor(_make_config())
+        for value in [25.0, 26.0, 27.0, 26.0, 26.0]:
+            predictor.add_data_point(value)
+        model = MagicMock(order=(0, 0, 0), with_intercept=True)
+        model.predict.return_value = [26.0]
+        with patch(
+            "dynamo.planner.core.load.predictors.pmdarima.auto_arima",
+            return_value=model,
+        ) as fit:
+            assert predictor.predict_next() == pytest.approx(26.0)
+            fit.assert_called_once()
+        assert predictor._mode == ARIMAPredictor.Mode.RAW
+
+    @pytest.mark.parametrize("log1p", [False, True])
+    @pytest.mark.parametrize("latest", [0.0, 26.3])
+    def test_zero_mean_model_recovers_only_for_positive_observations(
+        self, log1p, latest
+    ):
+        predictor = ARIMAPredictor(_make_config(load_predictor_log1p=log1p))
+        values = [26.0, 26.1, 25.9, 26.2, 26.0, latest]
+        for value in values:
+            predictor.add_data_point(value)
+        # Model state left by a prior log-space constant-series fit.
+        predictor._mode = ARIMAPredictor.Mode.LOG1P
+        predictor.data_buffer = [math.log1p(v) for v in values]
+        poisoned = pmdarima.ARIMA(
+            order=(0, 0, 0), with_intercept=False, suppress_warnings=True
+        ).fit(predictor.data_buffer)
+        predictor.model = poisoned
+        predictor._pending_raw_updates.clear()
+
+        assert predictor.predict_next() == pytest.approx(latest)
+        if latest == 0.0:
+            assert predictor.model is poisoned
+            return
+        assert predictor.model is None
+
+        predictor.add_data_point(26.1)
+        assert 25.0 < predictor.predict_next() < 27.0
+        assert predictor.model is not None
+        expected = (
+            [math.log1p(v) for v in predictor._raw_buffer]
+            if predictor._mode == ARIMAPredictor.Mode.LOG1P
+            else predictor._raw_buffer
+        )
+        assert predictor.model.arima_res_.data.endog == pytest.approx(expected)
+
+    @pytest.mark.parametrize("log1p", [False, True])
+    @pytest.mark.parametrize("value", [0.0, 1e-15, 26.0])
+    def test_constant_and_idle_values_are_preserved(self, log1p, value):
+        predictor = ARIMAPredictor(_make_config(load_predictor_log1p=log1p))
+        for _ in range(6):
+            predictor.add_data_point(value)
+        assert predictor.predict_next() == pytest.approx(value, abs=0.0)
+        assert predictor.model is None
 
 
 class TestBuiltinLoadPredictIdleTraffic:

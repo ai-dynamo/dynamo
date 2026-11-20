@@ -12,7 +12,7 @@ will fail early, before hitting runtime deserialization errors.
 This test is the early warning for vLLM KV-event wire-format changes.
 
 In the normal case, if this fails, first check whether
-`lib/kv-router/src/zmq_wire.rs` already accepts the new upstream vLLM event
+`lib/kv-events/src/zmq_wire/deserialize.rs` already accepts the new upstream vLLM event
 shape. If not, update that compatibility layer before updating this test.
 
 That file is Dynamo's compatibility layer for vLLM KV events:
@@ -20,15 +20,16 @@ That file is Dynamo's compatibility layer for vLLM KV events:
   `array_like=True` payloads
 - it handles field changes in `BlockStored` / `BlockRemoved` / `EventBatch`
 - it translates upstream `extra_keys` into Dynamo's internal `block_mm_infos`
-
-Only touch consolidator files if we explicitly need the consolidator publisher
-to preserve and republish a new upstream field.
 """
 
 import importlib
+import json
+from types import SimpleNamespace
 
 import pytest
-from packaging.version import Version
+
+from dynamo.vllm.args import update_engine_config_with_dynamo
+from dynamo.vllm.constants import DisaggregationMode
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
@@ -49,22 +50,6 @@ pytestmark = [
 ]
 
 
-def _has_group_idx(event_cls):
-    return "group_idx" in event_cls.__struct_fields__
-
-
-def _has_kv_cache_spec_kind(event_cls):
-    return "kv_cache_spec_kind" in event_cls.__struct_fields__
-
-
-def _has_kv_cache_spec_sliding_window(event_cls):
-    return "kv_cache_spec_sliding_window" in event_cls.__struct_fields__
-
-
-def _has_locality(event_cls):
-    return "locality" in event_cls.__struct_fields__
-
-
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -78,18 +63,19 @@ class TestVllmKvEventsApi:
         4. block_size
         5. lora_id
         6. medium
-        7. lora_name (added in vLLM 0.14.0)
-        8. extra_keys (added in vLLM 0.17.0)
-        9. group_idx (added for hybrid KV cache groups; optional for older vLLM)
-        10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
-        11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
-        12. locality (per-tier storage locality; optional for older vLLM)
-        13. ownership (secondary offloading tier; added in vLLM 0.29)
-        14. session_id (request session; added in vLLM 0.30)
+        7. lora_name
+        8. extra_keys
+        9. group_idx (hybrid KV cache groups)
+        10. kv_cache_spec_kind (semantic cache type)
+        11. kv_cache_spec_sliding_window (semantic cache window)
+        12. locality (per-tier storage locality)
+        13. ownership (secondary offloading tier)
+        14. session_id (request session)
+        15. lookahead_token_ids (EAGLE/MTP lookahead hashes)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
-        expected_fields = [
+        expected_fields = (
             "block_hashes",
             "parent_block_hash",
             "token_ids",
@@ -98,20 +84,14 @@ class TestVllmKvEventsApi:
             "medium",
             "lora_name",
             "extra_keys",
-        ]
-        if _has_group_idx(BlockStored):
-            expected_fields.append("group_idx")
-        if _has_kv_cache_spec_kind(BlockStored):
-            expected_fields.append("kv_cache_spec_kind")
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            expected_fields.append("kv_cache_spec_sliding_window")
-        if _has_locality(BlockStored):
-            expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
-            expected_fields.append("ownership")
-        if Version(_vllm.__version__).release >= (0, 30):
-            expected_fields.append("session_id")
-        expected_fields = tuple(expected_fields)
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+            "locality",
+            "ownership",
+            "session_id",
+            "lookahead_token_ids",
+        )
 
         actual_fields = BlockStored.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -119,28 +99,20 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs to match the new BlockStored wire format.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs to match the new BlockStored wire format.\n"
             f"  - Update this test's expected_fields and msgpack shape checks.\n"
             f"  - If needed, add or update a regression test in lib/llm/src/kv_router/publisher.rs."
         )
 
     def test_block_removed_fields(self):
         """Verify BlockRemoved has expected fields in expected order."""
-        expected_fields = [
+        expected_fields = (
             "block_hashes",
             "medium",
-        ]
-        if _has_group_idx(BlockRemoved):
-            expected_fields.append("group_idx")
-        if _has_kv_cache_spec_kind(BlockRemoved):
-            expected_fields.append("kv_cache_spec_kind")
-        if _has_kv_cache_spec_sliding_window(BlockRemoved):
-            expected_fields.append("kv_cache_spec_sliding_window")
-        if _has_locality(BlockRemoved):
-            expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
-            expected_fields.append("ownership")
-        expected_fields = tuple(expected_fields)
+            "group_idx",
+            "locality",
+            "ownership",
+        )
 
         actual_fields = BlockRemoved.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -148,7 +120,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs RawKvEvent::BlockRemoved seq deserializer.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs RawKvEvent::BlockRemoved seq deserializer.\n"
             f"  - Update this test's expected_fields."
         )
 
@@ -166,7 +138,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs KvEventBatch Deserialize impl.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs KvEventBatch Deserialize impl.\n"
             f"  - Update subscriber.rs VllmEventBatch tuple if batch field order changes.\n"
             f"  - Update this test's expected_fields."
         )
@@ -177,7 +149,7 @@ class TestVllmKvEventsApi:
         assert struct_config is not None, "KVCacheEvent is not a msgspec Struct"
         assert struct_config.array_like is False, (
             "KVCacheEvent changed away from tagged-map serialization. "
-            "Check lib/kv-router/src/zmq_wire/deserialize.rs compatibility."
+            "Check lib/kv-events/src/zmq_wire/deserialize.rs compatibility."
         )
 
     def test_kv_cache_event_uses_tag(self):
@@ -202,27 +174,21 @@ class TestVllmKvEventsApi:
         """
         import msgspec
 
-        event_kwargs = {
-            "block_hashes": [123, 456],
-            "parent_block_hash": 789,
-            "token_ids": [1, 2, 3, 4],
-            "block_size": 16,
-            "lora_id": None,
-            "medium": "GPU",
-            "lora_name": None,
-            "extra_keys": None,
-        }
-        if _has_group_idx(BlockStored):
-            event_kwargs["group_idx"] = 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            event_kwargs["kv_cache_spec_kind"] = "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            event_kwargs["kv_cache_spec_sliding_window"] = 128
-        if _has_locality(BlockStored):
-            event_kwargs["locality"] = "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
-            event_kwargs["session_id"] = "session-1"
-        event = BlockStored(**event_kwargs)
+        event = BlockStored(
+            block_hashes=[123, 456],
+            parent_block_hash=789,
+            token_ids=[1, 2, 3, 4],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+            extra_keys=None,
+            group_idx=0,
+            kv_cache_spec_kind="full_attention",
+            kv_cache_spec_sliding_window=128,
+            locality="LOCAL",
+            session_id="session-1",
+        )
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
@@ -237,39 +203,30 @@ class TestVllmKvEventsApi:
         assert decoded["medium"] == "GPU"
         assert decoded["lora_name"] is None
         assert decoded.get("extra_keys") is None
-        if _has_group_idx(BlockStored):
-            assert decoded["group_idx"] == 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            assert decoded["kv_cache_spec_kind"] == "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            assert decoded["kv_cache_spec_sliding_window"] == 128
-        if _has_locality(BlockStored):
-            assert decoded["locality"] == "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
-            assert decoded["session_id"] == "session-1"
+        assert decoded["group_idx"] == 0
+        assert decoded["kv_cache_spec_kind"] == "full_attention"
+        assert decoded["kv_cache_spec_sliding_window"] == 128
+        assert decoded["locality"] == "LOCAL"
+        assert decoded["session_id"] == "session-1"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
-        """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
+        """Verify multimodal tuple extra_keys keep their nested wire shape."""
         import msgspec
 
         mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
-        event_kwargs = {
-            "block_hashes": [123],
-            "parent_block_hash": None,
-            "token_ids": [1, 2, 3, 4],
-            "block_size": 16,
-            "lora_id": None,
-            "medium": "GPU",
-            "lora_name": None,
-            "extra_keys": [((mm_hash, 7),)],
-        }
-        if _has_group_idx(BlockStored):
-            event_kwargs["group_idx"] = 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            event_kwargs["kv_cache_spec_kind"] = "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            event_kwargs["kv_cache_spec_sliding_window"] = 128
-        event = BlockStored(**event_kwargs)
+        event = BlockStored(
+            block_hashes=[123],
+            parent_block_hash=None,
+            token_ids=[1, 2, 3, 4],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+            extra_keys=[((mm_hash, 7),)],
+            group_idx=0,
+            kv_cache_spec_kind="full_attention",
+            kv_cache_spec_sliding_window=128,
+        )
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
@@ -278,43 +235,87 @@ class TestVllmKvEventsApi:
             "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
             f"payloads. Decoded: {decoded['extra_keys']!r}"
         )
-        if _has_group_idx(BlockStored):
-            assert decoded["group_idx"] == 0
-        if _has_kv_cache_spec_kind(BlockStored):
-            assert decoded["kv_cache_spec_kind"] == "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            assert decoded["kv_cache_spec_sliding_window"] == 128
+        assert decoded["group_idx"] == 0
+        assert decoded["kv_cache_spec_kind"] == "full_attention"
+        assert decoded["kv_cache_spec_sliding_window"] == 128
 
     def test_block_removed_serialization_format(self):
         """Verify BlockRemoved serializes to expected msgpack map format."""
         import msgspec
 
-        event_kwargs = {
-            "block_hashes": [123, 456],
-            "medium": "GPU",
-        }
-        if _has_group_idx(BlockRemoved):
-            event_kwargs["group_idx"] = 0
-        if _has_kv_cache_spec_kind(BlockRemoved):
-            event_kwargs["kv_cache_spec_kind"] = "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockRemoved):
-            event_kwargs["kv_cache_spec_sliding_window"] = 128
-        if _has_locality(BlockRemoved):
-            event_kwargs["locality"] = "REMOTE"
-        event = BlockRemoved(**event_kwargs)
+        event = BlockRemoved(
+            block_hashes=[123, 456],
+            medium="GPU",
+            group_idx=0,
+            locality="REMOTE",
+        )
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
 
         assert decoded["type"] == "BlockRemoved"
         assert decoded["block_hashes"] == [123, 456]
         assert decoded["medium"] == "GPU"
-        if _has_group_idx(BlockRemoved):
-            assert decoded["group_idx"] == 0
-        if _has_kv_cache_spec_kind(BlockRemoved):
-            assert decoded["kv_cache_spec_kind"] == "full_attention"
-        if _has_kv_cache_spec_sliding_window(BlockRemoved):
-            assert (
-                decoded["kv_cache_spec_sliding_window"] == 128
-            ), "kv_cache_spec_sliding_window has wrong value"
-        if _has_locality(BlockRemoved):
-            assert decoded["locality"] == "REMOTE"
+        assert decoded["group_idx"] == 0
+        assert decoded["locality"] == "REMOTE"
+
+
+_SPECULATORS_CHECKPOINT_CONFIG = {
+    "speculators_model_type": "eagle3",
+    "speculators_config": {
+        "proposal_methods": [{"speculative_tokens": 1}],
+        "verifier": {"name_or_path": "Qwen/Qwen3-0.6B"},
+    },
+    "transformer_layer_config": {},
+}
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_config", "speculative_config"),
+    [
+        (None, {"method": "eagle3", "num_speculative_tokens": 1}),
+        (_SPECULATORS_CHECKPOINT_CONFIG, None),
+    ],
+    ids=["speculative-config", "speculators-checkpoint"],
+)
+def test_kv_event_publisher_keeps_legacy_block_hashes(
+    tmp_path, checkpoint_config, speculative_config
+):
+    """Dynamo's KV indexers hash each block's own tokens, so a worker publishing
+    KV events must not default to vLLM's EAGLE/MTP lookahead block hashes,
+    including those vLLM derives from a speculators checkpoint."""
+    if checkpoint_config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(checkpoint_config))
+
+    dynamo_config = SimpleNamespace(
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        use_kv_events=False,
+        embedding_worker=False,
+        classify_worker=False,
+        headless=False,
+        enable_multimodal=False,
+        fpm_trace=False,
+        benchmark_mode=None,
+    )
+    # AsyncEngineArgs would resolve the model from Hugging Face on construction.
+    engine_args = SimpleNamespace(
+        model=str(tmp_path),
+        tokenizer=None,
+        trust_remote_code=False,
+        revision=None,
+        hf_token=None,
+        runner="auto",
+        enable_prefix_caching=True,
+        block_size=16,
+        kv_transfer_config=None,
+        spec_method=None,
+        speculative_config=speculative_config,
+        kv_events_config=_kv_events.KVEventsConfig(enable_kv_cache_events=True),
+    )
+
+    update_engine_config_with_dynamo(dynamo_config, engine_args)
+
+    assert dynamo_config.use_kv_events
+    assert engine_args.speculative_config == {
+        "disable_lookahead_block_hashes": True,
+        **(speculative_config or {}),
+    }

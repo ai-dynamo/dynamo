@@ -88,6 +88,14 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   **Operator preset:** `8000` on frontend pods.
 </ParamField>
 
+<ParamField path="DYN_EXTRA_METRIC_PREFIXES" type="string">
+  Comma-separated metric-name prefixes appended to each backend worker's built-in engine-metrics allowlist (`vllm:`/`lmcache:`, `sglang:`, `trtllm_`), so metrics from custom components loaded into the engine process (e.g. a custom KV connector) are exposed on the worker's `/metrics` endpoint. Additive only: built-in prefixes are always kept. Matching is a literal prefix match — include the trailing separator. Whitespace around commas is trimmed and empty segments are ignored. Extra series carry the standard `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id` labels.
+
+  Read by the worker process at metrics-setup time, so set it on the worker, not the frontend. On vLLM it is only effective when `disable_log_stats` is false (the default).
+
+  For a walkthrough with a DGD snippet, see [Exposing Custom Component Metrics](../../developer-guide/knowledge-base/modular-components/backends/vllm/observability.md#exposing-custom-component-metrics).
+</ParamField>
+
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
@@ -239,10 +247,23 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" type="string">
-  Deprecated compatibility variable. The current runtime logs a warning and does not use this value
-  to select endpoints for system health.
+  JSON array of endpoint names, for example `["generate"]`. When the list is nonempty, the worker
+  system-status `/health` and `/live` paths report ready only when every listed endpoint is ready.
+  Each listed endpoint starts at `DYN_SYSTEM_STARTING_HEALTH_STATUS` when canaries are disabled, or
+  not ready when canaries are enabled. With canaries enabled, endpoints that register health check
+  payloads stay not ready after transport registration until canary verification succeeds. Endpoints
+  without health check payloads, and endpoints with canaries disabled, become ready on transport
+  registration. A nonempty list takes precedence over endpoints that register health check payloads.
+  The list can also come from `use_endpoint_health_status` in
+  `/opt/dynamo/defaults/runtime.toml` or `/opt/dynamo/etc/runtime.toml`. An unset or empty variable
+  keeps any list set in those files; set the variable to `[]` to clear it. With no list, readiness
+  comes from registered health check targets, then from the default fallbacks. An outstanding
+  readiness hold reports not ready whatever the list says. The runtime logs a warning whenever this
+  variable is set.
 
-  **Operator preset:** `["generate"]` on worker, prefill, and decode pods.
+  **Operator preset:** `["generate"]` on standard worker containers, including prefill and decode
+  workers. GMS failover removes this variable from engine containers. Runtime sidecars check
+  dependencies for `/health` and always return `200` for `/live`.
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_ENABLED" type="boolean" default="false">
@@ -256,7 +277,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
-  Maximum seconds to wait for a canary health-check response before marking the endpoint unhealthy.
+  Seconds to wait for a canary health-check response before marking the endpoint unhealthy. On
+  workers that publish forward-pass metrics, each completed engine forward pass restarts the wait,
+  up to 10 minutes in total. See
+  [Active Canary Configuration](health-checks.mdx#active-canary-configuration).
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_PAYLOAD" type="string">
@@ -346,8 +370,8 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
   Content source for synthetic benchmark prompts: unset keeps salt-seeded random token ids; `sharegpt` draws deterministic windows from a real-text token pool; `sharegpt_chain` reuses the KV warm-up chain texts so seeded and measured requests share one construction.
 </ParamField>
 
-<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="off">
-  Real-KV seeding for prefill points that read past KV. Accepts `on`, `1`, or `true` (case-insensitive); anything else keeps the synthetic prefix blocks that are registered in the prefix cache but never computed. When on, the seeded prefix is first computed by a real, unbooked prefill pass (staging; slots already deep enough are not re-run), an unbooked same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache. The expected hit length is validated before admission; on a miss the chain is re-staged once and the point is skipped on a second miss (`real_seed_injection_failed`, `real_seed_warm_injection_failed`, `real_seed_cache_validation_failed`). All ranks of an attention-DP group must agree on the setting (it is part of the grid-invariants digest). Dense-attention models measure the same either way; sparse-attention and hybrid-KV models need it for deep past-KV points.
+<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="auto">
+  Real-KV seeding for prefill points that read past KV. Accepts `on`, `1`, or `true` to enable it, `auto` (the default) to enable it only when the KV-cache layout has a recurrent-state (Mamba, GDN, or KDA) group and there is a single attention-DP rank, and any other value to keep the synthetic prefix blocks that are registered in the prefix cache but never computed. Synthetic blocks carry no recurrent state, so on a hybrid layout every past-KV prefill point misses the prefix cache and is skipped (`fake_prefix_cache_validation_failed`), and the worker rejects the run. When on, the seeded prefix is first computed by a real, unbooked prefill pass (staging; slots already deep enough are not re-run), an unbooked same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache. The expected hit length is validated before admission; on a miss the chain is re-staged once and the point is skipped on a second miss (`real_seed_injection_failed`, `real_seed_warm_injection_failed`, `real_seed_cache_validation_failed`). All ranks of an attention-DP group must agree on the setting (it is part of the grid-invariants digest). Dense-attention models measure the same either way. Hybrid-KV models need it for any past-KV point, and `auto` turns it on for them except under attention-DP, where real-seed retries are not yet coordinated across ranks. Sparse-attention models need it for deep past-KV points; set `on` for them explicitly.
 </ParamField>
 
 <ParamField path="DYN_BENCH_POOL_TAG" type="string">
@@ -446,9 +470,20 @@ See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-t
 
 See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
 
+## NVTX profiling
+
+One switch controls the NVTX annotations that Dynamo adds to an Nsight Systems timeline, in both the Rust runtime and the Python components. It is off by default.
+
+<ParamField path="DYN_NVTX" type="boolean" default="unset (off)">
+  Enables NVTX ranges and markers in the Rust runtime (frontend HTTP handling, preprocessing, routing, transport, worker ingress and egress) and in the Python components. Accepts `1`, `true`, `on`, or `yes` to enable and `0`, `false`, `off`, `no`, or empty to disable, trimmed and case-insensitive; any other value is an error at startup. The published wheels and container images include the Rust markers. The Python markers need the `nvtx` package from the `ai-dynamo[profiling]` extra; without it, the process logs a warning and starts without them. Replaces `DYN_ENABLE_RUST_NVTX`, which is no longer read.
+</ParamField>
+
+See [NVTX Profiling](nvtx-profiling.md) for the ranges, how to read the timeline, and the profiling overhead.
+
 ## Related
 
 - [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.
 - [Local Resource Monitor (Local)](local-resource-monitor-local.mdx) — host-side per-process exporter.
+- [NVTX Profiling](nvtx-profiling.md) — Nsight Systems annotations for the Dynamo frontend and workers.

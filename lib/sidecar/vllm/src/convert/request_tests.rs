@@ -455,6 +455,25 @@ fn canonical_priority_preserves_native_ordering() {
 }
 
 #[test]
+fn completion_marker_preserves_native_token_limits() {
+    for max_tokens in [None, Some(64)] {
+        let mut request = minimal_request();
+        request.extra_args = Some(json!({"request_type": "completions"}));
+        request.stop_conditions.max_tokens = max_tokens;
+        let wire = build_generate_request(
+            request,
+            "completion-marker".into(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
+        assert_eq!(
+            wire.stopping.unwrap().max_new_tokens,
+            max_tokens.unwrap_or(0)
+        );
+    }
+}
+
+#[test]
 fn prefill_limits_generation() {
     let mut request = minimal_request();
     request.stop_conditions.max_tokens = Some(100);

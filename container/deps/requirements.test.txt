@@ -15,13 +15,13 @@ boto3-stubs[s3]==1.42.9  # Type stubs for boto3 S3 client
 # requests 2.32.x rejects chardet>=6 in its compatibility check
 chardet<6
 coverage[toml]==7.13.1
-# For IFEval dataset loading in kvbm tests
-datasets==4.4.1
 # Datadog Test Optimization pytest plugin (--ddtrace). Pre-installed rather than
 # letting Datadog's CI action pip-install it at run time: that installer needs
 # `pip` on PATH, and it pulls its own coverage version over the coverage pin.
-ddtrace==4.14.0
-filelock==3.25.1
+ddtrace==4.15.6
+# Execute Planner's production Redis Lua scripts in unit tests.
+fakeredis[lua]==2.39.0
+filelock==4.2.11
 # OTLP receiver in tests/metrics/test_otlp_prometheus_parity.py, which asserts
 # that /metrics and the OTLP export carry the same metrics. Present transitively
 # via grpcio-tools and opentelemetry-exporter-otlp in requirements.common.txt;
@@ -36,7 +36,10 @@ hf-xet>=1.5.2
 # (added in 1.23.0). This floor is satisfied by the runtime image's own hub
 # version; it is declared so that a future cap fails resolution loudly here
 # instead of silently downgrading the hub underneath diffusers.
-huggingface-hub>=1.23.0
+# The ceiling keeps transformers importable in the TensorRT-LLM test image:
+# this file installs into /opt/dynamo/venv there, which shadows the system
+# site where transformers requires huggingface-hub>=1.5.0,<2.0.
+huggingface-hub>=1.23.0,<2.0
 # Kustomize recipe template renderer
 jinja2==3.1.6
 # For Kubernetes operations in deploy tests

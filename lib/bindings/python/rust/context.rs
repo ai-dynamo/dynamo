@@ -11,7 +11,10 @@
 // `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_backend_common::FirstTokenNotifier;
-use dynamo_llm::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+use dynamo_llm::http::service::response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders};
+use dynamo_llm::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::Context as PipelineContext;
@@ -66,6 +69,10 @@ pub struct Context {
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     session_affinity: Option<SessionAffinityId>,
+    agent_context: Option<Arc<AgentContext>>,
+    /// Where a frontend chat engine sets HTTP response headers. `None` when
+    /// the request's response cannot carry them.
+    response_headers: Option<ResponseHeaders>,
     /// Captured `engine.generate` span. `None` for Python-instantiated test
     /// contexts (where no parent span was plumbed in) — `current_span` /
     /// `start_span` return a no-op `SpanProxy` in that case.
@@ -186,6 +193,8 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             session_affinity: None,
+            agent_context: None,
+            response_headers: None,
             span: None,
         }
     }
@@ -198,6 +207,29 @@ impl Context {
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)?
             .map(|session_affinity| session_affinity.as_ref().clone());
         Ok(self)
+    }
+
+    /// Keep the request's [`AgentContext`], for a request routed from Python to inherit.
+    pub fn with_agent_context_from<T: Send + Sync + 'static>(
+        mut self,
+        context: &PipelineContext<T>,
+    ) -> Result<Self, String> {
+        self.agent_context = context.get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)?;
+        Ok(self)
+    }
+
+    /// Share the [`ResponseHeaders`] the chat completions handler put on the
+    /// request's context, so the engine can set response headers.
+    pub fn with_response_headers_from<T: Send + Sync + 'static>(
+        mut self,
+        context: &PipelineContext<T>,
+    ) -> Self {
+        self.response_headers = context
+            .get_optional::<ResponseHeaders>(RESPONSE_HEADERS_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .map(|headers| headers.as_ref().clone());
+        self
     }
 
     /// Attach the `engine.generate` span. Called by `PyLLMEngine::generate`
@@ -241,6 +273,10 @@ impl Context {
 
     pub fn session_affinity(&self) -> Option<&SessionAffinityId> {
         self.session_affinity.as_ref()
+    }
+
+    pub fn agent_context(&self) -> Option<&AgentContext> {
+        self.agent_context.as_deref()
     }
 
     /// Build the `traceparent` header value. Prefers the engine.generate
@@ -291,6 +327,8 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             session_affinity: None,
+            agent_context: None,
+            response_headers: None,
             span: None,
         }
     }
@@ -309,6 +347,8 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             session_affinity: self.session_affinity.clone(),
+            agent_context: self.agent_context.clone(),
+            response_headers: None,
             span: self.span.clone(),
         }
     }
@@ -350,6 +390,21 @@ impl Context {
     fn notify_first_token(&self) {
         if let Some(notifier) = &self.first_token {
             notifier.notify();
+        }
+    }
+
+    /// Set an HTTP response header from a frontend chat engine.
+    ///
+    /// Returns `False` when this request's response cannot carry it: the
+    /// response is already committed, or the request is not a chat
+    /// completions request. Otherwise raises `ValueError` for a name or value
+    /// that is not a valid header, or for a header the HTTP layer owns.
+    fn set_response_header(&self, name: &str, value: &str) -> PyResult<bool> {
+        match &self.response_headers {
+            Some(headers) => headers
+                .set(name, value)
+                .map_err(pyo3::exceptions::PyValueError::new_err),
+            None => Ok(false),
         }
     }
 

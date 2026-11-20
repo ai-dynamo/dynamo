@@ -17,9 +17,11 @@
 
 import asyncio
 import base64
+import errno
 import logging
+import struct
 from io import BytesIO
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
 
 import numpy as np
@@ -40,6 +42,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     ImageLoader,
     image_cache_scope_from_request,
+    read_decoded_media_via_nixl,
 )
 from dynamo.common.multimodal.shared_image_cache import (
     SharedImageCache,
@@ -79,6 +82,77 @@ _SIGNED_URL = (
     "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
     f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
 )
+
+
+async def test_hard_pixel_limit_rejects_before_decode(monkeypatch) -> None:
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    load = Mock(side_effect=AssertionError("pixel loading must not run"))
+    monkeypatch.setattr(Image.Image, "load", load)
+    with pytest.raises(HttpStatusError) as caught:
+        await ImageLoader._open_image(BytesIO(PNG_BYTES))
+    assert caught.value.status == 413
+    assert caught.value.message == "Image exceeds the decoded pixel limit"
+    assert isinstance(caught.value.__cause__, Image.DecompressionBombError)
+    load.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["inline", "fetched", "shared"])
+async def test_hard_pixel_limit_across_sources(monkeypatch, loader, source) -> None:
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    url = "https://example.com/image.png"
+    fetch = _mock_fetch_bytes()
+    if source == "inline":
+        url = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+    elif source == "shared":
+        loader._shared_image_cache = AsyncMock()
+        loader._shared_image_cache.get.return_value = PNG_BYTES
+    with patch(_FETCH_BYTES_PATH, fetch), pytest.raises(HttpStatusError) as caught:
+        await loader.load_image(url)
+    assert caught.value.status == 413
+    assert caught.value.message == "Image exceeds the decoded pixel limit"
+    if source == "fetched":
+        fetch.assert_awaited_once()
+    else:
+        fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "order", [(False,), (False, False), (True, False), (False, True)]
+)
+async def test_hard_pixel_limit_batches(monkeypatch, loader, order) -> None:
+    small = BytesIO()
+    Image.new("RGB", (1, 1)).save(small, format="PNG")
+    urls = [
+        {
+            URL_VARIANT_KEY: "data:image/png;base64,"
+            + base64.b64encode(small.getvalue() if valid else PNG_BYTES).decode()
+        }
+        for valid in order
+    ]
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    with pytest.raises(HttpStatusError) as caught:
+        await loader.load_image_batch(urls)
+    assert caught.value.status == 413
+    assert caught.value.message == "Image exceeds the decoded pixel limit"
+
+
+async def test_pillow_soft_pixel_warning_keeps_decoding(monkeypatch) -> None:
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 3)
+    with pytest.warns(Image.DecompressionBombWarning):
+        image = await ImageLoader._open_image(BytesIO(PNG_BYTES))
+    assert image.size == (2, 2)
+    assert image.mode == "RGB"
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("decoder fault"), MemoryError("host exhaustion")]
+)
+async def test_image_open_preserves_unexpected_faults(monkeypatch, error) -> None:
+    with patch.object(Image, "open", side_effect=error), pytest.raises(
+        type(error)
+    ) as caught:
+        await ImageLoader._open_image(BytesIO(PNG_BYTES))
+    assert caught.value is error
 
 
 def _permissive_policy(
@@ -319,15 +393,25 @@ async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:
         assert "https://example.com/img.png" in exc_info.value.url
 
 
-async def test_http_status_error_propagated(loader: ImageLoader) -> None:
-    """HTTP 4xx/5xx should propagate as HttpStatusError."""
-    error = HttpStatusError(404, "Not Found", "https://example.com/img.png")
+@pytest.mark.parametrize("status", [403, 404, 503])
+async def test_http_status_error_propagated(loader: ImageLoader, status: int) -> None:
+    url = "https://example.com/img.png?signature=SECRET"
+    error = HttpStatusError(status, "private origin details: SECRET", url)
     mock_fetch = _mock_fetch_bytes(side_effect=error)
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         with pytest.raises(HttpStatusError) as exc_info:
-            await loader.load_image("https://example.com/img.png")
-        assert exc_info.value.status == 404
-        assert exc_info.value is error
+            await loader.load_image(url)
+    raised = exc_info.value
+    if status == 503:
+        assert raised.status == status
+        assert raised is error
+    else:
+        assert raised.status == 400
+        assert raised.__cause__ is error
+        assert raised.url == url
+        assert raised.message.startswith(f"Image download returned HTTP {status}.")
+        assert "resend the image data before retrying" in raised.message
+        assert "SECRET" not in raised.message
 
 
 @pytest.mark.parametrize(
@@ -362,6 +446,7 @@ async def test_http_failure_logs_redact_reference(
         "status": 503,
         "timeout": 408,
         "connection": 400,
+        "decode": 400,
         "unsupported": 415,
     }.get(failure)
     if expected_status is not None:
@@ -377,7 +462,7 @@ async def test_http_failure_logs_redact_reference(
 
     if expected_status is not None:
         assert exc_info.value.status == expected_status
-    if failure in errors and failure not in ("timeout", "connection"):
+    if failure in errors and failure not in ("timeout", "connection", "decode"):
         assert exc_info.value is errors[failure]
     fetch.assert_awaited_once()
     assert fetch.await_args.args[0] == url
@@ -738,6 +823,109 @@ async def test_frontend_decoded_grayscale_image_is_converted_to_rgb(
     assert image.getpixel((0, 0)) == (127, 127, 127)
 
 
+# 2x1 RGBA: an opaque red pixel, then a fully transparent pixel whose stored colour is black.
+_RGBA_PIXELS = ((255, 0, 0, 255), (0, 0, 0, 0))
+
+
+def _rgba_png_bytes() -> bytes:
+    image = Image.new("RGBA", (2, 1))
+    image.putdata(_RGBA_PIXELS)
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _load_rgba(loader: ImageLoader, source: str) -> Image.Image:
+    content = _rgba_png_bytes()
+    if source == "data":
+        encoded = base64.b64encode(content).decode()
+        return await loader.load_image(f"data:image/png;base64,{encoded}")
+    if source == "http":
+        with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes(content)):
+            return await loader.load_image("https://example.com/logo.png")
+    # The frontend decoder hands RGBA pixels over NIXL as an (H, W, 4) uint8 array.
+    loader._nixl_connector = object()
+    decoded = np.array([_RGBA_PIXELS], dtype=np.uint8)
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=decoded),
+    ):
+        return await loader._read_and_convert_nixl_image({})
+
+
+async def test_frontend_decoded_read_keeps_alpha_channel() -> None:
+    """The NIXL read returns all four channels, so the loader's conversion sees the alpha."""
+    decoded_meta = {
+        "nixl_metadata": "metadata",
+        "nixl_descriptor": {"addr": 1, "size": 16},
+        "shape": [2, 2, 4],
+    }
+
+    array = await read_decoded_media_via_nixl(AsyncMock(), decoded_meta)
+
+    assert array.shape == (2, 2, 4)
+
+
+@pytest.mark.parametrize("source", ["data", "http", "decoded"])
+async def test_default_conversion_drops_alpha(loader: ImageLoader, source: str) -> None:
+    """A backend that passes no to_rgb keeps Pillow's convert("RGB") on every path."""
+    image = await _load_rgba(loader, source)
+
+    assert image.mode == "RGB"
+    assert [image.getpixel((0, 0)), image.getpixel((1, 0))] == [(255, 0, 0), (0, 0, 0)]
+
+
+@pytest.mark.parametrize("source", ["data", "http", "decoded"])
+async def test_to_rgb_receives_alpha_on_every_path(source: str) -> None:
+    """A backend's conversion sees the decoded image with its alpha, and owns the result."""
+    seen: list[tuple[str, tuple[int, ...]]] = []
+
+    def to_rgb(image: Image.Image) -> Image.Image:
+        seen.append((image.mode, image.getpixel((1, 0))))
+        return Image.new("RGB", image.size, (1, 2, 3))
+
+    loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=to_rgb)
+    image = await _load_rgba(loader, source)
+
+    assert seen == [("RGBA", (0, 0, 0, 0))]
+    assert image.getpixel((1, 0)) == (1, 2, 3)
+
+
+async def test_to_rgb_runs_on_shared_cache_hit(monkeypatch) -> None:
+    """The shared cache holds encoded bytes, so a hit still goes through the conversion."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = _rgba_png_bytes()
+    seen: list[str] = []
+
+    def to_rgb(image: Image.Image) -> Image.Image:
+        seen.append(image.mode)
+        return image.convert("RGB")
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, _mock_fetch_bytes()) as origin_fetch,
+    ):
+        loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=to_rgb)
+        await loader.load_image("https://example.com/logo.png")
+
+    origin_fetch.assert_not_called()
+    assert seen == ["RGBA"]
+
+
+async def test_truncated_image_is_rejected_when_to_rgb_returns_its_argument() -> None:
+    """The loader decodes before converting, so a conversion cannot hide truncated data."""
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()[:-40]).decode()
+    loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=lambda image: image)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(f"data:image/png;base64,{encoded}")
+
+    assert exc_info.value.status == 400
+
+
 async def test_unsupported_format_batch_data_url_raises_415(
     loader: ImageLoader, caplog
 ) -> None:
@@ -871,29 +1059,85 @@ async def test_truncated_data_url_batch_raises_400(loader: ImageLoader, caplog) 
     _assert_inline_reference_elided(caplog, encoded)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.EMFILE, "Too many open files"),
+        # Pillow's ImageFile.load raises this, without errno, when the codec
+        # cannot allocate memory.
+        OSError("out of memory when reading image file"),
+    ],
+    ids=["emfile", "pillow_codec_oom"],
+)
 async def test_unexpected_http_decoder_error_not_wrapped_as_value_error(
-    loader: ImageLoader,
+    loader: ImageLoader, error: OSError
 ) -> None:
-    """An unexpected decoder failure on a fetched image must not be
-    classified as a client validation error: it propagates unchanged
-    from load_image and the batch path folds it into a generic Exception,
-    so the frontend answers 500, not 400.
+    """Host resource exhaustion while decoding a fetched image must not be
+    classified as a client error: it propagates unchanged from load_image
+    and the batch path folds it into a generic Exception, so the frontend
+    answers 500, not 400.
     """
-    loader._open_image = AsyncMock(  # type: ignore[method-assign]
-        side_effect=OSError("image file is truncated")
-    )
+    loader._open_image = AsyncMock(side_effect=error)  # type: ignore[method-assign]
     mock_fetch = _mock_fetch_bytes()
 
     with patch(_FETCH_BYTES_PATH, mock_fetch):
-        with pytest.raises(OSError, match="truncated"):
+        with pytest.raises(OSError) as raised:
             await loader.load_image("https://example.com/img.png")
+        assert raised.value is error
 
         with pytest.raises(Exception) as exc_info:
             await loader.load_image_batch(
                 [{URL_VARIANT_KEY: "https://example.com/img.png"}]
             )
-    assert not isinstance(exc_info.value, ValueError)
-    assert "truncated" in str(exc_info.value)
+    assert not isinstance(exc_info.value, (ValueError, HttpStatusError))
+    assert str(error) in str(exc_info.value)
+
+
+def _truncated_jpeg_bytes() -> bytes:
+    """Pillow identifies these bytes, then raises OSError while decoding."""
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), color="red").save(buf, format="JPEG")
+    return buf.getvalue()[:-20]
+
+
+def _broken_png_chunk_bytes() -> bytes:
+    """A short IDAT length makes Pillow read a chunk header from inside the
+    image data, so decoding raises SyntaxError ("broken PNG file")."""
+    idat = PNG_BYTES.find(b"IDAT")
+    (length,) = struct.unpack(">I", PNG_BYTES[idat - 4 : idat])
+    return PNG_BYTES[: idat - 4] + struct.pack(">I", length - 8) + PNG_BYTES[idat:]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [_truncated_jpeg_bytes(), _broken_png_chunk_bytes()],
+    ids=["truncated_jpeg", "broken_png_chunk"],
+)
+async def test_corrupt_http_image_raises_400(
+    loader: ImageLoader, content: bytes
+) -> None:
+    """A fetched image that Pillow identifies but cannot decode is malformed
+    client input, as for the same bytes in a data: URL: both load_image and
+    the batch path raise 400."""
+    with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes(content=content)):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image("https://example.com/img")
+        assert exc_info.value.status == 400
+        assert exc_info.value.message == "Invalid or truncated image data"
+
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image_batch(
+                [{URL_VARIANT_KEY: "https://example.com/img"}]
+            )
+        assert exc_info.value.status == 400
+        assert exc_info.value.message == "Invalid or truncated image data"
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(
+            "data:image/png;base64," + base64.b64encode(content).decode()
+        )
+    assert exc_info.value.status == 400
+    assert exc_info.value.message == "Invalid or truncated image data"
 
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:

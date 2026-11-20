@@ -55,6 +55,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     per_rank_max_running_requests,
     runtime_capacity,
+    sglang_attention_tp_size,
     sglang_dp_layout,
 )
 from dynamo.sglang.engine_generate import (
@@ -134,7 +135,7 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Gate the serialized SGLang 0.5.19/0.5.22 execution profile.
+    """Gate the serialized SGLang 0.5.19/0.5.22/0.5.23 execution profile.
 
     CUDA is the qualified deployment; device support is not validated here,
     and XPU remains unqualified.
@@ -161,10 +162,10 @@ def _supports_systemone_serial(
     if not eligible:
         return False
     installed = version("sglang")
-    if re.fullmatch(r"0\.5\.(?:19|22)(?:\+cu[0-9]+)?", installed) is None:
+    if re.fullmatch(r"0\.5\.(?:19|22|23)(?:\+cu[0-9]+)?", installed) is None:
         logging.warning(
             "Decision scoring is disabled: the serial worker uses SGLang %s; "
-            "the qualified CUDA profiles require SGLang 0.5.19 or 0.5.22",
+            "the qualified CUDA profiles require SGLang 0.5.19, 0.5.22, or 0.5.23",
             installed,
         )
         return False
@@ -501,8 +502,21 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
             getattr(server_args, "hicache_storage_backend_extra_config", None)
         )
 
-    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+    # The TP width SGLang's storage keys are built from.
+    tp_size = sglang_attention_tp_size(server_args)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
+    page_size = int(getattr(server_args, "page_size", 1) or 1)
+
+    prefetch_threshold = None
+    if not linker:
+        # SGLang loads nothing from Mooncake for a hit shorter than this.
+        raw_threshold = extra_config.get("prefetch_threshold", 256)
+        try:
+            prefetch_threshold = max(int(raw_threshold), page_size)
+        except (TypeError, ValueError):
+            logging.warning(
+                "Ignoring non-integer Mooncake prefetch_threshold=%r", raw_threshold
+            )
 
     try:
         is_mla_model = sglang_uses_mla_backend(server_args)
@@ -541,7 +555,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     return {
         "backend": "mooncake",
         "tenant_id": _mooncake_tenant_id(extra_config),
-        "page_size": int(getattr(server_args, "page_size", 1) or 1),
+        "page_size": page_size,
         "tp_size": tp_size,
         "pp_size": pp_size,
         "is_mla_model": is_mla_model,
@@ -555,6 +569,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         ),
         "key_layout": "linker" if linker else "hicache",
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
+        "prefetch_threshold": prefetch_threshold,
     }
 
 
@@ -652,8 +667,14 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
-    # Multimodal and diffusion handlers do not forward the per-request gate.
-    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+    # Frontend-decoded media uses the regular LLM handlers, which forward the
+    # reasoning gate. Dedicated multimodal pipelines register through an encoder;
+    # diffusion handlers do not forward the gate.
+    if (
+        not dynamo_args.multimodal_worker
+        and not dynamo_args.multimodal_encode_worker
+        and not getattr(server_args, "dllm_algorithm", None)
+    ):
         publish_sglang_structural_tag_reasoning_policy(
             runtime_config, engine, server_args
         )

@@ -11,14 +11,14 @@ SPDX-License-Identifier: Apache-2.0
 
 | Path | Contents |
 |------|----------|
-| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
+| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm`/`tokenspeed` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
 | `docs/fern/` | Fern docs site; pages are in `pages/` |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate); read the matching one before writing that kind of code |
+| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate, and metrics, logs, and traces); read the matching one before writing that kind of code |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
@@ -30,7 +30,7 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 [TokenSpeed](https://github.com/lightseekorg/tokenspeed). Related projects:
 [NIXL](https://github.com/ai-dynamo/nixl) (KV-cache transfer),
 [AIPerf](https://github.com/ai-dynamo/aiperf) (load generation),
-[AISimulate](https://pypi.org/project/aisimulate/) (offline configuration search),
+[AISimulate](https://pypi.org/project/aisim/) (offline configuration search),
 [ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
 [Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
 
@@ -76,6 +76,7 @@ to it — edit only the canonical copy.
 - `dynamo-router-starter` — start or patch router modes and smoke-test the endpoint
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregated serving
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
+- `profile-with-nsight-operator` — profile chosen components with Nsight Systems through Nsight Operator and verify every report arrived
 
 **Recipe optimization loop** — start from
 [`agent-docs/guides/optimization/optimize-loop.md`](agent-docs/guides/optimization/optimize-loop.md),
@@ -192,8 +193,6 @@ cargo clippy --locked --no-deps -p dynamo-kv-router --all-targets -- -D warnings
   adds NVTX ranges.
 - CI's non-default feature checks are in [`pre-merge.yml`](.github/workflows/pre-merge.yml).
   Each is a separate cold build (about 4 min), so run only the one you touched.
-
-On macOS, build and test `dynamo-llm` with `--no-default-features` unless you need `block-manager`.
 
 ### Python tests
 

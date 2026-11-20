@@ -131,6 +131,74 @@ def test_floor_pairs_scale_down_across_participants():
     )
 
 
+def test_prefers_intra_participant_partner_over_smaller_cross_participant():
+    """Partner packing must prefer a partner inside the requesting participant.
+
+    Regression: candidates were sorted on ``abs(delta_gpu)`` alone, so a
+    cross-participant candidate with a smaller delta sorted ahead of every
+    intra-participant one. It also splits the transfer across connector calls;
+    neither path is atomic across individual component patches.
+    """
+    # Fixed total of 12 GPUs; every pool is 1 GPU/replica so tolerance is 1.
+    orch = _decider(max_total_gpus=12, min_total_gpus=12)
+    pools = _pools(ns__a=(2, 5, 1), ns__b=(None, 5, 1))  # 2 + 5 + 5 = 12
+
+    # Two pending scale-downs. The cross-participant one is *smaller*, so under
+    # the old |delta_gpu|-only sort it was consumed first.
+    orch.update_intent_cache("ns/a", _targets(decode=1), pools["ns/a"])  # -4
+    orch.update_intent_cache("ns/b", _targets(decode=4), pools["ns/b"])  # -1
+
+    res = _mediate(orch, "ns/a", _targets(prefill=4), pools)  # +2, breaches ceiling
+
+    assert res.approved
+    assert [p.participant_id for p in res.selected_partners] == ["ns/a"]
+    partner = res.selected_partners[0]
+    # Partially consumed: 5 -> 2 lands the total at the floor edge (11) rather
+    # than overshooting to 10 by applying the full cached intent of 1.
+    assert (partner.sub_type, partner.applied_desired) == ("decode", 2)
+
+
+def test_falls_back_when_intra_candidate_cannot_fit_one_replica():
+    orch = _decider(max_total_gpus=8, min_total_gpus=8)
+    pools = {
+        "ns/a": {
+            "prefill": PoolSpec("prefill", 2, 1),
+            "decode": PoolSpec("decode", 1, 4),
+        },
+        "ns/b": {"decode": PoolSpec("decode", 2, 1)},
+    }
+    orch.update_intent_cache("ns/a", _targets(decode=2), pools["ns/a"])
+    orch.update_intent_cache("ns/b", _targets(decode=3), pools["ns/b"])
+
+    result = _mediate(orch, "ns/a", _targets(prefill=1), pools)
+
+    assert result.approved
+    assert [
+        (partner.participant_id, partner.applied_desired)
+        for partner in result.selected_partners
+    ] == [("ns/b", 3)]
+
+
+def test_falls_back_to_cross_participant_when_no_intra_candidate():
+    """Preferring intra-participant partners must not disable cross-participant
+    pairing when the requesting participant has nothing pending."""
+    orch = _decider(max_total_gpus=12, min_total_gpus=12)
+    pools = _pools(ns__a=(2, 5, 1), ns__b=(None, 5, 1))  # 2 + 5 + 5 = 12
+
+    orch.update_intent_cache("ns/b", _targets(decode=3), pools["ns/b"])  # -2
+
+    res = _mediate(orch, "ns/a", _targets(prefill=4), pools)  # +2
+
+    assert res.approved
+    assert len(res.selected_partners) == 1
+    partner = res.selected_partners[0]
+    assert (partner.participant_id, partner.sub_type, partner.applied_desired) == (
+        "ns/b",
+        "decode",
+        3,
+    )
+
+
 def _priority(**kwargs) -> PriorityResolver:
     return PriorityResolver(PriorityConfig(**kwargs))
 
@@ -375,6 +443,51 @@ async def test_submit_ceiling_rejects_without_mutating(use_lock):
     assert out.status == ScaleStatus.REJECTED
     assert "budget breach" in out.message.lower()
     assert cm.pools["default/a"]["prefill"][0] == 1  # NOT actuated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundled", [False, True], ids=["separate", "bundled"])
+async def test_zero_cost_scale_up_does_not_allow_scale_down_below_floor(bundled):
+    cm = FakeCapacityManager()
+    cm.pools["default/a"] = {"prefill": [1, 0], "decode": [2, 4]}
+    orch = _orch(cm, max_gpus=8, min_gpus=8)
+
+    # The GPU reduction alone must be rejected without changing either pool.
+    standalone = await _submit(orch, "default/a", _targets(decode=1))
+    assert standalone.status == ScaleStatus.REJECTED
+    assert cm.current_replicas("default/a") == {"prefill": 1, "decode": 2}
+
+    if bundled:
+        targets = _targets(prefill=2, decode=1)
+    else:
+        free_update = await _submit(orch, "default/a", _targets(prefill=2))
+        assert free_update.status == ScaleStatus.SUCCESS
+        assert cm.current_replicas("default/a") == {"prefill": 2, "decode": 2}
+        targets = _targets(decode=1)
+
+    result = await _submit(orch, "default/a", targets)
+
+    assert result.status == ScaleStatus.REJECTED
+    assert "below floor" in result.message.lower()
+    assert cm.current_replicas("default/a") == {
+        "prefill": 1 if bundled else 2,
+        "decode": 2,
+    }
+    assert orch.total_gpus(cm.observe()) == 8
+
+
+@pytest.mark.asyncio
+async def test_nonzero_internal_gpu_transfer_retains_floor_tolerance():
+    cm = FakeCapacityManager()
+    cm.pools["default/a"] = {"prefill": [1, 1], "decode": [2, 4]}
+    orch = _orch(cm, max_gpus=9, min_gpus=9)
+
+    # +1 GPU and -4 GPUs form a real transfer within the 4-GPU floor tolerance.
+    result = await _submit(orch, "default/a", _targets(prefill=2, decode=1))
+
+    assert result.status == ScaleStatus.SUCCESS
+    assert cm.current_replicas("default/a") == {"prefill": 2, "decode": 1}
+    assert orch.total_gpus(cm.observe()) == 6
 
 
 @pytest.mark.asyncio

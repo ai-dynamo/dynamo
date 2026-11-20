@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: inkling-2-mini
+title: Inkling 2 Mini
+page: pages/recipes/model-recipes/inkling-2-mini.mdx
+provider: thinkingmachines
+model:
+  name: Inkling 2 Mini
+  hf_id: thinkingmachines/Inkling-2-Mini
+  precision: NVFP4
+status: experimental
+targets:
+- id: agg-b200
+  recommended: true
+  badge: functional
+  hardware:
+    gpu: B200
+    count: 2
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.8.0-inkling-2-mini-dev.1
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - tp2
+  - ep2
+  - reasoning-parser
+  - tool-calling
+  - structured-output
+  - image-input
+  workload:
+    type: functional
+  deploy:
+    asset: recipes/inkling-2-mini/sglang/agg-b200/deploy.yaml
+  expected_performance:
+    available: false
+- id: disagg-b200
+  recommended: false
+  badge: functional
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.8.0-inkling-2-mini-dev.1
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nvfp4
+  - tp2
+  - ep2
+  - reasoning-parser
+  - tool-calling
+  - structured-output
+  - image-input
+  - nixl-ucx
+  workload:
+    type: functional
+  deploy:
+    asset: recipes/inkling-2-mini/sglang/disagg-b200/deploy.yaml
+  expected_performance:
+    available: false
+- id: agg-vr200
+  recommended: false
+  badge: functional
+  hardware:
+    gpu: VR200
+    count: 2
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.8.0-inkling-2-mini-dev.1
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - tp2
+  - ep2
+  - reasoning-parser
+  - tool-calling
+  - structured-output
+  - image-input
+  workload:
+    type: functional
+  deploy:
+    asset: recipes/inkling-2-mini/sglang/agg-vr/deploy.yaml
+  expected_performance:
+    available: false
+- id: disagg-vr200
+  recommended: false
+  badge: functional
+  hardware:
+    gpu: VR200
+    count: 4
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.8.0-inkling-2-mini-dev.1
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nvfp4
+  - tp2
+  - ep2
+  - reasoning-parser
+  - tool-calling
+  - structured-output
+  - image-input
+  - mooncake-nvlink
+  workload:
+    type: functional
+  deploy:
+    asset: recipes/inkling-2-mini/sglang/disagg-vr/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- No validated performance numbers are published for this recipe; the page covers functional use only.
+- The runtime image tag is a placeholder until the container release publishes it.

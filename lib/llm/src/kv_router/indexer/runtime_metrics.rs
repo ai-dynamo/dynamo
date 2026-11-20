@@ -1,0 +1,64 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Builds the indexer's counters from a runtime `Component`. Lives in the frontend host, not
+//! in the stage or the composition crate: neither may depend on `dynamo-runtime`.
+
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+use dynamo_kv_indexer::host::KvIndexerMetrics;
+use dynamo_runtime::component::Component;
+use dynamo_runtime::metrics::MetricsHierarchy;
+
+const KV_CACHE_EVENTS_APPLIED_SUFFIX: &str = "kv_cache_events_applied";
+const KV_CACHE_EVENT_WARNINGS_SUFFIX: &str = "kv_cache_event_warnings";
+
+static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
+
+/// Host-side constructor for [`KvIndexerMetrics`] from a runtime component.
+pub trait KvIndexerMetricsExt {
+    /// Creates a shared metrics instance from a Component, memoizing the result so repeated
+    /// construction does not register the same series twice.
+    fn from_component(component: &Component) -> Arc<KvIndexerMetrics>;
+}
+
+impl KvIndexerMetricsExt for KvIndexerMetrics {
+    fn from_component(component: &Component) -> Arc<KvIndexerMetrics> {
+        {
+            use dynamo_kv_indexer::host::{
+                KV_CACHE_EVENT_WARNINGS_HELP, KV_CACHE_EVENT_WARNINGS_LABELS,
+                KV_CACHE_EVENTS_APPLIED_HELP, KV_CACHE_EVENTS_APPLIED_LABELS,
+            };
+            KV_INDEXER_METRICS
+                .get_or_init(|| {
+                    match (
+                        component.metrics().create_intcountervec(
+                            KV_CACHE_EVENTS_APPLIED_SUFFIX,
+                            KV_CACHE_EVENTS_APPLIED_HELP,
+                            KV_CACHE_EVENTS_APPLIED_LABELS,
+                            &[],
+                        ),
+                        component.metrics().create_intcountervec(
+                            KV_CACHE_EVENT_WARNINGS_SUFFIX,
+                            KV_CACHE_EVENT_WARNINGS_HELP,
+                            KV_CACHE_EVENT_WARNINGS_LABELS,
+                            &[],
+                        ),
+                    ) {
+                        (Ok(kv_cache_events_applied), Ok(kv_cache_event_warnings)) => {
+                            Arc::new(KvIndexerMetrics::from_counters(
+                                kv_cache_events_applied,
+                                kv_cache_event_warnings,
+                            ))
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
+                            Arc::new(KvIndexerMetrics::new_unregistered())
+                        }
+                    }
+                })
+                .clone()
+        }
+    }
+}

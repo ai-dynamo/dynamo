@@ -20,16 +20,12 @@ spec:
     mode: Optimize
     metric: ThroughputPerGPU
     sla: {}
-  aisimulate:
+  aisim:
     inputOverrides:
       engine:
         mode: aggregated
         context_length: 32768
         workers:
-          # TODO(#17581): Remove this explicit value after AISimulate preserves an unset runtime block size.
-          aggregated:
-            kv_cache:
-              block_size: 64
           prefill: null
           decode: null
       traffic:
@@ -44,3 +40,12 @@ spec:
         snapshot_interval_seconds: 0
   recommendation:
     maxCandidates: 1
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      metadata:
+        labels:
+          test.dynamo.nvidia.com/dgd-override: label-applied
+        annotations:
+          test.dynamo.nvidia.com/dgd-override: annotation-applied

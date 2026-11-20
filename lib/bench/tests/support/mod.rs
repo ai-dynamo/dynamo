@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
-use dynamo_kv_router::indexer::{
+use dynamo_kv_indexer::host::{
     KvIndexerMetrics, METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND,
     METRIC_WARNING_DUPLICATE_STORE,
 };

@@ -11,10 +11,10 @@ on:
   workflow_call:
     inputs:
       gpu_runner_labels:
-        description: 'JSON runner labels for Python GPU tests; defaults to the existing unpinned runner selector'
+        description: 'JSON runner labels for Python GPU tests; defaults to the shared organization runner'
         required: false
         type: string
-        default: '["prod-tester-amd-gpu-v2"]'
+        default: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       builder_name:
         description: 'BuildKit builder name'
         required: true
@@ -146,8 +146,10 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
-      cpu_only_test_timeout_minutes: 30
+      # Planner-family tests run in planner-test; core keeps bindings coverage here.
+      cpu_only_test_markers: ${{ format('{0} and (not planner or core)', inputs.cpu_parallel_test_markers) }}
+      # TODO(DYN-5487): restore 30 after validating timings with Planner tests split out.
+      cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}
@@ -168,7 +170,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: 'pre_merge and not parallel and not defaulted and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_markers: 'pre_merge and not parallel and not defaulted and not (vllm or sglang or trtllm) and (not planner or core) and (gpu_0)'
       cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
@@ -184,7 +186,6 @@ jobs:
       test_suite_name: dynamo
       framework: dynamo  # matches the framework passed to image
       test_type: gpu
-      amd_runner: prod-tester-amd-gpu-v2
       amd_runner_labels: ${{ inputs.gpu_runner_labels }}
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
