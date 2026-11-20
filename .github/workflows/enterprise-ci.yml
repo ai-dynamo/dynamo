@@ -29,8 +29,10 @@ permissions:
   # compliance-extract downloads the previous run's compliance artifact.
   actions: read
 
+# Release-branch pushes key on the SHA so each commit builds its own image in
+# parallel, as post-merge does; queued pushes would otherwise cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: false
 
 jobs:
