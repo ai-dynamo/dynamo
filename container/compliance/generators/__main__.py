@@ -322,7 +322,8 @@ def main(argv: list[str] | None = None) -> int:
         args.ecosystem,
         args.source_location,
         base_sbom=args.subtract_sbom,
-        dpkg_root=args.dpkg_root,
+        # Only a scanned dpkg root is the shipped filesystem (the operator's is a helper).
+        dpkg_root=args.dpkg_root if "dpkg" in args.ecosystem else None,
     )
     logger.info(
         "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",

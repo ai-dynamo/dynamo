@@ -37,6 +37,22 @@ def _write_base_sbom(directory: Path, name: str = "base@test-amd64.cdx.json") ->
         },
         {
             "type": "library",
+            "name": "libremoved",
+            "version": "3.0",
+            "purl": "pkg:deb/ubuntu/libremoved@3.0",
+            "licenses": [{"license": {"id": "ISC"}}],
+        },
+        {
+            "type": "library",
+            "name": "libexpr",
+            "version": "4.0",
+            "licenses": [
+                {"expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception"},
+                {"license": {"name": "Odd)License"}},
+            ],
+        },
+        {
+            "type": "library",
             "name": "liba",
             "version": "1.0",
             "licenses": [{"license": {"id": "MIT"}}],
@@ -118,7 +134,7 @@ def test_base_components_parsed(tmp_path: Path) -> None:
 
     comps = {c.name: c for c in load_base_components(sbom)}
 
-    assert sorted(comps) == ["liba", "libb", "libnolicense", "zlib1g"]
+    assert sorted(comps) == ["liba", "libb", "libexpr", "libnolicense", "libremoved", "zlib1g"]
     assert comps["libb"].spdx == "MIT License AND Apache 2.0"
     assert comps["libnolicense"].spdx == NOASSERTION
 
@@ -139,11 +155,13 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     assert mit and text.count(mit) == 1
     zlib = spdx_license_text("Zlib")
     assert zlib and text.count(zlib) == 1
+    apache = spdx_license_text("Apache-2.0")
+    assert apache and text.count(apache) == 1
     missing = text.split("is the reference:\n", 1)[1]
-    assert missing.splitlines() == ["Apache 2.0"]
+    assert missing.splitlines() == ["Apache 2.0", "Odd)License"]
 
 
-def test_base_deb_copyright_read_only_for_installed_version(tmp_path: Path) -> None:
+def test_base_debs_limited_to_installed_versions(tmp_path: Path) -> None:
     sbom = _write_base_sbom(tmp_path / "base_sboms")
     root = tmp_path / "root"
     (root / "var/lib/dpkg").mkdir(parents=True)
@@ -159,6 +177,7 @@ def test_base_deb_copyright_read_only_for_installed_version(tmp_path: Path) -> N
 
     assert comps["zlib1g"].license_text == "zlib1g COPYRIGHT\n"
     assert comps["liba"].license_text is None
+    assert "libremoved" not in comps
 
 
 def test_main_writes_third_party_with_base_section(tmp_path: Path) -> None:
