@@ -205,6 +205,9 @@ _BASE_DEBS_FILTERED = (
     "followed by its copyright file where the image ships one. "
 )
 
+# Where a Debian package installs its copyright file, relative to the root.
+DEB_COPYRIGHT_DIR = Path("usr/share/doc")
+
 # Placeholder for a base-image component whose SBOM entry declares no license.
 NOASSERTION = "NOASSERTION"
 
@@ -259,7 +262,7 @@ def load_base_components(
         if shipped_debs is not None and (c.get("purl") or "").startswith("pkg:deb/"):
             if (name, version) not in shipped_debs:
                 continue
-            copyright_path = dpkg_root / "usr/share/doc" / name / "copyright"
+            copyright_path = dpkg_root / DEB_COPYRIGHT_DIR / name / "copyright"
             try:
                 text = copyright_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -292,7 +295,7 @@ def _split_top_level_and(expr: str) -> list[str]:
 
 
 def render_base_section(
-    sbom_path: Path, components: list[Component], debs_filtered: bool = False
+    sbom_path: Path, components: list[Component], debs_note: str = ""
 ) -> str:
     """Render the base-image section of THIRD-PARTY.txt."""
     image = _base_image_label(sbom_path)
@@ -301,7 +304,7 @@ def render_base_section(
             image=image,
             rule="=" * len(f"BASE IMAGE — {image}"),
             sbom=sbom_path.name,
-            debs=_BASE_DEBS_FILTERED if debs_filtered else "",
+            debs=debs_note,
         )
     ]
     license_ids: set[str] = set()
@@ -356,7 +359,9 @@ def write_third_party(
             parts.append(notices.read_text(encoding="utf-8").rstrip() + "\n\n")
     if base_sbom is not None:
         base = load_base_components(base_sbom, shipped_debs, dpkg_root)
-        section = render_base_section(base_sbom, base, shipped_debs is not None)
+        section = render_base_section(
+            base_sbom, base, _BASE_DEBS_FILTERED if shipped_debs is not None else ""
+        )
         parts.append(section.rstrip() + "\n")
     path = output_dir / "THIRD-PARTY.txt"
     path.write_text("".join(parts).rstrip() + "\n", encoding="utf-8")

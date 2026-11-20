@@ -31,13 +31,12 @@ import subprocess
 from pathlib import Path
 
 from .. import overrides as license_overrides
-from .common import UNKNOWN, Component
+from .common import DEB_COPYRIGHT_DIR, UNKNOWN, Component
 
 logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "dpkg"
 
-_COPYRIGHT_DIR = Path("usr/share/doc")
 
 # dpkg states that do not mean "installed". In `not-installed`, no file of the
 # package is on disk. `config-files` means removed but not purged: dpkg deleted
@@ -400,7 +399,7 @@ def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -
     if overridden:
         return overridden
 
-    copyright_path = root / _COPYRIGHT_DIR / pkg_name / "copyright"
+    copyright_path = root / DEB_COPYRIGHT_DIR / pkg_name / "copyright"
     if not copyright_path.is_file():
         return UNKNOWN
 
