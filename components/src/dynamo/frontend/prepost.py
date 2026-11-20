@@ -32,6 +32,10 @@ from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.structural_tag_registry import (
+    get_model_structural_tag,
+    limit_to_single_tool_call,
+)
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 from xgrammar import StructuralTag
@@ -50,20 +54,6 @@ from .thinking import (
     glm_prompt_reasoning_open,
 )
 from .utils import legacy_guided_decoding
-
-get_model_structural_tag: Any
-limit_to_single_tool_call: Any
-try:
-    from vllm.tool_parsers import structural_tag_registry
-except ImportError:  # Older supported vLLM releases do not expose this registry.
-    get_model_structural_tag = None
-    limit_to_single_tool_call = None
-else:
-    get_model_structural_tag = structural_tag_registry.get_model_structural_tag
-    # Older registries and parser hooks do not expose the typed limiter.
-    limit_to_single_tool_call = getattr(
-        structural_tag_registry, "limit_to_single_tool_call", None
-    )
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -285,7 +275,7 @@ def _request_for_vllm_structural_tag(
 
 
 def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
-    """Limit serialized tags from older vLLM hooks without the typed helper.
+    """Limit serialized tags from out-of-tree parser hooks that return a dict.
 
     Only format children are visited, so argument schemas are left unchanged.
     These three list formats repeat tool calls in vLLM's registered tags.
@@ -337,7 +327,7 @@ def build_tool_call_guided_decoding(
         try:
             structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
             structural_tag_kwargs = {}
-            if structural_tag_model == "hy_v4" and get_model_structural_tag is not None:
+            if structural_tag_model == "hy_v4":
                 # HYV4's parser detects checkpoint-specific tokens at construction.
                 # Keep its suffix while Dynamo owns activation of the registry path.
                 structural_tag_kwargs["token_suffix"] = getattr(
@@ -352,8 +342,7 @@ def build_tool_call_guided_decoding(
                     **structural_tag_kwargs,
                 )
                 if structural_tag_model is not None
-                and get_model_structural_tag is not None
-                # Older parser hooks may not take ``reasoning``; keep their
+                # Out-of-tree parser hooks may not take ``reasoning``; keep their
                 # call unchanged unless the reasoning prefix is needed.
                 else tool_parser.get_structural_tag(request_for_tag, reasoning=True)
                 if starts_in_reasoning
@@ -373,9 +362,7 @@ def build_tool_call_guided_decoding(
             structural_tag = None
         if structural_tag is not None:
             single_call = request.parallel_tool_calls is False
-            use_typed_limiter = limit_to_single_tool_call is not None and isinstance(
-                structural_tag, StructuralTag
-            )
+            use_typed_limiter = isinstance(structural_tag, StructuralTag)
             if single_call and use_typed_limiter:
                 limit_to_single_tool_call(structural_tag)
             tag_value = (
@@ -706,6 +693,9 @@ def _prepare_request(
         if validated_request is not None
         else _validate_chat_completion_request(request)
     )
+    # vLLM renders from the unadjusted request, and parsers that compile
+    # response_format into a grammar clear it; the prompt needs the caller's value.
+    render_response_format = request_for_sampling.response_format
 
     tool_parser: ToolParser | None = None
     # With enable_auto_tool_choice the model may emit tool calls even when the
@@ -832,6 +822,7 @@ def _prepare_request(
             "documents": request_for_sampling.documents,
             "tokenize": tokenize_in_template,
         },
+        response_format=render_response_format,
     )
 
     return (

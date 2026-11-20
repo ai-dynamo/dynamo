@@ -60,10 +60,16 @@ use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
 mod capacity;
 
 /// Callers build an Enqueue's prepared rows only once they hold a slot, so this also
-/// bounds the rows in flight: ranks x ~120 B each, about 60 MiB at 2048 ranks, and nearly
+/// bounds the rows in flight: ranks x ~120 B each, about 8 MiB at 2048 ranks, and nearly
 /// as much again for the load each projects with them (ranks x ~100 B). A backlog past
 /// it waits, in order, for a slot.
-const ADMISSION_CHANNEL_CAPACITY: usize = 256;
+///
+/// It also keeps prepared loads adoptable. At most the rest of a full channel and one
+/// taken batch (39 commands) are ahead of a caller when it sends. Their bookings, any
+/// made while it projected, and any releases the actor applies itself are the writes
+/// the actor re-reads; past ranks / `PREPARED_LOAD_MAX_STALE` of them (128 at 2048
+/// ranks) it projects every rank itself for each booking.
+const ADMISSION_CHANNEL_CAPACITY: usize = 32;
 
 /// Commands the actor takes from the channel in one receive. A receive spends one unit of
 /// the task's cooperative budget whatever it returns, so a backlog costs the actor a yield
@@ -5746,6 +5752,49 @@ mod tests {
             WorkerWithDpRank::new(1, 0)
         );
         assert_eq!(prepared_selections.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_load_is_adopted_behind_a_full_channel() {
+        let prepared_queue = make_prepared_queue_with(2048, 1, false, Box::new(LeastLoaded));
+        let mut actor = actor_with_selector_for_test(
+            &prepared_queue.queue,
+            &prepared_queue.slots,
+            counting_policy(
+                &prepared_queue.prepared_selections,
+                false,
+                Box::new(LeastLoaded),
+            ),
+        );
+        let (last, _last_rx) = make_request("last", 64);
+        let mut prepared = prepared_queue.queue.prepare_candidates(&last).unwrap();
+
+        // The most commands ahead of a caller when it sends: the rest of a full channel and
+        // the batch the actor took. Each books, which is one actor write.
+        for index in 0..ADMISSION_CHANNEL_CAPACITY + ADMISSION_BATCH - 1 {
+            let (request, _rx) = make_request(&format!("ahead-{index}"), 64);
+            let admission = actor.with_projected_loads(
+                request,
+                Instant::now(),
+                None,
+                |actor, request, prepared| {
+                    actor.admit_one_projected(
+                        AdmissionContext::untracked(0, None),
+                        request,
+                        prepared,
+                    )
+                },
+            );
+            assert_eq!(admission, Admission::Booked);
+        }
+
+        // Otherwise the actor projects all 2048 ranks itself, for every booking in a backlog.
+        let overlap = actor.projects_overlap();
+        assert!(
+            actor
+                .adopt_prepared_load(&mut prepared, &last, overlap, false)
+                .is_some()
+        );
     }
 
     #[tokio::test]

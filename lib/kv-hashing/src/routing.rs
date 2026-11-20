@@ -168,8 +168,8 @@ fn for_each_block_hash_for_seq_with_seed(
 
 /// Compute the next rolling sequence hash from a parent sequence hash and the
 /// current block hash. Delegates to [`dynamo_tokens::compute_next_sequence_hash`] — the
-/// single source of truth for the chain recurrence shared across kv-router,
-/// kvbm-logical, and the universal hashing crate.
+/// single source of truth for the chain recurrence shared across kv-router
+/// and the universal hashing crate.
 #[inline]
 pub fn compute_next_seq_hash(
     parent_seq_hash: SequenceHash,

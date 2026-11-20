@@ -18,7 +18,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.tokenspeed.disagg import (
@@ -51,6 +51,8 @@ class Config(DynamoRuntimeConfig):
     engine_startup_timeout: float = 3600.0
     # The prefill host advertised to decode workers, when not --host.
     bootstrap_host: Optional[str] = None
+    # Freeze the start-up heap and raise the GC thresholds once the engine is up.
+    freeze_gc_after_init: bool = False
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -108,6 +110,18 @@ class DynamoTokenSpeedArgGroup(ArgGroup):
             "Mooncake bootstrap server. Defaults to --host, or this machine's "
             "address when --host is loopback. Does not change where TokenSpeed "
             "listens.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-after-init",
+            env_var="DYN_TOKENSPEED_FREEZE_GC_AFTER_INIT",
+            default=False,
+            help=(
+                "Collect and freeze tracked objects in the worker process once the "
+                "engine has started, and raise the GC thresholds, so collections "
+                "stop re-walking the start-up heap and the queued output chunks. "
+                "Opt in only after validating memory usage for the workload."
+            ),
         )
 
 

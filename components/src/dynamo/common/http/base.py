@@ -69,8 +69,8 @@ class HttpStatusError(HttpError):
         # ``message`` is bounded in the *attribute*, not just in the rendered
         # string: errors.rs::extract_http_like_error reads ``.status`` and
         # ``.message`` off this class by name and, per the SECURITY note there,
-        # forwards ``.message`` verbatim to the client on a 4xx. Nothing in the
-        # rendered text reaches that path. ``url`` is not part of that protocol,
+        # keeps it private unless it exactly matches an approved public message.
+        # Nothing in the rendered text reaches that path. ``url`` is not part of that protocol,
         # so it keeps its full value for debugging.
         message = describe_error_detail(message, _MAX_MESSAGE_LENGTH)
         super().__init__(f"HTTP {status} for {describe_media_source(url)}: {message}")

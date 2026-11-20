@@ -92,6 +92,7 @@ pub enum WorkerSource {
 pub struct ListenerInfo {
     endpoint: String,
     engine_owned_mm_identity: bool,
+    idempotent_stores: bool,
     status: ListenerStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -143,6 +144,7 @@ pub struct ListenerRecord {
     endpoint: String,
     replay_endpoint: Option<String>,
     engine_owned_mm_identity: bool,
+    idempotent_stores: bool,
     block_size: u32,
     indexer: Indexer,
     watermark: Arc<AtomicU64>,
@@ -154,6 +156,7 @@ impl ListenerRecord {
         endpoint: String,
         replay_endpoint: Option<String>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
         block_size: u32,
         indexer: Indexer,
         watermark: Arc<AtomicU64>,
@@ -162,6 +165,7 @@ impl ListenerRecord {
             endpoint,
             replay_endpoint,
             engine_owned_mm_identity,
+            idempotent_stores,
             block_size,
             indexer,
             watermark,
@@ -184,6 +188,10 @@ impl ListenerRecord {
 
     pub(super) fn engine_owned_mm_identity(&self) -> bool {
         self.engine_owned_mm_identity
+    }
+
+    pub(super) fn idempotent_stores(&self) -> bool {
+        self.idempotent_stores
     }
 
     pub(super) fn block_size(&self) -> u32 {
@@ -298,6 +306,7 @@ impl ListenerRecord {
         ListenerInfo {
             endpoint: self.endpoint.clone(),
             engine_owned_mm_identity: self.engine_owned_mm_identity,
+            idempotent_stores: self.idempotent_stores,
             status: runtime.status,
             last_error: runtime.last_error.clone(),
         }
@@ -417,6 +426,7 @@ impl WorkerRegistry {
         block_size: u32,
         replay_endpoint: Option<String>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
     ) -> Result<()> {
         let key = RoutingPartitionId::new(model_name, routing_group);
         let registration = self.index.lock_lifecycle().await;
@@ -448,6 +458,7 @@ impl WorkerRegistry {
             endpoint,
             replay_endpoint,
             engine_owned_mm_identity,
+            idempotent_stores,
             bs,
             indexer,
             watermark,
@@ -838,6 +849,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -883,6 +895,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -914,6 +927,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -928,6 +942,7 @@ mod tests {
             "default".into(),
             1,
             None,
+            false,
             false,
         );
         tokio::pin!(registration);
@@ -1004,6 +1019,7 @@ mod tests {
                     1,
                     None,
                     engine_owned,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -1022,6 +1038,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_records_idempotent_stores_per_listener() {
+        let registry = test_registry();
+        for (dp_rank, idempotent_stores) in [(0, false), (1, true)] {
+            registry
+                .register(
+                    1,
+                    format!("tcp://127.0.0.1:{}", 15580 + dp_rank),
+                    dp_rank,
+                    "test-model".to_string(),
+                    "default".to_string(),
+                    1,
+                    None,
+                    false,
+                    idempotent_stores,
+                )
+                .await
+                .unwrap();
+        }
+
+        let entry = registry.workers.get(&1).unwrap();
+        assert!(!entry.listeners[&0].idempotent_stores());
+        assert!(entry.listeners[&1].idempotent_stores());
+        assert!(!entry.listeners[&1].engine_owned_mm_identity());
+        drop(entry);
+        let listed = serde_json::to_value(registry.list()).unwrap();
+        assert_eq!(listed[0]["listeners"]["0"]["idempotent_stores"], false);
+        assert_eq!(listed[0]["listeners"]["1"]["idempotent_stores"], true);
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn deregister_dp_rank_removes_watermark() {
         let registry = test_registry();
         registry.signal_ready();
@@ -1036,6 +1083,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1049,6 +1097,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
                 false,
             )
             .await
@@ -1087,6 +1136,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1112,6 +1162,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1133,6 +1184,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
                 false,
             )
             .await
@@ -1166,6 +1218,7 @@ mod tests {
                 1,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1198,6 +1251,7 @@ mod tests {
                 4,
                 None,
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1211,6 +1265,7 @@ mod tests {
                 "other-group".to_string(),
                 8,
                 None,
+                false,
                 false,
             )
             .await

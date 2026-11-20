@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Downloads thinkingmachines/Inkling-2-Mini from Hugging Face (weights and tokenizer) into the shared-model-cache PVC at
+# /shared-model-cache/Inkling-2-Mini, which the deployments mount. The runtime is in the image.
+# If the repo is private or gated for your account, create a token secret first (optional; skip it for a public repo):
+#   kubectl create secret generic hf-token --from-literal=HF_TOKEN=<token> -n $NAMESPACE
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inkling-2-mini-model-download
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: download
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.8.0-inkling-2-mini-dev.1
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import json, os
+              from huggingface_hub import snapshot_download
+              out = "/shared-model-cache/Inkling-2-Mini"
+              snapshot_download(repo_id="thinkingmachines/Inkling-2-Mini", local_dir=out,
+                                token=os.environ.get("HF_TOKEN") or None, max_workers=8)
+              # The loader fails late if a shard the index references is missing, so check here.
+              idx = os.path.join(out, "model.safetensors.index.json")
+              if os.path.exists(idx):
+                  shards = set(json.load(open(idx))["weight_map"].values())
+                  missing = sorted(s for s in shards if not os.path.exists(os.path.join(out, s)))
+                  assert not missing, missing
+              assert os.path.exists(os.path.join(out, "config.json")), "config.json missing"
+              print("DOWNLOAD COMPLETE", flush=True)
+          env:
+            - name: HF_HOME
+              value: /tmp/hf
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
