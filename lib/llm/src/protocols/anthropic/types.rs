@@ -44,7 +44,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
     ));
 }
 
-fn system_message_content(content: &AnthropicMessageContent) -> String {
+pub(crate) fn system_message_content(content: &AnthropicMessageContent) -> String {
     match content {
         AnthropicMessageContent::Text { content } => content.clone(),
         AnthropicMessageContent::Blocks { content } => content
@@ -57,6 +57,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
             .join("\n"),
     }
 }
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
