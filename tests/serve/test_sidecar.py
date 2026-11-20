@@ -10,6 +10,7 @@ import pathlib
 from dataclasses import dataclass, field, replace
 
 import pytest
+from huggingface_hub import snapshot_download
 
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
@@ -723,8 +724,6 @@ sidecar_configs = {
 
 
 def _prepare_media_config(config, request, tmp_path, ports):
-    from huggingface_hub import snapshot_download
-
     scenario = config.env["TRTLLM_TEST_MEDIA"]
     options = {
         "max_batch_size": 1,
