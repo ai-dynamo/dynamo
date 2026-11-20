@@ -127,6 +127,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
   fallback path.
 
+  When neither this flag nor `--router-policy-config` is set, the mode is `round-robin`. When only
+  a policy file is set, the mode is `kv` and the file selects each role's policy. A policy file
+  with any mode other than `kv` is an error.
+
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
@@ -378,7 +382,9 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies.
+  The file selects each role's policy, so pass it without `--router-mode`; any `--router-mode` other
+  than `kv` alongside it is an error. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 

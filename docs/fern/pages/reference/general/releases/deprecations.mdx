@@ -21,6 +21,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.8.0 - Upcoming
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **The frontend rejects `--router-policy-config` combined with a `--router-mode` other than `kv`.** A policy file now selects each role's worker-selection policy without `--router-mode kv`. Previously, a policy file passed with `round-robin`, `random`, `least-loaded`, `direct`, or `device-aware-weighted` was silently ignored, and so was a policy file passed with no `--router-mode`: that frontend ran `round-robin` and now routes by the file. `--router-mode kv` still works, with or without a policy file.
+
+  > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
 
 | Old | New |
