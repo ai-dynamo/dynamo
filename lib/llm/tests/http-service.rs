@@ -2963,7 +2963,10 @@ async fn test_batch_completion_uses_one_response_id() {
         .add_completions_model(MODEL, card.mdcsum(), engine.clone())
         .unwrap();
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
     let prompts = ["one", "two", "three"];
     let expected_id = || {
         let ids = std::mem::take(&mut *engine.context_ids.lock().unwrap());
