@@ -228,3 +228,17 @@ def test_real_dpkg_query_reports_conffiles_in_the_parsed_shape() -> None:
     assert lines, "no conffiles reported; cannot tell whether the field resolved"
     unparsed = [line for line in lines if not dpkg._CONFFILE_LINE.match(line)]
     assert not unparsed, f"conffile lines the pattern does not match: {unparsed[:5]}"
+
+
+def test_carries_each_packages_copyright_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A shipped package's own copyright file becomes its NOTICES license text."""
+    copyright_file = tmp_path / "usr/share/doc/bash/copyright"
+    copyright_file.parent.mkdir(parents=True)
+    copyright_file.write_text("bash COPYRIGHT\n", encoding="utf-8")
+    _fake_dpkg_query(monkeypatch, "bash\t5.2.21-2ubuntu4\tinstalled\n")
+
+    (component,) = dpkg.collect_components(tmp_path)
+
+    assert component.license_text == "bash COPYRIGHT\n"

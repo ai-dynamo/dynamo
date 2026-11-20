@@ -127,7 +127,7 @@ def test_concatenates_notices_files(tmp_path: Path) -> None:
     (tmp_path / "NOTICES-Python.txt").write_text("STALE PYTHON NOTICES\n")
     (tmp_path / "osrb-deps.csv").write_text("not a notices file\n")
 
-    text = write_third_party(tmp_path, ["rust", "go"]).read_text()
+    text = write_third_party(tmp_path, ["rust", "go"]).read_text(encoding="utf-8")
 
     assert text.startswith("THIRD-PARTY SOFTWARE NOTICES\n")
     assert text.index("GO NOTICES BODY") < text.index("RUST NOTICES BODY")
@@ -139,8 +139,10 @@ def test_concatenates_notices_files(tmp_path: Path) -> None:
 def test_source_location_only_when_given(tmp_path: Path) -> None:
     url = "https://example.invalid/dynamo-sources.zip"
 
-    assert url not in write_third_party(tmp_path, []).read_text()
-    text = write_third_party(tmp_path, [], source_location=url).read_text()
+    assert url not in write_third_party(tmp_path, []).read_text(encoding="utf-8")
+    text = write_third_party(tmp_path, [], source_location=url).read_text(
+        encoding="utf-8"
+    )
     assert f"available at:\n{url}\n" in text
 
 
@@ -173,7 +175,7 @@ def test_base_section_renders_each_license_text_once(tmp_path: Path) -> None:
     out = tmp_path / "legal"
     out.mkdir()
 
-    text = write_third_party(out, [], base_sbom=sbom).read_text()
+    text = write_third_party(out, [], base_sbom=sbom).read_text(encoding="utf-8")
 
     assert "BASE IMAGE — nvcr.io/nvidia/base/ubuntu:noble-test" in text
     assert "## liba 1.0\n\nLicenses: MIT\n" in text
@@ -234,7 +236,7 @@ def _run_main(tmp_path: Path, ecosystem: str) -> str:
         ]
     )
     assert rc == 0
-    return (out / "THIRD-PARTY.txt").read_text()
+    return (out / "THIRD-PARTY.txt").read_text(encoding="utf-8")
 
 
 def test_main_go_only_keeps_every_base_deb(tmp_path: Path) -> None:
@@ -281,6 +283,6 @@ def test_base_label_falls_back_to_filename(tmp_path: Path) -> None:
         json.dumps({"entries": [{"baseline_sbom": sbom.name}]})
     )
 
-    text = write_third_party(tmp_path, [], base_sbom=sbom).read_text()
+    text = write_third_party(tmp_path, [], base_sbom=sbom).read_text(encoding="utf-8")
 
     assert f"BASE IMAGE — {sbom.name}" in text

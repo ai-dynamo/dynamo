@@ -31,7 +31,7 @@ import subprocess
 from pathlib import Path
 
 from .. import overrides as license_overrides
-from .common import DEB_COPYRIGHT_DIR, UNKNOWN, Component
+from .common import DEB_COPYRIGHT_DIR, UNKNOWN, Component, read_deb_copyright
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +506,7 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
                 version=version,
                 spdx=spdx,
                 source_url=None,  # apt-get source URL is the right answer; see source-archival
+                license_text=read_deb_copyright(root, name),
             )
         )
 

@@ -209,6 +209,17 @@ _BASE_DEBS_FILTERED = (
 # Where a Debian package installs its copyright file, relative to the root.
 DEB_COPYRIGHT_DIR = Path("usr/share/doc")
 
+
+def read_deb_copyright(root: Path, package: str) -> str | None:
+    """Return the text of a Debian package's copyright file under root, or None."""
+    try:
+        return (root / DEB_COPYRIGHT_DIR / package / "copyright").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+
+
 # Placeholder for a base-image component whose SBOM entry declares no license.
 NOASSERTION = "NOASSERTION"
 
@@ -240,6 +251,7 @@ def load_base_components(
     one inside it gets its /usr/share/doc/<pkg>/copyright file, when present,
     as license text. An empty set means the scan found nothing: no filter.
     """
+    # Function-local: dpkg imports this module at load time.
     from .dpkg import _normalize_debian_license
 
     shipped_debs = shipped_debs or None
@@ -269,11 +281,7 @@ def load_base_components(
         if shipped_debs is not None and is_deb:
             if (name, version) not in shipped_debs:
                 continue
-            copyright_path = dpkg_root / DEB_COPYRIGHT_DIR / name / "copyright"
-            try:
-                text = copyright_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                text = None
+            text = read_deb_copyright(dpkg_root, name)
         comp = Component(
             ecosystem="base",
             name=name,
