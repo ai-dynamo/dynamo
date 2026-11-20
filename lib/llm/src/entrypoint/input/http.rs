@@ -320,7 +320,10 @@ async fn run_with_router_plugins(
     );
 
     let _graceful_task = distributed_runtime.register_graceful_task();
-    let run_result = http_service.run(distributed_runtime.child_token()).await;
+    let run_result = http_service
+        .with_runtime_shutdown(&distributed_runtime)
+        .run(distributed_runtime.primary_token().child_token())
+        .await;
 
     // Initiate runtime shutdown whenever the server exits, including bind
     // failures, for both discovery-backed and in-process engines.

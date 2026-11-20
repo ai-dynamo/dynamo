@@ -117,6 +117,14 @@ class DistributedRuntime:
         """
         ...
 
+    def force_shutdown(self) -> None:
+        """
+        Force the shutdown started by ``shutdown()`` (starting it first if needed):
+        drained work is aborted rather than waited on. A frontend skips its
+        propagation window and drain and ends in-flight exchanges.
+        """
+        ...
+
     def set_health_status(self, ready: bool) -> None:
         """
         Explicitly set the system-level health status (Ready / NotReady).

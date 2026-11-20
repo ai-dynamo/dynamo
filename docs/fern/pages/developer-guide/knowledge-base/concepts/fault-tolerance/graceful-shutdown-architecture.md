@@ -88,17 +88,14 @@ generate_endpoint.serve_endpoint(
 
 ### Frontend HTTP Draining
 
-The Frontend uses a separate HTTP drain state before it cancels the distributed runtime:
+The HTTP Frontend holds a graceful task in the runtime until its listener finishes draining.
 
-1. Mark the server as draining.
-2. Return `503 Service Unavailable` from `/health` and reject new OpenAI-compatible requests with 503.
-3. Keep `/live` at `200 OK` so liveness probes do not restart the process while requests drain.
-4. Wait for admitted response bodies, including streaming responses, to complete.
-5. Continue tracking accepted `/v1/realtime` WebSocket sessions until their tasks exit, even though the HTTP upgrade response has completed.
-6. After `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires (default `5` seconds), enter the stopping state and cancel runtime state.
+1. On the first `SIGTERM` or `SIGINT`, the Frontend calls `runtime.shutdown()`.
+2. The HTTP service enters `propagating`. Its `/health` endpoint returns 503 and `/live` returns 200. It continues serving inference while upstream endpoints stop routing traffic to it.
+3. After `DYN_FRONTEND_PROPAGATION_DELAY_SECS` (default 5 seconds), the service enters `draining`. New inference requests receive 503. Admitted response bodies and upgraded `/v1/realtime` WebSocket sessions have up to `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (default 5 seconds) to finish.
+4. When draining completes or times out, the service enters `stopping` and releases its graceful task so runtime teardown can proceed.
 
-This separates readiness from liveness: traffic is removed promptly without turning an intentional
-drain into a restart loop.
+A second signal calls `runtime.force_shutdown()` and interrupts either the propagation window or the drain.
 
 ### Migration Integration
 
