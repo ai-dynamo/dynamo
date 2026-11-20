@@ -79,8 +79,11 @@ from dynamo.common.utils.input_params import (
     resolve_thinking_token_budget,
 )
 from dynamo.common.utils.structural_tag import (
+    publish_vllm_structural_tag_backend,
+    publish_vllm_structural_tag_reasoning_policy,
     serialize_structural_tag,
-    validate_structural_tag_backend,
+    structural_tag_backend_compatible,
+    structural_tag_backend_error,
 )
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.common.utils.token_ids import normalize_request_token_ids
@@ -1044,13 +1047,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         # The selected worker knows the effective backend, even when workers
         # serving the same model have different structured-output settings.
-        validate_structural_tag_backend(
-            structured_outputs.structural_tag,
-            self.engine_client.vllm_config.structured_outputs_config.backend,
-            backend_label="vLLM structured-output backend",
-            supported_backends=("auto", "xgrammar"),
-            legacy_backend="guidance",
-        )
+        backend = self.engine_client.vllm_config.structured_outputs_config.backend
+        if not structural_tag_backend_compatible(
+            structured_outputs.structural_tag, backend
+        ):
+            raise InvalidArgument(structural_tag_backend_error(backend))
 
     @property
     def loaded_loras(self) -> dict[str, LoRAInfo]:
@@ -2435,6 +2436,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
         runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+        publish_vllm_structural_tag_backend(
+            runtime_config, self.engine_client.vllm_config
+        )
+        publish_vllm_structural_tag_reasoning_policy(
+            runtime_config, self.engine_client.vllm_config
+        )
 
         if lora_worker_type in (WorkerType.Aggregated, WorkerType.Decode):
             lora_config = self.engine_client.vllm_config.lora_config

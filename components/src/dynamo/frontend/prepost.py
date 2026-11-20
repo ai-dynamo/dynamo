@@ -49,6 +49,10 @@ from dynamo.common.utils.guided_json import (
     admits_only_empty_object,
     reject_nonprogressing_guided_json_ref_cycles,
 )
+from dynamo.common.utils.structural_tag import (
+    structural_tag_backend_compatible,
+    structural_tag_backend_error,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_template, responses_tools_request
@@ -285,6 +289,22 @@ def _request_for_vllm_structural_tag(
             )
         )
     return request.model_copy(update={"tools": tools})
+
+
+def _tool_fallback_preserves_schema_policy(
+    request: ChatCompletionRequest, schema_mode: str
+) -> bool:
+    choice = request.tool_choice
+    named_tool = (
+        choice.function.name
+        if isinstance(choice, ChatCompletionNamedToolChoiceParam)
+        else None
+    )
+    return all(
+        effective_tool_strict(tool.function.strict, schema_mode)
+        for tool in request.tools or []
+        if named_tool is None or tool.function.name == named_tool
+    )
 
 
 def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
@@ -651,6 +671,34 @@ def _prompt_leaves_reasoning_open(
     return tail.rstrip().endswith(start)
 
 
+def _can_start_bare_tool_guidance(
+    prompt_token_ids: list[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+    request_for_sampling: ChatCompletionRequest,
+) -> bool:
+    # A prompt can continue an open reasoning block without ending in its opener.
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        return not glm_open
+    if not _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs):
+        return True
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    return parser.is_reasoning_end(prompt_token_ids)
+
+
 def _reasoning_block_until(
     end: str, tokenizer: TokenizerLike, parser: ReasoningParser
 ) -> dict[str, Any]:
@@ -967,6 +1015,8 @@ async def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
+    backend_defers_grammar: bool = False,
+    structural_tag_backend: str | None = None,
     request_id: str | None = None,
 ) -> PreprocessResult:
     """Render a validated chat request and select its engine guidance and parsers."""
@@ -1117,7 +1167,7 @@ async def preprocess_chat_request(
         response_format = validated_request.response_format
         response_format_type = response_format.type if response_format else None
         if (
-            not structural_tag_excludes_reasoning
+            not backend_defers_grammar
             and not has_explicit_output_constraint
             and response_format_type in ("json_object", "json_schema")
         ):
@@ -1135,6 +1185,48 @@ async def preprocess_chat_request(
             )
     else:
         guided_decoding = tool_guided_decoding
+    if (
+        guided_decoding is not None
+        and "structural_tag" in guided_decoding
+        and not structural_tag_backend_compatible(
+            guided_decoding["structural_tag"], structural_tag_backend
+        )
+    ):
+        # Only replace a generated tool constraint. Caller/reasoning-parser
+        # constraints have already won precedence and must never be discarded.
+        if (
+            guided_decoding is tool_guided_decoding
+            and is_forced_tool_choice
+            and not reasoning_rewrote_guidance
+            # Outlines and LM Format Enforcer can silently drop argument
+            # constraints such as numeric bounds when given a JSON schema.
+            and structural_tag_backend == "guidance"
+            and _tool_fallback_preserves_schema_policy(
+                request_for_sampling, structural_tag_schema
+            )
+            # The generic bare-JSON decoder expects tool arguments from the
+            # first output token, even when the engine can defer enforcement.
+            and _can_start_bare_tool_guidance(
+                tokens,
+                tokenizer=tokenizer,
+                reasoning_parser_class=reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+                request_for_sampling=request_for_sampling,
+            )
+            and (tool_parser is None or tool_parser.supports_required_and_named)
+        ):
+            fallback = build_tool_call_guided_decoding(
+                request_for_sampling, tool_parser
+            )
+            if fallback is not None and (
+                parser_guided_decoding is None or parser_guided_decoding == fallback
+            ):
+                guided_decoding = tool_guided_decoding = fallback
+                # The alternate matches the generic decoder's wire format.
+                parser_guided_decoding = None
+        if guided_decoding is not None and "structural_tag" in guided_decoding:
+            raise InvalidArgument(structural_tag_backend_error(structural_tag_backend))
     # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema
     # when a forced tool choice has no parser-provided grammar.  That can happen
     # both without a parser and with parsers (for example Hermes) whose

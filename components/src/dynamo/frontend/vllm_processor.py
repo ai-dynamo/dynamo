@@ -56,6 +56,7 @@ from .prepost import (
 )
 from .structural_tag_policy import (
     runtime_backend_defers_grammar,
+    runtime_structural_tag_backend,
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
 )
@@ -610,6 +611,9 @@ def _build_reasoning_parser_metadata(
         return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
+    bare_json = guided_decoding is not None and (
+        "json" in guided_decoding or "regex" in guided_decoding
+    )
     # A known GLM prompt state overrides the thinking flags. vLLM's GLM parser
     # reads every marker as content when both flags are false, so its kwargs follow.
     glm_open = _glm_prompt_reasoning_open(
@@ -621,9 +625,6 @@ def _build_reasoning_parser_metadata(
     if glm_open is not None:
         # Bare JSON starts immediately unless the worker advertises that it
         # delays the grammar. Display preferences do not decide that boundary.
-        bare_json = guided_decoding is not None and (
-            "json" in guided_decoding or "regex" in guided_decoding
-        )
         reasoning_ended = not glm_open or (bare_json and not backend_defers_grammar)
         return _ReasoningParserMetadata(
             reasoning_ended,
@@ -660,6 +661,7 @@ def _build_reasoning_parser_metadata(
     engine_reasoning_ended = (
         True
         if not getattr(request_for_sampling, "include_reasoning", True)
+        and not (bare_json and backend_defers_grammar)
         else response_reasoning_ended
     )
     return _ReasoningParserMetadata(
@@ -790,6 +792,7 @@ class VllmProcessor:
         structural_tag_schema: str = "auto",
         structural_tag_excludes_reasoning: bool = False,
         backend_defers_grammar: bool = False,
+        structural_tag_backend: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -806,6 +809,7 @@ class VllmProcessor:
         self.structural_tag_schema = structural_tag_schema
         self.structural_tag_excludes_reasoning = structural_tag_excludes_reasoning
         self.backend_defers_grammar = backend_defers_grammar
+        self.structural_tag_backend = structural_tag_backend
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -1051,6 +1055,8 @@ class VllmProcessor:
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
                 structural_tag_excludes_reasoning=self.structural_tag_excludes_reasoning,
+                backend_defers_grammar=self.backend_defers_grammar,
+                structural_tag_backend=self.structural_tag_backend,
                 request_id=context.id() if context is not None else request_id,
             )
 
@@ -1900,6 +1906,7 @@ class EngineFactory:
             structural_tag_schema=structural_tag_schema,
             structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
             backend_defers_grammar=runtime_backend_defers_grammar(runtime_config),
+            structural_tag_backend=runtime_structural_tag_backend(runtime_config),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
