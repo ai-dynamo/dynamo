@@ -772,6 +772,10 @@ impl DeltaAggregator {
             })?;
         }
         if let Some(family) = selected_unified_family {
+            let incomplete_call_policy = super::unified_parser::IncompleteNativeToolCallPolicy::new(
+                parsing_options.reject_incomplete_native_tool_calls,
+                parsing_options.parallel_tool_calls == Some(false),
+            );
             for choice in aggregator.choices.values_mut() {
                 if choice.text.is_empty()
                     || choice
@@ -807,18 +811,16 @@ impl DeltaAggregator {
                         }
                         // A complete first call satisfies the single-call contract even
                         // when native generation produces an unfinished sibling.
-                        let incomplete_selected_call = parsed.incomplete_native_call
-                            && !(parsing_options.reject_incomplete_native_tool_calls
-                                && parsing_options.parallel_tool_calls == Some(false)
-                                && !parsed.tool_calls.is_empty());
+                        let incomplete_selected_call = incomplete_call_policy
+                            .incomplete_selected_call(parsed.incomplete_native_call, || {
+                                !parsed.tool_calls.is_empty()
+                            });
                         if incomplete_selected_call
                             && !parsing_options.suppress_tool_calls
-                            && super::unified_parser::rejects_incomplete_native_tool_call(
-                                family,
+                            && incomplete_call_policy.rejects_at(
                                 choice
                                     .finish_reason
                                     .unwrap_or(dynamo_protocols::types::FinishReason::Stop),
-                                parsing_options.reject_incomplete_native_tool_calls,
                             )
                         {
                             return Err(super::unified_parser::incomplete_tool_call_error());

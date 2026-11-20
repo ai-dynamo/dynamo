@@ -1002,7 +1002,8 @@ For streaming `/v1/responses` requests on a deployment advertising
 `responses_context_overflow_events=true`, context overflow returns HTTP 200
 with a terminal `response.failed` event whose
 `response.error.code` is `context_length_exceeded`. The TensorRT-LLM sidecar
-advertises this capability. During a rolling upgrade, the frontend enables each
+advertises this capability and converts legacy OpenEngine context-limit errors
+to typed rejections before forwarding them. During a rolling upgrade, the frontend enables each
 generation capability once every worker in its serving group advertises it.
 Clients must inspect terminal SSE events. HTTP 200
 alone does not mean generation succeeded. An overflow detected before streaming

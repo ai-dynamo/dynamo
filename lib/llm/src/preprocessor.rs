@@ -108,7 +108,7 @@ use crate::protocols::{
         chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             scrub_synthetic_chunk_metadata,
-            unified_parser::{glm_reasoning_prefill_is_closed, validate_glm_thinking_off_prefill},
+            unified_parser::{GLM_THINKING_OFF_PREFILL_ERROR, glm_reasoning_prefill_is_closed},
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -117,7 +117,8 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+    DeveloperRolePolicy, MediaRequestExt, apply_continue_final_message,
+    chat_prompt_formatter_from_mdc, prompt_formatter_from_mdc,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -250,6 +251,8 @@ pub struct PromptReasoningPrefill {
     /// treats an unclosed prompt as open; GLM requires an explicit boundary.
     /// `None` leaves the request's thinking controls authoritative.
     reasoning_closed_by_prompt: Option<bool>,
+    /// A parser-specific diagnostic when this rendered prefill cannot honor thinking-off.
+    thinking_off_error: Option<&'static str>,
     /// The prompt left the model's final (visible) channel open — an assistant
     /// prefill with `continue_final_message` on a channel grammar (Beam) — so the
     /// unified parser starts in `Response` instead of waiting for a channel opener.
@@ -326,6 +329,7 @@ impl From<bool> for PromptReasoningPrefill {
             unified_starting_state: None,
             prefix: None,
             reasoning_closed_by_prompt: None,
+            thinking_off_error: None,
             response: false,
             beam_channel: None,
         }
@@ -2153,7 +2157,7 @@ pub struct OpenAIPreprocessor {
     /// parser) and any model that sets `normalize_tool_call_args: true` in its
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
-    uses_custom_chat_template: bool,
+    developer_role: DeveloperRolePolicy,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -3019,11 +3023,26 @@ impl OpenAIPreprocessor {
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
-        match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
-        }
+        Self::new_for_chat(mdc, tokenizer, None)
+    }
+
+    pub(crate) fn new_for_chat(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
+        let (PromptFormatter::OAI(formatter), developer_role) =
+            chat_prompt_formatter_from_mdc(&mdc)?;
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            developer_role,
+            tokenizer,
+            None,
+            speculative_prefill_cancel,
+            true,
+        )
     }
 
     /// Build the preprocessor used by token-input embedding pipelines.
@@ -3038,6 +3057,7 @@ impl OpenAIPreprocessor {
         Self::new_with_parts_inner(
             mdc,
             formatter,
+            DeveloperRolePolicy::Preserve,
             tokenizer,
             Some(embedding_tokenizers),
             None,
@@ -3050,7 +3070,15 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            DeveloperRolePolicy::Preserve,
+            tokenizer,
+            None,
+            None,
+            false,
+        )
     }
 
     pub fn new_with_parts(
@@ -3071,6 +3099,7 @@ impl OpenAIPreprocessor {
         Self::new_with_parts_inner(
             mdc,
             formatter,
+            DeveloperRolePolicy::Preserve,
             tokenizer,
             None,
             speculative_prefill_cancel,
@@ -3081,6 +3110,7 @@ impl OpenAIPreprocessor {
     fn new_with_parts_inner(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
+        developer_role: DeveloperRolePolicy,
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
@@ -3511,10 +3541,7 @@ impl OpenAIPreprocessor {
             beam_route,
             mistral_tool_call_grammar,
             normalize_tool_call_args,
-            uses_custom_chat_template: mdc
-                .chat_template_file
-                .as_ref()
-                .is_some_and(PromptFormatterArtifact::is_custom),
+            developer_role,
             media_loader,
             token_budget,
             context_length,
@@ -4172,13 +4199,6 @@ impl OpenAIPreprocessor {
             .map(|(prompt, _)| prompt)
     }
 
-    fn uses_glm_parser(&self) -> bool {
-        crate::protocols::openai::chat_completions::unified_parser::configured_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) == Some(crate::protocols::openai::chat_completions::unified_parser::GLM47_UNIFIED_FAMILY)
-    }
-
     fn apply_template_and_prefill<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -4240,9 +4260,7 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
-        let uses_glm_parser = self.uses_glm_parser();
-        let normalize_developer_role = uses_glm_parser
-            && !self.uses_custom_chat_template
+        let normalize_developer_role = self.developer_role == DeveloperRolePolicy::RenderAsSystem
             && request.typed_messages().is_some_and(|messages| {
                 messages.iter().any(|message| {
                     matches!(
@@ -4292,8 +4310,14 @@ impl OpenAIPreprocessor {
             }
             None => (None, None),
         };
+        let mut prefill = Self::prompt_reasoning_prefill_at_boundary(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
+            header_search_end,
+        );
         if request.should_add_generation_prompt()
-            && uses_glm_parser
+            && let Some(message) = prefill.thinking_off_error
             && self
                 .runtime_config
                 .runtime_data
@@ -4306,16 +4330,9 @@ impl OpenAIPreprocessor {
                 request.chat_template_args(),
                 self.runtime_config.reasoning_parser.as_deref(),
             ) == Some(false)
-            && let Some(prompt) = formatted_prompt.as_ref()
         {
-            validate_glm_thinking_off_prefill(prompt.as_str())?;
+            return Err(crate::protocols::common::invalid_argument_error(message));
         }
-        let mut prefill = Self::prompt_reasoning_prefill_at_boundary(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
-            header_search_end,
-        );
         // Without a generation prompt (`add_generation_prompt: false`, or a
         // continued final message, which ends inside the assistant's text) the
         // tail cannot establish the template's reasoning state: keep the
@@ -7802,10 +7819,10 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
         header_search_end: Option<usize>,
     ) -> PromptReasoningPrefill {
-        let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
-            tool_call_parser,
-            reasoning_parser,
-        );
+        use crate::protocols::openai::chat_completions::unified_parser::{
+            GLM47_UNIFIED_FAMILY, configured_family,
+        };
+        let family = configured_family(tool_call_parser, reasoning_parser);
         let assistant_prefill = (family == Some("gpt_oss"))
             .then(|| {
                 formatted_prompt
@@ -7848,14 +7865,19 @@ impl OpenAIPreprocessor {
         // the rendered prompt is what the model was told. A chat template that
         // does not render `thinking_mode` leaves a "disabled" prompt open, so
         // the model may still open with `<mm:think>` or `</mm:think>`.
-        let reasoning_closed_by_prompt = if matches!(reasoning_parser, Some("glm45" | "glm47")) {
-            formatted_prompt.and_then(|prompt| {
-                if unified {
-                    Some(false)
-                } else {
-                    glm_reasoning_prefill_is_closed(prompt).then_some(true)
-                }
-            })
+        let glm_reasoning = matches!(reasoning_parser, Some("glm45" | "glm47"));
+        let glm_profile = family == Some(GLM47_UNIFIED_FAMILY);
+        let glm_prefill_closed = if glm_reasoning || glm_profile {
+            formatted_prompt.map(glm_reasoning_prefill_is_closed)
+        } else {
+            None
+        };
+        let reasoning_closed_by_prompt = if glm_reasoning {
+            if unified {
+                formatted_prompt.map(|_| false)
+            } else {
+                glm_prefill_closed.filter(|&closed| closed)
+            }
         } else {
             Self::is_minimax_m3_reasoning_parser(reasoning_parser)
                 .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
@@ -7883,6 +7905,8 @@ impl OpenAIPreprocessor {
             .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
             prefix,
             reasoning_closed_by_prompt,
+            thinking_off_error: (glm_profile && glm_prefill_closed == Some(false))
+                .then_some(GLM_THINKING_OFF_PREFILL_ERROR),
             response,
             beam_channel,
         }
@@ -10228,7 +10252,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn glm_developer_messages_reach_the_rendered_prompt_in_order() {
+    fn developer_role_rendering_follows_the_selected_template() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test", "messages": [
                 {"role": "system", "content": "SYSTEM"},
@@ -10239,46 +10263,68 @@ mod tests {
         }))
         .unwrap();
         let original = serde_json::to_value(&request).unwrap();
-        const TEMPLATE: &str = "{% for m in messages %}{% if m.role == 'system' or m.role == 'user' %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}";
+        const TEMPLATE: &str = concat!(
+            "{# <|system|> <|assistant|> <arg_key> <arg_value> #}",
+            "{% for m in messages %}{% if m.role == 'system' or m.role == 'user' %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}"
+        );
+        const DEVELOPER_TEMPLATE: &str = concat!(
+            "{# <|system|> <|assistant|> <arg_key> <arg_value> #}",
+            "{% for m in messages %}{% if m.role in ['system', 'developer', 'user'] %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}"
+        );
         const CUSTOM_TEMPLATE: &str =
             "{% for m in messages %}[{{ m.role }}:{{ m.content }}]{% endfor %}";
-        for (tool, reasoning, custom, expected) in [
+        const AS_SYSTEM: &str = "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]";
+        const AS_DEVELOPER: &str =
+            "[system:SYSTEM][developer:DEV_ONE][user:USER][developer:DEV_TWO]";
+        let model_dir = PathBuf::from("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let metadata_dir = tempfile::tempdir().unwrap();
+        let config_path = metadata_dir.path().join("config.json");
+        let tokenizer_config = metadata_dir.path().join("tokenizer_config.json");
+        let custom_path = metadata_dir.path().join("override.jinja");
+        std::fs::write(&custom_path, CUSTOM_TEMPLATE).unwrap();
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(model_dir.join("config.json")).unwrap()).unwrap();
+        let stock = serde_json::json!(TEMPLATE);
+        for (model_type, custom, template, expected) in [
+            ("glm4_moe", false, stock.clone(), AS_SYSTEM),
+            ("glm4_moe_lite", false, stock.clone(), AS_SYSTEM),
+            ("glm_moe_dsa", false, stock.clone(), AS_SYSTEM),
+            ("", false, stock.clone(), AS_SYSTEM),
+            ("glm_moe_dsa", true, stock.clone(), AS_DEVELOPER),
             (
-                Some("glm47"),
-                Some("glm45"),
+                "glm_moe_dsa",
                 false,
-                "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]",
+                serde_json::json!(DEVELOPER_TEMPLATE),
+                AS_DEVELOPER,
             ),
             (
-                None,
-                Some("glm45"),
+                "glm_moe_dsa",
                 false,
-                "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]",
+                serde_json::json!([{"default": DEVELOPER_TEMPLATE}, {"tool_use": TEMPLATE}]),
+                AS_DEVELOPER,
             ),
-            (
-                Some("glm47"),
-                Some("glm45"),
-                true,
-                "[system:SYSTEM][developer:DEV_ONE][user:USER][developer:DEV_TWO]",
-            ),
-            (
-                Some("qwen3"),
-                Some("qwen3"),
-                false,
-                "[system:SYSTEM][user:USER]",
-            ),
+            ("qwen3", false, stock, "[system:SYSTEM][user:USER]"),
         ] {
-            let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
-            preprocessor.uses_custom_chat_template = custom;
-            preprocessor.formatter =
-                test_prompt_formatter(if custom { CUSTOM_TEMPLATE } else { TEMPLATE });
-            preprocessor.tool_call_parser = tool.map(str::to_owned);
-            preprocessor.runtime_config.reasoning_parser = reasoning.map(str::to_owned);
+            config["model_type"] = model_type.into();
+            std::fs::write(&config_path, config.to_string()).unwrap();
+            std::fs::write(
+                &tokenizer_config,
+                serde_json::json!({"chat_template":template}).to_string(),
+            )
+            .unwrap();
+            let mut card =
+                ModelDeploymentCard::load_from_disk(&model_dir, custom.then_some(&custom_path))
+                    .unwrap();
+            card.model_info =
+                Some(crate::model_card::ModelInfoType::from_disk(metadata_dir.path()).unwrap());
+            card.prompt_formatter =
+                PromptFormatterArtifact::from_disk(metadata_dir.path()).unwrap();
+            let preprocessor = OpenAIPreprocessor::new(card).unwrap();
             let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
             assert_eq!(
                 rendered.as_str(),
                 expected,
-                "tool={tool:?} reasoning={reasoning:?}"
+                "model_type={model_type:?} custom={custom}"
             );
             assert_eq!(serde_json::to_value(&request).unwrap(), original);
         }

@@ -83,14 +83,7 @@ pub(crate) fn glm_reasoning_prefill_is_closed(prompt: &str) -> bool {
     prompt.trim_end().ends_with("</think>")
 }
 
-pub(crate) fn validate_glm_thinking_off_prefill(prompt: &str) -> anyhow::Result<()> {
-    if glm_reasoning_prefill_is_closed(prompt) {
-        return Ok(());
-    }
-    Err(crate::protocols::common::invalid_argument_error(
-        "The selected GLM chat template does not render a closed reasoning prefill for thinking-off. Remove the reasoning-off setting or use a template that supports it.",
-    ))
-}
+pub(crate) const GLM_THINKING_OFF_PREFILL_ERROR: &str = "The selected GLM chat template does not render a closed reasoning prefill for thinking-off. Remove the reasoning-off setting or use a template that supports it.";
 
 pub(crate) fn incomplete_tool_call_error() -> DynamoError {
     DynamoError::builder()
@@ -108,25 +101,44 @@ fn parser_error_annotation(
     ))
 }
 
-pub(crate) fn rejects_incomplete_native_tool_call(
-    family: &str,
-    reason: FinishReason,
-    enabled: bool,
-) -> bool {
-    enabled
-        && family == GLM47_UNIFIED_FAMILY
-        && matches!(reason, FinishReason::Stop | FinishReason::ToolCalls)
+#[derive(Clone, Copy, Default)]
+pub(super) enum IncompleteNativeToolCallPolicy {
+    #[default]
+    Recover,
+    Reject,
+    RejectUnlessFirstCompleted,
 }
 
-fn incomplete_glm_terminal(
-    family: &str,
-    reason: Option<FinishReason>,
-    enabled: bool,
-    incomplete: impl FnOnce() -> bool,
-) -> Option<DynamoError> {
-    (reason.is_some_and(|reason| rejects_incomplete_native_tool_call(family, reason, enabled))
-        && incomplete())
-    .then(incomplete_tool_call_error)
+impl IncompleteNativeToolCallPolicy {
+    pub(super) fn new(reject: bool, single_tool_call: bool) -> Self {
+        match (reject, single_tool_call) {
+            (false, _) => Self::Recover,
+            (true, true) => Self::RejectUnlessFirstCompleted,
+            (true, false) => Self::Reject,
+        }
+    }
+
+    pub(super) fn incomplete_selected_call(
+        self,
+        incomplete: bool,
+        first_completed: impl FnOnce() -> bool,
+    ) -> bool {
+        incomplete && !(matches!(self, Self::RejectUnlessFirstCompleted) && first_completed())
+    }
+
+    pub(super) fn rejects_at(self, reason: FinishReason) -> bool {
+        !matches!(self, Self::Recover)
+            && matches!(reason, FinishReason::Stop | FinishReason::ToolCalls)
+    }
+
+    fn terminal_error(
+        self,
+        reason: Option<FinishReason>,
+        incomplete: impl FnOnce() -> bool,
+    ) -> Option<DynamoError> {
+        (reason.is_some_and(|reason| self.rejects_at(reason)) && incomplete())
+            .then(incomplete_tool_call_error)
+    }
 }
 
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
@@ -1698,6 +1710,13 @@ enum NativeGrammarState {
     Glm(GlmNativeStreamState),
 }
 
+/// GLM's adapter detects calls that would otherwise disappear when the parser
+/// sees an unfinished native envelope. Keep strict termination opt-in to
+/// adapters that can report that evidence.
+fn reports_incomplete_native_calls(family: &str) -> bool {
+    family == GLM47_UNIFIED_FAMILY
+}
+
 /// Adapter ordering state for the Qwen XML dialect; source responses live longer
 /// than a parser instance and remain in `ChoiceRecord`.
 #[derive(Default)]
@@ -2063,7 +2082,7 @@ impl QuotedControlMarkerProbe {
 pub(crate) struct ChoiceState {
     native_grammar_state: NativeGrammarState,
     incomplete_native_call: bool,
-    retain_first_glm_call: bool,
+    incomplete_call_policy: IncompleteNativeToolCallPolicy,
     family: String,
     message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
@@ -2241,7 +2260,7 @@ impl ChoiceState {
                 NativeGrammarState::None
             },
             incomplete_native_call: false,
-            retain_first_glm_call: false,
+            incomplete_call_policy: IncompleteNativeToolCallPolicy::Recover,
             family: family.to_string(),
             message_boundaries: Vec::new(),
             parser,
@@ -2881,20 +2900,20 @@ impl ChoiceState {
     }
 
     fn has_incomplete_native_tool_call(&self) -> bool {
-        (self.incomplete_native_call || !self.pending_tool_calls.is_empty())
-            && !self.first_glm_call_is_complete()
+        self.incomplete_call_policy.incomplete_selected_call(
+            self.incomplete_native_call || !self.pending_tool_calls.is_empty(),
+            || self.parser_call_completion.get(&0) == Some(&true),
+        )
     }
 
     fn has_incomplete_tool_call(&self) -> bool {
-        (self.incomplete_native_call
-            || !self.pending_tool_calls.is_empty()
-            || !self.pending_parsed_tool_calls.is_empty()
-            || has_incomplete_call_evidence(&self.parser_call_completion))
-            && !self.first_glm_call_is_complete()
-    }
-
-    fn first_glm_call_is_complete(&self) -> bool {
-        self.retain_first_glm_call && self.parser_call_completion.get(&0) == Some(&true)
+        self.incomplete_call_policy.incomplete_selected_call(
+            self.incomplete_native_call
+                || !self.pending_tool_calls.is_empty()
+                || !self.pending_parsed_tool_calls.is_empty()
+                || has_incomplete_call_evidence(&self.parser_call_completion),
+            || self.parser_call_completion.get(&0) == Some(&true),
+        )
     }
 
     /// OpenAI streaming contract: `Stop` becomes `ToolCalls` only when every emitted
@@ -3275,7 +3294,7 @@ fn parse_complete_in_mode(
 #[derive(Default)]
 struct ChoiceRecord {
     incomplete_native_call: bool,
-    retain_first_glm_call: bool,
+    incomplete_call_policy: IncompleteNativeToolCallPolicy,
     opened_calls: HashSet<usize>,
     tool_ids_emitted: HashSet<usize>,
     tool_types_emitted: HashSet<usize>,
@@ -3530,20 +3549,20 @@ fn stream_chunks_for_choices(
 
 impl ChoiceRecord {
     fn has_incomplete_native_tool_call(&self) -> bool {
-        (self.incomplete_native_call || !self.pending_tool_calls.is_empty())
-            && !self.first_glm_call_is_complete()
+        self.incomplete_call_policy.incomplete_selected_call(
+            self.incomplete_native_call || !self.pending_tool_calls.is_empty(),
+            || self.parser_call_completion.get(&0) == Some(&true),
+        )
     }
 
     fn has_incomplete_tool_call(&self) -> bool {
-        (self.incomplete_native_call
-            || !self.pending_tool_calls.is_empty()
-            || !self.pending_parsed_tool_calls.is_empty()
-            || has_incomplete_call_evidence(&self.parser_call_completion))
-            && !self.first_glm_call_is_complete()
-    }
-
-    fn first_glm_call_is_complete(&self) -> bool {
-        self.retain_first_glm_call && self.parser_call_completion.get(&0) == Some(&true)
+        self.incomplete_call_policy.incomplete_selected_call(
+            self.incomplete_native_call
+                || !self.pending_tool_calls.is_empty()
+                || !self.pending_parsed_tool_calls.is_empty()
+                || has_incomplete_call_evidence(&self.parser_call_completion),
+            || self.parser_call_completion.get(&0) == Some(&true),
+        )
     }
 
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
@@ -3555,7 +3574,7 @@ impl ChoiceRecord {
     }
 
     fn remember_state(&mut self, state: &ChoiceState) {
-        self.retain_first_glm_call = state.retain_first_glm_call;
+        self.incomplete_call_policy = state.incomplete_call_policy;
         self.incomplete_native_call |= state.incomplete_native_call;
         self.opened_calls.extend(state.opened_calls.iter().copied());
         self.tool_ids_emitted
@@ -3589,13 +3608,13 @@ impl ChoiceRecord {
 /// never rebuilt, so all that remains is its `ChoiceRecord`. The second case has
 /// nothing left to flush, but a choice with a completed tool call still needs a synthesized
 /// `ToolCalls` terminal so a strict client doesn't hang waiting for one; a choice that
-/// never called a tool gets no synthetic chunk unless a suppressed GLM native
+/// never called a tool gets no synthetic chunk unless a suppressed native
 /// call needs an error to expose the incomplete output.
 fn finish_unterminated_choices(
     states: &mut HashMap<u32, ChoiceState>,
     records: &mut HashMap<u32, ChoiceRecord>,
     family: &str,
-    reject_incomplete_native_tool_calls: bool,
+    incomplete_call_policy: IncompleteNativeToolCallPolicy,
 ) -> Vec<FinishedStreamChunk> {
     let mut indices: Vec<u32> = states
         .keys()
@@ -3624,12 +3643,11 @@ fn finish_unterminated_choices(
                 // use the family policy so default-on parsers retain their EOF contract.
                 let mut flushed = state.choices_for(&base, deltas, true, None);
                 state.resolve_complete_parsed_tool_calls_at_eof();
-                if let Some(error) = incomplete_glm_terminal(
-                    family,
-                    Some(FinishReason::Stop),
-                    reject_incomplete_native_tool_calls,
-                    || state.has_incomplete_native_tool_call(),
-                ) {
+                if let Some(error) = incomplete_call_policy
+                    .terminal_error(Some(FinishReason::Stop), || {
+                        state.has_incomplete_native_tool_call()
+                    })
+                {
                     for choice in &mut flushed {
                         choice.finish_reason = None;
                     }
@@ -3670,12 +3688,11 @@ fn finish_unterminated_choices(
                     &mut record.pending_parsed_tool_calls,
                     family,
                 );
-                if let Some(error) = incomplete_glm_terminal(
-                    family,
-                    Some(FinishReason::Stop),
-                    reject_incomplete_native_tool_calls,
-                    || record.has_incomplete_native_tool_call(),
-                ) {
+                if let Some(error) = incomplete_call_policy
+                    .terminal_error(Some(FinishReason::Stop), || {
+                        record.has_incomplete_native_tool_call()
+                    })
+                {
                     chunks.push(FinishedStreamChunk::Error(error.into()));
                     break;
                 }
@@ -3990,9 +4007,10 @@ where
     let argument_framing = argument_framing(&guided_tool_constraint);
     let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
-    let retain_first_glm_call = family == GLM47_UNIFIED_FAMILY
-        && policy.reject_incomplete_native_tool_calls
-        && policy.single_tool_call;
+    let incomplete_call_policy = IncompleteNativeToolCallPolicy::new(
+        policy.reject_incomplete_native_tool_calls && reports_incomplete_native_calls(family),
+        policy.single_tool_call,
+    );
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
         let mut states: HashMap<u32, ChoiceState> = HashMap::new();
@@ -4056,7 +4074,7 @@ where
                     for choice in flush_undecided_guided_prefixes(&mut undecided_guided_prefix, policy, prefill) {
                         yield response_with_choice(template, choice, &states, &records);
                     }
-                    for output in finish_unterminated_choices(&mut states, &mut records, family, policy.reject_incomplete_native_tool_calls) {
+                    for output in finish_unterminated_choices(&mut states, &mut records, family, incomplete_call_policy) {
                         match output {
                             FinishedStreamChunk::Error(error) => { yield parser_error_annotation(error); return; }
                             FinishedStreamChunk::Choice(choice) => {
@@ -4088,7 +4106,7 @@ where
             let mut phase_boundaries = HashMap::new();
             let mut deferred_qwen_responses = Vec::new();
             let mut qwen_source_metadata_deferred = false;
-            let mut glm_terminal_error = None;
+            let mut incomplete_call_error = None;
             for mut original in originals {
                 if already_parsed(&original) {
                     if let Some(prefix) = undecided_guided_prefix.remove(&original.index)
@@ -4097,7 +4115,7 @@ where
                     // built for it (e.g. its first-ever chunk is already-parsed),
                     // so it is not invisible to `finish_unterminated_choices`.
                     let record = records.entry(original.index).or_default();
-                    record.retain_first_glm_call = retain_first_glm_call;
+                    record.incomplete_call_policy = incomplete_call_policy;
                     let pending_whitespace =
                         std::mem::take(&mut record.pending_guided_prefill_whitespace);
                     if !pending_whitespace.is_empty() {
@@ -4326,10 +4344,10 @@ where
                         }
                         record.remember_state(&state);
                     }
-                    if let Some(error) = incomplete_glm_terminal(family, original.finish_reason, policy.reject_incomplete_native_tool_calls, || record.has_incomplete_native_tool_call()) {
+                    if let Some(error) = incomplete_call_policy.terminal_error(original.finish_reason, || record.has_incomplete_native_tool_call()) {
                         original.finish_reason = None;
                         emitted.push(original);
-                        glm_terminal_error = Some(error);
+                        incomplete_call_error = Some(error);
                         break;
                     }
                     original.finish_reason = record.normalize_finish_reason(original.finish_reason);
@@ -4531,7 +4549,7 @@ where
                         let cache = if uses_request_prefill { harmony_prefill_cache.as_mut() } else { None };
                         match ChoiceState::new_with_prefill_cache(family, &tools, choice_prefill, mode, guided_streaming, argument_framing, cache) {
                             Ok(mut state) => {
-                                state.retain_first_glm_call = retain_first_glm_call;
+                                state.incomplete_call_policy = incomplete_call_policy;
                                 state.preserve_message_phases(family == MUSE_SPARK_UNIFIED_FAMILY);
                                 // Only a successful checkpoint replaces the request seed.
                                 // Detours use a fresh response parser and never this seed.
@@ -4625,10 +4643,10 @@ where
                     &chat.tool_call_completion,
                     original.index,
                 );
-                if let Some(error) = incomplete_glm_terminal(family, terminal, policy.reject_incomplete_native_tool_calls, || state.has_incomplete_native_tool_call()) {
+                if let Some(error) = incomplete_call_policy.terminal_error(terminal, || state.has_incomplete_native_tool_call()) {
                     for choice in &mut choices { choice.finish_reason = None; }
                     emitted.extend(choices);
-                    glm_terminal_error = Some(error);
+                    incomplete_call_error = Some(error);
                     break;
                 }
                 // Pass-through indices are assigned by choices_for, so completion
@@ -4672,7 +4690,7 @@ where
             }
 
             if emitted.is_empty() && deferred_qwen_responses.is_empty() {
-                if let Some(error) = glm_terminal_error {
+                if let Some(error) = incomplete_call_error {
                     yield Annotated::from_err(error);
                     return;
                 }
@@ -4724,7 +4742,7 @@ where
                     error: if is_last { response.error.take() } else { None },
                 };
             }
-            if let Some(error) = glm_terminal_error {
+            if let Some(error) = incomplete_call_error {
                 yield Annotated::from_err(error);
                 return;
             }
@@ -4735,7 +4753,7 @@ where
             for choice in flush_undecided_guided_prefixes(&mut undecided_guided_prefix, policy, prefill) {
                         yield response_with_choice(template, choice, &states, &records);
                     }
-                    for output in finish_unterminated_choices(&mut states, &mut records, family, policy.reject_incomplete_native_tool_calls) {
+                    for output in finish_unterminated_choices(&mut states, &mut records, family, incomplete_call_policy) {
                 match output {
                             FinishedStreamChunk::Error(error) => { yield parser_error_annotation(error); return; }
                     FinishedStreamChunk::Choice(choice) => {
@@ -9909,7 +9927,7 @@ pub(crate) mod tests {
         choice.delta.reasoning_content = Some("already parsed reasoning".to_string());
         choice.finish_reason = Some(FinishReason::ToolCalls);
 
-        let responses = apply_stream(
+        let responses = apply_stream_with_policy(
             stream::iter([
                 chunk(
                     "<tool_call><function=get_weather><parameter=city>Paris",
@@ -9918,13 +9936,18 @@ pub(crate) mod tests {
                 parsed_terminal,
             ]),
             Some(weather_tools()),
-            None,
-            false,
+            GuidedToolConstraint::None,
             UnifiedParserStartingState::Response,
             QWEN3_UNIFIED_FAMILY,
+            true,
+            UnifiedRequestPolicy {
+                reject_incomplete_native_tool_calls: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await;
+        assert!(responses.iter().all(|response| response.error.is_none()));
         let choices = collect_choices(&responses);
 
         assert!(
@@ -11028,7 +11051,7 @@ pub(crate) mod tests {
             message_boundaries: Vec::new(),
             native_grammar_state: NativeGrammarState::None,
             incomplete_native_call: false,
-            retain_first_glm_call: false,
+            incomplete_call_policy: IncompleteNativeToolCallPolicy::Recover,
             family: "test".to_string(),
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),
@@ -11789,7 +11812,7 @@ pub(crate) mod tests {
                     &mut HashMap::new(),
                     &mut records,
                     QWEN3_UNIFIED_FAMILY,
-                    false,
+                    IncompleteNativeToolCallPolicy::Recover,
                 );
                 assert_eq!(fallback.len(), 1);
                 let FinishedStreamChunk::Source(fallback) = &fallback[0] else {
@@ -13600,6 +13623,8 @@ pub(crate) mod tests {
                 None,
                 Some(FinishReason::Stop),
                 Some(FinishReason::ToolCalls),
+                Some(FinishReason::Length),
+                Some(FinishReason::ContentFilter),
             ] {
                 let mut input = chunk("I'll check. <tool_call>ipy", false);
                 input.data.as_mut().unwrap().inner.choices[0].finish_reason = terminal;
@@ -13628,11 +13653,16 @@ pub(crate) mod tests {
                     content, "I'll check. ",
                     "strict={strict} terminal={terminal:?}"
                 );
+                let expect_error = strict
+                    && !matches!(
+                        terminal,
+                        Some(FinishReason::Length | FinishReason::ContentFilter)
+                    );
                 assert_eq!(
                     output.iter().any(|response| response.error.is_some()),
-                    strict
+                    expect_error
                 );
-                if strict {
+                if expect_error {
                     assert_eq!(
                         output.last().unwrap().error.as_ref().unwrap().class(),
                         ErrorClass::BackendProtocol
@@ -13642,11 +13672,15 @@ pub(crate) mod tests {
                             .iter()
                             .all(|choice| choice.finish_reason.is_none())
                     );
-                } else if terminal.is_some() {
+                } else if let Some(terminal) = terminal {
+                    let expected = match terminal {
+                        FinishReason::Stop | FinishReason::ToolCalls => FinishReason::Length,
+                        reason => reason,
+                    };
                     assert!(
                         collect_choices(&output)
                             .iter()
-                            .any(|choice| choice.finish_reason == Some(FinishReason::Length))
+                            .any(|choice| choice.finish_reason == Some(expected))
                     );
                 }
             }
@@ -15608,7 +15642,7 @@ pub(crate) mod tests {
                 &mut HashMap::new(),
                 &mut records,
                 QWEN3_UNIFIED_FAMILY,
-                false,
+                IncompleteNativeToolCallPolicy::Recover,
             );
             assert!(
                 matches!(&chunks[..], [FinishedStreamChunk::Choice(choice)] if choice.finish_reason == Some(FinishReason::Length))
