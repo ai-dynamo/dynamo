@@ -65,7 +65,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.7.0" }
 # Published separately by https://github.com/ai-dynamo/aisim.
-aisimulate-core = { package = "aisim-core", version = "=0.14.0" }
+aisimulate-core = { package = "aisim-core", version = "=0.14.0-beta.1" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
@@ -237,13 +237,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
-# Release-only AISim 0.14.0 RC4 source pin for Dynamo 1.7.0.
-[patch.crates-io]
-aisim-core = { git = "https://github.com/ai-dynamo/aisim.git", rev = "77d82652b2f83fd67afefc3141d69a5f06e630be" }
-
-# Publication uses the indexed RC matching the normal Git source pin above.
-[workspace.metadata.artifactory.dependencies.aisim-core]
-version = "=0.14.0-rc.4"
-registry = "aisim"
-git-rev = "77d82652b2f83fd67afefc3141d69a5f06e630be"

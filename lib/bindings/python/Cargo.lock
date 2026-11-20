@@ -34,8 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisim-core"
-version = "0.14.0"
-source = "git+https://github.com/ai-dynamo/aisim.git?rev=77d82652b2f83fd67afefc3141d69a5f06e630be#77d82652b2f83fd67afefc3141d69a5f06e630be"
+version = "0.14.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54dd91ad674ac4593aad6e9963363ab0b6c9c1c4b3c5adcf1282370b60f098bc"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

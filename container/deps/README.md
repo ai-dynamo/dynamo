@@ -8,7 +8,7 @@ so each image only installs what it needs.
 | File | Purpose |
 |------|---------|
 | `requirements.common.txt` | Core deps shared by all containers |
-| `requirements.aisimulate.txt` | Source-built AISim wheel staged into release wheelhouses |
+| `requirements.aisimulate.txt` | Published AISim wheel fetched through the PyPI stub and staged into release wheelhouses |
 | `requirements.planner.txt` | Planner, profiler, and global_planner deps |
 | `requirements.frontend.txt` | Frontend deps |
 | `requirements.benchmark.txt` | Benchmark and profiling tools |
