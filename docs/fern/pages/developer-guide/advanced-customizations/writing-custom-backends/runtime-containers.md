@@ -19,7 +19,7 @@ python container/render.py --framework=sglang --target=runtime --output-short-fi
 docker build -t dynamo:latest-sglang-runtime -f container/rendered.Dockerfile .
 
 # TensorRT-LLM runtime image
-python container/render.py --framework=trtllm --target=runtime --cuda-version=13.1 --output-short-filename
+python container/render.py --framework=trtllm --target=runtime --cuda-version=13.4 --output-short-filename
 docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 ```
 
