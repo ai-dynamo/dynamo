@@ -57,8 +57,8 @@ The DCD spec contains `backendFramework`, general environment defaults in `env`,
   their generated values. Older or missing origins retain legacy sorted composition.
   The field maps natively between `v1alpha1` and `v1beta1`, separately from alpha `envs`.
   For origins 1.8.0 and later, admission requires unique names within this root list. An existing
-  duplicate list can remain unchanged on update only if the old DCD already used semantic ordering.
-  Changing any part of the list or entering semantic ordering requires unique names throughout.
+  duplicate list is rejected even when it is unchanged on update. Repair stored duplicates before
+  making unrelated updates; the operator does not silently de-duplicate them.
   New or changed entries must not combine a non-empty `value` with `valueFrom`.
   Names in different layers may still override one another. Standalone DCDs use their
   immutable object origin; graph-owned DCDs use inherited PodTemplate origins, including role

@@ -28,6 +28,7 @@ import (
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
 	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
 	oldEnv []corev1.EnvVar,
+	orderedEnvironment bool,
 ) field.ErrorList {
 	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -38,6 +39,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 		field.NewPath("spec"),
 		dcd.GetDynamoNamespace(),
 		oldEnv,
+		orderedEnvironment,
 	)
 }
 
@@ -48,11 +50,13 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	fldPath *field.Path,
 	dynamoNamespace string,
 	oldEnv []corev1.EnvVar,
+	orderedEnvironment bool,
 ) field.ErrorList {
 	return v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoNamespace,
 		oldEnv,
+		orderedEnvironment,
 	)
 }

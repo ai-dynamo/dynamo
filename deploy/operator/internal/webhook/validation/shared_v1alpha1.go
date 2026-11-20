@@ -35,6 +35,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	fldPath *field.Path,
 	dynamoNamespace string,
 	oldEnv []corev1.EnvVar,
+	orderedEnvironment bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(spec.Annotations); invalid {
@@ -68,7 +69,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 
 	// Alpha envs is not a map-list in the source schema, unlike the converted container env.
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"))...)
+		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"), orderedEnvironment)...)
 	}
 	if spec.Ingress != nil {
 		allErrs = append(allErrs, v.validateIngressSpecV1alpha1(spec.Ingress, fldPath.Child("ingress"))...)

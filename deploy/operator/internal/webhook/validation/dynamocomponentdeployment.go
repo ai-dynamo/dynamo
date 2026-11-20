@@ -71,7 +71,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha, nil)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha, nil, dynamo.DCDUsesOrderedEnvironment(dcd))...)
 
 	return validation.warnings, invalidDynamoComponentDeploymentError(dcd, allErrs)
 }
@@ -107,7 +107,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		}
 		oldEnv = oldAlpha.Spec.Envs
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldEnv)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, oldEnv, dynamo.DCDUsesOrderedEnvironment(newDCD))...)
 
 	// Run the source-version old/new ratchet after the stateless traversal.
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -200,7 +200,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		if oldSpec != nil && oldOrderedEnvironment {
 			oldEnv = oldSpec.Env
 		}
-		allErrs = append(allErrs, v.validateEnvVars(spec.Env, oldEnv, fldPath.Child("env"))...)
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, oldEnv, fldPath.Child("env"), orderedEnvironment)...)
 	}
 	allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)

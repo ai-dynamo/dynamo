@@ -207,16 +207,18 @@ The effective `MODEL_ROOT` precedes `MODEL_PATH`, which expands to `/fast/models
 
 **Root-list validation:** DGD `spec.env` (`spec.envs` in `v1alpha1`) requires unique names on
 create and whenever that list changes, regardless of origin. DCD root `spec.env` applies this
-rule only when its effective operator origin is 1.8.0 or later. An update may retain a
-pre-existing duplicate list only when the complete ordered list is unchanged; changing a
-value, source, order, or member requires unique names throughout. Overrides between layers
-remain allowed. For DCDs, retaining an unchanged duplicate list also requires that the old DCD
-already used semantic ordering. The root OpenAPI list schema is unchanged so it does not reject
-unchanged legacy duplicates before webhook ratcheting runs.
+rule only when its effective operator origin is 1.8.0 or later. **For origins 1.8.0 and later,
+both resources reject duplicates even on updates that leave the list unchanged.** Repair stored
+duplicates before unrelated updates; the operator does not silently de-duplicate them. Earlier
+or missing DGD origins retain a pre-existing duplicate list only when the complete ordered list
+is unchanged; changing a value, source, order, or member requires unique names throughout.
+Overrides between layers remain allowed. The root OpenAPI list schema is unchanged so it does
+not reject unchanged legacy-origin duplicates before webhook ratcheting runs.
 
 New or changed root entries must not combine a non-empty `value` with `valueFrom`. Alpha
 component `envs` lists also require unique names and valid value/source combinations on create
-or list changes; an unchanged existing list may be retained. Cross-layer overrides remain valid.
+or list changes. Only earlier or missing origins can retain an unchanged existing list with
+duplicates; origins 1.8.0 and later reject it. Cross-layer overrides remain valid.
 
 **Existing deployments:** DGDs created by an operator older than 1.8.0, or without the origin
 annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not

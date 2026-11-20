@@ -45,11 +45,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// validateEnvVars requires unique names and valid value/source combinations,
-// ratcheting only an unchanged ordered list.
+// validateEnvVars requires unique names and valid value/source combinations.
+// Only unchanged lists ratchet; semantic ordering never ratchets duplicate names.
 // fldPath must not be nil; nil oldEnv means there is no previously eligible list.
-func (v *sharedValidation) validateEnvVars(env, oldEnv []corev1.EnvVar, fldPath *field.Path) field.ErrorList {
-	if apiequality.Semantic.DeepEqual(env, oldEnv) {
+func (v *sharedValidation) validateEnvVars(env, oldEnv []corev1.EnvVar, fldPath *field.Path, orderedEnvironment bool) field.ErrorList {
+	unchanged := apiequality.Semantic.DeepEqual(env, oldEnv)
+	if unchanged && !orderedEnvironment {
 		return nil
 	}
 
@@ -61,7 +62,7 @@ func (v *sharedValidation) validateEnvVars(env, oldEnv []corev1.EnvVar, fldPath 
 			allErrs = append(allErrs, field.Duplicate(fldPath.Index(i).Child("name"), entry.Name))
 		}
 		seen[entry.Name] = true
-		if entry.Value != "" && entry.ValueFrom != nil {
+		if !unchanged && entry.Value != "" && entry.ValueFrom != nil {
 			allErrs = append(allErrs, field.Forbidden(fldPath.Index(i).Child("valueFrom"), "may not be specified when value is non-empty"))
 		}
 	}

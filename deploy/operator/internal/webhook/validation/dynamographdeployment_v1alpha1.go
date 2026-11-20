@@ -19,6 +19,7 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -43,6 +44,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 		dgd.Name,
 		dgd.Namespace,
 		oldSpec,
+		compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations),
 	)
 }
 
@@ -54,6 +56,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 	dgdName string,
 	dgdNamespace string,
 	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+	orderedEnvironment bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pvcsPath := fldPath.Child("pvcs")
@@ -75,6 +78,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			servicePath,
 			dynamoNamespace,
 			oldEnv,
+			orderedEnvironment,
 		)...)
 	}
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -82,7 +86,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 		if oldSpec != nil {
 			oldEnv = oldSpec.Envs
 		}
-		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"))...)
+		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"), orderedEnvironment)...)
 		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntimeV1Alpha1(spec, fldPath)...)
 	}
 	return allErrs

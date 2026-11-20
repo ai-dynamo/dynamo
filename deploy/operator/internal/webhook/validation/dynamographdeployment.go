@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -71,6 +72,7 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	oldEnv                  []corev1.EnvVar
+	orderedEnvironment      bool
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
@@ -238,10 +240,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
+		orderedEnvironment:      compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations),
 		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
 		oldGroveUpdateStrategy:  oldStrategy,
 	}
-	// Preserve the full ordered old list for root environment ratcheting.
+	// Preserve the full old list; duplicate-name ratcheting is limited to legacy origins.
 	if oldDGD != nil {
 		specOpts.oldEnv = oldDGD.Spec.Env
 	}
@@ -505,7 +508,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 	// The source-alpha recursion owns its differently named root envs field.
 	if !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		allErrs = append(allErrs, v.validateEnvVars(spec.Env, opts.oldEnv, fldPath.Child("env"))...)
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, opts.oldEnv, fldPath.Child("env"), opts.orderedEnvironment)...)
 	}
 
 	if spec.Restart != nil {

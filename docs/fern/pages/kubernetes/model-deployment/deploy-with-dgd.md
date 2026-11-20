@@ -596,15 +596,18 @@ If the base port is unknown, the operator retains existing port declarations; au
 alignment is not guaranteed. A known invalid port still fails rendering.
 
 Use unique names within the DGD's root `spec.env` list (`spec.envs` in `v1alpha1`), regardless
-of origin. An update may retain an existing duplicate list only when the complete ordered list
-is unchanged. Changing any value, source, position, or member requires unique names throughout
-the list. Names are case-sensitive. Same-named entries in different layers remain valid overrides,
-as `BASE` demonstrates above. Root DCD `spec.env` follows the same rule only for origins 1.8.0
-and later; older or missing origins retain their previous validation behavior.
-Entering semantic ordering also revalidates a DCD's root list even if that list is unchanged.
+of origin. For origins 1.8.0 and later, admission rejects duplicates even when an update leaves
+the list unchanged. Repair a stored duplicate list before making unrelated updates; the operator
+does not silently de-duplicate it. Earlier or missing origins may retain an existing duplicate
+list only when the complete ordered list is unchanged. Changing any value, source, position, or
+member requires unique names throughout the list. Names are case-sensitive. Same-named entries
+in different layers remain valid overrides, as `BASE` demonstrates above. Root DCD `spec.env`
+also rejects duplicates on create and update for origins 1.8.0 and later, including unchanged
+lists; older or missing origins retain their previous validation behavior.
 New or changed root entries must not specify both a non-empty `value` and `valueFrom`.
 
-For example, this root list is rejected on create or when changed on update:
+For example, this root list is rejected on create or when changed on update, and on every
+non-terminating update for origins 1.8.0 and later:
 
 ```yaml
 spec:
@@ -625,9 +628,10 @@ conversion. When both lists define the same name, the extra container value repl
 service value at its original position. Conversion also de-duplicates entries within
 `extraPodSpec.mainContainer.env`, even when `service.envs` is empty. Only `service.envs`
 retains same-list repeated names through conversion, but admission rejects such repetitions on
-create or list changes because generated child resources require unique names. An unchanged
-existing service list can be retained on update. The same validation rejects a non-empty `value`
-combined with `valueFrom`. Keep order-dependent variables with unique names together in
+create or list changes because generated child resources require unique names. Only earlier or
+missing origins can retain an unchanged existing service list with duplicates; origins 1.8.0 and
+later reject it. New or changed lists also reject a non-empty `value` combined with `valueFrom`.
+Keep order-dependent variables with unique names together in
 `service.envs`, and avoid redefining those names in the extra
 container list. For direct ordered PodTemplate configuration, use `v1beta1` with
 `podTemplate.spec.containers[*].env`.
