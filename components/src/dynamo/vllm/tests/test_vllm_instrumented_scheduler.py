@@ -10612,12 +10612,17 @@ def _dp_parallel(**overrides):
     [
         # vLLM keeps the full CUDA_VISIBLE_DEVICES in every DP engine core and
         # offsets the worker's local rank by dp_local_rank * world_size.
-        ({"data_parallel_rank_local": 0}, "4,5,6,7", ["4", "5"]),
-        ({}, "4,5,6,7", ["6", "7"]),
-        ({}, None, ["2", "3"]),
-        ({}, "GPU-a,GPU-b,GPU-c,GPU-d", ["GPU-c", "GPU-d"]),
-        ({"data_parallel_rank_local": None}, "4,5,6,7", ["6", "7"]),
-        ({"assigned_physical_gpu_ids": [3, 2, 1, 0]}, "0,1,2,3", ["1", "0"]),
+        # Results are CUDA ordinals in this process, not NVML indices.
+        ({"data_parallel_rank_local": 0}, "4,5,6,7", [0, 1]),
+        ({}, "4,5,6,7", [2, 3]),
+        ({}, None, [2, 3]),
+        ({}, "", [2, 3]),
+        ({}, "GPU-a,GPU-b,GPU-c,GPU-d", [2, 3]),
+        ({"data_parallel_rank_local": None}, "4,5,6,7", [2, 3]),
+        # An assigned id names a CUDA_VISIBLE_DEVICES entry by value.
+        ({"assigned_physical_gpu_ids": [3, 2, 1, 0]}, "0,1,2,3", [1, 0]),
+        ({"assigned_physical_gpu_ids": [3, 2, 1, 0]}, "3,2,1,0", [2, 3]),
+        ({"assigned_physical_gpu_ids": [3, 2, 1, 0]}, None, [1, 0]),
     ],
 )
 def test_power_window_reads_the_gpus_of_its_own_dp_rank(overrides, visible, expected):
@@ -10648,57 +10653,80 @@ def test_power_window_has_no_gpu_mapping_without_a_local_layout(overrides):
         )
 
 
-def test_power_window_gpu_mapping_rejects_too_few_visible_devices():
+@pytest.mark.parametrize(
+    ("overrides", "visible"),
+    [
+        ({}, "0,1"),
+        ({"assigned_physical_gpu_ids": [0, 1]}, "0,1,2,3"),
+        # Assigned id 4 is not visible to this process.
+        ({"assigned_physical_gpu_ids": [0, 1, 2, 4]}, "0,1,2,3"),
+        # vLLM would match these through NVML indices.
+        ({"assigned_physical_gpu_ids": [0, 1, 2, 3]}, "GPU-a,GPU-b,GPU-c,GPU-d"),
+    ],
+)
+def test_power_window_gpu_mapping_rejects_an_unresolvable_layout(overrides, visible):
     with pytest.raises(
         instrumented_scheduler_module._BenchPowerUnavailable,
         match="gpu_mapping_unavailable",
     ):
-        instrumented_scheduler_module._bench_power_device_ids(_dp_parallel(), "0,1")
+        instrumented_scheduler_module._bench_power_device_ids(
+            _dp_parallel(**overrides), visible
+        )
 
 
-def _fake_nvml(monkeypatch, names):
-    handles = []
+def _fake_nvml(monkeypatch, accessible):
+    """pynvml stand-in that opens only ``accessible`` UUIDs, never by index."""
+    opened = []
+
+    def by_uuid(uuid_value):
+        if uuid_value not in accessible:
+            raise RuntimeError(f"no permission for {uuid_value}")
+        opened.append(uuid_value)
+        return f"handle-{uuid_value}"
+
+    def by_index(index):
+        raise AssertionError("GPUs must be opened by UUID, not NVML index")
+
     fake = SimpleNamespace(
         nvmlInit=lambda: None,
-        nvmlDeviceGetCount=lambda: len(names),
-        nvmlDeviceGetHandleByIndex=lambda index: handles.append(index) or index,
-        nvmlDeviceGetHandleByUUID=lambda uuid: uuid,
-        nvmlDeviceGetName=lambda handle: names[handle],
-        nvmlDeviceGetUUID=lambda handle: f"GPU-{handle}",
-        NVMLError=Exception,
+        nvmlDeviceGetHandleByUUID=by_uuid,
+        nvmlDeviceGetHandleByIndex=by_index,
+        NVMLError=type("NVMLError", (Exception,), {}),
     )
     monkeypatch.setitem(sys.modules, "pynvml", fake)
-    return handles
+    return opened
 
 
-@pytest.mark.parametrize(
-    ("names", "order", "ids", "ok"),
-    [
-        (["H200", "B200"], None, ["0"], False),
-        (["H200", "B200"], "FASTEST_FIRST", ["0"], False),
-        (["H200", "B200"], "PCI_BUS_ID", ["0"], True),
-        (["H200", "H200"], None, ["0"], True),
-        # UUID entries never depend on index order.
-        (["H200", "B200"], None, ["GPU-1"], True),
-    ],
-)
-def test_power_window_integer_ids_need_a_safe_nvml_index_mapping(
-    monkeypatch, names, order, ids, ok
-):
-    _fake_nvml(monkeypatch, names)
-    if order is None:
-        monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
-    else:
-        monkeypatch.setenv("CUDA_DEVICE_ORDER", order)
+def test_power_window_opens_the_gpu_cuda_reports_for_the_worker(monkeypatch):
+    # CUDA ordinal 0 is the B200 at NVML index 1; the H200 at NVML index 0 is
+    # inaccessible and must not be opened or scanned.
+    cuda_uuids = {0: "GPU-b200", 1: "GPU-h200"}
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_bench_cuda_device_uuid", cuda_uuids.__getitem__
+    )
+    opened = _fake_nvml(monkeypatch, accessible={"GPU-b200"})
 
-    if ok:
-        assert instrumented_scheduler_module._bench_open_power_gpus(ids)
-    else:
-        with pytest.raises(
-            instrumented_scheduler_module._BenchPowerUnavailable,
-            match="gpu_mapping_unavailable",
-        ):
-            instrumented_scheduler_module._bench_open_power_gpus(ids)
+    gpus = instrumented_scheduler_module._bench_open_power_gpus([0])
+
+    assert gpus == [("GPU-b200", "handle-GPU-b200")]
+    assert opened == ["GPU-b200"]
+
+
+def test_power_window_without_a_cuda_identity_has_no_gpu_mapping(monkeypatch):
+    def no_driver(ordinal):
+        raise OSError("libcuda.so.1: cannot open shared object file")
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_bench_cuda_device_uuid", no_driver
+    )
+    opened = _fake_nvml(monkeypatch, accessible={"GPU-a"})
+
+    with pytest.raises(
+        instrumented_scheduler_module._BenchPowerUnavailable,
+        match="gpu_mapping_unavailable",
+    ):
+        instrumented_scheduler_module._bench_open_power_gpus([0])
+    assert opened == []
 
 
 def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatch):

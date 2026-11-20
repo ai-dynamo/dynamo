@@ -666,16 +666,16 @@ def _bench_nvml_reason(error: Exception) -> str:
     return "nvml_error"
 
 
-def _bench_power_device_ids(parallel_config: Any, visible: str | None) -> list[str]:
-    """Device ids (NVML index or UUID) of the GPUs this attention-DP rank drives.
+def _bench_power_device_ids(parallel_config: Any, visible: str | None) -> list[int]:
+    """CUDA ordinals of the GPUs this attention-DP rank's model workers use.
 
-    Mirrors vLLM's worker device choice (``gpu_worker.Worker.init_device``):
-    under in-node multiprocess DP, every engine core keeps the full
-    ``CUDA_VISIBLE_DEVICES``, and worker ``i`` of DP-local rank ``d`` uses
-    logical device ``d * world_size + i``, mapped through
-    ``assigned_physical_gpu_ids`` when it is set. Integer entries are CUDA ordinals;
-    ``_bench_open_power_gpus`` uses them as NVML indices only when that is
-    safe (``CUDA_DEVICE_ORDER=PCI_BUS_ID`` or a node of identical GPUs). Ray,
+    Mirrors vLLM's worker device choice (``gpu_worker.Worker.init_device`` and
+    ``Platform.logical_device_id_to_visible_device_id``): under in-node
+    multiprocess DP every engine core keeps the full ``CUDA_VISIBLE_DEVICES``,
+    worker ``i`` of DP-local rank ``d`` has logical id ``d * world_size + i``,
+    and an ``assigned_physical_gpu_ids`` entry names a ``CUDA_VISIBLE_DEVICES``
+    entry by value. The workers inherit this process's CUDA environment (or
+    are this process), so each ordinal names the worker's GPU here too. Ray,
     external-launcher and multi-node layouts have no local mapping.
     """
     if (
@@ -690,65 +690,72 @@ def _bench_power_device_ids(parallel_config: Any, visible: str | None) -> list[s
     if dp_local_rank is None:
         dp_local_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
     logical = range(dp_local_rank * world_size, (dp_local_rank + 1) * world_size)
+    # vLLM treats an empty CUDA_VISIBLE_DEVICES as unset.
+    entries = [entry.strip() for entry in (visible or "").split(",") if entry.strip()]
     assigned = getattr(parallel_config, "assigned_physical_gpu_ids", None)
-    if assigned is not None:
-        entries = [str(device) for device in assigned]
-    elif visible is not None:
-        entries = [entry.strip() for entry in visible.split(",") if entry.strip()]
-    else:
-        return [str(device) for device in logical]
-    if logical.stop > len(entries):
+    if assigned is None:
+        if entries and logical.stop > len(entries):
+            raise _BenchPowerUnavailable("gpu_mapping_unavailable")
+        return list(logical)
+    if logical.stop > len(assigned):
         raise _BenchPowerUnavailable("gpu_mapping_unavailable")
-    return [entries[device] for device in logical]
+    physical = [int(assigned[device]) for device in logical]
+    if not entries:
+        return physical
+    # vLLM matches UUID entries through NVML indices, which need not follow
+    # CUDA order; only integer entries map without NVML.
+    if not all(entry.isdigit() for entry in entries):
+        raise _BenchPowerUnavailable("gpu_mapping_unavailable")
+    visible_ids = [int(entry) for entry in entries]
+    if any(device not in visible_ids for device in physical):
+        raise _BenchPowerUnavailable("gpu_mapping_unavailable")
+    return [visible_ids.index(device) for device in physical]
 
 
-def _bench_nvml_index_is_cuda_ordinal(pynvml: Any) -> bool:
-    """Whether a CUDA ordinal can be used as an NVML index on this node.
+def _bench_cuda_device_uuid(ordinal: int) -> str:
+    """NVML-format UUID of CUDA device ``ordinal`` in this process.
 
-    CUDA defaults to ``FASTEST_FIRST`` ordering while NVML indexes by PCI bus,
-    so the two agree only under ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` or when every
-    GPU on the node is the same model.
+    Reads the driver API directly: ``cuInit`` and ``cuDeviceGetUuid`` create
+    no CUDA context and allocate no device memory.
     """
-    if os.environ.get("CUDA_DEVICE_ORDER") == "PCI_BUS_ID":
-        return True
-    names = set()
-    for index in range(int(pynvml.nvmlDeviceGetCount())):
-        name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(index))
-        names.add(name.decode() if isinstance(name, bytes) else str(name))
-    return len(names) <= 1
+    import ctypes
+
+    cuda = ctypes.CDLL("libcuda.so.1")
+    device = ctypes.c_int()
+    raw = (ctypes.c_ubyte * 16)()
+    for call, args in (
+        ("cuInit", (0,)),
+        ("cuDeviceGet", (ctypes.byref(device), int(ordinal))),
+        ("cuDeviceGetUuid_v2", (raw, device)),
+    ):
+        status = getattr(cuda, call)(*args)
+        if status != 0:
+            raise RuntimeError(f"{call} returned CUDA error {status}")
+    value = bytes(raw).hex()
+    return f"GPU-{value[:8]}-{value[8:12]}-{value[12:16]}-{value[16:20]}-{value[20:]}"
 
 
-def _bench_open_power_gpus(device_ids: Sequence[str]) -> list[tuple[str, Any]]:
-    """NVML handles and UUIDs of ``device_ids`` (NVML indices or UUIDs)."""
+def _bench_open_power_gpus(ordinals: Sequence[int]) -> list[tuple[str, Any]]:
+    """NVML handles and UUIDs of the GPUs at CUDA ``ordinals``.
+
+    Each GPU is identified by the UUID CUDA reports for the ordinal the worker
+    runs on and opened by that UUID, never by an NVML index: NVML indexes in
+    PCI bus order, CUDA by default does not, and other GPUs on the node are
+    never touched.
+    """
+    try:
+        uuids = [_bench_cuda_device_uuid(ordinal) for ordinal in ordinals]
+    except Exception as error:
+        logger.warning("Power window: cannot identify the rank's GPUs", exc_info=True)
+        raise _BenchPowerUnavailable("gpu_mapping_unavailable") from error
     try:
         import pynvml
 
         pynvml.nvmlInit()
-        unsafe_mapping = any(
-            entry.isdigit() for entry in device_ids
-        ) and not _bench_nvml_index_is_cuda_ordinal(pynvml)
-    except Exception as error:
-        logger.warning("Power window: cannot open the rank's GPUs", exc_info=True)
-        raise _BenchPowerUnavailable(_bench_nvml_reason(error)) from error
-    if unsafe_mapping:
-        logger.warning(
-            "Power window: integer GPU ids may not match NVML indices "
-            "(mixed GPUs without CUDA_DEVICE_ORDER=PCI_BUS_ID)"
-        )
-        raise _BenchPowerUnavailable("gpu_mapping_unavailable")
-    try:
-        gpus = []
-        for entry in device_ids:
-            handle = (
-                pynvml.nvmlDeviceGetHandleByIndex(int(entry))
-                if entry.isdigit()
-                else pynvml.nvmlDeviceGetHandleByUUID(entry)
-            )
-            uuid_value = pynvml.nvmlDeviceGetUUID(handle)
-            if isinstance(uuid_value, bytes):
-                uuid_value = uuid_value.decode()
-            gpus.append((str(uuid_value), handle))
-        return gpus
+        return [
+            (uuid_value, pynvml.nvmlDeviceGetHandleByUUID(uuid_value))
+            for uuid_value in uuids
+        ]
     except Exception as error:
         logger.warning("Power window: cannot open the rank's GPUs", exc_info=True)
         raise _BenchPowerUnavailable(_bench_nvml_reason(error)) from error
@@ -2989,7 +2996,7 @@ class InstrumentedScheduler(AsyncScheduler):
     _bench_power_window: dict | None = None
     _bench_power_result: dict | None = None
     _bench_power_gpus: list[tuple[str, Any]] | str | None = None
-    _bench_power_device_ids: list[str] | str = "gpu_mapping_unavailable"
+    _bench_power_device_ids: list[int] | str = "gpu_mapping_unavailable"
     _bench_last_prefill: tuple[list[list[int]], list[str] | None] | None = None
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
