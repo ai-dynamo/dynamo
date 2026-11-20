@@ -9,7 +9,6 @@ use dynamo_llm::tokenizers::{
 };
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
-use tokenizers::models::bpe::{BPE, Vocab};
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
@@ -82,27 +81,24 @@ fn test_basetenkenizer_model_card_matches_hf_and_uses_prefix_cache() {
             let model = "model-card-basetenkenizer-cache-integration";
             let dir = tempdir().unwrap();
             let tokenizer_path = dir.path().join("tokenizer.json");
-            let vocab = Vocab::from_iter(
-                [
-                    "<unk>", " ", "!", ",", "H", "T", "d", "e", "h", "l", "o", "r", "w", "He",
-                    "ll", "llo", "or", "ld",
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(id, token)| (token.to_string(), id as u32)),
-            );
-            let merges = [("H", "e"), ("l", "l"), ("ll", "o"), ("o", "r"), ("l", "d")]
-                .into_iter()
-                .map(|(left, right)| (left.to_string(), right.to_string()))
-                .collect();
-            let bpe = BPE::builder()
-                .vocab_and_merges(vocab, merges)
-                .unk_token("<unk>".to_string())
-                .build()
-                .unwrap();
-            tokenizers::Tokenizer::new(bpe)
-                .save(&tokenizer_path, false)
-                .unwrap();
+            let vocab: serde_json::Map<String, serde_json::Value> = [
+                "<unk>", " ", "!", ",", "H", "T", "d", "e", "h", "l", "o", "r", "w", "He", "ll",
+                "llo", "or", "ld",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(id, token)| (token.to_string(), id.into()))
+            .collect();
+            let tokenizer = serde_json::json!({
+                "version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
+                "normalizer": null, "pre_tokenizer": null, "post_processor": null, "decoder": null,
+                "model": {"type": "BPE", "dropout": null, "unk_token": "<unk>",
+                    "continuing_subword_prefix": null, "end_of_word_suffix": null,
+                    "fuse_unk": false, "byte_fallback": false, "ignore_merges": false,
+                    "vocab": vocab,
+                    "merges": [["H", "e"], ["l", "l"], ["ll", "o"], ["o", "r"], ["l", "d"]]}
+            });
+            std::fs::write(&tokenizer_path, tokenizer.to_string()).unwrap();
             std::fs::write(
                 dir.path().join("tokenizer_config.json"),
                 r#"{
@@ -246,6 +242,173 @@ fn test_alternate_tokenizer_load_failure_is_rejected_when_fallback_is_disabled()
     );
 }
 
+/// With the fastokens backend, text comes back from the same Hugging Face decoder as the default
+/// backend. The ids, text and stream chunks are what the `tokenizers` 0.23.2 decoder returned;
+/// they come from `tokenizers/tests/data/hf-expectations/TinyLlama_v1.1` in frontend-crates.
+#[test]
+#[serial_test::serial]
+fn test_fastokens_model_card_decodes_like_the_default_backend() {
+    struct Decoded {
+        ids: &'static [u32],
+        text: &'static str,
+        text_without_specials: &'static str,
+        chunks: &'static [Option<&'static str>],
+        last_chunk: Option<&'static str>,
+    }
+    // TinyLlama: `</s>` is 2 and `<0xNN>` is 3 + NN.
+    let cases = [
+        Decoded {
+            ids: &[22172, 29871, 243, 162, 155, 131, 29871, 30662, 30675, 29991],
+            text: "hello 😀 北京!",
+            text_without_specials: "hello 😀 北京!",
+            chunks: &[
+                Some("hello"),
+                Some(" "),
+                None,
+                None,
+                None,
+                None,
+                Some("😀 "),
+                Some("北"),
+                Some("京"),
+                Some("!"),
+            ],
+            last_chunk: None,
+        },
+        // The four bytes of the emoji end the output, so only the final flush emits it.
+        Decoded {
+            ids: &[274, 28059, 29871, 30662, 30675, 29871, 243, 162, 155, 131],
+            text: "café 北京 😀",
+            text_without_specials: "café 北京 😀",
+            chunks: &[
+                Some("c"),
+                Some("afé"),
+                Some(" "),
+                Some("北"),
+                Some("京"),
+                Some(" "),
+                None,
+                None,
+                None,
+                None,
+            ],
+            last_chunk: Some("😀"),
+        },
+        // `a`, `</s>`, then an invalid byte: skipping the special joins the two bytes into one
+        // run, and the invalid byte replaces the whole run.
+        Decoded {
+            ids: &[100, 2, 248],
+            text: "a</s>\u{fffd}",
+            text_without_specials: "\u{fffd}\u{fffd}",
+            chunks: &[None, Some("a</s>"), None],
+            last_chunk: Some("\u{fffd}"),
+        },
+        Decoded {
+            ids: &[198, 172, 2],
+            text: "é</s>",
+            text_without_specials: "é",
+            chunks: &[None, None, Some("é</s>")],
+            last_chunk: None,
+        },
+    ];
+
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
+        for backend in [TokenizerBackend::Default, TokenizerBackend::Fastokens] {
+            let mut mdc = ModelDeploymentCard::with_name_only("fastokens-decode");
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(format!("{HF_PATH}/tokenizer.json")).unwrap(),
+            ));
+            mdc.runtime_config.tokenizer_backend = Some(backend);
+            // A fastokens load failure must fail here, not fall back to the default backend.
+            mdc.runtime_config.tokenizer_fallback_enabled = Some(false);
+            let tokenizer = mdc.tokenizer().unwrap();
+            let name = backend.as_str();
+
+            assert_eq!(
+                tokenizer.encode(cases[0].text).unwrap().token_ids(),
+                cases[0].ids,
+                "{name}"
+            );
+            for case in &cases {
+                let ids = case.ids;
+                assert_eq!(
+                    tokenizer.decode(ids, false).unwrap().as_str(),
+                    case.text,
+                    "{name}: {ids:?}"
+                );
+                assert_eq!(
+                    tokenizer.decode(ids, true).unwrap().as_str(),
+                    case.text_without_specials,
+                    "{name}: {ids:?}, skipping special tokens"
+                );
+                let mut stream = tokenizer.decode_stream(&[], false);
+                let chunks: Vec<Option<String>> =
+                    ids.iter().map(|id| stream.step(*id).unwrap()).collect();
+                let chunks: Vec<Option<&str>> = chunks.iter().map(Option::as_deref).collect();
+                assert_eq!(chunks, case.chunks, "{name}: {ids:?}");
+                assert_eq!(
+                    stream.finish().unwrap().as_deref(),
+                    case.last_chunk,
+                    "{name}: {ids:?}"
+                );
+            }
+        }
+    });
+}
+
+/// A configuration the Hugging Face backend cannot serve with the same ids and text fails at
+/// load, naming the model and the file. Nothing else can serve it: an alternate backend that
+/// falls back reaches the same error.
+#[test]
+#[serial_test::serial]
+fn test_unsupported_hf_configuration_is_rejected_with_model_and_path() {
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
+        let dir = tempdir().unwrap();
+        let tokenizer_path = dir.path().join("tokenizer.json");
+        // Under the lowercase normalizer the added token is keyed as `control`, so `CONTROL`
+        // would have no id.
+        std::fs::write(
+            &tokenizer_path,
+            r#"{
+                "version": "1.0",
+                "truncation": null,
+                "padding": null,
+                "added_tokens": [
+                    {"id": 2, "content": "CONTROL", "special": true, "single_word": false,
+                     "lstrip": false, "rstrip": false, "normalized": true}
+                ],
+                "normalizer": {"type": "Lowercase"},
+                "pre_tokenizer": {"type": "Whitespace"},
+                "post_processor": null,
+                "decoder": null,
+                "model": {
+                    "type": "WordLevel",
+                    "vocab": {"[UNK]": 0, "hello": 1},
+                    "unk_token": "[UNK]"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        for backend in [TokenizerBackend::Default, TokenizerBackend::Fastokens] {
+            let mut mdc = ModelDeploymentCard::with_name_only("normalized-added-token");
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&tokenizer_path).unwrap(),
+            ));
+            mdc.runtime_config.tokenizer_backend = Some(backend);
+            mdc.runtime_config.tokenizer_fallback_enabled = Some(true);
+            let error = format!("{:#}", mdc.tokenizer().err().expect("must not load"));
+            assert!(
+                error.contains("unsupported added token \"CONTROL\"")
+                    && error.contains("normalized-added-token")
+                    && error.contains(tokenizer_path.to_str().unwrap()),
+                "{}: {error}",
+                backend.as_str()
+            );
+        }
+    });
+}
+
 #[test]
 #[serial_test::serial]
 fn test_hf_model_card_disables_serialized_padding_and_truncation() {
@@ -284,13 +447,6 @@ fn test_hf_model_card_disables_serialized_padding_and_truncation() {
         )
         .unwrap();
 
-        let raw = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap()).unwrap();
-        assert_eq!(
-            raw.encode("hello world again").unwrap().token_ids(),
-            &[1, 2, 0, 0, 0, 0, 0, 0],
-            "fixture must exercise serialized truncation and padding"
-        );
-
         let mut mdc = ModelDeploymentCard::with_name_only("hf-online-normalization");
         mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
             CheckedFile::from_disk(&tokenizer_path).unwrap(),
@@ -300,7 +456,8 @@ fn test_hf_model_card_disables_serialized_padding_and_truncation() {
         assert_eq!(
             tokenizer.encode("hello world again").unwrap().token_ids(),
             &[1, 2, 3],
-            "online tokenization must not apply serialized padding or truncation"
+            "online tokenization must not apply serialized padding or truncation, \
+             which would give [1, 2, 0, 0, 0, 0, 0, 0]"
         );
     });
 }

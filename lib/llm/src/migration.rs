@@ -4272,28 +4272,41 @@ mod tests {
     /// Real byte-fallback tokenizer used to prove migration replays incremental decoder
     /// state rather than treating buffered generated IDs as already-consumed prompt.
     fn byte_fallback_backend() -> Arc<crate::backend::Backend> {
-        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+        let mut vocab: serde_json::Map<String, serde_json::Value> = (0..256u32)
+            .map(|byte| (format!("<0x{byte:02X}>"), byte.into()))
+            .collect();
+        vocab.insert("!".to_string(), BANG.into());
+        let config = serde_json::json!({
             "version": "1.0", "truncation": null, "padding": null,
             "added_tokens": [], "normalizer": null, "pre_tokenizer": null,
             "post_processor": null,
             "decoder": {"type": "Sequence", "decoders": [
                 {"type": "ByteFallback"}, {"type": "Fuse"}]},
-            "model": {"type": "BPE", "vocab": {
-                "<0x61>": 0, "<0xC3>": 1, "<0xA9>": 2, "!": 3
-            }, "merges": [], "byte_fallback": true}
-        }))
-        .unwrap();
+            "model": {"type": "BPE", "vocab": vocab, "merges": [], "byte_fallback": true}
+        });
         let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> =
-            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_json(config).unwrap());
         crate::backend::Backend::from_tokenizer(crate::tokenizers::Tokenizer::from(tokenizer))
     }
+
+    // Ids in `byte_fallback_backend`'s vocabulary. `<0xNN>` is id NN: the Hugging Face reader
+    // requires every byte token of a byte-fallback vocabulary.
+    const BYTE_A: u32 = 0x61;
+    const BYTE_LEAD: u32 = 0xC3;
+    const BYTE_TAIL: u32 = 0xA9;
+    const BANG: u32 = 256;
 
     /// A buffered ASCII byte from the failed attempt must be released with the retry's
     /// boundary token, while token IDs, per-token strings, and logprobs remain aligned.
     #[tokio::test]
     async fn migration_replays_ascii_byte_fallback_decoder_state() {
-        let outputs =
-            run_raw_token_migration_outputs(byte_fallback_backend(), None, vec![0], vec![3]).await;
+        let outputs = run_raw_token_migration_outputs(
+            byte_fallback_backend(),
+            None,
+            vec![BYTE_A],
+            vec![BANG],
+        )
+        .await;
         let text: String = outputs
             .iter()
             .filter_map(|data| data.text.as_deref())
@@ -4311,16 +4324,26 @@ mod tests {
                     .map(|((id, token), logprob)| (id, token, logprob))
             })
             .collect();
-        assert_eq!(accounting, vec![(0, Some("a"), 0.0), (3, Some("!"), 3.0)]);
+        assert_eq!(
+            accounting,
+            vec![
+                (BYTE_A, Some("a"), BYTE_A as f64),
+                (BANG, Some("!"), BANG as f64)
+            ]
+        );
     }
 
     /// Split UTF-8 bytes must combine across attempts; neither byte may be dropped or
     /// double-counted when the retry reconstructs the incremental decoder.
     #[tokio::test]
     async fn migration_replays_multibyte_fallback_decoder_state() {
-        let outputs =
-            run_raw_token_migration_outputs(byte_fallback_backend(), None, vec![1], vec![2, 3])
-                .await;
+        let outputs = run_raw_token_migration_outputs(
+            byte_fallback_backend(),
+            None,
+            vec![BYTE_LEAD],
+            vec![BYTE_TAIL, BANG],
+        )
+        .await;
         let text: String = outputs
             .iter()
             .filter_map(|data| data.text.as_deref())
@@ -4341,9 +4364,9 @@ mod tests {
         assert_eq!(
             accounted,
             vec![
-                (1, Some("�"), 1.0),
-                (2, Some("�"), 2.0),
-                (3, Some("!"), 3.0)
+                (BYTE_LEAD, Some("�"), BYTE_LEAD as f64),
+                (BYTE_TAIL, Some("�"), BYTE_TAIL as f64),
+                (BANG, Some("!"), BANG as f64)
             ]
         );
     }

@@ -30,7 +30,6 @@ use derive_builder::Builder;
 use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
-use tokenizers::Tokenizer as HfTokenizer;
 
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
@@ -251,32 +250,6 @@ fn instrumented_tokenizer_cache(
 
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
-
-/// Extract the set of atomic special-token strings from a HuggingFace tokenizer.
-///
-/// "Special" here means `AddedToken { special: true, .. }` — these are the only tokens
-/// guaranteed atomic in BPE (won't be merged with surrounding bytes), so they are the
-/// only safe boundary points for the L1 prefix cache.
-fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
-    let added = hf.get_added_tokens_decoder();
-    let mut out: Vec<String> = added
-        .values()
-        .filter(|t| t.special)
-        .map(|t| t.content.clone())
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// Exclusive bound for client token ids: the largest id plus one, added tokens
-/// included. Ids can have gaps, so the token count is not a bound.
-fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
-    hf.get_vocab(true)
-        .into_values()
-        .max()
-        .map(|id| id as usize + 1)
-}
 
 /// serde `deserialize_with` that maps an explicitly-present value -- *including
 /// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
@@ -1121,7 +1094,7 @@ pub struct ModelDeploymentCard {
     #[serde(skip, default)]
     checksum: OnceLock<String>,
 
-    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    /// Set when this card loads its tokenizer: one more than its largest token id.
     #[serde(skip, default)]
     tokenizer_id_bound: OnceLock<Option<usize>>,
 }
@@ -1497,86 +1470,51 @@ impl ModelDeploymentCard {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
 
-                // Load HF first — needed both for fallback and (if cache is on) for
-                // extracting special-token strings. Alternate backends do not re-expose
-                // `get_added_tokens_decoder`, so capture specials from the raw HF
-                // tokenizer before any swap.
-                let mut hf = HfTokenizer::from_file(p)
-                    .inspect_err(|err| {
-                        if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
-                            && let Ok(contents) = std::fs::read_to_string(p)
-                        {
-                            crate::log_json_err(&p.display().to_string(), &contents, serde_err);
-                        }
-                    })
-                    .map_err(anyhow::Error::msg)
-                    .with_context(|| p.display().to_string())?;
-                // Apply the tokenizer_config.json special-token merge eagerly so
-                // `extract_hf_special_tokens` below sees the same specials the
-                // wrapped tokenizer will use. Without this the L1 prefix cache's
-                // boundary list would diverge from the actual tokenizer
-                // (e.g. Qwen2-VL's `<|image_pad|>` would be in the tokenizer
-                // but missing from the cache specials), letting chat prefixes
-                // straddle a special-token boundary and reducing hit rate.
-                if let Some(model_dir) = p.parent() {
-                    crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
-                }
-                self.tokenizer_id_bound
-                    .get_or_init(|| hf_token_id_bound(&hf));
-
-                // Disable any truncation baked into `tokenizer.json`: the HF
-                // `tokenizers` crate honors it on `encode()`, silently clipping every
-                // prompt (e.g. `stepfun-ai/Step-3.7-Flash-*` caps at 2048), unlike
-                // Python `transformers`, which resets it on load. Match that: never
-                // truncate implicitly; over-length prompts are rejected elsewhere.
-                if hf.get_truncation().is_some() {
-                    tracing::warn!(
-                        "tokenizer.json declares a truncation config; disabling it so \
-                         prompts are not silently clipped"
-                    );
-                    // Hard-fail rather than warn: if we can't clear it, the prompt
-                    // would still be silently clipped, defeating the purpose.
-                    hf.with_truncation(None)
-                        .map_err(anyhow::Error::msg)
-                        .context("failed to disable tokenizer.json truncation")?;
-                }
-
-                // Padding belongs to the batching layer, not individual online requests.
-                if hf.get_padding().is_some() {
-                    tracing::warn!(
-                        "tokenizer.json declares a padding config; disabling it for online \
-                         tokenization"
-                    );
-                    hf.with_padding(None);
-                }
-
-                // Hold onto specials before any move of `hf`.
-                let specials: Vec<String> = if cache_enabled {
-                    extract_hf_special_tokens(&hf)
-                } else {
-                    Vec::new()
-                };
-
-                // Merge already applied above; just wrap. Embedding
-                // tokenizers use the HF post-processor to apply BOS/EOS when
+                // Every backend reads `tokenizer.json` itself and merges in the special
+                // tokens that only `tokenizer_config.json` declares (e.g. Qwen2-VL's
+                // `<|image_pad|>`). It reports the special-token strings and the id
+                // bound of the vocabulary it serves, so the L1 prefix cache's boundary
+                // list cannot diverge from the tokenizer behind it and let a chat
+                // prefix straddle a special-token boundary.
+                //
+                // The HF backend never applies a `truncation` or `padding` block from
+                // `tokenizer.json`. Python `transformers` resets both on load; applied,
+                // they would silently clip every prompt (e.g.
+                // `stepfun-ai/Step-3.7-Flash-*` caps at 2048). Over-length prompts are
+                // rejected elsewhere, and padding belongs to the batching layer.
+                type Loaded = (
+                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    TokenizerBackend,
+                    Vec<String>,
+                    Option<usize>,
+                );
+                // Embedding tokenizers use the HF post-processor to apply BOS/EOS when
                 // requested; normal tokenizers keep their existing defaults.
-                let wrap_hf = |hf: HfTokenizer| {
-                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
-                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
+                let load_hf = || -> anyhow::Result<Loaded> {
+                    let hf = crate::tokenizers::HuggingFaceTokenizer::from_file(p)
+                        .with_context(|| format!("model '{}' ({})", self.name(), p.display()))?;
+                    let specials = hf.special_tokens().to_vec();
+                    let id_bound = hf.token_id_bound();
+                    let hf = crate::tokenizers::traits::Tokenizer::with_options(hf, options);
+                    Ok((Arc::new(hf), TokenizerBackend::Default, specials, id_bound))
                 };
 
                 // Pick the inner backend.
-                let (raw, cache_backend): (
-                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
-                    TokenizerBackend,
-                ) = match tokenizer_backend {
-                    TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
+                let (raw, cache_backend, specials, id_bound): Loaded = match tokenizer_backend {
+                    TokenizerBackend::Default => load_hf()?,
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
                                 Ok(fast) => {
                                     tracing::info!("Using fastokens tokenizer backend");
-                                    (Arc::new(fast), TokenizerBackend::Fastokens)
+                                    let specials = fast.special_tokens().to_vec();
+                                    let id_bound = fast.token_id_bound();
+                                    (
+                                        Arc::new(fast),
+                                        TokenizerBackend::Fastokens,
+                                        specials,
+                                        id_bound,
+                                    )
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1588,7 +1526,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
                                     );
-                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                                    load_hf()?
                                 }
                             }
                         } else {
@@ -1602,7 +1540,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                             );
-                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                            load_hf()?
                         }
                     }
                     TokenizerBackend::Basetenkenizer => {
@@ -1610,7 +1548,14 @@ impl ModelDeploymentCard {
                             match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
                                 Ok(baseten) => {
                                     tracing::info!("Using basetenkenizer tokenizer backend");
-                                    (Arc::new(baseten), TokenizerBackend::Basetenkenizer)
+                                    let specials = baseten.special_tokens().to_vec();
+                                    let id_bound = baseten.token_id_bound();
+                                    (
+                                        Arc::new(baseten),
+                                        TokenizerBackend::Basetenkenizer,
+                                        specials,
+                                        id_bound,
+                                    )
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1622,7 +1567,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
                                     );
-                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                                    load_hf()?
                                 }
                             }
                         } else {
@@ -1636,10 +1581,11 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
                             );
-                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                            load_hf()?
                         }
                     }
                 };
+                self.tokenizer_id_bound.get_or_init(|| id_bound);
 
                 if cache_enabled && !options.add_special_tokens {
                     let shared_cache = shared_tokenizer_cache();

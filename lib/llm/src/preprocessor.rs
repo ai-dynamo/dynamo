@@ -128,13 +128,11 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
-/// Takes the encoder's token buffer rather than copying it. The tokenizer cache and fastokens
-/// return `Encoding::Sp` with an exactly sized buffer, so a copy only adds a prompt-sized
-/// allocation per request; the Hugging Face encoding still needs one.
+/// Takes the encoder's token buffer rather than copying it. Every backend returns an exactly
+/// sized buffer, so a copy would only add a prompt-sized allocation per request.
 fn into_token_ids(encoding: Encoding) -> Vec<TokenIdType> {
     match encoding {
         Encoding::Sp(token_ids) => token_ids,
-        encoding => encoding.token_ids().to_vec(),
     }
 }
 
@@ -552,22 +550,6 @@ mod into_token_ids_tests {
         let taken = into_token_ids(Encoding::Sp(token_ids));
         assert_eq!(taken, vec![1, 2, 3]);
         assert_eq!(taken.as_ptr(), buffer);
-    }
-
-    #[test]
-    fn copies_hugging_face_ids() {
-        let encoding = Encoding::Hf(Box::new(tokenizers::tokenizer::Encoding::new(
-            vec![7, 8],
-            vec![0, 0],
-            vec!["a".to_string(), "b".to_string()],
-            vec![None, None],
-            vec![(0, 1), (1, 2)],
-            vec![0, 0],
-            vec![1, 1],
-            vec![],
-            Default::default(),
-        )));
-        assert_eq!(into_token_ids(encoding), vec![7, 8]);
     }
 }
 

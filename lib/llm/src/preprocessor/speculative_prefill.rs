@@ -756,14 +756,13 @@ mod tests {
         let vocab: serde_json::Map<_, _> = (0..256)
             .map(|byte| (format!("<0x{byte:02X}>"), json!(byte)))
             .collect();
-        let hf: tokenizers::Tokenizer = serde_json::from_value(json!({
+        let config = json!({
             "version": "1.0", "truncation": null, "padding": null,
             "added_tokens": [], "normalizer": null, "pre_tokenizer": null,
             "post_processor": null, "decoder": null,
             "model": {"type": "BPE", "vocab": vocab, "merges": [], "byte_fallback": true}
-        }))
-        .unwrap();
-        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+        });
+        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_json(config).unwrap())
     }
 
     #[tokio::test]
