@@ -1724,7 +1724,6 @@ impl DistributedRuntime {
             .end_canary_maintenance(lease);
         Ok(())
     }
-
 }
 
 #[pymethods]
