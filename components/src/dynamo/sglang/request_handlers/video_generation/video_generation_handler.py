@@ -3,7 +3,6 @@
 
 import asyncio
 import base64
-import io
 import logging
 import random
 import time
@@ -18,6 +17,7 @@ from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.video_utils import encode_to_video_bytes, frames_to_numpy
 from dynamo.sglang.args import Config
 from dynamo.sglang.media_protocol import SGLangCreateVideoRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -254,63 +254,29 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         if not frames:
             raise RuntimeError("DiffGenerator returned no frames")
 
-        # Convert frames to video bytes
-        video_bytes = await self._frames_to_video(frames, fps)
-        return video_bytes
+        return await self._frames_to_video(frames, fps)
 
-    async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "libvpx-vp9"
-    ) -> bytes:
-        """Convert list of frames to video bytes.
+    async def _frames_to_video(self, frames: list, fps: int) -> bytes:
+        """Encode generated frames to VP9-in-mp4 bytes.
+
+        Uses the shared encoder the vLLM-Omni and TensorRT-LLM backends already
+        call, so all three produce the same output. Conversion and encoding
+        both run off the event loop.
 
         Args:
-            frames: List of frames (PIL Images or numpy arrays).
+            frames: Frames from ``DiffGenerator`` (PIL Images or numpy arrays).
             fps: Frames per second.
-            codec: Video codec to use.
 
         Returns:
             Video bytes in mp4 format.
         """
-        try:
-            import numpy as np
-            from PIL import Image
 
-            # Convert frames to numpy arrays if needed
-            np_frames = []
-            for frame in frames:
-                if isinstance(frame, Image.Image):
-                    np_frames.append(np.array(frame))
-                elif isinstance(frame, np.ndarray):
-                    np_frames.append(frame)
-                else:
-                    raise ValueError(f"Unsupported frame type: {type(frame)}")
-
-            import imageio
-
-            def encode_with_codec(codec_name: str) -> bytes:
-                output_buffer = io.BytesIO()
-                with imageio.get_writer(
-                    output_buffer,
-                    format="mp4",  # type: ignore
-                    fps=fps,
-                    codec=codec_name,
-                    output_params=["-pix_fmt", "yuv420p"],
-                ) as writer:
-                    for frame in np_frames:
-                        writer.append_data(frame)  # type: ignore
-
-                output_buffer.seek(0)
-                return output_buffer.read()
-
-            # VP9 (libvpx-vp9) is a royalty-free CPU encoder in the in-tree LGPL
-            # ffmpeg; no HW/GPU fallback and no libx264 (GPL, H.264) fallback.
-            return encode_with_codec(codec)
-
-        except ImportError as e:
-            raise RuntimeError(
-                f"Missing dependency for video encoding: {e}. "
-                "Install with: pip install imageio imageio-ffmpeg"
+        def encode() -> bytes:
+            return encode_to_video_bytes(
+                frames_to_numpy(frames), fps=fps, output_format="mp4"
             )
+
+        return await asyncio.to_thread(encode)
 
     def _parse_size(self, size_str: str) -> tuple[int, int]:
         """Parse 'WxH' -> (width, height)"""

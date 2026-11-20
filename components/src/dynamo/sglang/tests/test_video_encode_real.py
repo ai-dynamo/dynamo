@@ -3,8 +3,9 @@
 
 """Real (un-mocked) video-encode regression test for the SGLang output path.
 
-Drives VideoGenerationWorkerHandler._frames_to_video through the ACTUAL ffmpeg
-baked into the shipped runtime image. This is the pre_merge guard for the gap
+Drives VideoGenerationWorkerHandler._frames_to_video, and through it the shared
+encode_to_video_bytes encoder, against the ACTUAL ffmpeg baked into the shipped
+runtime image. This is the pre_merge guard for the gap
 that let SGLang ship with no ffmpeg at all (video generation would fail at the
 encode step) go green through the PR pipeline. Runs on the CUDA image only
 (gpu_0, no xpu) because the in-tree VP9 ffmpeg is copied into the CUDA runtime;
@@ -45,8 +46,8 @@ def _synthetic_pil_frames(n: int = 8, size: int = 64) -> list:
     ]
 
 
-def _probe_video_codec(video_bytes: bytes) -> str:
-    """Return the video stream codec of encoded bytes, via the shipped ffmpeg."""
+def _probe_video_stream(video_bytes: bytes) -> tuple[str, str]:
+    """Return ``(codec, pixel format)`` of encoded bytes, via the shipped ffmpeg."""
     exe = os.environ.get("IMAGEIO_FFMPEG_EXE")
     if not exe:
         try:
@@ -65,8 +66,11 @@ def _probe_video_codec(video_bytes: bytes) -> str:
         ).stderr
     for line in stderr.splitlines():
         if "Video:" in line:
-            return line.split("Video:", 1)[1].split(",")[0].split()[0]
-    return "?"
+            # "Video: vp9 (Profile 0) (vp09 / 0x39307076), yuv420p(tv, progressive), ..."
+            fields = line.split("Video:", 1)[1].split(",")
+            pix_fmt = fields[1].split("(")[0].strip() if len(fields) > 1 else "?"
+            return fields[0].split()[0], pix_fmt
+    return "?", "?"
 
 
 @pytest.mark.asyncio
@@ -76,5 +80,8 @@ async def test_sglang_video_output_is_vp9_in_shipped_image():
     handler = VideoGenerationWorkerHandler.__new__(VideoGenerationWorkerHandler)
     video_bytes = await handler._frames_to_video(_synthetic_pil_frames(), 8)
     assert video_bytes, "encoder produced no bytes"
-    codec = _probe_video_codec(video_bytes)
+    codec, pix_fmt = _probe_video_stream(video_bytes)
     assert codec == "vp9", f"expected vp9-encoded output, got codec={codec!r}"
+    # 4:2:0 is what browsers and players decode; the handler used to request it
+    # explicitly, the shared encoder has to produce it on its own.
+    assert pix_fmt == "yuv420p", f"expected yuv420p output, got {pix_fmt!r}"

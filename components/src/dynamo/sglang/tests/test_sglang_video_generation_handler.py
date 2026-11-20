@@ -12,6 +12,7 @@ alone and every test would still pass.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
+import numpy as np
 import pytest
 
 from dynamo.common.http.url_validator import UrlValidationError
@@ -108,6 +109,31 @@ async def test_t2v_passes_no_image_path(handler) -> None:
 
     args = handler.generator.generate.call_args[1]["sampling_params_kwargs"]
     assert "image_path" not in args
+
+
+async def test_frames_to_video_uses_the_shared_encoder(monkeypatch) -> None:
+    """SGLang encodes through the encoder vLLM-Omni and TensorRT-LLM already use."""
+    seen = {}
+
+    def fake_encode(frames, fps, output_format):
+        seen.update(frames=frames, fps=fps, output_format=output_format)
+        return b"mp4-bytes"
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.video_generation.video_generation_handler"
+        ".encode_to_video_bytes",
+        fake_encode,
+    )
+    # _frames_to_video uses no instance state, so bypass the engine-bound
+    # constructor (the fixture replaces the method under test with a mock).
+    handler = VideoGenerationWorkerHandler.__new__(VideoGenerationWorkerHandler)
+    frames = [np.full((16, 24, 3), i, dtype=np.uint8) for i in range(3)]
+
+    assert await handler._frames_to_video(frames, 8) == b"mp4-bytes"
+
+    assert seen["frames"].dtype == np.uint8
+    np.testing.assert_array_equal(seen["frames"], np.stack(frames))
+    assert (seen["fps"], seen["output_format"]) == (8, "mp4")
 
 
 async def test_generate_applies_the_defaults_for_unset_fields(handler) -> None:
