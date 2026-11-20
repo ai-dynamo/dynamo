@@ -316,5 +316,19 @@ engine startup, readiness and cleanup. Post-merge and nightly CI execute these
 assertions through the existing sidecar E2E jobs. No separate GPU test executable
 or native-test build artifact is needed.
 
+The upstream TensorRT-LLM nightly workflow runs the `upstream_trtllm` cases in
+this same serve module: image, video, Whisper transcription and image-cache
+identity. It resolves the latest regular release image to a digest, builds
+Dynamo's runtime wheel and sidecar for that image, and installs test tooling in
+an isolated environment. The native engine stays in its stock interpreter.
+These cases use file discovery and TCP requests without etcd or NATS.
+The accuracy cases send data URIs; the identity case fetches HTTP images.
+The speech fixture and model downloads require network access.
+The regular Dynamo-runtime nightly job excludes this marker.
+
+Manual native tests in `trtllm/src/tests/e2e.rs` retain disaggregation, affinity
+and exact captured ZMQ hash-chain checks. Those checks are separate from the
+HTTP serve cases.
+
 The SGLang launch scripts run SGLang's Rust server (`SGLANG_RUST_SERVER=1`), so
 the SGLang configs need SGLang v0.5.23 or later.
