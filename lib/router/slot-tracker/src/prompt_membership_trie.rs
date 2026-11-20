@@ -145,20 +145,34 @@ pub(super) struct PromptMembershipTrie {
     cleanup: Arc<CleanupState>,
 }
 
+/// Free `nodes` and every uniquely owned descendant on a heap stack.
+///
+/// A node another thread still holds is left in place. When that thread drops
+/// the last `Arc`, [`PromptTrieNode`]'s `Drop` continues this same walk, so
+/// teardown never falls back to recursive `Drop` of a deep subtree.
+fn release_owned_nodes(nodes: impl IntoIterator<Item = SharedNode>) {
+    let mut stack: Vec<SharedNode> = nodes.into_iter().collect();
+    while let Some(node) = stack.pop() {
+        if let Ok(lock) = Arc::try_unwrap(node) {
+            let mut inner = lock.into_inner();
+            stack.extend(inner.children.drain().map(|(_, child)| child));
+        }
+    }
+}
+
+impl Drop for PromptTrieNode {
+    fn drop(&mut self) {
+        release_owned_nodes(self.children.drain().map(|(_, child)| child));
+    }
+}
+
 impl Drop for PromptMembershipTrie {
     fn drop(&mut self) {
-        let mut stack: Vec<SharedNode> = Vec::new();
-        {
+        let children = {
             let mut root = self.root.write();
-            stack.extend(root.children.drain().map(|(_, child)| child));
-        }
-
-        while let Some(node) = stack.pop() {
-            if let Ok(rwlock) = Arc::try_unwrap(node) {
-                let mut inner = rwlock.into_inner();
-                stack.extend(inner.children.drain().map(|(_, child)| child));
-            }
-        }
+            root.children.drain().map(|(_, child)| child).collect::<Vec<_>>()
+        };
+        release_owned_nodes(children);
     }
 }
 
@@ -1047,5 +1061,37 @@ mod tests {
             trie.root.read().children.is_empty(),
             "background sweep should unlink the empty leaf"
         );
+    }
+
+    #[test]
+    fn dropping_the_last_external_node_ref_stays_iterative() {
+        const DEPTH: u64 = 2_048;
+        let trie = PromptMembershipTrie::default();
+        let worker = worker(1, 0);
+        let mut path = vec![0];
+        trie.store_path(worker, &path, 0);
+        for hash in 1..DEPTH {
+            path.push(hash);
+            trie.store_path(worker, &path, path.len() - 1);
+        }
+        // Hold the top of the chain the way a sweep does, then destroy the
+        // trie. The last release happens on a small stack and must stay
+        // iterative.
+        let held = trie
+            .root
+            .read()
+            .children
+            .values()
+            .next()
+            .cloned()
+            .expect("root child");
+        drop(trie);
+        std::thread::Builder::new()
+            .name("small-stack-drop".into())
+            .stack_size(256 * 1024)
+            .spawn(move || drop(held))
+            .expect("drop thread starts")
+            .join()
+            .expect("iterative drop finishes on a small stack");
     }
 }
