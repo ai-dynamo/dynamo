@@ -109,6 +109,7 @@ impl Drop for PrefillTasks {
 pub struct SpeculativePrefillRequest {
     messages: Vec<ChatCompletionRequestMessage>,
     tools: Option<Value>,
+    raw_tools: Option<Value>,
     template_tools: Option<Value>,
     tool_choice: Option<Value>,
     response_format: Option<Value>,
@@ -127,6 +128,7 @@ impl SpeculativePrefillRequest {
         Self {
             messages: request.inner.messages.clone(),
             tools: request.tools(),
+            raw_tools: request.raw_tools(),
             template_tools: request.template_tools(),
             tool_choice: request.tool_choice(),
             response_format: request.response_format(),
@@ -151,6 +153,10 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 
     fn tools(&self) -> Option<Value> {
         self.tools.clone()
+    }
+
+    fn raw_tools(&self) -> Option<Value> {
+        self.raw_tools.clone()
     }
 
     fn template_tools(&self) -> Option<Value> {
@@ -833,6 +839,63 @@ mod tests {
                 "settings: {settings}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn warmup_tokens_preserve_mistral_raw_tool_schemas() {
+        let tokenizer = byte_fallback_tokenizer();
+        let formatter: Arc<dyn OAIPromptFormatter> =
+            Arc::new(dynamo_renderer::mistral::MistralFormatter::new(13, None).unwrap());
+        let mut payload = serde_json::to_value(chat_request(true)).unwrap();
+        payload["tools"] = json!([{"type": "function", "function": {
+            "name": "now", "parameters": {}
+        }}]);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(payload).unwrap();
+        let mut completed = request.clone();
+        completed
+            .inner
+            .messages
+            .push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                        "everest is 8849 m tall.".into(),
+                    )),
+                    ..Default::default()
+                },
+            ));
+        completed.common.add_generation_prompt = Some(false);
+        let rendered = formatter.render(&completed).unwrap();
+        assert!(rendered.contains(concat!(
+            r#"[AVAILABLE_TOOLS][{"type": "function", "function": {"name": "now", "description": "", "parameters": {}}}]"#,
+            "[/AVAILABLE_TOOLS]"
+        )));
+        let snapshot = SpeculativePrefillRequest::from_request(&completed);
+        assert_eq!(formatter.render(&snapshot).unwrap(), rendered);
+        let expected = tokenizer.encode(&rendered).unwrap();
+        assert!(!expected.token_ids().is_empty());
+
+        let backend = Arc::new(WindDownBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let tasks = test_tasks(None);
+        let tracker = tasks.tracker.clone();
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-mistral-raw-tools",
+            &engine,
+            &formatter,
+            &tokenizer,
+            &tasks,
+        );
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(text_of(&items), "everest is 8849 m tall.");
+        wait_for_dispatch(&backend.dispatched).await;
+        let actual = backend.token_ids.lock().clone();
+        drop(tasks);
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .unwrap();
+        assert_eq!(actual.as_slice(), expected.token_ids());
     }
 
     #[tokio::test]
