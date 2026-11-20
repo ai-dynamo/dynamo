@@ -9,9 +9,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from aisimulate.output_adapter import OUTPUT_ADAPTER_API_VERSION
-from aisimulate.sweeper.config import SmartSearchConfig
-from aisimulate.sweeper.result import SweepResult
+from aisim.output_adapter import OUTPUT_ADAPTER_API_VERSION
+from aisim.sweeper.config import SmartSearchConfig
+from aisim.sweeper.result import SweepResult
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dynamo.aisimulate.output.dgd.renderers import (

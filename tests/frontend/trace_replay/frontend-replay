@@ -1,0 +1,51 @@
+#!/usr/bin/env -S uv run --no-project --script
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# /// script
+# requires-python = "==3.12.*"
+# dependencies = ["tokenizers==0.21.4", "requests==2.33.1"]
+# [tool.uv]
+# exclude-newer = "2026-11-11T00:00:00Z"
+# ///
+
+"""Run repository corpus tools in an isolated uv environment."""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import sys
+from pathlib import Path
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments and arguments[0] == "build-corpus":
+        script_dir = Path(__file__).resolve().parent
+        root = script_dir.parents[2]
+        sys.path[:] = [
+            entry for entry in sys.path if Path(entry or ".").resolve() != script_dir
+        ]
+        sys.path.insert(0, str(root))
+        builder = importlib.import_module("tests.frontend.trace_replay.build_corpus")
+        if not Path(builder.__file__).resolve().is_relative_to(root):
+            raise RuntimeError("build-corpus was imported outside this checkout")
+        return builder.main(arguments[1:])
+    parser = argparse.ArgumentParser(
+        prog="frontend-replay",
+        description="Capture and independently prepare frontend replay corpora.",
+    )
+    parser.add_argument("command", choices=("build-corpus",))
+    parser.parse_args(arguments)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        # Bootstrap/import failures share the corpus tool's failure exit code.
+        print(
+            f"frontend-replay: startup failed ({type(exc).__name__})", file=sys.stderr
+        )
+        raise SystemExit(2) from exc

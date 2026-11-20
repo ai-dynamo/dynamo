@@ -10,7 +10,6 @@ use tokio::sync::{Notify, mpsc::Sender};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     DistributedRuntime,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
@@ -20,6 +19,7 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::PrefillLoadEstimator;
 
 use dynamo_renderer::PromptFormatter;
 
@@ -595,8 +595,8 @@ impl ModelWatcher {
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline =
-                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
+            let needs_generate_pipeline = needs_systemone_preprocessor
+                || supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -1021,8 +1021,10 @@ impl ModelWatcher {
                 let transcriptions_router = PushRouter::<
                     NvCreateAudioTranscriptionRequest,
                     Annotated<NvAudioTranscriptionResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.transcriptions_engine = Some(Arc::new(transcriptions_router));
@@ -1451,8 +1453,11 @@ impl ControllerHost for ModelWatcher {
         drop(prepared);
     }
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
-        self.drt.discovery().list(DiscoveryQuery::AllModels).await
+    async fn list_instances(
+        &self,
+        query: DiscoveryQuery,
+    ) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        self.drt.discovery().list(query).await
     }
 }
 
@@ -1638,8 +1643,11 @@ mod tests {
             ..Default::default()
         };
         let config = |router_mode| {
-            RouterConfig::new(router_mode, dynamo_kv_router::KvRouterConfig::default())
-                .with_load_threshold_config(thresholds.clone())
+            RouterConfig::new(
+                router_mode,
+                dynamo_kv_router::config::KvRouterConfig::default(),
+            )
+            .with_load_threshold_config(thresholds.clone())
         };
         let direct = load_threshold_handle(&config(RouterMode::Direct));
         direct.update(&thresholds);
@@ -2167,10 +2175,10 @@ mod tests {
             .await
             .unwrap();
         for difference in [
-            "source-path",
             "explicit-default",
             "overridden-policy",
             "needs",
+            "kv-block-size",
         ] {
             let endpoint = drt
                 .namespace(difference)
@@ -2186,10 +2194,6 @@ mod tests {
             incumbent.worker_type = Some(WorkerType::Aggregated);
             let mut newcomer = incumbent.clone();
             match difference {
-                "source-path" => {
-                    incumbent.source_path = Some("/mounted/model".to_string());
-                    newcomer.source_path = Some("/streamer/cache/model".to_string());
-                }
                 "explicit-default" => newcomer.router_config = Some(RouterConfig::default()),
                 "overridden-policy" => {
                     incumbent.router_config = Some(RouterConfig::default());
@@ -2199,6 +2203,10 @@ mod tests {
                     });
                 }
                 "needs" => newcomer.needs = vec![vec![WorkerType::Encode]],
+                "kv-block-size" => {
+                    incumbent.kv_cache_block_size = 16;
+                    newcomer.kv_cache_block_size = 32;
+                }
                 _ => unreachable!(),
             }
             let manager = Arc::new(ModelManager::new());
@@ -2238,7 +2246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frontends_keep_their_locally_first_configuration() {
+    async fn cards_with_different_source_paths_are_both_admitted() {
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
@@ -2250,21 +2258,28 @@ mod tests {
         let mut second = first.clone();
         first.source_path = Some("/model/one".to_string());
         second.source_path = Some("/model/two".to_string());
-        for (incumbent_id, incumbent, newcomer_id, newcomer) in
+        assert_eq!(first.mdcsum(), second.mdcsum());
+        for (first_id, first_card, second_id, second_card) in
             [(1, &first, 2, &second), (2, &second, 1, &first)]
         {
             let manager = Arc::new(ModelManager::new());
             let (events, task) =
                 watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
-            apply_discovery_event(&events, discovered_card("dgd-v1", incumbent_id, incumbent))
-                .await;
+            apply_discovery_event(&events, discovered_card("dgd-v1", first_id, first_card)).await;
             wait_for_model(&manager, "local-first", |_| true).await;
-            apply_discovery_event(&events, discovered_card("dgd-v1", newcomer_id, newcomer)).await;
-            assert_eq!(manager.get_model_cards().len(), 1);
+            apply_discovery_event(&events, discovered_card("dgd-v1", second_id, second_card)).await;
+
+            let cards = manager.get_model_cards();
+            assert_eq!(cards.len(), 2);
+            let source_paths: HashSet<_> = cards
+                .into_iter()
+                .map(|card| card.source_path.unwrap())
+                .collect();
             assert_eq!(
-                manager.get_model_cards()[0].source_path,
-                incumbent.source_path
+                source_paths,
+                HashSet::from(["/model/one".to_string(), "/model/two".to_string()])
             );
+
             drop(events);
             task.await.unwrap();
         }
@@ -2280,7 +2295,7 @@ mod tests {
         let manager = Arc::new(ModelManager::new());
         let (events, task) =
             watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
-        for namespace in ["dgd-v1", "dgd-v2"] {
+        for (namespace, kv_cache_block_size) in [("dgd-v1", 16), ("dgd-v2", 32)] {
             let endpoint = drt
                 .namespace(namespace)
                 .unwrap()
@@ -2293,6 +2308,7 @@ mod tests {
             card.model_type = ModelType::Chat;
             card.worker_type = Some(WorkerType::Aggregated);
             card.source_path = Some(format!("/models/{namespace}"));
+            card.kv_cache_block_size = kv_cache_block_size;
             apply_discovery_event(
                 &events,
                 discovered_card(namespace, drt.discovery().instance_id(), &card),
@@ -2306,7 +2322,9 @@ mod tests {
         assert_eq!(model.worker_set_count(), 2);
         assert!(model.is_workers_ready("dgd-v1"));
         assert!(model.is_workers_ready("dgd-v2"));
-        assert_eq!(manager.get_model_cards().len(), 2);
+        let cards = manager.get_model_cards();
+        assert_eq!(cards.len(), 2);
+        assert_ne!(cards[0].mdcsum(), cards[1].mdcsum());
         drop(events);
         task.await.unwrap();
         runtime.shutdown();
@@ -2323,12 +2341,12 @@ mod tests {
 
         assert!(supports_enabled_engine_generate(
             &card,
-            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY],
         ));
         assert!(!supports_enabled_engine_generate(&card, &[]));
         assert!(!supports_enabled_engine_generate(
             &card,
-            &[OTHER_GENERATE_CAPABILITY]
+            &[OTHER_GENERATE_CAPABILITY],
         ));
     }
 
@@ -2360,9 +2378,8 @@ mod tests {
             return;
         }
         use dynamo_kv_router::plugins::request_classifier::{
-            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier, WorkerView,
         };
-        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct RejectingClassifier {
@@ -2375,13 +2392,13 @@ mod tests {
             fn classify(
                 &mut self,
                 _request: ClassifyRequest,
-                _workers: WorkerCandidates<'_>,
-            ) -> ClassifyFuture {
+                _workers: &dyn WorkerView,
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
                     .unwrap();
-                Box::pin(async { Err(Box::new(std::io::Error::other("catalog rejection")) as _) })
+                Err(Box::new(std::io::Error::other("catalog rejection")) as _)
             }
 
             async fn on_event(&mut self, event: ClassifyEvent) {
@@ -2399,9 +2416,6 @@ mod tests {
             r#"
 worker_selection:
   aggregated: test
-  instances:
-    - name: test
-      type: test
 request_classifier:
   type: test
 "#,
@@ -2409,7 +2423,7 @@ request_classifier:
         .unwrap();
         let router_config = RouterConfig::new(
             RouterMode::KV,
-            dynamo_kv_router::KvRouterConfig {
+            dynamo_kv_router::config::KvRouterConfig {
                 use_kv_events: false,
                 router_policy_config: Some(policy_file.path().display().to_string()),
                 ..Default::default()
@@ -2564,9 +2578,9 @@ request_classifier:
             (0..2)
                 .map(|instance| (
                     WorkerType::Aggregated,
-                    dynamo_kv_router::RoutingPartitionId::new(
+                    dynamo_router_protocol::identity::RoutingPartitionId::new(
                         format!("classifier-model-{instance}"),
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP
+                        dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP
                     ),
                 ))
                 .collect::<Vec<_>>()
@@ -2705,6 +2719,91 @@ request_classifier:
                 .active_decode_blocks_threshold,
             Some(0.8)
         );
+    }
+
+    #[tokio::test]
+    async fn text_transcriptions_register_under_selector_router_modes() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for (index, router_mode) in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::LeastLoaded,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let manager = Arc::new(ModelManager::new());
+            let watcher = Arc::new(ModelWatcher::new(
+                drt.clone(),
+                manager.clone(),
+                RouterConfig {
+                    router_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new_with_prefix(Some(format!(
+                    "watcher_transcriptions_test_{index}"
+                )))),
+            ));
+            let model_name = format!("stt-model-{index}");
+            let mcid = ModelCardInstanceId {
+                namespace: format!("stt-ns-{index}"),
+                component: "workers".to_string(),
+                endpoint: "generate".to_string(),
+                instance_id: 1,
+                model_suffix: None,
+            };
+            let mut card = ModelDeploymentCard::with_name_only(&model_name);
+            card.model_input = ModelInput::Text;
+            card.model_type = ModelType::Transcriptions;
+            card.worker_type = Some(WorkerType::Aggregated);
+
+            let endpoint_id = model_card_endpoint_id(&mcid);
+            let key = GroupKey {
+                model_name: card.name().to_string(),
+                worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+            };
+            let desired = DesiredInstance {
+                key: mcid.to_path(),
+                mcid,
+                endpoint_id,
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+                video_contract: qwen_video_contract_digest(&card),
+                card,
+                group_key: key.clone(),
+            };
+            let spec = GroupSpec {
+                key,
+                mdc_checksum: desired.mdc_checksum.clone(),
+                fingerprint: desired.mdc_checksum.clone(),
+                generation: 1,
+                representative: desired.clone(),
+                video_contract: desired.video_contract.clone(),
+            };
+            let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+            let prepared = watcher
+                .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+                .await
+                .unwrap_or_else(|err| panic!("{router_mode:?}: {err:#}"));
+            watcher
+                .commit_group(&spec, prepared, &[desired], &[])
+                .unwrap();
+
+            assert!(
+                manager
+                    .get_model(&model_name)
+                    .unwrap()
+                    .has_transcriptions_engine(),
+                "{router_mode:?}: transcription engine not registered"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2931,6 +3030,24 @@ request_classifier:
         ));
         assert_eq!(source, RouterLoadSource::Encode);
         assert!(!source.monitors_sequence_load());
+
+        watcher.set_systemone_enabled(true);
+        watcher.generate_engine_capabilities.clear();
+        watcher.chat_engine_factory = Some(Arc::new(|_, _, _| {
+            Box::pin(async {
+                Ok(Arc::new(UncalledEngine)
+                    as crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine)
+            })
+        }));
+        assert!(!spec.representative.card.is_systemone_serial_eligible());
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+        let prepared = watcher
+            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+            .await
+            .unwrap();
+        let workers = prepared.worker_set.as_ref().unwrap();
+        assert!(workers.has_chat_engine());
+        assert!(!workers.has_generate_engine());
         runtime.shutdown();
     }
 
@@ -3409,7 +3526,7 @@ request_classifier:
     fn only_explicit_policies_require_typed_model_cards() {
         let unresolved = RouterPluginBuilder::default();
         let resolved = dynamo_router_policies::default_registry()
-            .resolve_plugins(&dynamo_kv_router::KvRouterConfig::default())
+            .resolve_plugins(&dynamo_kv_router::config::KvRouterConfig::default())
             .unwrap();
         assert!(resolved.worker_selection().is_some());
         let builtin = RouterPluginBuilder::new(resolved);
@@ -3440,7 +3557,7 @@ request_classifier:
         }
 
         let mut card = ModelDeploymentCard::with_name_only("model");
-        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.runtime_config.tool_call_parser = Some("llama3_json".to_string());
         card.model_type = ModelType::Embedding;
         assert!(validate_card_parser_version(&card, false).is_ok());
         card.model_type = ModelType::Chat;

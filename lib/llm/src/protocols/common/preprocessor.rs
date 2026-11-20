@@ -3,18 +3,17 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use derive_builder::Builder;
-pub use dynamo_kv_router::kv_hints::{
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
-use dynamo_kv_router::{
-    config::RouterConfigOverride,
-    plugins::request_classifier::AbortCause,
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    scheduling::RequestLifecycle,
-};
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
+use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};
 use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
@@ -24,6 +23,7 @@ use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RequestAttemptRelease;
+use crate::lora::runtime::RuntimeLoraSourceUri;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -62,6 +62,18 @@ pub struct RoutingHints {
     /// Used for LORA-aware routing and tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
+
+    /// Canonical base model for a request-time LoRA adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_name: Option<String>,
+
+    /// Opaque source URI sent only to the selected worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_source_uri: Option<RuntimeLoraSourceUri>,
+
+    /// Request-time LoRA resolver protocol version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_resolution_version: Option<u16>,
 
     /// Cache namespace for request-scoped KV cache isolation.
     #[serde(
@@ -309,6 +321,8 @@ pub enum MultimodalData {
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
+    /// Opaque JSON for a backend-registered modality processor.
+    Json(serde_json::Value),
 }
 
 impl<'de> Deserialize<'de> for MultimodalData {
@@ -323,6 +337,7 @@ impl<'de> Deserialize<'de> for MultimodalData {
             RawUrl(String),
             Decoded(RdmaMediaDataDescriptor),
             UuidOnly(String),
+            Json(serde_json::Value),
         }
 
         match WireData::deserialize(deserializer)? {
@@ -335,6 +350,7 @@ impl<'de> Deserialize<'de> for MultimodalData {
             WireData::RawUrl(value) => Ok(Self::RawUrl(value)),
             WireData::Decoded(value) => Ok(Self::Decoded(value)),
             WireData::UuidOnly(value) => Ok(Self::UuidOnly(value)),
+            WireData::Json(value) => Ok(Self::Json(value)),
         }
     }
 }
@@ -604,6 +620,16 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
 
+    /// Milliseconds between the frontend receiving this request and the router dispatching this
+    /// attempt to its worker, so it includes routing, router queueing and, for a decode leg, the
+    /// prefill leg. Router-owned, unlike the client's `request_timestamp_ms`: a backend can order
+    /// admission by the original arrival with it (TensorRT-LLM's
+    /// `DisaggregatedParams.orig_elapsed_s`). Absent when no frontend router dispatched the
+    /// request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_since_arrival_ms: Option<f64>,
+
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]
@@ -789,6 +815,30 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
+    /// The request's tracker, created if the request has none. The tracker is not serialized, so
+    /// a request another router dispatched arrives without one; the new tracker starts from the
+    /// age that router stamped, so a later stamp adds this process's time to it.
+    pub fn ensure_tracker(&mut self) -> &Arc<RequestTracker> {
+        let upstream_elapsed = self
+            .elapsed_since_arrival_ms
+            .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+            .unwrap_or_default();
+        self.tracker.get_or_insert_with(|| {
+            Arc::new(RequestTracker::with_upstream_elapsed(upstream_elapsed))
+        })
+    }
+
+    /// Stamp [`Self::elapsed_since_arrival_ms`] from the request's tracker. The router calls
+    /// this as it dispatches each attempt, and every attempt is stamped from the same tracker, so
+    /// a retry does not count earlier time twice. A request without a tracker keeps the value it
+    /// arrived with.
+    pub fn stamp_elapsed_since_arrival(&mut self) {
+        if let Some(tracker) = &self.tracker {
+            self.elapsed_since_arrival_ms =
+                Some(tracker.elapsed_since_arrival().as_secs_f64() * 1000.0);
+        }
+    }
+
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -921,6 +971,7 @@ mod tests {
                 MultimodalData::RawUrl(value) => OldData::RawUrl(value),
                 MultimodalData::Decoded(value) => OldData::Decoded(value),
                 MultimodalData::UuidOnly(value) => OldData::UuidOnly(value),
+                MultimodalData::Json(_) => panic!("URL fixture decoded as custom JSON"),
             };
             assert_eq!(
                 serde_json::to_value(legacy).unwrap(),
@@ -1472,5 +1523,45 @@ mod tests {
 
         let decoded: RoutingHints = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.cache_namespace.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn a_new_tracker_starts_from_the_upstream_stamp() {
+        let request = |stamp: Option<f64>| {
+            let mut request = PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .build()
+                .unwrap();
+            request.elapsed_since_arrival_ms = stamp;
+            request
+        };
+        let restamped = |mut request: PreprocessedRequest| {
+            request.ensure_tracker();
+            request.stamp_elapsed_since_arrival();
+            request.elapsed_since_arrival_ms.unwrap()
+        };
+
+        assert!((1500.0..2500.0).contains(&restamped(request(Some(1500.0)))));
+        // A stamp that is not a duration is dropped, not carried forward.
+        for stamp in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert!(
+                (0.0..1000.0).contains(&restamped(request(stamp))),
+                "{stamp:?}"
+            );
+        }
+
+        // The longest stamp that is still a duration does not overflow when time is added.
+        assert!(restamped(request(Some(1.8e22))) >= 1.8e22);
+
+        // An existing tracker is kept: the frontend's own clock already covers the request.
+        let mut received = request(Some(1500.0));
+        let tracker = Arc::new(RequestTracker::new());
+        received.tracker = Some(Arc::clone(&tracker));
+        assert!(Arc::ptr_eq(received.ensure_tracker(), &tracker));
+        assert!((0.0..1000.0).contains(&restamped(received)));
     }
 }

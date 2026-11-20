@@ -31,6 +31,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from dynamo.global_planner.gpu_cost import GpuCostConfig
+from dynamo.global_planner.managed_config import ManagedAllocationConfig
 from dynamo.global_planner.priority import PriorityConfig
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,11 @@ class GlobalPlannerConfig(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    managed_allocation: ManagedAllocationConfig | None = Field(
+        default=None,
+        description="Opt in to serialized priority reclamation of explicitly enrolled pools.",
+    )
 
     managed_namespaces: Optional[list[str]] = Field(
         default=None,
@@ -127,6 +133,17 @@ class GlobalPlannerConfig(BaseModel):
         one edge or the other. Previously this started cleanly and surfaced only
         as a stream of rejections at request time.
         """
+        if self.managed_allocation is not None and (
+            self.no_operation
+            or self.managed_namespaces is not None
+            or self.min_total_gpus != -1
+            or self.max_total_gpus != -1
+            or self.priority != PriorityConfig()
+            or self.gpu_cost != GpuCostConfig()
+        ):
+            raise ValueError(
+                "managed_allocation cannot be combined with legacy authorization, budget, priority, GPU cost, or no-operation settings"
+            )
         if (
             self.min_total_gpus >= 0
             and self.max_total_gpus >= 0
@@ -198,6 +215,15 @@ class GlobalPlannerConfig(BaseModel):
     def log_summary(self) -> None:
         """Log the effective configuration at startup."""
         logger.info(f"Environment: {self.environment}")
+        if self.managed_allocation is not None:
+            allocation = self.managed_allocation.policy
+            logger.info(
+                "Managed allocation: %s pools, shared GPU band [%s, %s]",
+                len(allocation.pools),
+                allocation.min_total_gpus,
+                allocation.max_total_gpus,
+            )
+            return
 
         if self.managed_namespaces:
             logger.info("Authorization: ENABLED")

@@ -13,12 +13,11 @@ use std::{
 use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::KvRouterConfig,
-    plugins::worker_selection::WorkerInputs,
-    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-};
+use dynamo_kv_hints::KvTransferEnforcement;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -1592,6 +1591,7 @@ impl ModelManager {
     pub(crate) fn get_systemone_execution_selection(
         &self,
         requested_model: &str,
+        required_candidates: usize,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         let catalog = self.catalog.load();
         let canonical_model = catalog
@@ -1600,7 +1600,7 @@ impl ModelManager {
             .map(String::as_str)
             .unwrap_or(requested_model);
         if let Some(model) = catalog.models.get(canonical_model) {
-            return model.get_systemone_execution_selection();
+            return model.get_systemone_execution_selection(required_candidates);
         }
 
         Err(SystemOneSelectionError::NotFound)
@@ -1624,6 +1624,25 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine_with_parsing()
+    }
+
+    pub fn get_chat_completions_engine_with_parsing_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_parsing_for_capability(capability)
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -2434,17 +2453,19 @@ impl ModelManager {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // A policy that does not consume cache input must not create a shared-cache client or
-        // subscribe to its updates.
-        let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
-        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
+        // A configured hint policy that reads KV copy sources starts the KV index and its event
+        // subscription even when the worker-selection policy reads none. Only the
+        // worker-selection policy reads cache input; without it, create no shared-cache client.
+        let index_inputs = policy.prepare_inputs();
+        let wants_cache = index_inputs.contains(WorkerInputs::CACHE);
+        let shared_cache: Option<Arc<dyn dynamo_scheduler::host::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
                 .map(|c| c.shared_cache_type)
                 .unwrap_or_default()
             {
-                dynamo_kv_router::SharedCacheType::None => None,
-                dynamo_kv_router::SharedCacheType::Hicache => {
+                dynamo_worker_selection::host::SharedCacheType::None => None,
+                dynamo_worker_selection::host::SharedCacheType::Hicache => {
                     let worker_component_name = &endpoint.id().component;
                     tracing::info!(
                         worker_component = worker_component_name,
@@ -2462,7 +2483,7 @@ impl ModelManager {
         let kv_event_source_requirement = KvEventSourceRequirement::derive(
             worker_role,
             &effective_kv_router_config,
-            policy.inputs(),
+            index_inputs,
         );
         let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(
@@ -2488,7 +2509,8 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
-            self.lora_enabled.then(|| lora_domain.filter.clone()),
+            self.lora_enabled
+                .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
         )
@@ -2974,7 +2996,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
+    use dynamo_kv_events::event::KV_EVENT_SUBJECT;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
@@ -3137,14 +3160,14 @@ mod tests {
         let _workers = register_systemone_model(&manager, "model-a");
         for unregistered in ["jev-latest", "default", "typo"] {
             assert!(matches!(
-                manager.get_systemone_execution_selection(unregistered),
+                manager.get_systemone_execution_selection(unregistered, 2),
                 Err(SystemOneSelectionError::NotFound)
             ));
         }
         assert!(manager.register_alias("jev-latest", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("jev-latest")
+                .get_systemone_execution_selection("jev-latest", 2)
                 .unwrap()
                 .canonical_model,
             "model-a"
@@ -3152,18 +3175,18 @@ mod tests {
         assert!(manager.register_alias("public-model", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("public-model")
+                .get_systemone_execution_selection("public-model", 2)
                 .unwrap()
                 .canonical_model,
             "model-a"
         );
         assert!(matches!(
-            manager.get_systemone_execution_selection("typo"),
+            manager.get_systemone_execution_selection("typo", 2),
             Err(SystemOneSelectionError::NotFound)
         ));
         manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
         assert!(matches!(
-            manager.get_systemone_execution_selection("unsupported"),
+            manager.get_systemone_execution_selection("unsupported", 2),
             Err(SystemOneSelectionError::Unsupported)
         ));
     }
@@ -3175,17 +3198,17 @@ mod tests {
         assert!(manager.register_alias("jev-latest", "model-a"));
         workers_a.send(vec![]).unwrap();
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest"),
+            manager.get_systemone_execution_selection("jev-latest", 2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let _workers_b = register_systemone_model(&manager, "model-b");
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest"),
+            manager.get_systemone_execution_selection("jev-latest", 2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("model-b")
+                .get_systemone_execution_selection("model-b", 2)
                 .unwrap()
                 .canonical_model,
             "model-b"
@@ -3197,7 +3220,7 @@ mod tests {
         let manager = ModelManager::new();
         let workers = register_systemone_model(&manager, "model-a");
         let selection = manager
-            .get_systemone_execution_selection("model-a")
+            .get_systemone_execution_selection("model-a", 2)
             .unwrap();
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
@@ -3439,8 +3462,8 @@ mod tests {
 
     #[test]
     fn lora_state_and_load_are_isolated_by_endpoint() {
-        use crate::kv_router::protocols::WorkerWithDpRank;
         use crate::model_card::LoraInfo;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         let manager = ModelManager::new();
         let endpoint_a = EndpointId::from("test.worker-a.generate");

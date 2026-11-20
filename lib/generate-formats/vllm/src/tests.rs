@@ -28,6 +28,47 @@ fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
 }
 
 #[test]
+fn causal_scoring_request_survives_the_native_format_boundary() {
+    let native = dynamo_llm::protocols::systemone::causal_scoring_request(
+        &[1, 2, 3],
+        &[20, 10],
+        "request-cache-scope",
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&native).unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let opened = VllmFormat
+        .open(ClientRequest {
+            body: &body,
+            headers: &headers,
+            default_request_id: "scoring-request",
+        })
+        .unwrap();
+    opened.validation.unwrap();
+    let bound = (opened.bind)(&routing_metadata(16, false, None)).unwrap();
+    let request = bound.request;
+    assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
+    assert_eq!(request.stop_conditions.max_tokens, Some(1));
+    let routing = request.routing.unwrap();
+    assert_eq!(routing.expected_output_tokens, Some(1));
+    assert_eq!(
+        routing.cache_namespace.as_deref(),
+        Some("request-cache-scope")
+    );
+    let envelope = &request.extra_args.unwrap()["vllm_tito"];
+    assert_eq!(
+        envelope["sampling_params"]["logprob_token_ids"],
+        json!([20, 10])
+    );
+    assert_eq!(envelope["sampling_params"]["max_tokens"], 1);
+    assert_eq!(envelope["cache_salt"], "request-cache-scope");
+}
+
+#[test]
 fn model_alias_is_canonicalized_only_when_the_client_supplies_a_model() {
     for model in [None, Some("public-alias")] {
         let mut body = json!({"token_ids":[1], "sampling_params":{}});
@@ -127,18 +168,18 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
     });
     let preprocessed = project(&raw, &routing_metadata(4, false, None));
 
-    let hash_a = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+    let hash_a = dynamo_kv_hashing::multimodal::hash_mm_identifier(&preprocessed_mm_identifier(
         "image",
         b"opaque-a",
     ))
     .expect("content-derived hash");
-    let hash_b = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+    let hash_b = dynamo_kv_hashing::multimodal::hash_mm_identifier(&preprocessed_mm_identifier(
         "image",
         b"opaque-b",
     ))
     .expect("content-derived hash");
-    let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_a);
-    let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_b);
+    let pad_a = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(hash_a);
+    let pad_b = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(hash_b);
     let mm = preprocessed
         .mm_routing_info
         .as_ref()
@@ -198,10 +239,10 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         .mm_routing_info
         .as_ref()
         .expect("base request keeps exact MM routing");
-    let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+    let request_hashes = dynamo_kv_hashing::routing::compute_block_hash_for_seq(
         &routing.routing_token_ids,
         4,
-        dynamo_kv_router::protocols::BlockHashOptions::default(),
+        dynamo_kv_hashing::routing::BlockHashOptions::default(),
     );
     let marked_identifier = preprocessed
         .extra_args
@@ -214,8 +255,8 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         .expect("frontend-approved marked MM hash")
         .to_string();
     let event_mm_info =
-        dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
-            dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
+        dynamo_kv_events::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+            dynamo_kv_events::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
                 marked_identifier,
                 1,
             )),
@@ -225,11 +266,11 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         .next()
         .flatten()
         .expect("block MM metadata");
-    let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+    let event_block = dynamo_kv_events::zmq_wire::create_stored_block_from_parts(
         4,
         7,
         &[10, 99, 99, 20],
-        dynamo_kv_router::zmq_wire::StoredBlockOptions {
+        dynamo_kv_events::zmq_wire::StoredBlockOptions {
             mm_extra_info: Some(event_mm_info),
             image_token_id: Some(99),
             ..Default::default()
@@ -259,11 +300,11 @@ fn sparse_and_ambiguous_multimodal_layouts_are_handled() {
     let routing = generate_mm_routing_info(&request, 5)
         .expect("valid sparse MM routing metadata")
         .expect("MM routing projection");
-    let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+    let mm_hash = dynamo_kv_hashing::multimodal::hash_mm_identifier(&preprocessed_mm_identifier(
         "image", b"sparse",
     ))
     .expect("content-derived identifier");
-    let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
+    let pad = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(mm_hash);
     assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
 
     for (name, token_ids, features, expected_error) in [

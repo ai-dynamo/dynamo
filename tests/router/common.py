@@ -22,6 +22,7 @@ from tests.router.helper import (
     get_runtime,
     managed_runtime,
     poll_for_worker_instances,
+    read_routed_worker_from_stream,
     send_inflight_requests,
     send_request_via_python_kv_router,
     verify_response_timing,
@@ -752,7 +753,12 @@ def _test_remote_indexer_decisions(
         runtime,
         expected_query_instances: int,
         expected_record_instances: int,
-    ) -> None:
+    ) -> tuple[set[int], set[int]]:
+        """Wait for a topology safe to exercise, then return its instance IDs.
+
+        Event-driven owners expose query endpoints only and may be replicated;
+        approximate owners require a co-located singleton query/record pair.
+        """
         query_endpoint = runtime.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
         )
@@ -768,19 +774,25 @@ def _test_remote_indexer_decisions(
 
             if use_kv_events:
                 if len(query_ids) >= expected_query_instances and len(record_ids) == 0:
-                    return
+                    return query_ids, record_ids
             elif (
                 len(query_ids) == expected_query_instances
                 and len(record_ids) == expected_record_instances
                 and query_ids == record_ids
             ):
-                return
+                return query_ids, record_ids
 
             await asyncio.sleep(0.5)
 
         raise TimeoutError("Timed out waiting for served indexer endpoints to register")
 
     async def run_test(runtimes):
+        """Verify independent consumers share the served indexer's decisions.
+
+        In approximate mode, one consumer records a forced decision and another
+        must eventually observe it and reverse its independently computed choice.
+        The write acknowledgement is not a read-after-write visibility fence.
+        """
         endpoint_path = (
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -847,7 +859,7 @@ def _test_remote_indexer_decisions(
             serving_endpoints.append(endpoint_b)
             serving_routers.append(router_b)
 
-        await wait_for_served_indexer(
+        owner_query_ids, owner_record_ids = await wait_for_served_indexer(
             serving_runtimes[0],
             expected_query_instances=len(serving_routers),
             expected_record_instances=0 if use_kv_events else 1,
@@ -859,6 +871,49 @@ def _test_remote_indexer_decisions(
             router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
         runtimes.append(consumer_runtime)
+        consumer_query_ids, consumer_record_ids = await wait_for_served_indexer(
+            consumer_runtime,
+            expected_query_instances=len(serving_routers),
+            expected_record_instances=0 if use_kv_events else 1,
+        )
+
+        cross_consumer_router = consumer_router
+        if not use_kv_events:
+            (
+                cross_consumer_runtime,
+                cross_consumer_endpoint,
+                cross_consumer_router,
+            ) = await make_router(
+                serve_indexer=False,
+                use_remote_indexer=True,
+                router_predicted_ttl_secs=router_predicted_ttl_secs,
+            )
+            runtimes.append(cross_consumer_runtime)
+            (
+                cross_consumer_query_ids,
+                cross_consumer_record_ids,
+            ) = await wait_for_served_indexer(
+                cross_consumer_runtime,
+                expected_query_instances=1,
+                expected_record_instances=1,
+            )
+            indexer_instance_sets = (
+                owner_record_ids,
+                consumer_query_ids,
+                consumer_record_ids,
+                cross_consumer_query_ids,
+                cross_consumer_record_ids,
+            )
+            assert all(
+                instance_ids == owner_query_ids
+                for instance_ids in indexer_instance_sets
+            ), "both remote consumers must discover the same singleton indexer owner"
+            assert (
+                consumer_endpoint.connection_id()
+                != cross_consumer_endpoint.connection_id()
+            ), "remote consumers must use independent runtime connections"
+            assert consumer_endpoint.connection_id() not in owner_query_ids
+            assert cross_consumer_endpoint.connection_id() not in owner_query_ids
 
         worker_ids = sorted(
             await poll_for_worker_instances(
@@ -962,15 +1017,15 @@ def _test_remote_indexer_decisions(
             await wait_for_serving_indexers_live(worker_b_id, dp_rank_b)
 
         blocks = [
-            [random.randint(1, 10000) for _ in range(block_size)] for _ in range(7)
+            [random.randint(1, 10000) for _ in range(block_size)] for _ in range(8)
         ]
-        A, B, C, D, E, F, G = blocks
+        A, B, C, D, E, F, G, H = blocks
         request_specs = [
             (serving_routers[0], A + B, worker_a_id, dp_rank_a, 0.1),
             (serving_routers[0], A + C + D, worker_a_id, dp_rank_a, 0.1),
             (serving_routers[-1], A + C + E, worker_b_id, dp_rank_b, 2.0),
             (consumer_router, A + C + D + F, None, None, 2.0),
-            (consumer_router, A + C + E + G, None, None, 2.0),
+            (cross_consumer_router, A + C + E + G, None, None, 2.0),
         ]
         dp_a = dp_rank_a if dp_rank_a is not None else 0
         dp_b = dp_rank_b if dp_rank_b is not None else 0
@@ -1036,7 +1091,6 @@ def _test_remote_indexer_decisions(
                 f"Request 4: expected prefill_dp_rank={dp_rank_a} "
                 f"(longest prefix match), got {req4['prefill_dp_rank']}"
             )
-
         req5 = responses[4]
         assert req5["prefill_worker_id"] == worker_b_id, (
             f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
@@ -1047,6 +1101,74 @@ def _test_remote_indexer_decisions(
                 f"Request 5: expected prefill_dp_rank={dp_rank_b} "
                 f"(longest prefix match), got {req5['prefill_dp_rank']}"
             )
+
+        if not use_kv_events:
+            selection_tokens = A + C + E + H
+            await _assert_overlap_scores(
+                cross_consumer_router,
+                selection_tokens,
+                block_size,
+                {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+                "consumer B before consumer A's selection-changing write",
+            )
+
+            forced_response = await send_request_via_python_kv_router(
+                kv_python_router=consumer_router,
+                model_name=model_name,
+                token_ids=selection_tokens,
+                stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                worker_id=worker_a_id,
+                dp_rank=dp_rank_a,
+                return_worker_ids=True,
+            )
+            assert isinstance(
+                forced_response, dict
+            ), f"Expected dict result from consumer A, got {type(forced_response)}"
+            assert forced_response["prefill_worker_id"] == worker_a_id
+            if test_dp_rank:
+                assert forced_response["prefill_dp_rank"] == dp_rank_a
+
+            deadline = time.monotonic() + 10
+            observed_worker_a_blocks = None
+            while time.monotonic() < deadline:
+                scores = await cross_consumer_router.get_overlap_scores(
+                    selection_tokens, include_shared=False
+                )
+                rows = {
+                    (row["worker_id"], row["dp_rank"]): row for row in scores["workers"]
+                }
+                observed_worker_a_blocks = rows[(worker_a_id, dp_a)]["device_blocks"]
+                if observed_worker_a_blocks == 4:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError(
+                    "consumer B did not observe consumer A's accepted write: "
+                    f"expected worker A device_blocks=4, got {observed_worker_a_blocks}"
+                )
+
+            await _assert_overlap_scores(
+                cross_consumer_router,
+                selection_tokens,
+                block_size,
+                {(worker_a_id, dp_a): 4, (worker_b_id, dp_b): 3},
+                "consumer B after consumer A's selection-changing write",
+            )
+
+            cross_consumer_response = await send_request_via_python_kv_router(
+                kv_python_router=cross_consumer_router,
+                model_name=model_name,
+                token_ids=selection_tokens,
+                stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                return_worker_ids=True,
+            )
+            assert isinstance(cross_consumer_response, dict), (
+                "Expected dict result from consumer B, got "
+                f"{type(cross_consumer_response)}"
+            )
+            assert cross_consumer_response["prefill_worker_id"] == worker_a_id
+            if test_dp_rank:
+                assert cross_consumer_response["prefill_dp_rank"] == dp_rank_a
 
         await poll_for_worker_instances(
             consumer_endpoint, expected_num_instances, max_wait_time=120
@@ -3220,7 +3342,8 @@ def _test_router_cache_salt_isolation(
         token_ids = list(range(1_000, 1_000 + block_size * 2))
         expected_blocks = len(token_ids) // block_size
 
-        async def generate(cache_salt: str, worker_id: Optional[int] = None) -> None:
+        async def generate(cache_salt: str, worker_id: Optional[int] = None) -> int:
+            """Run one request and return the worker it was routed to."""
             routing: dict[str, Any] = {"cache_salt": cache_salt}
             if worker_id is not None:
                 routing["backend_instance_id"] = worker_id
@@ -3235,14 +3358,7 @@ def _test_router_cache_salt_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
-            terminal = None
-            async for response in stream:
-                if (
-                    isinstance(response, dict)
-                    and response.get("finish_reason") is not None
-                ):
-                    terminal = response
-            assert terminal is not None, f"tenant {cache_salt} request did not finish"
+            return await read_routed_worker_from_stream(stream, f"tenant {cache_salt}")
 
         async def device_blocks(
             cache_salt: Optional[str],
@@ -3316,11 +3432,10 @@ def _test_router_cache_salt_isolation(
         await wait_for_worker("tenant-a", worker_a)
         await wait_for_worker("tenant-b", worker_b)
 
-        # Unpinned requests use the same selection path as production. Repeating
-        # each namespace must preserve its worker-local cache footprint; routing
-        # either request to the other worker would publish a second nonzero score.
-        await generate("tenant-a")
-        await generate("tenant-b")
+        # Unpinned repeats must reach their tenant's worker. Score checks alone
+        # miss a misroute: seeding already met them, and its events may arrive late.
+        assert await generate("tenant-a") == worker_a[0]
+        assert await generate("tenant-b") == worker_b[0]
         await wait_for_scores("tenant-a", {worker_a: expected_blocks})
         await wait_for_scores("tenant-b", {worker_b: expected_blocks})
 
@@ -3387,19 +3502,7 @@ def _test_router_lora_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
-            routed_worker = None
-            terminal = None
-            async for response in stream:
-                if not isinstance(response, dict):
-                    continue
-                worker_info = (response.get("routing_data") or {}).get("worker_id")
-                if worker_info and routed_worker is None:
-                    routed_worker = worker_info.get("decode_worker_id")
-                if response.get("finish_reason") is not None:
-                    terminal = response
-            assert terminal is not None, f"lora={lora!r} request did not finish"
-            assert routed_worker is not None, f"lora={lora!r}: no routed worker"
-            return routed_worker
+            return await read_routed_worker_from_stream(stream, f"lora={lora!r}")
 
         async def device_blocks(lora: Optional[str]) -> dict[tuple[int, int], int]:
             scores = await kv_router.get_overlap_scores(

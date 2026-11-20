@@ -1,31 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  lpu_servers: ""
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-all-local-4f40-decode-fd884c294bcb8400
-  namespace: test
----
-data:
-  nodes_per_partition: ""
-  partition_ids: ""
-  partition_node_offsets: ""
-  partition_paths: ""
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-all-local-4f40-lpu-88cdafee07541757
-  namespace: test
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
@@ -41,8 +16,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-        nvidia.com/extra-resources-hash: fd884c294bcb84009f3f599f5ab8f4dc6a696089567f23f0a5864a094c7614b6
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9716f907878181fed83aae3f9f03aaddd489713ea7d0d7894bdca70bac3d14b4
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1a38fc2f1466131b32a53c4e191d1a522fa5f7c4601adcf1eeb8fbbada6865db
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -57,32 +31,71 @@ spec:
         minAvailable: 1
         podSpec:
           containers:
-          - args:
-            - serve
-            command:
-            - /usr/local/bin/cyborg-entrypoint
-            - --expand-hosts
-            - --
-            - /opt/gpu-runtime
-            env:
+          - env:
+            - name: LPX_ALLOCATION
             - name: LPX_LOCAL_PARTITION_IDS
               value: "0"
             - name: GBUILD_MANIFEST_PATH
-              value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
+              value: /nfs/node-local-v2-connected-lpx/deployment.v1.capnp.bin
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v2-connected-lpx
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            - name: RDMA_PORT
+              value: "19877"
+            image: example.invalid/cyborg:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: 9091
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 9091
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              claims:
+              - name: gpu
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: 9091
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /dev/infiniband
+              name: infiniband
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /run/openengine
+              name: openengine
+            - mountPath: /dev/shm
+              name: shared-memory
+          initContainers:
+          - args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
               value: decode
             - name: DYN_DISCOVERY_BACKEND
               value: kubernetes
-            - name: DYN_FORWARDPASS_METRIC_PORT
-              value: "20380"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
             - name: DYN_NAMESPACE
               value: test-node-local-v2-hybrid-all-local
             - name: DYN_PARENT_DGD_K8S_NAME
@@ -93,22 +106,10 @@ spec:
               value: "true"
             - name: DYN_SYSTEM_PORT
               value: "9090"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: '["generate"]'
             - name: ETCD_ENDPOINTS
               value: etcd-address
             - name: NATS_SERVER
               value: nats-address
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "n"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -121,52 +122,41 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            - name: RDMA_PORT
-              value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
-            image: example.invalid/gpu-runtime:test
+            image: example.invalid/dynamo-sidecar:test
             livenessProbe:
-              failureThreshold: 1
+              failureThreshold: 3
               httpGet:
                 path: /live
                 port: system
               periodSeconds: 5
               timeoutSeconds: 4
-            name: main
+            name: runtime
             ports:
             - containerPort: 9090
               name: system
-              protocol: TCP
-            - containerPort: 19090
-              name: nixl
               protocol: TCP
             readinessProbe:
               failureThreshold: 3
               httpGet:
                 path: /health
                 port: system
-              periodSeconds: 10
+              periodSeconds: 5
               timeoutSeconds: 4
-            resources:
-              claims:
-              - name: gpu
+            resources: {}
+            restartPolicy: Always
             startupProbe:
-              failureThreshold: 720
+              failureThreshold: 30
               httpGet:
                 path: /live
                 port: system
-              periodSeconds: 10
-              timeoutSeconds: 5
+              periodSeconds: 2
+              timeoutSeconds: 1
             volumeMounts:
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev/infiniband
-              name: infiniband
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
+              readOnly: true
+            - mountPath: /run/openengine
+              name: openengine
           resourceClaims:
           - name: gpu
             resourceClaimTemplateName: decode-gpu
@@ -184,13 +174,12 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - emptyDir: {}
+            name: openengine
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: node-local-v2-hybrid-all-local-4f40-decode-fd884c294bcb8400
-            name: config
         replicas: 1
         roleName: cond
     headlessServiceConfig:
@@ -198,7 +187,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid-all-local
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9716f907878181fed83aae3f9f03aaddd489713ea7d0d7894bdca70bac3d14b4
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1a38fc2f1466131b32a53c4e191d1a522fa5f7c4601adcf1eeb8fbbada6865db
       cliqueNames:
       - cond
       minAvailable: 1
