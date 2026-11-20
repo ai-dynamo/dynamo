@@ -290,6 +290,8 @@ and remove `NATS_SERVER`. Keep the other environment entries from the manifest:
 The fixed response-stream port is optional; without it, the runtime allocates a free port.
 Port `5562` is used for worker responses to Relay's runtime requests, not for WAN subscriptions.
 It does not need to be added to the WAN Service: workers connect to the advertised pod address.
+It applies to the `tcp` response plane. On the default Velo response plane, Relay and the workers
+connect to each other's Velo listeners (`DYN_VELO_RESPONSE_PORT`, OS-assigned when unset).
 
 Workers and other local event consumers must also use `DYN_EVENT_PLANE=zmq`. For an entirely
 TCP-based request path, configure workers with `DYN_REQUEST_PLANE=tcp`. Changing Relay alone

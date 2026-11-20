@@ -164,6 +164,10 @@ you use.
   expected name). For the NATS transport, enable TLS with `NATS_TLS_CA_CERT_PATH`.
   This protects the confidentiality and integrity of request-plane traffic in
   transit.
+- **Response streams follow the TCP TLS settings.** The default Velo response
+  plane has no TLS. While any `DYN_TCP_TLS_*` setting is present, Dynamo uses the
+  `tcp` response plane, so TLS covers responses too; without those settings,
+  responses travel in plaintext.
 - **Authenticate both ends with mutual TLS (mTLS).** Set
   `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` on the server so it requires clients to present
   a certificate — an unauthenticated client is then rejected at the handshake;

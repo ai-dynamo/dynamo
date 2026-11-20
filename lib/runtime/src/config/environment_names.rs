@@ -863,7 +863,7 @@ pub mod request_plane {
 /// Response plane transport configuration.
 pub mod response_plane {
     /// Response transport used by every runtime in this process: "tcp", "quic"
-    /// or "velo". Defaults to "tcp".
+    /// or "velo". Defaults to "velo", or to "tcp" while TLS is configured.
     ///
     /// Velo has no TLS, so a process that selects velo uses tcp instead
     /// while any `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is
@@ -922,7 +922,8 @@ pub mod tcp_response_stream {
     /// unparseable values fall back to the default.
     pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
 
-    /// Host or interface for the TCP response stream server and QUIC response listener.
+    /// Host or interface for the TCP response stream server and the QUIC and
+    /// Velo response listeners.
     ///
     /// Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, IPv4 or IPv6
     /// wildcards, and interface names. Interface aliases such as `eth0:1` are

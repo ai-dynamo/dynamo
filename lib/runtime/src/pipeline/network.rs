@@ -58,9 +58,9 @@ static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 /// Process-wide response transport. Frontends and workers must use the same mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ResponsePlaneMode {
-    #[default]
     Tcp,
     Quic,
+    #[default]
     Velo,
 }
 
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn response_plane_mode_parses_supported_values() {
         let parse = ResponsePlaneMode::from_config_value;
-        assert_eq!(parse(None).unwrap(), ResponsePlaneMode::Tcp);
+        assert_eq!(parse(None).unwrap(), ResponsePlaneMode::Velo);
         assert_eq!(parse(Some("tcp")).unwrap(), ResponsePlaneMode::Tcp);
         assert_eq!(parse(Some("quic")).unwrap(), ResponsePlaneMode::Quic);
         assert_eq!(parse(Some("velo")).unwrap(), ResponsePlaneMode::Velo);

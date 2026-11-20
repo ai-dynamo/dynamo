@@ -61,7 +61,7 @@ def create_runtime(
             backwards compatibility but will be removed in a future release.
         response_plane: Response transport (tcp, quic, or velo). Frontend and workers
             must use the same value. When None, the Rust runtime reads
-            DYN_RESPONSE_PLANE and defaults to tcp.
+            DYN_RESPONSE_PLANE and defaults to velo (tcp while TLS is set).
 
     Returns:
         Tuple of (runtime, event_loop).

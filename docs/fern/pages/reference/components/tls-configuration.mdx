@@ -20,6 +20,12 @@ request and response streams; NATS traffic is encrypted separately via NATS TLS
 when it runs over ZMQ it is **not** encrypted, and when it runs over NATS it is
 encrypted only if NATS TLS is configured.
 
+<Note>
+The default Velo response plane has no TLS. While any `DYN_TCP_TLS_*` path is set or
+`DYN_TCP_TLS_INSECURE` is true, Dynamo runs the response stream on `tcp` instead and logs a
+warning, so these settings also encrypt responses.
+</Note>
+
 ## HTTP TLS and mTLS
 
 The frontend accepts HTTPS connections from external clients or an API gateway.
