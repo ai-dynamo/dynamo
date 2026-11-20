@@ -134,6 +134,10 @@ runs:
         esac
         echo "baseline_stem=${BASELINE_STEM}" >> $GITHUB_OUTPUT
         echo "run_compliance=${RUN_COMPLIANCE}" >> $GITHUB_OUTPUT
+        # THIRD-PARTY.txt points at this version's source archive on NGC.
+        DYNAMO_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+        [[ "${DYNAMO_VERSION}" =~ ^[0-9A-Za-z.+-]+$ ]] || DYNAMO_VERSION=""
+        echo "dynamo_version=${DYNAMO_VERSION}" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
       uses: $/.github/actions/init-dynamo-builder
@@ -159,6 +163,7 @@ runs:
       env:
         ECR_REGISTRY: ${{ inputs.ecr_registry }}
         ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        DYNAMO_VERSION: ${{ steps.settings.outputs.dynamo_version }}
       run: |
         ECR_DEFAULT_IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
         IMAGE_URIS=("${ECR_DEFAULT_IMAGE_BASE}:${{ inputs.image_tag }}")
@@ -187,6 +192,7 @@ runs:
         # container/context.yaml). Empty stem (power-agent) → no compliance.
         if [[ "${{ steps.settings.outputs.run_compliance }}" == "true" ]]; then
           BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+          BUILD_ARGS+=("--build-arg" "DYNAMO_VERSION=${DYNAMO_VERSION}")
           BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}")
         fi
         while IFS= read -r build_arg; do
@@ -228,6 +234,7 @@ runs:
       working-directory: ./deploy/${{ inputs.component }}
       env:
         ECR_HOSTNAME: ${{ inputs.ecr_registry }}
+        DYNAMO_VERSION: ${{ steps.settings.outputs.dynamo_version }}
       run: |
         mkdir -p /tmp/compliance
         # Single FROM-scratch compliance_artifact stage → the unified /legal tree
@@ -236,6 +243,7 @@ runs:
         # in sync with the build-and-push step above.
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
         BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+        BUILD_ARGS+=("--build-arg" "DYNAMO_VERSION=${DYNAMO_VERSION}")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
             BUILD_ARGS+=("--build-arg" "${build_arg}")
@@ -445,10 +453,12 @@ runs:
       working-directory: ./deploy/${{ inputs.component }}
       env:
         ECR_HOSTNAME: ${{ inputs.ecr_registry }}
+        DYNAMO_VERSION: ${{ steps.settings.outputs.dynamo_version }}
       run: |
         mkdir -p /tmp/sources
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
         BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+        BUILD_ARGS+=("--build-arg" "DYNAMO_VERSION=${DYNAMO_VERSION}")
         BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=true")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
