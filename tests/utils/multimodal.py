@@ -13,6 +13,8 @@ from typing import Any, Optional, Type
 from urllib.request import urlopen
 
 import pytest
+from PIL import Image, ImageOps, PngImagePlugin
+from werkzeug.utils import send_file
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import (
@@ -770,9 +772,6 @@ def make_multimodal_configs(
 
 def make_sidecar_image_identity_payload(server) -> ImageCacheIdentityPayload:
     """Keep the URL identity stable while replacing the pixels on the last request."""
-    from PIL import Image, ImageOps, PngImagePlugin
-    from werkzeug.utils import send_file
-
     payload = make_sidecar_media_payload("image-routing")
     encoded = base64.b64decode(payload.media_source(0).split(",", 1)[1])
     image = Image.open(BytesIO(encoded)).convert("RGB")
