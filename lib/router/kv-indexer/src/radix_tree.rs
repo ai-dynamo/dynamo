@@ -3,7 +3,6 @@
 
 //! Single-threaded compressed radix tree for KV cache routing.
 
-use std::sync::Arc;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -13,7 +12,10 @@ use std::{
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::compressed_radix::{NodeState, append_dump_events};
-use super::{EventWarningKind, MatchDetails, PreBoundEventCounters};
+use super::{
+    EventWarningKind, MatchDetails, PreBoundEventCounters, ResidentBlockCountsHandle,
+    ResidentBlockTracker,
+};
 use crate::prelude::*;
 
 pub(crate) type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
@@ -84,7 +86,8 @@ impl RadixBlock {
 pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
-    lifecycle: super::HashLifecycle,
+    /// Live per-rank block counts, once a policy reads them.
+    resident_blocks: Option<ResidentBlockTracker>,
 }
 
 impl Default for RadixTree {
@@ -115,17 +118,11 @@ impl Drop for RadixTree {
 }
 
 impl RadixTree {
-    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
-        let mut backend = Self::new();
-        backend.lifecycle = super::HashLifecycle::new(delegate);
-        backend
-    }
-
     pub fn new() -> Self {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
-            lifecycle: super::HashLifecycle::default(),
+            resident_blocks: None,
         }
     }
 
@@ -292,14 +289,18 @@ impl RadixTree {
         let event_id = event.event.event_id;
         self.lookup.entry(worker).or_default();
 
-        match event.event.data {
+        let result = match event.event.data {
             KvCacheEventData::Stored(store) => self.apply_stored(worker, store, event_id, counters),
             KvCacheEventData::Removed(remove) => self.apply_removed(worker, remove, event_id),
             KvCacheEventData::Cleared => {
-                self.remove_worker_dp_rank(worker.worker_id, worker.dp_rank);
+                self.drop_rank(worker);
                 Ok(())
             }
+        };
+        if let Some(tracker) = &mut self.resident_blocks {
+            tracker.update(worker, self.lookup.get(&worker).map(WorkerLookup::len));
         }
+        result
     }
 
     fn apply_stored(
@@ -344,7 +345,6 @@ impl RadixTree {
                     };
                     if !node_ref.state.covers_pos(worker, pos) {
                         self.lookup.get_mut(&worker).unwrap().remove(&parent_hash);
-                        self.lifecycle.remove(worker, parent_hash);
                         self.log_missing_parent(worker, event_id, &store);
                         return Err(KvCacheEventError::ParentBlockNotFound);
                     }
@@ -605,7 +605,6 @@ impl RadixTree {
                 Some(existing) if Rc::ptr_eq(&existing, node) => {}
                 _ => changed = true,
             }
-            self.lifecycle.insert(worker, block.block_hash);
         }
         changed
     }
@@ -709,7 +708,6 @@ impl RadixTree {
             RadixBlock::prune_unreachable(&node);
             for &stale_hash in &outcome.stale_hashes {
                 lookup.remove(&stale_hash);
-                self.lifecycle.remove(worker, stale_hash);
             }
             eagerly_removed.extend_from_slice(&outcome.stale_hashes);
         }
@@ -729,11 +727,6 @@ impl RadixTree {
             let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) else {
                 continue;
             };
-            if self.lifecycle.is_enabled() {
-                for &hash in blocks.keys() {
-                    self.lifecycle.remove(worker, hash);
-                }
-            }
             let mut seen = FxHashSet::default();
             for node in blocks.into_values() {
                 if !seen.insert(Rc::as_ptr(&node)) {
@@ -750,18 +743,25 @@ impl RadixTree {
 
     pub fn remove_worker(&mut self, worker_id: WorkerId) {
         self.remove_or_clear_worker_blocks(worker_id, false);
+        if let Some(tracker) = &mut self.resident_blocks {
+            tracker.remove(|worker| worker.worker_id == worker_id);
+        }
     }
 
     pub fn remove_worker_dp_rank(&mut self, worker_id: WorkerId, dp_rank: DpRank) {
-        let worker = WorkerWithDpRank { worker_id, dp_rank };
+        let rank = WorkerWithDpRank { worker_id, dp_rank };
+        self.drop_rank(rank);
+        if let Some(tracker) = &mut self.resident_blocks {
+            tracker.remove(|worker| worker == rank);
+        }
+    }
+
+    /// Drops `worker`'s blocks and lookup entry. Callers decide the rank's resident block counter:
+    /// a clear leaves it at 0, a removal withdraws it.
+    fn drop_rank(&mut self, worker: WorkerWithDpRank) {
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
-        if self.lifecycle.is_enabled() {
-            for &hash in blocks.keys() {
-                self.lifecycle.remove(worker, hash);
-            }
-        }
         let mut seen = FxHashSet::default();
         for node in blocks.into_values() {
             if !seen.insert(Rc::as_ptr(&node)) {
@@ -774,6 +774,13 @@ impl RadixTree {
 
     pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
         self.remove_or_clear_worker_blocks(worker_id, true);
+        if let Some(tracker) = &mut self.resident_blocks {
+            for (worker, blocks) in &self.lookup {
+                if worker.worker_id == worker_id {
+                    tracker.update(*worker, Some(blocks.len()));
+                }
+            }
+        }
     }
 
     pub fn get_workers(&self) -> Vec<WorkerId> {
@@ -872,6 +879,16 @@ impl RadixTree {
 
     pub fn current_size(&self) -> usize {
         self.lookup.values().map(FxHashMap::len).sum()
+    }
+
+    /// Keeps live per-rank block counts in `counts` from now on, starting with the ranks held now.
+    pub(crate) fn track_resident_blocks(&mut self, counts: ResidentBlockCountsHandle) {
+        self.resident_blocks = Some(ResidentBlockTracker::new(
+            counts,
+            self.lookup
+                .iter()
+                .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
+        ));
     }
 
     #[cfg(test)]
