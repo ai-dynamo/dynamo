@@ -820,7 +820,15 @@ jobs:
               echo ""
               echo "=== vLLM Enterprise Runtime Image ==="
               SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-vllm-runtime-enterprise"
-              if [ "${SUBSET}" = "all" ] && ! crane manifest "${SOURCE}" >/dev/null 2>&1; then
+              ENT_SKIP=false
+              if [ "${SUBSET}" = "all" ] && ! crane manifest "${SOURCE}" >/dev/null 2>"${RUNNER_TEMP}/enterprise-manifest.err"; then
+                if grep -qE "MANIFEST_UNKNOWN|NAME_UNKNOWN" "${RUNNER_TEMP}/enterprise-manifest.err"; then
+                  ENT_SKIP=true
+                else
+                  echo "::warning::could not probe ${COMMIT_SHA}-vllm-runtime-enterprise ($(cat "${RUNNER_TEMP}/enterprise-manifest.err")); attempting the copy"
+                fi
+              fi
+              if [ "${ENT_SKIP}" = "true" ]; then
                 echo "skip vllm-runtime-enterprise: not built for ${COMMIT_SHA}"
               else
                 TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime-enterprise:${NGC_VERSION_TAG}"
