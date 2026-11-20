@@ -61,6 +61,183 @@ mod scripted_chat_engine;
 
 struct CounterEngine {}
 
+/// Capture the HTTP-dispatched choice count and emit that many synthetic choices.
+/// An unspecified count deliberately defaults to three to expose backend-default leakage.
+#[derive(Default)]
+struct ChoiceCountEngine {
+    counts: std::sync::Mutex<Vec<Option<u8>>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for ChoiceCountEngine
+{
+    /// Record the typed count, check token-path extraction, and return a terminal chat chunk.
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        use dynamo_llm::protocols::common::SamplingOptionsProvider;
+        let n = request.inner.n;
+        self.counts.lock().unwrap().push(n);
+        assert_eq!(request.extract_sampling_options()?.n, n);
+        assert_eq!(
+            serde_json::to_value(request.content())?["n"],
+            serde_json::json!(n)
+        );
+        let choices: Vec<_> = (0..n.unwrap_or(3)).map(|index| serde_json::json!({
+            "index": index, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"
+        })).collect();
+        let output = serde_json::from_value(serde_json::json!({
+            "id": "choice-count", "object": "chat.completion.chunk", "created": 0,
+            "model": request.inner.model, "choices": choices
+        }))?;
+        let (_, context) = request.transfer(());
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+            context.context(),
+        ))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for ChoiceCountEngine
+{
+    /// Record the typed count, check token-path extraction, and return a terminal completion chunk.
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        use dynamo_llm::protocols::common::SamplingOptionsProvider;
+        let n = request.inner.n;
+        self.counts.lock().unwrap().push(n);
+        assert_eq!(request.extract_sampling_options()?.n, n);
+        assert_eq!(
+            serde_json::to_value(request.content())?["n"],
+            serde_json::json!(n)
+        );
+        let choices: Vec<_> = (0..n.unwrap_or(3))
+            .map(|index| {
+                serde_json::json!({
+                    "index": index, "text": "hello", "logprobs": null, "finish_reason": "stop"
+                })
+            })
+            .collect();
+        let output = serde_json::from_value(serde_json::json!({
+            "id": "choice-count", "object": "text_completion", "created": 0,
+            "model": request.inner.model, "choices": choices
+        }))?;
+        let (_, context) = request.transfer(());
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+            context.context(),
+        ))
+    }
+}
+
+/// Both HTTP endpoints send explicit n=1 for omission/null in unary and SSE modes.
+/// Explicit counts survive; zero remains invalid. The synthetic engine's default
+/// of three makes this fail before the fix, without relying on real-engine defaults.
+#[tokio::test]
+async fn choice_count_defaults_before_backend_dispatch() {
+    use serde_json::{Value, json};
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .host("127.0.0.1")
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let engine = Arc::new(ChoiceCountEngine::default());
+    let card = ModelDeploymentCard::with_name_only("choice-count");
+    service
+        .model_manager()
+        .add_chat_completions_model("choice-count", card.mdcsum(), engine.clone())
+        .unwrap();
+    service
+        .model_manager()
+        .add_completions_model("choice-count", card.mdcsum(), engine.clone())
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let task = service.spawn_with_listener(cancel.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    for path in ["/v1/chat/completions", "/v1/completions"] {
+        for streaming in [false, true] {
+            for (n, expected) in [
+                (None, 1),
+                (Some(Value::Null), 1),
+                (Some(json!(1)), 1),
+                (Some(json!(2)), 2),
+                (Some(json!(0)), 0),
+            ] {
+                let mut body = json!({"model": "choice-count", "stream": streaming});
+                if path == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hello"}]);
+                } else {
+                    body["prompt"] = json!("hello");
+                }
+                if let Some(n) = n {
+                    body["n"] = n;
+                }
+                let response = client
+                    .post(format!("http://127.0.0.1:{port}{path}"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                if expected == 0 {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    assert!(engine.counts.lock().unwrap().is_empty());
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK);
+                let text = response.text().await.unwrap();
+                let payloads: Vec<Value> = if streaming {
+                    assert!(text.contains("data: [DONE]"), "{text}");
+                    text.lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter(|data| *data != "[DONE]")
+                        .map(|data| serde_json::from_str(data).unwrap())
+                        .collect()
+                } else {
+                    vec![serde_json::from_str(&text).unwrap()]
+                };
+                let indexes: std::collections::BTreeSet<_> = payloads
+                    .iter()
+                    .flat_map(|payload| payload["choices"].as_array().unwrap())
+                    .map(|choice| choice["index"].as_u64().unwrap())
+                    .collect();
+                assert_eq!(indexes, (0..expected as u64).collect());
+                assert_eq!(
+                    std::mem::take(&mut *engine.counts.lock().unwrap()),
+                    vec![Some(expected)]
+                );
+            }
+        }
+    }
+    cancel.cancel();
+    timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 #[derive(Default)]
 struct NvExtCaptureEngine {
     nvext: std::sync::Mutex<Option<Option<NvExt>>>,
