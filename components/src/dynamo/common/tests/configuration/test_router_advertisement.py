@@ -18,6 +18,12 @@ from dynamo.common.configuration.groups.router_args import (
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
+def _advertise(config):
+    """Build a worker's advertisement, which warns that advertising is deprecated."""
+    with pytest.warns(FutureWarning, match="--router-mode on a worker"):
+        return build_router_config(config)
+
+
 def _router_flags() -> set[str]:
     parser = argparse.ArgumentParser(add_help=False)
     add_worker_router_arguments(parser)
@@ -56,7 +62,7 @@ def test_kv_tuning_is_carried_not_reset():
         config, _ = parse_worker_router_config(
             ["--router-mode", "kv", "--router-kv-overlap-score-credit", "2.5"]
         )
-    router_config = build_router_config(config)
+    router_config = _advertise(config)
     assert router_config is not None
     assert router_config.kv_router_config.overlap_score_credit == 2.5
 
@@ -74,11 +80,10 @@ def test_frontend_only_arguments_are_not_offered_to_workers():
     assert "--router-kv-events" in flags
 
 
-def test_worker_session_affinity_flags_are_not_deprecated():
-    """Only the frontend's copies moved to the policy file.
+def test_worker_session_affinity_flags_do_not_warn_one_by_one():
+    """Only the frontend's copies name a `session_affinity` key to move to.
 
-    A worker still advertises its TTL and mode with these flags, so they must
-    not warn until the card's `router_config` itself is deprecated.
+    A worker's flags are covered by the one warning for its advertisement.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -96,8 +101,11 @@ def test_worker_session_affinity_flags_are_not_deprecated():
     assert config.session_affinity_mode == "soft"
 
 
-def test_worker_busy_threshold_flags_are_not_deprecated():
-    """Only the frontend's copies moved to the policy file."""
+def test_worker_busy_threshold_flags_do_not_warn_one_by_one():
+    """Only the frontend's copies name a `busy_threshold` key to move to.
+
+    A worker's flags are covered by the one warning for its advertisement.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         config, _ = parse_worker_router_config(
@@ -112,6 +120,52 @@ def test_worker_busy_threshold_flags_are_not_deprecated():
         )
     assert config.active_decode_blocks_threshold == 0.5
     assert config.active_prefill_tokens_threshold_frac == 2.0
+
+
+@pytest.mark.parametrize("source", ["cli", "env"])
+@pytest.mark.parametrize(
+    "mode, replacement",
+    [
+        ("kv", "`ROLE: dynamo-default-cost-fn`"),
+        ("round-robin", "`ROLE: round-robin`"),
+        # No policy type yet, so the mode moves to the frontend's flag.
+        (
+            "device-aware-weighted",
+            "--router-mode device-aware-weighted on the frontend",
+        ),
+    ],
+    ids=["kv", "round-robin", "device-aware-weighted"],
+)
+def test_advertising_worker_is_told_what_replaces_its_router_flags(
+    monkeypatch: pytest.MonkeyPatch, source: str, mode: str, replacement: str
+):
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    argv = []
+    if source == "cli":
+        argv = ["--router-mode", mode]
+    else:
+        monkeypatch.setenv("DYN_ROUTER_MODE", mode)
+    config, _ = parse_worker_router_config(argv)
+
+    with pytest.warns(FutureWarning) as caught:
+        assert build_router_config(config) is not None
+
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert "--router-mode on a worker (DYN_ROUTER_MODE)" in message
+    assert "removed in v1.9" in message
+    assert replacement in message
+
+
+def test_worker_that_advertises_nothing_is_not_warned(monkeypatch: pytest.MonkeyPatch):
+    """Router variables a worker inherits do nothing without a mode."""
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "300")
+    monkeypatch.setenv("DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD", "0.9")
+    config, _ = parse_worker_router_config([])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert build_router_config(config) is None
 
 
 def test_router_arg_group_refuses_to_guess_its_caller():
@@ -155,9 +209,10 @@ def test_deprecated_absolute_prefill_threshold_warns_when_advertised(
     assert config.active_prefill_tokens_threshold == 123
     assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
 
-    assert build_router_config(config) is not None
+    assert _advertise(config) is not None
     assert caplog.text.count(_ABSOLUTE_PREFILL_DEPRECATION) == 1
-    # A worker's fraction flag is not deprecated, so its notice still names it.
+    # A worker's notice still names its fraction flag; the advertisement's own
+    # warning sends the worker to the frontend's policy file.
     assert "; use --active-prefill-tokens-threshold-frac" in caplog.text
 
 
@@ -174,7 +229,7 @@ def test_absolute_prefill_threshold_unset_or_unadvertised_stays_quiet(
     caplog.set_level("WARNING")
 
     config, _ = parse_worker_router_config(["--router-mode", "kv"])
-    assert build_router_config(config) is not None
+    assert _advertise(config) is not None
 
     config, _ = parse_worker_router_config(["--active-prefill-tokens-threshold", "123"])
     assert build_router_config(config) is None
@@ -226,7 +281,7 @@ def test_default_hints_are_allowed_off_the_kv_path(tmp_path, worker_selection):
     config, _ = parse_worker_router_config(
         ["--router-mode", "round-robin", "--router-policy-config", policy]
     )
-    assert build_router_config(config) is not None
+    assert _advertise(config) is not None
 
 
 @pytest.mark.parametrize(

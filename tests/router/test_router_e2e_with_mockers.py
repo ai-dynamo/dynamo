@@ -1635,7 +1635,11 @@ def test_disagg_per_role_session_affinity(
         )
 
 
-@pytest.mark.parametrize("affine_role", ["prefill", "decode"])
+@pytest.mark.parametrize(
+    "affine_role, workers_advertise",
+    [("prefill", False), ("decode", True)],
+    ids=["prefill", "decode-workers-advertise"],
+)
 @pytest.mark.timeout(180)
 def test_disagg_per_role_session_affinity_policy_file(
     request,
@@ -1643,18 +1647,28 @@ def test_disagg_per_role_session_affinity_policy_file(
     predownload_tokenizers,
     tmp_path,
     affine_role,
+    workers_advertise,
 ):
     """A policy file gives one role session affinity; the other role gets none.
 
-    No worker advertises anything and the frontend takes no affinity flag. The
-    ``decode`` case also checks that the prefill pool, which configures nothing,
-    does not inherit the decode entry.
+    The frontend takes no affinity flag. The ``decode`` case also checks that
+    the prefill pool does not inherit the decode entry, and that the frontend
+    routes by the file whatever workers advertise: its prefill mockers
+    advertise KV routing and a session-affinity TTL, which would keep the
+    session on one prefill worker if the frontend honored them.
     """
     shared_namespace = f"test-namespace-{generate_random_suffix()}"
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
     }
+    prefill_mocker_args = decode_mocker_args = mocker_args
+    if workers_advertise:
+        decode_mocker_args = {**mocker_args, "router_mode": "kv"}
+        prefill_mocker_args = {
+            **decode_mocker_args,
+            "router_session_affinity_ttl_secs": 300,
+        }
     roles = {"prefill": "round-robin", "decode": "round-robin"}
     roles[affine_role] = "{type: round-robin, session_affinity: true}"
     policy_file = tmp_path / "policy.yaml"
@@ -1667,8 +1681,8 @@ def test_disagg_per_role_session_affinity_policy_file(
         request,
         shared_namespace,
         "prefill_first",
-        prefill_mocker_args=mocker_args,
-        decode_mocker_args=mocker_args,
+        prefill_mocker_args=prefill_mocker_args,
+        decode_mocker_args=decode_mocker_args,
         num_prefill_mockers=2,
         num_decode_mockers=2,
         enable_disagg_bootstrap=False,

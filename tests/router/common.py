@@ -4241,8 +4241,8 @@ def _test_disagg_per_role_session_affinity(
 
     Without ``router_policy_config``, the prefill workers advertise a
     session-affinity TTL; the decode workers advertise the same router mode
-    without one. With it, no worker advertises anything and the frontend takes
-    only the policy file, which sets ``session_affinity`` on ``affine_role``.
+    without one. With it, the frontend takes only the policy file, which sets
+    ``session_affinity`` on ``affine_role``, and ignores what workers advertise.
     Both hops run round-robin, so the only thing that can pin a session is its
     own affinity setting:
 

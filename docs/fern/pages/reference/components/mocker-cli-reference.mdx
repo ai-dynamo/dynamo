@@ -546,9 +546,15 @@ Apply only when `--engine-type trtllm`.
 ## Router advertisement
 
 Mocker accepts the same `--router-*` worker-advertisement options as the real backend launchers.
-Use them to override Router behavior for this worker set. See
+Use them to override Router behavior for this worker set on a Frontend without a policy file. See
 [Router Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md)
 for the shared fields.
+
+<Warning>
+  Router advertisement is deprecated and scheduled for removal in Dynamo 1.9.0. A Frontend started
+  with `--router-policy-config` ignores it. Set each role's policy under `worker_selection` in
+  that file instead.
+</Warning>
 
 <ParamField path="--router-mode" type="string" default="inherit frontend">
   Advertise a Router configuration for this worker set. When omitted, the worker advertises no
