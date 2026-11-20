@@ -114,7 +114,7 @@ pub struct RequestTraceMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
     /// The prompt tokens the engine reported it reused. Absent when no report came.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_reused_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_received_ms: Option<u64>,

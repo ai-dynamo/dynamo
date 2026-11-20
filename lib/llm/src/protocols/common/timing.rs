@@ -342,8 +342,6 @@ impl RequestTracker {
         self.cached_tokens.get().copied()
     }
 
-    /// Record the engine's own reused-token count. Unlike `cached_tokens`, which
-    /// is the router's estimate, this is what the engine reported.
     pub fn record_engine_reused_tokens(&self, tokens: u64) {
         let _ = self.engine_reused_tokens.set(tokens);
     }

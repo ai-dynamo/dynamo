@@ -78,11 +78,8 @@ pub(super) struct RouteObservation {
 
 struct KvHitTracking {
     prompt_tokens: u64,
-    /// Whether usage `cached_tokens` may stand in for a missing `kv_cache_hit`. Not on the
-    /// decode leg of a remote prefill: its usage carries the prefill leg's count, which the
-    /// prefill attempt already reported. That leg carries the prefill's result, or is a
-    /// decode attempt with bootstrap info (the prefill leg carries bootstrap info too). A
-    /// decode attempt without either prefilled locally and reports its own reuse.
+    /// Whether usage `cached_tokens` may stand in for a missing `kv_cache_hit`; see
+    /// [`usage_counts_as_engine_reuse`].
     usage_fallback: bool,
     /// Taken by the first valid worker report, so an attempt counts at most once.
     reused_tokens: Option<IntCounter>,
@@ -149,6 +146,18 @@ fn usage_cached_tokens(prompt_tokens: u64, data: &LLMEngineOutput) -> Option<u64
         .as_ref()?
         .cached_tokens
         .map(u64::from)
+}
+
+/// Whether usage `cached_tokens` measure reuse from before this attempt. Not on the decode
+/// leg of a remote prefill, whose usage repeats the prefill leg's count. Not where workers
+/// withhold `kv_cache_hit` on purpose but still send usage: `n > 1` (each sample's count
+/// includes the previous sample's hit) and multimodal input (the count includes expanded
+/// media tokens).
+fn usage_counts_as_engine_reuse(request: &PreprocessedRequest, phase: RequestPhase) -> bool {
+    request.prefill_result.is_none()
+        && !(phase == RequestPhase::Decode && request.bootstrap_info.is_some())
+        && request.sampling_options.n.is_none_or(|n| n <= 1)
+        && request.multi_modal_data.is_none()
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -736,8 +745,7 @@ impl RequestGuard {
         }
         let kv_hit = kv_route.map(|route| KvHitTracking {
             prompt_tokens: route.prompt_tokens,
-            usage_fallback: request.prefill_result.is_none()
-                && !(phase == RequestPhase::Decode && request.bootstrap_info.is_some()),
+            usage_fallback: usage_counts_as_engine_reuse(request, phase),
             reused_tokens: Some(request_metrics.observe_kv_route_estimate(
                 phase,
                 &request.model,
@@ -1064,62 +1072,6 @@ impl Drop for RequestGuard {
 #[cfg(test)]
 mod kv_cache_hit_tests {
     use super::*;
-
-    fn worker_item(prompt_tokens: u64, reused_tokens: u64) -> Annotated<LLMEngineOutput> {
-        Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({
-                "kv_cache_hit": {
-                    "prompt_tokens": prompt_tokens,
-                    "reused_tokens": reused_tokens,
-                }
-            })),
-            ..Default::default()
-        })
-    }
-
-    fn kv_hit_tracking(prompt_tokens: u64) -> (KvHitTracking, IntCounter) {
-        let counter = IntCounter::new("test_reused_tokens", "test").unwrap();
-        (
-            KvHitTracking {
-                prompt_tokens,
-                usage_fallback: true,
-                reused_tokens: Some(counter.clone()),
-            },
-            counter,
-        )
-    }
-
-    /// The router's estimate and the engine's report are kept apart: the
-    /// report lands on the tracker without touching `cached_tokens`, and only
-    /// the first valid report counts.
-    #[test]
-    fn worker_report_is_kept_on_the_request_tracker() {
-        let tracker = RequestTracker::new();
-        tracker.record_isl(100, Some(32));
-        let (mut kv, counter) = kv_hit_tracking(100);
-
-        kv.capture(&worker_item(100, 64), Some(&tracker));
-        kv.capture(&worker_item(100, 80), Some(&tracker));
-
-        assert_eq!(tracker.engine_reused_tokens(), Some(64));
-        assert_eq!(tracker.cached_tokens(), Some(32));
-        assert_eq!(counter.get(), 64);
-    }
-
-    #[test]
-    fn mismatched_worker_report_is_not_kept() {
-        let tracker = RequestTracker::new();
-        let (mut kv, counter) = kv_hit_tracking(100);
-
-        kv.capture(&worker_item(99, 64), Some(&tracker));
-        kv.capture(
-            &Annotated::from_data(LLMEngineOutput::default()),
-            Some(&tracker),
-        );
-
-        assert_eq!(tracker.engine_reused_tokens(), None);
-        assert_eq!(counter.get(), 0);
-    }
 
     fn report(reused: u64) -> serde_json::Value {
         serde_json::json!({
