@@ -132,7 +132,7 @@ requests meeting the SLOs; it is not the ranking metric.
 | Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate | Simulated GPU-hours |
 | ---: | --- | ---: | ---: | ---: | ---: |
 | 1 | **Cognitive Agent** | 2.467 | 5.00 | 58.26% | 20,011.3 |
-| 2 | **cloudAI-MPC** | 2.700 | 7.50 | 57.32% | 18,719.4 |
+| 2 | **cloudAI-MPC** | 2.700 | 7.50 | 57.43% | 18,821.9 |
 | 3 | Static | 2.733 | 10.50 | 63.93% | 27,718.9 |
 | 4 | Dynamo Planner | 3.733 | 5.00 | 81.57% | 30,488.8 |
 | 5 | KEDA | 4.500 | 0.00 | 28.46% | 13,084.4 |
@@ -142,12 +142,12 @@ requests meeting the SLOs; it is not the ranking metric.
 
 | Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate | Simulated GPU-hours |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 1 | **cloudAI-MPC** | 2.483 | 12.00 | 76.74% | 18,802.0 |
+| 1 | **cloudAI-MPC** | 2.517 | 12.00 | 76.93% | 18,787.5 |
 | 2 | Dynamo Planner | 3.017 | 6.50 | 62.30% | 15,490.7 |
 | 3 | **Cognitive Agent** | 3.333 | 2.00 | 79.78% | 23,525.8 |
 | 4 | Static | 3.433 | 5.83 | 65.53% | 23,897.4 |
 | 5 | Reactive | 3.967 | 2.33 | 61.60% | 19,162.5 |
-| 6 | KEDA | 4.767 | 1.33 | 64.09% | 21,337.6 |
+| 6 | KEDA | 4.733 | 1.33 | 64.09% | 21,337.6 |
 
 cloudAI-MPC ranks first in disaggregated serving and second in aggregated.
 Cognitive Agent ranks first in aggregated serving and third in disaggregated.
