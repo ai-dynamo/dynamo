@@ -18,13 +18,44 @@ import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from autoscaling_arena.workloads.axes import RateFn, ShapeFn, poisson_arrivals
 
 # A prefix policy is stateful across a trace, so we store a factory that mints a
 # fresh policy per materialization (keeps generation reproducible + isolated).
 PrefixFactory = Callable[[], "object"]  # () -> obj with .assign(rng, isl, block_size)
+
+# Mooncake field names and upstream aliases accepted by lib/data-gen's MooncakeRow.
+_MOONCAKE_FIELD_ALIASES: tuple[tuple[str, str], ...] = (
+    ("timestamp", "created_time"),
+    ("input_length", "input_tokens"),
+    ("output_length", "output_tokens"),
+)
+
+
+def _normalize_mooncake_record(
+    record: dict[str, Any], *, line_number: int | None = None
+) -> tuple[dict[str, Any], bool]:
+    """Normalize Mooncake aliases to canonical field names and reject duplicate fields."""
+    has_alias = False
+    for canonical, alias in _MOONCAKE_FIELD_ALIASES:
+        if alias in record:
+            if canonical in record:
+                prefix = f"line {line_number}: " if line_number is not None else ""
+                raise ValueError(
+                    f"{prefix}{canonical} and its alias {alias} are both set"
+                )
+            has_alias = True
+
+    if not has_alias:
+        return record, False
+
+    normalized = dict(record)
+    for canonical, alias in _MOONCAKE_FIELD_ALIASES:
+        if alias in normalized:
+            normalized[canonical] = normalized.pop(alias)
+    return normalized, True
 
 
 def validate_mooncake_trace(
@@ -52,6 +83,8 @@ def validate_mooncake_trace(
                 ) from exc
             if not isinstance(record, dict):
                 raise ValueError(f"line {line_number}: expected a JSON object")
+
+            record, _ = _normalize_mooncake_record(record, line_number=line_number)
 
             timestamp = record.get("timestamp")
             input_length = record.get("input_length")
@@ -219,32 +252,73 @@ class Workload:
                     f"static trace for '{self.name}' missing: {self.static_trace}"
                 )
             if cap is None and arrival_speedup == 1.0 and self.presorted:
-                if not force_copy_static:
-                    return self.static_trace
+                has_alias = False
+                with self.static_trace.open() as fh:
+                    for line_number, line in enumerate(fh, start=1):
+                        if not line.strip():
+                            continue
+                        _, record_had_alias = _normalize_mooncake_record(
+                            json.loads(line), line_number=line_number
+                        )
+                        if record_had_alias:
+                            has_alias = True
+                            break
+                if not has_alias:
+                    if not force_copy_static:
+                        return self.static_trace
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    path = out_dir / f"{self.name}.jsonl"
+                    try:
+                        os.link(self.static_trace, path)
+                    except OSError:
+                        shutil.copyfile(self.static_trace, path)
+                    return path
+
                 out_dir.mkdir(parents=True, exist_ok=True)
                 path = out_dir / f"{self.name}.jsonl"
                 try:
-                    os.link(self.static_trace, path)
+                    is_same = path.samefile(self.static_trace)
                 except OSError:
-                    shutil.copyfile(self.static_trace, path)
+                    is_same = path.resolve() == self.static_trace.resolve()
+                if is_same:
+                    raise ValueError(
+                        f"destination '{path}' must not refer to the input static trace '{self.static_trace}'"
+                    )
+
+                with self.static_trace.open() as fh, path.open("w") as out_fh:
+                    for line_number, line in enumerate(fh, start=1):
+                        if not line.strip():
+                            continue
+                        record, _ = _normalize_mooncake_record(
+                            json.loads(line), line_number=line_number
+                        )
+                        out_fh.write(json.dumps(record) + "\n")
                 return path
             if self.presorted:
                 # Already timestamp-sorted: stream + early-stop at the cap so we
                 # never load a multi-hundred-MB trace just to slice it.
                 records = []
                 with self.static_trace.open() as fh:
-                    for line in fh:
+                    for line_number, line in enumerate(fh, start=1):
                         if not line.strip():
                             continue
-                        records.append(json.loads(line))
+                        record, _ = _normalize_mooncake_record(
+                            json.loads(line), line_number=line_number
+                        )
+                        records.append(record)
                         if cap is not None and len(records) >= cap:
                             break
             else:
-                records = [
-                    json.loads(line)
-                    for line in self.static_trace.read_text().splitlines()
-                    if line.strip()
-                ]
+                records = []
+                for line_number, line in enumerate(
+                    self.static_trace.read_text().splitlines(), start=1
+                ):
+                    if not line.strip():
+                        continue
+                    record, _ = _normalize_mooncake_record(
+                        json.loads(line), line_number=line_number
+                    )
+                    records.append(record)
                 records.sort(key=lambda r: r.get("timestamp", 0))
                 if cap is not None:
                     records = records[:cap]

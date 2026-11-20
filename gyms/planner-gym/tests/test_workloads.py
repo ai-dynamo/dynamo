@@ -294,6 +294,107 @@ def test_arrival_speedup_compresses_timestamps(tmp_path):
     )
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_materialize_aliased_static_trace_with_transforms(tmp_path):
+    records = [
+        {
+            "created_time": 300,
+            "input_tokens": 128,
+            "output_tokens": 16,
+            "hash_ids": [1],
+        },
+        {"created_time": 100, "input_tokens": 64, "output_tokens": 32, "hash_ids": [2]},
+        {
+            "created_time": 200,
+            "input_tokens": 256,
+            "output_tokens": 64,
+            "hash_ids": [3],
+        },
+    ]
+    trace = tmp_path / "aliased_static.jsonl"
+    trace.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    workload_unsorted = Workload(
+        name="aliased-unsorted",
+        description="",
+        static_trace=trace,
+        presorted=False,
+    )
+    sorted_path = workload_unsorted.materialize(tmp_path / "sorted_out")
+    sorted_rows = [json.loads(line) for line in sorted_path.read_text().splitlines()]
+    assert [r["timestamp"] for r in sorted_rows] == [100, 200, 300]
+    for r in sorted_rows:
+        assert "created_time" not in r
+        assert "input_tokens" not in r
+        assert "output_tokens" not in r
+        assert "input_length" in r
+        assert "output_length" in r
+
+    presorted_aliased_trace = tmp_path / "presorted_aliased.jsonl"
+    presorted_aliased_trace.write_text(
+        "\n".join(json.dumps(records[i]) for i in [1, 2, 0]) + "\n"
+    )
+    workload_presorted = Workload(
+        name="aliased-presorted",
+        description="",
+        static_trace=presorted_aliased_trace,
+        presorted=True,
+    )
+    sliced_path = workload_presorted.materialize(
+        tmp_path / "sliced_out", max_requests=2
+    )
+    sliced_rows = [json.loads(line) for line in sliced_path.read_text().splitlines()]
+    assert len(sliced_rows) == 2
+    assert [r["timestamp"] for r in sliced_rows] == [100, 200]
+    for r in sliced_rows:
+        assert "created_time" not in r
+        assert "input_length" in r
+
+    speedup_path = workload_unsorted.materialize(
+        tmp_path / "speedup_out", arrival_speedup=2.0
+    )
+    speedup_rows = [json.loads(line) for line in speedup_path.read_text().splitlines()]
+    assert [r["timestamp"] for r in speedup_rows] == [50, 100, 150]
+
+    presorted_full_path = workload_presorted.materialize(tmp_path / "presorted_full")
+    assert presorted_full_path != presorted_aliased_trace
+    presorted_full_rows = [
+        json.loads(line) for line in presorted_full_path.read_text().splitlines()
+    ]
+    assert [r["timestamp"] for r in presorted_full_rows] == [100, 200, 300]
+    for r in presorted_full_rows:
+        assert "created_time" not in r
+        assert "input_tokens" not in r
+        assert "output_tokens" not in r
+        assert "input_length" in r
+        assert "output_length" in r
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_materialize_aliased_static_trace_rejects_same_file_destination(tmp_path):
+    record = {
+        "created_time": 100,
+        "input_tokens": 64,
+        "output_tokens": 10,
+        "hash_ids": [1],
+    }
+    trace = tmp_path / "recorded.jsonl"
+    trace.write_text(json.dumps(record) + "\n")
+    workload = Workload(
+        name="recorded",
+        description="",
+        static_trace=trace,
+        presorted=True,
+    )
+    with pytest.raises(ValueError, match="must not refer to the input static trace"):
+        workload.materialize(tmp_path)
+    assert trace.read_text().strip() == json.dumps(record)
+
+
 def _static_workload(tmp_path):
     trace = tmp_path / "input.jsonl"
     trace.write_text(
@@ -377,3 +478,290 @@ def test_synthetic_workload_missing_axis_names_the_configuration_error(missing):
 def test_synthetic_workload_lists_all_missing_axes():
     with pytest.raises(ValueError, match="arrival, shape, prefix_factory, duration_s"):
         Workload(name="incomplete", description="test").generate_records(seed=0)
+
+
+# --- Mooncake upstream field aliases (Issue #19234) -----------------------
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"timestamp": 0, "input_length": 100, "output_length": 10, "hash_ids": [1]},
+        {"created_time": 0, "input_tokens": 100, "output_tokens": 10, "hash_ids": [1]},
+        {"created_time": 0, "input_length": 100, "output_length": 10, "hash_ids": [1]},
+        {"timestamp": 0, "input_tokens": 100, "output_length": 10, "hash_ids": [1]},
+        {"timestamp": 0, "input_length": 100, "output_tokens": 10, "hash_ids": [1]},
+        {"created_time": 0, "input_length": 100, "output_tokens": 10, "hash_ids": [1]},
+        {"created_time": 0, "input_tokens": 100, "output_length": 10, "hash_ids": [1]},
+    ],
+)
+def test_validate_recorded_trace_accepts_upstream_aliases(tmp_path, record):
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps(record) + "\n")
+    assert validate_mooncake_trace(trace, block_size=512, presorted=True) == 1
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_validate_recorded_trace_multiple_records_with_alternating_aliases(tmp_path):
+    records = [
+        {"timestamp": 0, "input_length": 64, "output_length": 10, "hash_ids": [1]},
+        {"created_time": 100, "input_tokens": 64, "output_length": 10, "hash_ids": [2]},
+        {"timestamp": 200, "input_length": 64, "output_tokens": 10, "hash_ids": [3]},
+        {"created_time": 300, "input_tokens": 64, "output_tokens": 10, "hash_ids": [4]},
+    ]
+    trace = tmp_path / "multi.jsonl"
+    trace.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    assert validate_mooncake_trace(trace, block_size=64, presorted=True) == 4
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_validate_recorded_trace_honors_presorted_with_aliases(tmp_path):
+    records = [
+        {"created_time": 100, "input_tokens": 64, "output_tokens": 10, "hash_ids": [1]},
+        {"created_time": 50, "input_tokens": 64, "output_tokens": 10, "hash_ids": [2]},
+    ]
+    trace = tmp_path / "unsorted_alias.jsonl"
+    trace.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    with pytest.raises(ValueError, match="line 2: timestamps are not sorted"):
+        validate_mooncake_trace(trace, block_size=64, presorted=True)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("record", "canonical", "alias"),
+    [
+        (
+            {
+                "timestamp": 0,
+                "created_time": 0,
+                "input_length": 100,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "timestamp",
+            "created_time",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "created_time": 10,
+                "input_length": 100,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "timestamp",
+            "created_time",
+        ),
+        (
+            {
+                "created_time": 0,
+                "timestamp": 0,
+                "input_length": 100,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "timestamp",
+            "created_time",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "input_length": 100,
+                "input_tokens": 100,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "input_length",
+            "input_tokens",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "input_length": 100,
+                "input_tokens": 200,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "input_length",
+            "input_tokens",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "input_tokens": 100,
+                "input_length": 100,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "input_length",
+            "input_tokens",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "input_length": 100,
+                "output_length": 10,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "output_length",
+            "output_tokens",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "input_length": 100,
+                "output_length": 10,
+                "output_tokens": 20,
+                "hash_ids": [1],
+            },
+            "output_length",
+            "output_tokens",
+        ),
+        (
+            {
+                "timestamp": 0,
+                "input_length": 100,
+                "output_tokens": 10,
+                "output_length": 10,
+                "hash_ids": [1],
+            },
+            "output_length",
+            "output_tokens",
+        ),
+    ],
+)
+def test_validate_recorded_trace_rejects_duplicate_semantic_fields(
+    tmp_path, record, canonical, alias
+):
+    trace = tmp_path / "duplicate.jsonl"
+    trace.write_text(json.dumps(record) + "\n")
+    with pytest.raises(
+        ValueError, match=f"line 1: {canonical} and its alias {alias} are both set"
+    ):
+        validate_mooncake_trace(trace, block_size=512)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("record", "match"),
+    [
+        (
+            {
+                "created_time": -1,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: timestamp must be a finite nonnegative number",
+        ),
+        (
+            {
+                "created_time": False,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: timestamp must be a finite nonnegative number",
+        ),
+        (
+            {
+                "created_time": "zero",
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: timestamp must be a finite nonnegative number",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": 0,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: input_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": -5,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: input_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": True,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: input_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": 1.5,
+                "output_tokens": 10,
+                "hash_ids": [1],
+            },
+            "line 1: input_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": 100,
+                "output_tokens": 0,
+                "hash_ids": [1],
+            },
+            "line 1: output_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": 100,
+                "output_tokens": -1,
+                "hash_ids": [1],
+            },
+            "line 1: output_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": 100,
+                "output_tokens": False,
+                "hash_ids": [1],
+            },
+            "line 1: output_length must be a positive integer",
+        ),
+        (
+            {
+                "created_time": 0,
+                "input_tokens": 65,
+                "output_tokens": 2,
+                "hash_ids": [1],
+            },
+            "line 1: input_length 65 with block size 64 requires 2 hashes, got 1",
+        ),
+    ],
+)
+def test_validate_recorded_trace_rejects_invalid_aliased_values(
+    tmp_path, record, match
+):
+    trace = tmp_path / "invalid_alias.jsonl"
+    trace.write_text(json.dumps(record) + "\n")
+    with pytest.raises(ValueError, match=match):
+        validate_mooncake_trace(trace, block_size=64)
