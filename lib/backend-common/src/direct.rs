@@ -67,13 +67,18 @@ pub type DirectEngineFactory =
 pub struct DirectDispatch {
     adapters: parking_lot::RwLock<HashMap<u64, Arc<EngineAdapter>>>,
     /// One supervisor per engine; each releases its engine on runtime shutdown.
+    /// Nothing waits for them: an engine's cleanup releases only this
+    /// process's client, not the engine, which runs elsewhere.
     supervisors: TaskTracker,
+    /// Held while an engine's model files are fetched, so engines that start
+    /// together download a model once and then read the local copy.
+    model_fetch: tokio::sync::Mutex<()>,
 }
 
 impl DirectDispatch {
-    /// Resolves once runtime shutdown has withdrawn and cleaned up every
-    /// engine. Await it before the process exits.
-    pub async fn stopped(&self) {
+    /// Resolves once runtime shutdown has withdrawn and cleaned up every engine.
+    #[cfg(test)]
+    async fn stopped(&self) {
         self.supervisors.wait().await;
     }
 }
@@ -123,7 +128,8 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 }
 
 /// Probe and register every listed engine, then keep each registered while it
-/// serves. Returns once every engine serves; fails if any cannot be started.
+/// serves. Engines start concurrently. Returns once every engine serves; fails
+/// as soon as any cannot be started, releasing the others.
 ///
 /// `config` is the worker configuration a sidecar for these engines would run
 /// with. Each engine's role comes from its spec, not from `config`.
@@ -172,30 +178,47 @@ pub async fn serve_direct_engines(
             format!("register the direct dispatch: {register_error}"),
         )
     })?;
-    let mut hosts: Vec<(DirectEngineHost, HostedEngine)> = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let host = DirectEngineHost {
+    let hosts: Vec<DirectEngineHost> = specs
+        .into_iter()
+        .map(|spec| DirectEngineHost {
             drt: drt.clone(),
             config: config.clone(),
             instance_id: instance_id_for_url(&spec.url),
             spec,
             factory: factory.clone(),
             dispatch: dispatch.clone(),
-        };
-        // Release the engines started so far if a later one fails.
-        let hosted = match host.start().await {
-            Ok(hosted) => hosted,
-            Err(start_error) => {
-                for (host, hosted) in hosts {
-                    host.stop(hosted).await;
-                }
-                return Err(start_error);
+        })
+        .collect();
+    // Start every engine at once. The first that fails aborts the starts still
+    // running, and every engine started so far is released.
+    let abort = CancellationToken::new();
+    let started = futures::future::join_all(hosts.iter().map(|host| async {
+        let started = host.start(&abort).await;
+        if started.is_err() {
+            abort.cancel();
+        }
+        started
+    }))
+    .await;
+    let mut serving = Vec::with_capacity(hosts.len());
+    let mut start_error = None;
+    for (host, started) in hosts.into_iter().zip(started) {
+        match started {
+            Ok(Some(hosted)) => serving.push((host, hosted)),
+            Ok(None) => {}
+            Err(failed) => {
+                start_error.get_or_insert(failed);
             }
-        };
-        hosts.push((host, hosted));
+        }
+    }
+    if let Some(start_error) = start_error {
+        for (host, hosted) in serving {
+            host.stop(hosted).await;
+        }
+        return Err(start_error);
     }
     let shutdown = drt.primary_token();
-    for (host, hosted) in hosts {
+    for (host, hosted) in serving {
         dispatch
             .supervisors
             .spawn(host.supervise(hosted, shutdown.clone()));
@@ -234,20 +257,28 @@ struct HostedEngine {
 }
 
 impl DirectEngineHost {
-    /// Start the engine, make it dispatchable, then publish it.
-    async fn start(&self) -> Result<HostedEngine, DynamoError> {
+    /// Start the engine, make it dispatchable, then publish it. Returns `None`
+    /// when `abort` fires before the engine has started; the engine is
+    /// released then, as after a failed start.
+    async fn start(&self, abort: &CancellationToken) -> Result<Option<HostedEngine>, DynamoError> {
         let engine = (self.factory)(&self.spec)?;
-        let started = async {
-            let engine_config = engine.start(self.instance_id).await?;
-            let (endpoint, model) = self.discovery_records(&engine, &engine_config).await?;
-            Ok::<_, DynamoError>((endpoint, model))
-        }
-        .await;
+        let started = tokio::select! {
+            _ = abort.cancelled() => None,
+            started = async {
+                let engine_config = engine.start(self.instance_id).await?;
+                let (endpoint, model) = self.discovery_records(&engine, &engine_config).await?;
+                Ok::<_, DynamoError>((endpoint, model))
+            } => Some(started),
+        };
         let (endpoint, model) = match started {
-            Ok(records) => records,
-            Err(start_error) => {
+            Some(Ok(records)) => records,
+            Some(Err(start_error)) => {
                 self.cleanup(&engine).await;
                 return Err(start_error);
+            }
+            None => {
+                self.cleanup(&engine).await;
+                return Ok(None);
             }
         };
 
@@ -284,7 +315,7 @@ impl DirectEngineHost {
             mode = ?self.spec.mode,
             "serving engine directly"
         );
-        Ok(hosted)
+        Ok(Some(hosted))
     }
 
     /// Withdraw the engine from discovery and dispatch, then release it.
@@ -331,8 +362,9 @@ impl DirectEngineHost {
                     _ = shutdown.cancelled() => return,
                     _ = tokio::time::sleep(delay) => {}
                 }
-                match self.start().await {
-                    Ok(hosted) => break hosted,
+                match self.start(&shutdown).await {
+                    Ok(Some(hosted)) => break hosted,
+                    Ok(None) => return,
                     Err(probe_error) => {
                         tracing::debug!(url = %self.spec.url, %probe_error, "engine is not serving yet");
                         delay = (delay * 2).min(REPROBE_MAX_DELAY);
@@ -362,7 +394,10 @@ impl DirectEngineHost {
             &mut engine_config.runtime_data,
             engine.kv_event_sources().await?,
         )?;
-        let local_model = build_local_model(&config, &engine_config, false).await?;
+        let local_model = {
+            let _fetching = self.dispatch.model_fetch.lock().await;
+            build_local_model(&config, &engine_config, false).await?
+        };
         let mut card = local_model.card().clone();
         card.model_type = model_type;
         card.model_input = config.model_input;
@@ -480,6 +515,9 @@ mod tests {
         /// The ZMQ KV-event publisher the engine advertises, if any.
         kv_events: Option<String>,
         cleanups: AtomicUsize,
+        /// Calls to `start`; a start never returns while `start_hangs` is set.
+        starts: AtomicUsize,
+        start_hangs: AtomicBool,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -497,6 +535,10 @@ mod tests {
     #[async_trait]
     impl LLMEngine for FakeEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            self.state.starts.fetch_add(1, Ordering::SeqCst);
+            if self.state.start_hangs.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             if !self.state.up.load(Ordering::SeqCst) {
                 return Err(error(
                     ErrorType::Backend(BackendError::CannotConnect),
@@ -775,6 +817,79 @@ mod tests {
             .await
             .expect("shutdown must release every engine");
         assert_eq!((cleanups(A), cleanups(B)), (a_cleanups + 1, b_cleanups + 1));
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_a_reprobe_whose_start_does_not_return() {
+        let frontend = Frontend::start("direct-reprobe-shutdown", 0).await;
+        let a = frontend.states[A].clone();
+        let starts = a.starts.load(Ordering::SeqCst);
+        a.start_hangs.store(true, Ordering::SeqCst);
+        a.lost.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while a.starts.load(Ordering::SeqCst) == starts {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the lost engine must be probed again");
+
+        let cleanups = a.cleanups.load(Ordering::SeqCst);
+        frontend.drt.primary_token().cancel();
+        tokio::time::timeout(Duration::from_secs(10), frontend.dispatch.stopped())
+            .await
+            .expect("shutdown must end the probe");
+        assert_eq!(a.cleanups.load(Ordering::SeqCst), cleanups + 1);
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_fails_to_start_aborts_the_starts_still_running() {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        // `A` never finishes starting; `B` is down, so its start fails.
+        let states: HashMap<&'static str, Arc<EngineState>> = HashMap::from([
+            (
+                A,
+                Arc::new(EngineState {
+                    up: AtomicBool::new(true),
+                    start_hangs: AtomicBool::new(true),
+                    ..EngineState::default()
+                }),
+            ),
+            (B, Arc::new(EngineState::default())),
+        ]);
+        let factory_states = states.clone();
+        let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
+            Ok(Arc::new(FakeEngine {
+                state: factory_states[spec.url.as_str()].clone(),
+                fail_next: Arc::default(),
+                hold_next: Arc::default(),
+                held: Arc::default(),
+            }) as Arc<dyn LLMEngine>)
+        });
+        let specs = [A, B]
+            .map(|url| DirectEngineSpec {
+                url: url.to_string(),
+                mode: DisaggregationMode::Aggregated,
+            })
+            .to_vec();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            serve_direct_engines(&drt, WorkerConfig::default(), specs, factory),
+        )
+        .await
+        .expect("a failed start must not wait for the other engines");
+        assert!(result.is_err());
+        // Both engines are released: `B` after its failed start, `A` after
+        // its start was aborted.
+        for url in [A, B] {
+            assert_eq!(states[url].cleanups.load(Ordering::SeqCst), 1, "{url}");
+        }
+        drt.shutdown();
     }
 
     #[tokio::test]
