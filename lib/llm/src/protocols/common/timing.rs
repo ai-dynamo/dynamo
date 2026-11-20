@@ -16,10 +16,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
-use crate::http::service::metrics::{
-    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
-    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
-};
 use crate::protocols::common::extensions::WorkerIdInfo;
 
 /// Worker type constants for Prometheus metric labels.
@@ -27,7 +23,6 @@ use crate::protocols::common::extensions::WorkerIdInfo;
 /// when updating per-worker metrics (TTFT, ITL).
 pub const WORKER_TYPE_PREFILL: &str = "prefill";
 pub const WORKER_TYPE_DECODE: &str = "decode";
-const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Phase of the request in disaggregated serving.
 ///
@@ -637,51 +632,6 @@ impl RequestTracker {
         self.decode_worker_type.get().copied()
     }
 
-    /// Write TTFT and ISL to per-worker last gauges using prefill worker labels.
-    /// Called from the Python binding path on first token.
-    pub fn observe_first_token_gauges(&self) {
-        let Some(worker_id) = self.prefill_worker_id() else {
-            return;
-        };
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = self
-            .prefill_dp_rank()
-            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
-        let worker_type = self.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-
-        if let Some(ttft) = self.ttft_ms() {
-            WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
-                .with_label_values(labels)
-                .set(ttft / 1000.0);
-        }
-        if let Some(isl) = self.isl_tokens() {
-            WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
-                .with_label_values(labels)
-                .set(isl as i64);
-        }
-    }
-
-    /// Write avg ITL to per-worker last gauge using decode worker labels.
-    /// Called at each output block boundary and from the Python binding path.
-    pub fn observe_finish_gauges(&self) {
-        let Some(worker_id) = self.decode_worker_id() else {
-            return;
-        };
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = self
-            .decode_dp_rank()
-            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
-        let worker_type = self.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-
-        if let Some(avg_itl) = self.avg_itl_ms() {
-            WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-                .with_label_values(labels)
-                .set(avg_itl / 1000.0);
-        }
-    }
-
     /// Inject timing measured in another process (a standalone router); `get_timing_info`
     /// merges its fields in (see there). First-write-wins: with `n > 1` the first terminal
     /// choice to arrive fixes the request-level snapshot (per-choice timing is out of scope).
@@ -1038,71 +988,6 @@ mod tests {
         assert_eq!(tracker.prefill_dp_rank(), Some(0));
         assert_eq!(tracker.decode_worker_id(), Some(42));
         assert_eq!(tracker.decode_dp_rank(), Some(0));
-    }
-
-    #[test]
-    fn test_observe_first_token_gauges_no_panic_without_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_first_token();
-        tracker.record_isl(100, Some(50));
-        // No worker recorded — should return early without panic
-        tracker.observe_first_token_gauges();
-    }
-
-    #[test]
-    fn test_observe_finish_gauges_no_panic_without_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_first_token();
-        tracker.record_osl(10);
-        tracker.record_finish();
-        // No worker recorded — should return early without panic
-        tracker.observe_finish_gauges();
-    }
-
-    #[test]
-    fn test_observe_first_token_gauges_with_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
-        thread::sleep(Duration::from_millis(5));
-        tracker.record_first_token();
-        tracker.record_isl(256, Some(128));
-
-        tracker.observe_first_token_gauges();
-
-        let labels = &["42", "0", WORKER_TYPE_PREFILL];
-        let ttft_val = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
-            .with_label_values(labels)
-            .get();
-        assert!(
-            ttft_val > 0.0,
-            "TTFT gauge should be positive after observe, got {ttft_val}"
-        );
-
-        let isl_val = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
-            .with_label_values(labels)
-            .get();
-        assert_eq!(isl_val, 256, "ISL gauge should be 256, got {isl_val}");
-    }
-
-    #[test]
-    fn test_observe_finish_gauges_with_worker() {
-        let tracker = RequestTracker::new();
-        tracker.record_worker(99, Some(1), WORKER_TYPE_DECODE);
-        tracker.record_first_token();
-        thread::sleep(Duration::from_millis(10));
-        tracker.record_osl(5);
-        tracker.record_finish();
-
-        tracker.observe_finish_gauges();
-
-        let labels = &["99", "1", WORKER_TYPE_DECODE];
-        let itl_val = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-            .with_label_values(labels)
-            .get();
-        assert!(
-            itl_val > 0.0,
-            "ITL gauge should be positive after observe, got {itl_val}"
-        );
     }
 
     #[test]

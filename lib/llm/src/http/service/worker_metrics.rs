@@ -18,6 +18,7 @@ use super::metrics::{
 use crate::discovery::ModelManager;
 use crate::discovery::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
+use crate::protocols::common::timing::{RequestTracker, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 
 const GROUP_LABELS: &[&str] = &[
     "model",
@@ -28,6 +29,7 @@ const GROUP_LABELS: &[&str] = &[
 ];
 const COUNT_STATES: &[&str] = &["discovered", "available", "pending", "excluded"];
 
+const UNSET_DP_RANK_LABEL: &str = "none";
 type InventorySnapshot = Vec<(WorkerGroupObservation, HashSet<u64>)>;
 type InventoryProvider = Arc<dyn Fn() -> InventorySnapshot + Send + Sync>;
 type AllowedRanks = HashMap<(u64, String), HashSet<u32>>;
@@ -289,6 +291,51 @@ pub(super) fn register_worker_metrics(
         Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()),
     ];
     registry.register(Box::new(WorkerMetricsCollector::new(inventory, values)?))
+}
+
+/// Write TTFT and ISL to per-worker last gauges using prefill worker labels.
+/// Called from the Python binding path on first token.
+pub fn observe_first_token_gauges(tracker: &RequestTracker) {
+    let Some(worker_id) = tracker.prefill_worker_id() else {
+        return;
+    };
+    let worker_id_str = worker_id.to_string();
+    let dp_rank_str = tracker
+        .prefill_dp_rank()
+        .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+    let worker_type = tracker.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
+    let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+
+    if let Some(ttft) = tracker.ttft_ms() {
+        WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(labels)
+            .set(ttft / 1000.0);
+    }
+    if let Some(isl) = tracker.isl_tokens() {
+        WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(labels)
+            .set(isl as i64);
+    }
+}
+
+/// Write avg ITL to per-worker last gauge using decode worker labels.
+/// Called at each output block boundary and from the Python binding path.
+pub fn observe_finish_gauges(tracker: &RequestTracker) {
+    let Some(worker_id) = tracker.decode_worker_id() else {
+        return;
+    };
+    let worker_id_str = worker_id.to_string();
+    let dp_rank_str = tracker
+        .decode_dp_rank()
+        .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+    let worker_type = tracker.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
+    let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+
+    if let Some(avg_itl) = tracker.avg_itl_ms() {
+        WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(labels)
+            .set(avg_itl / 1000.0);
+    }
 }
 
 #[cfg(test)]
@@ -787,5 +834,70 @@ mod tests {
                 Some(7.0)
             );
         }
+    }
+
+    #[test]
+    fn test_observe_first_token_gauges_no_panic_without_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_first_token();
+        tracker.record_isl(100, Some(50));
+        // No worker recorded — should return early without panic
+        observe_first_token_gauges(&tracker);
+    }
+
+    #[test]
+    fn test_observe_finish_gauges_no_panic_without_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_first_token();
+        tracker.record_osl(10);
+        tracker.record_finish();
+        // No worker recorded — should return early without panic
+        observe_finish_gauges(&tracker);
+    }
+
+    #[test]
+    fn test_observe_first_token_gauges_with_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.record_first_token();
+        tracker.record_isl(256, Some(128));
+
+        observe_first_token_gauges(&tracker);
+
+        let labels = &["42", "0", WORKER_TYPE_PREFILL];
+        let ttft_val = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert!(
+            ttft_val > 0.0,
+            "TTFT gauge should be positive after observe, got {ttft_val}"
+        );
+
+        let isl_val = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert_eq!(isl_val, 256, "ISL gauge should be 256, got {isl_val}");
+    }
+
+    #[test]
+    fn test_observe_finish_gauges_with_worker() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker(99, Some(1), WORKER_TYPE_DECODE);
+        tracker.record_first_token();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        tracker.record_osl(5);
+        tracker.record_finish();
+
+        observe_finish_gauges(&tracker);
+
+        let labels = &["99", "1", WORKER_TYPE_DECODE];
+        let itl_val = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert!(
+            itl_val > 0.0,
+            "ITL gauge should be positive after observe, got {itl_val}"
+        );
     }
 }
