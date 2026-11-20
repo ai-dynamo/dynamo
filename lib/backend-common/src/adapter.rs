@@ -1335,13 +1335,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn encoder_consumers_abort_without_waiting_for_receipt() {
+    async fn non_decode_modes_abort_immediately() {
         for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
             let (engine, release, abort_calls) = ParkedEngine::new();
             let adapter = EngineAdapter::new(engine, mode);
-            let mut request = make_request(vec![1]);
-            request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
-            let input = Context::new(request);
+            let input = Context::new(make_request(vec![1]));
             let ctrl = input.context();
             let mut stream = adapter.generate(input).await.unwrap();
 
@@ -1357,36 +1355,38 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancellation_followed_by_stream_drop_still_aborts() {
-        const REQUESTS: usize = 64;
-        let (engine, _release, abort_calls) = ParkedEngine::new();
-        let engine_lifetime = Arc::downgrade(&engine);
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Encode] {
+            const REQUESTS: usize = 64;
+            let (engine, _release, abort_calls) = ParkedEngine::new();
+            let engine_lifetime = Arc::downgrade(&engine);
+            let adapter = EngineAdapter::new(engine, mode);
 
-        // Exercise the monitor's randomized select order with both signals ready.
-        for _ in 0..REQUESTS {
-            let input = Context::new(make_request(vec![1]));
-            let ctrl = input.context();
-            let mut stream = adapter.generate(input).await.unwrap();
-            assert!(futures::poll!(stream.next()).is_pending());
-            tokio::task::yield_now().await;
-
-            ctrl.stop_generating();
-            drop(stream);
-        }
-        drop(adapter);
-
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while engine_lifetime.strong_count() != 0 {
+            // Exercise the monitor's randomized select order with both signals ready.
+            for _ in 0..REQUESTS {
+                let input = Context::new(make_request(vec![1]));
+                let ctrl = input.context();
+                let mut stream = adapter.generate(input).await.unwrap();
+                assert!(futures::poll!(stream.next()).is_pending());
                 tokio::task::yield_now().await;
+
+                ctrl.stop_generating();
+                drop(stream);
             }
-        })
-        .await
-        .expect("cancellation monitors did not finish");
-        assert_eq!(
-            abort_calls.load(Ordering::SeqCst),
-            REQUESTS,
-            "every cancelled request must call engine.abort despite stream teardown"
-        );
+            drop(adapter);
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while engine_lifetime.strong_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancellation monitors did not finish");
+            assert_eq!(
+                abort_calls.load(Ordering::SeqCst),
+                REQUESTS,
+                "every cancelled request must call engine.abort despite stream teardown"
+            );
+        }
     }
 
     /// Engine that fires the side-channel first-token notify on entry and

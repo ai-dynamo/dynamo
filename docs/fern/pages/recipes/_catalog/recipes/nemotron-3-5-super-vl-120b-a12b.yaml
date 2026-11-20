@@ -168,6 +168,72 @@ targets:
   expected_performance:
     available: true
     summary: 1,050.44 output tok/s/GPU, 60.84 user tok/s P50, TTFT P50 1.073 s at concurrency 128 (3P2D, SWE-bench Pro replay).
+- id: vllm-agg-b200-certified
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - session-affinity
+  - mtp-speculative-decoding
+  - fp8-kv-cache
+  - cpu-kv-offload
+  workload:
+    type: swe-bench-pro-trace
+    sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
+  deploy:
+    asset: recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/agg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,411.0 output tok/s/GPU, 74.75 user tok/s P50, TTFT P50 0.369 s at concurrency 128 (4 workers,
+      text-only SWE-bench Pro replay, synthetic MTP acceptance 4.06; the recipe defaults to natural acceptance).
+  badge: nvidia-certified
+  certification:
+    source: nim-factory
+    ref: 01M7PXDSP2S8A2X2EPVD8Z200M
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+    date: "2026-11-18"
+- id: vllm-disagg-b200-certified
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 5
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+  topology: disaggregated
+  techniques:
+  - kv-aware-routing
+  - session-affinity
+  - mtp-speculative-decoding
+  - fp8-kv-cache
+  - disaggregated-prefill-decode
+  workload:
+    type: swe-bench-pro-trace
+    sla: 'Target: > 50 user output tokens/s P50; TTFT P50 < 5 s'
+  deploy:
+    asset: recipes/certified/nemotron-3.5-super-vl-120b-a12b/vllm/disagg-b200-swebenchpro/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3.5-super-vl-120b-a12b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1,163.6 output tok/s/GPU, 82.73 user tok/s P50, TTFT P50 0.990 s at concurrency 128 (3P2D,
+      text-only SWE-bench Pro replay, synthetic MTP acceptance 4.06; the recipe defaults to natural acceptance).
+  badge: nvidia-certified
+  certification:
+    source: nim-factory
+    ref: 01M7PXDSP2S8A2X2EPVD8Z200M
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.7.0
+    date: "2026-11-18"
 - id: vllm-agg-gb200
   recommended: false
   hardware:
@@ -432,5 +498,7 @@ targets:
     summary: 1,119.13 output tok/s/GPU, 144.61 user tok/s P50, TTFT P50 2.366 s at concurrency 80 (4 GPUs, 2P2D MTP3, SWE-bench Pro replay).
 maintainer: Alexandre Milesi
 gaps:
-- Image and video qualification pending.
+- Image and video qualification pending, except on the certified B200 targets, where NIM Factory accuracy testing covered them.
 - Site-specific network devices and health behavior require deployment qualification.
+- The certified B200 targets use 1.7.0 enterprise images, which publish on NGC with the Dynamo 1.7.0 release.
+- Video on the certified disaggregated B200 target needs a longer request timeout and NIXL KV lease; see the certified recipe README.

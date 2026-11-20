@@ -58,7 +58,7 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo==1.3.0
 pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo==1.3.0.dev1
 ```
 
-**Nightlies:** `ai-dynamo` and `ai-dynamo-runtime` nightly builds from `main` publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); `kvbm` joined the nightly train on Aug 2, 2026. Install with the same `--pre` + extra-index pattern. See [Nightly Releases](nightly-releases.md) for the full artifact list and container tags.
+**Nightlies:** `ai-dynamo` and `ai-dynamo-runtime` nightly builds from `main` publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with the same `--pre` + extra-index pattern. See [Nightly Releases](nightly-releases.md) for the full artifact list and container tags.
 
 </Accordion>
 
@@ -137,7 +137,7 @@ Current stable release: v1.6.0 (container tag `1.6.0`, wheel version `1.6.0`).
 | v0.8.1 | sglang-runtime:0.8.1-cuda13, vllm-runtime:0.8.1-cuda13 | Multimodality not expected to work on ARM64. Works on AMD64. | Known limitation |
 | v0.8.0 | sglang-runtime:0.8.0-cuda13 | CuDNN installation issue caused PyTorch v2.9.1 compatibility problems with nn.Conv3d — performance degradation and excessive memory usage in multimodal workloads. | Fixed in v0.8.1 (#5461) |
 
-ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.
+ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.
 
 **Crates: first published version on crates.io**
 

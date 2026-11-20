@@ -1550,6 +1550,10 @@ mod tests {
                 return Ok(None);
             }
             let card: ModelDeploymentCard = serde_json::from_value(card_json)?;
+            let mdc_checksum = card
+                .source_path
+                .clone()
+                .expect("test cards store their synthetic MDC checksum in source_path");
             let mcid = ModelCardInstanceId {
                 namespace: namespace.clone(),
                 component: component.clone(),
@@ -1566,8 +1570,8 @@ mod tests {
                     name: endpoint,
                 },
                 group_key: group_key(),
-                mdc_checksum: card.mdcsum().to_string(),
-                projection_fingerprint: card.source_path.clone().unwrap(),
+                mdc_checksum: mdc_checksum.clone(),
+                projection_fingerprint: mdc_checksum,
                 video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
                 card,
             }))
@@ -1735,7 +1739,7 @@ mod tests {
                 name: "generate".to_string(),
             },
             group_key: group_key(),
-            mdc_checksum: card.mdcsum().to_string(),
+            mdc_checksum: mdc_checksum.to_string(),
             projection_fingerprint: mdc_checksum.to_string(),
             video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
             card,
@@ -1788,6 +1792,7 @@ mod tests {
 
     fn encoder_consumer(id: u64, checksum: &str, required: bool) -> DesiredInstance {
         let mut worker = instance(id, checksum);
+        let original_checksum = worker.card.mdcsum();
         worker
             .card
             .runtime_config
@@ -1795,7 +1800,7 @@ mod tests {
             .insert("requires_encoder_result".into(), required.into());
         let uncached: ModelDeploymentCard =
             serde_json::from_value(serde_json::to_value(&worker.card).unwrap()).unwrap();
-        assert_eq!(uncached.mdcsum(), worker.mdc_checksum);
+        assert_eq!(uncached.mdcsum(), original_checksum);
         worker
     }
 

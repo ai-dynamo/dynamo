@@ -32,7 +32,8 @@ supported, even when `--context-length` is supplied.
 > `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`, which includes
 > image/video URL passthrough, audio input, native KVCM2 event streaming, OpenEngine routing load support,
 > and aggregated image-aware KV routing ([NVIDIA/TensorRT-LLM#21125](https://github.com/NVIDIA/TensorRT-LLM/pull/21125)).
-> The nightly CI job tests image, video, and audio passthrough against the latest regular upstream nightly;
+> The nightly CI job tests image, video, audio, and image-cache identity through
+> Dynamo HTTP and the sidecar against the latest regular upstream nightly;
 > it also supports manual dispatch. The examples below stay pinned to the validated version.
 
 ## Support matrix
@@ -72,8 +73,9 @@ curl -s localhost:8000/v1/chat/completions \
 
 Audio requires a runtime containing upstream audio support, such as the example
 pin above. The nightly audio lane runs real Whisper-tiny
-inference and checks the transcript and authoritative token usage. Full frontend
-HTTP CI is tracked separately from that adapter-to-engine test.
+inference through Dynamo HTTP and checks the transcript and authoritative token
+usage. It installs the current Dynamo test runtime alongside the stock upstream
+engine; it does not replace the engine with Dynamo's bundled TRT-LLM version.
 
 Whisper-tiny has no chat template and accepts text task prefixes rather than
 token-ID input. Supply `--custom-jinja-template` to the sidecar. An empty template

@@ -243,6 +243,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "upstream_trtllm: runs against the resolved official TRT-LLM nightly, "
+        "independently of the in-process runtime image",
+    )
+    config.addinivalue_line(
+        "markers",
         "engine_ports: dynamo_dynamic_ports also allocates per-worker engine "
         "HTTP/gRPC and vLLM KV replay ports, exported as "
         "DYN_ENGINE_{HTTP,GRPC}_PORT{N} and DYN_VLLM_KV_REPLAY_PORT{N}",
@@ -695,7 +700,6 @@ def pytest_collection_modifyitems(config, items):
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
         "sglang": "sglang",
-        "kvbm": "kvbm",
         "lmcache": "lmcache",
     }
     for marker_name, module_name in framework_markers.items():
@@ -1346,12 +1350,15 @@ def dynamo_dynamic_ports(
         engine_grpc_ports: list[int] = []
         engine_kv_replay_ports: list[int] = []
         if request.node.get_closest_marker("engine_ports"):
-            engine_http_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            # One block each, so a single-worker test's DP engine can bind the
+            # first port + rank, up to num_system_ports ranks. With several
+            # workers, worker N's rank k would take worker N+k's port.
+            engine_http_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_http_ports)
-            engine_grpc_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            engine_grpc_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_grpc_ports)
             # One block, so a data-parallel engine can replay on the first port + rank.

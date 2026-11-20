@@ -4,7 +4,7 @@
 # Approve CI for a fork PR by posting `/ok to test <head-sha>`.
 # Approval applies only to that commit.
 #
-# This workflow handles fork PRs when they are opened, pushed to, or reopened,
+# The approval job handles fork PRs when they are opened, pushed to, or reopened,
 # and when glamr-agent posts a CI request. PRs from branches in this repository
 # use the internal-contributor CI workflow instead.
 #
@@ -38,6 +38,9 @@
 # Before posting approval, the workflow checks that the PR is still open and its
 # base and head have not changed. A push can arrive after this check, so the CI
 # trigger must also check the command's SHA when approval is required.
+
+# Maintainers can retry failed jobs from existing PR runs with `/rerun ci`.
+# Copied-branch retries require approval for the current PR head.
 
 name: Trigger CI Approval Flow
 
@@ -328,3 +331,32 @@ jobs:
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \
             --body "/ok to test $PR_SHA"
+
+  rerun:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/rerun ci')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      issues: write  # Comment reactions
+      pull-requests: write
+    concurrency:
+      group: rerun-ci-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      # issue_comment uses the default branch SHA. Never check out the PR head.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Retry failed jobs
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        with:
+          script: |
+            const rerun = require('./.github/scripts/rerun-ci.js');
+            await rerun({ github, context, core });

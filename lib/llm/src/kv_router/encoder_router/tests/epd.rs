@@ -120,12 +120,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             ));
         }
         self.3.fetch_add(1, Ordering::SeqCst);
-        if matches!(request.sampling_options.n, Some(2 | 4 | 5 | 6))
-            || request
-                .multi_modal_data
-                .as_ref()
-                .is_some_and(|media| media.contains_key("unsupported_url"))
-        {
+        if matches!(request.sampling_options.n, Some(2 | 4 | 5 | 6)) {
             return Ok(ResponseStream::new(
                 Box::pin(stream::iter([Annotated {
                     error: Some(
@@ -463,85 +458,6 @@ async fn downstream_error_waits_for_producer_disposal() {
     fixture.shutdown().await;
 }
 
-async fn finalization_failure_waits_for_disposal(required: bool) {
-    let mut fixture = Fixture::new().await;
-    fixture.router.set_required(required);
-    let downstream = Arc::new(CaptureEngine::default());
-    let mut request = multimodal_request();
-    request.extra_args = Some(json!({"block_release": true, "truncate_after_terminal": true}));
-    let request = SingleIn::new(request);
-    let request_id = request.id().to_string();
-    let mut task = tokio::spawn({
-        let router = fixture.router.clone();
-        let downstream = downstream.clone();
-        async move { router.generate(request, downstream).await }
-    });
-    let (producer, release) = fixture.release_for(&request_id).await;
-    assert_eq!(producer, fixture.ids[0]);
-    assert_eq!(
-        release.encoder_result.as_ref().unwrap()["worker_id"],
-        producer
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut task)
-            .await
-            .is_err(),
-        "truncated Encode stream escaped before disposing its export"
-    );
-    assert!(
-        downstream.request.lock().unwrap().is_none(),
-        "inline fallback started before export disposal"
-    );
-    fixture.release_gate.add_permits(1);
-    let result = tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .unwrap()
-        .unwrap();
-    if required {
-        let error = result.unwrap_err();
-        assert!(dynamo_runtime::error::match_error_chain(
-            error.as_ref(),
-            &[dynamo_runtime::error::ErrorType::Disconnected],
-            &[]
-        ));
-        assert!(crate::migration::is_migratable(error.as_ref()));
-        assert!(downstream.request.lock().unwrap().is_none());
-    } else {
-        drop(result.unwrap());
-        let captured = downstream.request.lock().unwrap();
-        let captured = captured.as_ref().unwrap();
-        assert!(captured.encoder_result.is_none());
-        assert!(captured.multi_modal_data.is_some());
-    }
-    fixture.shutdown().await;
-}
-
-#[tokio::test]
-async fn required_encode_finalization_failure_waits_for_disposal() {
-    if isolated(concat!(
-        module_path!(),
-        "::required_encode_finalization_failure_waits_for_disposal"
-    ))
-    .await
-    {
-        return;
-    }
-    finalization_failure_waits_for_disposal(true).await;
-}
-
-#[tokio::test]
-async fn optional_encode_finalization_failure_waits_for_disposal() {
-    if isolated(concat!(
-        module_path!(),
-        "::optional_encode_finalization_failure_waits_for_disposal"
-    ))
-    .await
-    {
-        return;
-    }
-    finalization_failure_waits_for_disposal(false).await;
-}
-
 #[tokio::test]
 async fn release_support_is_negotiated_per_handoff() {
     if isolated(concat!(
@@ -581,30 +497,46 @@ async fn release_support_is_negotiated_per_handoff() {
 }
 
 #[tokio::test]
-async fn encode_failure_uses_current_required_policy_after_disposal() {
+async fn encode_failure_waits_for_disposal_and_uses_current_policy() {
     if isolated(concat!(
         module_path!(),
-        "::encode_failure_uses_current_required_policy_after_disposal"
+        "::encode_failure_waits_for_disposal_and_uses_current_policy"
     ))
     .await
     {
         return;
     }
-    for required in [true, false] {
+    for (initially_required, required) in
+        [(true, true), (false, false), (false, true), (true, false)]
+    {
         let mut fixture = Fixture::new().await;
-        fixture.router.set_required(!required);
+        fixture.router.set_required(initially_required);
         let downstream = Arc::new(CaptureEngine::default());
         let mut request = multimodal_request();
         request.extra_args = Some(json!({"block_release": true, "truncate_after_terminal": true}));
         let request = SingleIn::new(request);
         let request_id = request.id().to_string();
-        let task = tokio::spawn({
+        let mut task = tokio::spawn({
             let router = fixture.router.clone();
             let downstream = downstream.clone();
             async move { router.generate(request, downstream).await }
         });
-        fixture.release_for(&request_id).await;
-        assert!(!task.is_finished());
+        let (producer, release) = fixture.release_for(&request_id).await;
+        assert_eq!(producer, fixture.ids[0]);
+        assert_eq!(
+            release.encoder_result.as_ref().unwrap()["worker_id"],
+            producer
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut task)
+                .await
+                .is_err(),
+            "truncated Encode stream escaped before disposing its export"
+        );
+        assert!(
+            downstream.request.lock().unwrap().is_none(),
+            "inline fallback started before export disposal"
+        );
         fixture.router.set_required(required);
         fixture.release_gate.add_permits(1);
         let result = tokio::time::timeout(Duration::from_secs(5), task)
@@ -618,6 +550,7 @@ async fn encode_failure_uses_current_required_policy_after_disposal() {
                 &[dynamo_runtime::error::ErrorType::Disconnected],
                 &[]
             ));
+            assert!(crate::migration::is_migratable(error.as_ref()));
             assert!(downstream.request.lock().unwrap().is_none());
         } else {
             drop(result.unwrap());
@@ -687,21 +620,6 @@ async fn encoder_errors_remain_typed_and_optional_requests_can_fall_inline() {
     let ids = fixture.ids.clone();
     router.set_required(true);
     let downstream = Arc::new(CaptureEngine::default());
-    let error = router
-        .generate(
-            SingleIn::new(media_request("unsupported_url")),
-            downstream.clone(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<DynamoError>().unwrap().class(),
-        ErrorClass::InvalidRequest
-    );
-    assert!(error.to_string().contains("Required encoder hop failed"));
-    assert!(format!("{error:#}").contains("encoder rejected request"));
-    assert!(downstream.request.lock().unwrap().is_none());
-    let downstream = Arc::new(CaptureEngine::default());
     let mut invalid = multimodal_request();
     invalid.sampling_options.n = Some(2);
     let error = router
@@ -712,6 +630,7 @@ async fn encoder_errors_remain_typed_and_optional_requests_can_fall_inline() {
         error.downcast_ref::<DynamoError>().unwrap().class(),
         ErrorClass::InvalidRequest
     );
+    assert!(format!("{error:#}").contains("encoder rejected request"));
     assert!(downstream.request.lock().unwrap().is_none());
     for (n, expected, migratable) in [
         (4, dynamo_runtime::error::ErrorType::ResourceExhausted, true),
@@ -961,8 +880,9 @@ async fn isolated(test: &str) -> bool {
         .expect("encoder subprocess must finish within its deadline")
         .unwrap();
     assert!(
-        output.status.success(),
-        "{}\n{}",
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "encoder subprocess must execute exactly one test\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

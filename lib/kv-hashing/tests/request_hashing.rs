@@ -339,8 +339,8 @@ fn mm_info_conversion_roundtrip() {
 // Producer's block_hash matches the router's LocalBlockHash for default requests
 // -----------------------------------------------------------------------------
 //
-// The kvbm-consolidator's vLLM/TRT-LLM ingestion path (`lib/kvbm-consolidator/src/tracker.rs`)
-// routes through `Request::into_blocks()` to compute block_hash + PLH. The kv-router's
+// A producer that ingests vLLM/TRT-LLM events routes through `Request::into_blocks()`
+// to compute block_hash + PLH. The kv-router's
 // indexer recomputes `tokens_hash` from token_ids via `compute_block_hash_for_seq`
 // (`lib/kv-hashing/src/routing.rs`) using `XXH3_SEED = 1337` as the base seed
 // (plus `xxh3_64(lora_name)` when lora is set). For the indexer's lookup to find a

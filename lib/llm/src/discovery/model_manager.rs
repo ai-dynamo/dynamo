@@ -20,6 +20,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
+use super::controller::EncoderPolicy;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
@@ -1591,6 +1592,7 @@ impl ModelManager {
     pub(crate) fn get_systemone_execution_selection(
         &self,
         requested_model: &str,
+        required_candidates: usize,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         let catalog = self.catalog.load();
         let canonical_model = catalog
@@ -1599,7 +1601,7 @@ impl ModelManager {
             .map(String::as_str)
             .unwrap_or(requested_model);
         if let Some(model) = catalog.models.get(canonical_model) {
-            return model.get_systemone_execution_selection();
+            return model.get_systemone_execution_selection(required_candidates);
         }
 
         Err(SystemOneSelectionError::NotFound)
@@ -1642,6 +1644,25 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine_with_parsing_for_capability(capability)
+    }
+
+    pub(crate) fn get_chat_completions_engine_with_input_policy(
+        &self,
+        model: &str,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        ),
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_input_policy()
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -1716,6 +1737,8 @@ impl ModelManager {
     /// the parsing options the HTTP handlers read (tool-call / reasoning parser, structural
     /// tag, ...) reflect that card instead of the defaults. The card is still stamped as a
     /// synthetic aggregated in-process worker.
+    ///
+    /// In-process inputs register the default card; Mistral v11+ needs discovered workers.
     pub fn add_chat_completions_model_with_card(
         &self,
         model: &str,
@@ -1725,6 +1748,7 @@ impl ModelManager {
     ) -> Result<(), ModelManagerError> {
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
+        let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card);
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1733,6 +1757,7 @@ impl ModelManager {
         }
         let namespace = format!("__local_chat_{}", model);
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
+        ws.set_input_policy(input_policy);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
@@ -2758,11 +2783,7 @@ impl ModelManager {
     }
 
     pub(crate) fn requires_encoder_result(card: &ModelDeploymentCard) -> bool {
-        card.runtime_config
-            .runtime_data
-            .get(crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        EncoderPolicy::from_card(card) == EncoderPolicy::EncoderRequired
     }
 
     // -- Worker monitoring --
@@ -3177,14 +3198,14 @@ mod tests {
         let _workers = register_systemone_model(&manager, "model-a");
         for unregistered in ["jev-latest", "default", "typo"] {
             assert!(matches!(
-                manager.get_systemone_execution_selection(unregistered),
+                manager.get_systemone_execution_selection(unregistered, 2),
                 Err(SystemOneSelectionError::NotFound)
             ));
         }
         assert!(manager.register_alias("jev-latest", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("jev-latest")
+                .get_systemone_execution_selection("jev-latest", 2)
                 .unwrap()
                 .canonical_model,
             "model-a"
@@ -3192,18 +3213,18 @@ mod tests {
         assert!(manager.register_alias("public-model", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("public-model")
+                .get_systemone_execution_selection("public-model", 2)
                 .unwrap()
                 .canonical_model,
             "model-a"
         );
         assert!(matches!(
-            manager.get_systemone_execution_selection("typo"),
+            manager.get_systemone_execution_selection("typo", 2),
             Err(SystemOneSelectionError::NotFound)
         ));
         manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
         assert!(matches!(
-            manager.get_systemone_execution_selection("unsupported"),
+            manager.get_systemone_execution_selection("unsupported", 2),
             Err(SystemOneSelectionError::Unsupported)
         ));
     }
@@ -3215,17 +3236,17 @@ mod tests {
         assert!(manager.register_alias("jev-latest", "model-a"));
         workers_a.send(vec![]).unwrap();
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest"),
+            manager.get_systemone_execution_selection("jev-latest", 2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let _workers_b = register_systemone_model(&manager, "model-b");
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest"),
+            manager.get_systemone_execution_selection("jev-latest", 2),
             Err(SystemOneSelectionError::Unavailable)
         ));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("model-b")
+                .get_systemone_execution_selection("model-b", 2)
                 .unwrap()
                 .canonical_model,
             "model-b"
@@ -3237,7 +3258,7 @@ mod tests {
         let manager = ModelManager::new();
         let workers = register_systemone_model(&manager, "model-a");
         let selection = manager
-            .get_systemone_execution_selection("model-a")
+            .get_systemone_execution_selection("model-a", 2)
             .unwrap();
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
