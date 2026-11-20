@@ -6,8 +6,10 @@ package serviceidentity_test
 import (
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -26,15 +28,16 @@ func TestServicesPreserveUnresolvedComponentType(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Render ordinary and auxiliary Services from the same optional component type")
-			params := dynamo.ComponentServiceParams{
+			params := componentdeployment.ServiceParams{
 				ServiceName: "graph-component", Namespace: "default", DGDName: "graph",
 				ComponentName: "component", ComponentType: tc.resolvedType, DynamoNamespace: "default-graph", Labels: tc.authored,
+				IsK8sDiscovery: true,
 			}
-			ordinary, err := dynamo.GenerateComponentService(params)
+			ordinary, err := componentdeployment.RenderService(params)
 			require.NoError(t, err)
 
 			t.Log("Preserve an authored type or its absence when the type is unresolved")
-			for _, service := range []*corev1.Service{ordinary, dynamo.GenerateElasticEPHeadlessService(params)} {
+			for _, service := range []*corev1.Service{ordinary, grove.RenderElasticEPLeaderService(&v1beta1.DynamoComponentDeploymentSharedSpec{}, params, true)} {
 				value, present := service.Labels[consts.KubeLabelDynamoComponentType]
 				require.Equal(t, tc.wantPresent, present)
 				require.Equal(t, tc.want, value)
