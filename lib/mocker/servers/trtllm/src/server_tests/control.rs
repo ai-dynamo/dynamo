@@ -40,17 +40,15 @@ async fn abort_reports_aborted_then_already_finished() {
         .into_inner();
     let _first = stream.next().await.unwrap().unwrap();
 
-    for target in [pb::abort_request::Target::KvSession(
-        pb::KvSessionRef::default(),
-    )] {
-        let error = service
-            .abort(Request::new(pb::AbortRequest {
-                target: Some(target),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Code::Unimplemented);
-    }
+    let error = service
+        .abort(Request::new(pb::AbortRequest {
+            target: Some(pb::abort_request::Target::KvSession(
+                pb::KvSessionRef::default(),
+            )),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Unimplemented);
 
     let abort = |target| {
         let service = service.clone();

@@ -69,7 +69,6 @@ pub(crate) fn build_generate_request_with_routing(
     // when decode does reject is the sound fix and belongs on that side.
     let max_tokens = match mode {
         DisaggregationMode::Prefill => Some(1),
-        DisaggregationMode::Encode => None,
         _ => max_tokens(&request, limits, request_has_media)?,
     };
     // The decode worker replays the prefill worker's session; the prefill worker
@@ -89,7 +88,7 @@ pub(crate) fn build_generate_request_with_routing(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
-    let guided = guided_decoding(&request, mode)?;
+    let guided = guided_decoding(&request)?;
     let session_id = request
         .agent_context
         .as_ref()
@@ -107,8 +106,7 @@ pub(crate) fn build_generate_request_with_routing(
             (allow_dp_rank && rank.is_some()).then_some(request_id)
         })
         .map(str::to_string);
-    let include_stop_in_output =
-        (!mode.is_encode() && has_visible_stop_tokens(&request)).then_some(true);
+    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
     let top_k = normalize_top_k(sampling.top_k)?;
@@ -729,7 +727,6 @@ fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
 
 fn guided_decoding(
     request: &PreprocessedRequest,
-    mode: DisaggregationMode,
 ) -> Result<Option<pb::GuidedDecoding>, DynamoError> {
     let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
         return Ok(None);
@@ -759,9 +756,6 @@ fn guided_decoding(
         return Err(client::invalid_argument(
             "only one guided decoding constraint may be set",
         ));
-    }
-    if mode.is_encode() {
-        return Ok(None);
     }
     use pb::guided_decoding::Guide;
     let guide = if let Some(json) = &guided.json {

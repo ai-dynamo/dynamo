@@ -472,7 +472,6 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::InvalidArgument
-            | tonic::Code::FailedPrecondition
             | tonic::Code::NotFound
             | tonic::Code::Unimplemented
             | tonic::Code::Unauthenticated

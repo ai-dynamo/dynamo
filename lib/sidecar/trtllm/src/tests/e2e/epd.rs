@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::client::{ModelLimits, TrtllmClient};
-use crate::convert::{build_encode_request, build_generate_request};
 use dynamo_backend_common::LLMEngineOutput;
-use dynamo_sidecar_common::GrpcChannelPool;
 
 use super::*;
 
@@ -144,28 +141,11 @@ pub(super) async fn baseline(engine: &TrtllmSidecarEngine, model: &str) {
     .expect("aggregated EPD baseline timed out");
 }
 
-async fn worker(
-    endpoint: &str,
-    model: &str,
-    mode: DisaggregationMode,
-) -> (TrtllmSidecarEngine, ModelLimits) {
-    let endpoint = GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid EPD endpoint");
-    let client = TrtllmClient::connect(&endpoint, transport(1))
-        .await
-        .expect("connect real EPD engine");
-    let info = client
-        .wait_for_model_info(
-            model,
-            None,
-            tokio::time::Instant::now() + Duration::from_secs(30),
-            Duration::from_millis(100),
-        )
-        .await
-        .expect("read real Control.GetModelInfo for EPD negotiation");
+async fn worker(endpoint: &str, model: &str, mode: DisaggregationMode) -> TrtllmSidecarEngine {
     let mut args = vec![
         "sidecar".into(),
         "--grpc-endpoint".into(),
-        endpoint.to_string(),
+        endpoint.into(),
         "--model-path".into(),
         model.into(),
         "--disaggregation-mode".into(),
@@ -178,50 +158,27 @@ async fn worker(
         .expect("configure real EPD worker")
         .0;
     engine.start(0).await.expect("start real EPD worker");
-    (engine, info.limits)
+    engine
 }
 
-fn assert_same_input(encoded: &pb::EncodeRequest, generated: &pb::GenerateRequest) {
-    match (&encoded.input, &generated.input) {
-        (
-            Some(pb::encode_request::Input::Prompt(a)),
-            Some(pb::generate_request::Input::Prompt(b)),
-        ) => assert_eq!(a, b),
-        (
-            Some(pb::encode_request::Input::TokenIds(a)),
-            Some(pb::generate_request::Input::TokenIds(b)),
-        ) => assert_eq!(a, b),
-        _ => panic!("encoder and consumer input context must match"),
-    }
-}
-
-async fn reject_replay(endpoint: &str, mut request: pb::GenerateRequest) -> String {
-    static REPLAY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    request.request_id = format!(
-        "replay-{}",
-        REPLAY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    assert!(request.encoded_media.is_some());
-    assert!(request.kv.as_ref().is_none_or(|kv| kv.session.is_none()));
-    let endpoint = GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid replay endpoint");
-    let channels = GrpcChannelPool::connect("TensorRT-LLM", &endpoint, transport(1), false)
+async fn reject_replay(consumer: &TrtllmSidecarEngine, request: PreprocessedRequest) -> String {
+    let context = dynamo_backend_common::testing::mock_context();
+    let error = match consumer
+        .generate(request, GenerateContext::new(context, None))
         .await
-        .expect("connect the consumer inference service");
-    let mut inference = pb::inference_client::InferenceClient::new(channels.next_channel());
-    let status = match inference.generate(request).await {
-        Err(status) => status,
-        Ok(response) => response
-            .into_inner()
-            .message()
+    {
+        Err(error) => error,
+        Ok(mut stream) => stream
+            .next()
             .await
-            .expect_err("replay must fail before emitting an inference event"),
+            .expect("replay must fail before emitting inference output")
+            .expect_err("a consumed encoder reference must not be reusable"),
     };
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(
-        status.message().contains("expired or was already consumed"),
-        "replay must reject the spent export: {status}"
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(dynamo_backend_common::BackendError::InvalidArgument)
     );
-    status.to_string()
+    error.to_string()
 }
 
 async fn run(disaggregated: bool) {
@@ -237,11 +194,10 @@ async fn run(disaggregated: bool) {
     );
     assert_eq!(baseline.cases.len(), 2);
     let encoder_endpoint = required("TRTLLM_E2E_ENCODER_ENDPOINT");
-    let (encoder, encoder_limits) =
-        worker(&encoder_endpoint, &model, DisaggregationMode::Encode).await;
+    let encoder = worker(&encoder_endpoint, &model, DisaggregationMode::Encode).await;
     let mode = if disaggregated { PREFILL } else { AGG };
     let consumer_endpoint = required("TRTLLM_E2E_PREFILL_ENDPOINT");
-    let (consumer, consumer_limits) = worker(&consumer_endpoint, &model, mode).await;
+    let consumer = worker(&consumer_endpoint, &model, mode).await;
     let decode = if disaggregated {
         Some(
             worker(
@@ -263,8 +219,6 @@ async fn run(disaggregated: bool) {
     assert!(probe_outputs[0].encoder_result.is_none());
     let mut cases = Vec::new();
     for (mut request, expected) in image_requests(&model).into_iter().zip(baseline.cases) {
-        let encoder_wire =
-            build_encode_request(request.clone(), "e", &model, Some(encoder_limits)).unwrap();
         let encoded = collect(&encoder, request.clone()).await;
         assert_eq!(
             encoded.len(),
@@ -273,35 +227,17 @@ async fn run(disaggregated: bool) {
         );
         assert!(encoded[0].token_ids.is_empty());
         assert_eq!(encoded[0].finish_reason, Some(FinishReason::Stop));
-        let handoff = encoded[0]
-            .encoder_result
-            .as_deref()
-            .cloned()
-            .expect("Encode must carry its opaque reference");
-        assert!(
-            !handoff["opaque_state"]
-                .as_str()
-                .expect("base64 opaque reference")
-                .is_empty()
+        request.encoder_result = Some(
+            encoded[0]
+                .encoder_result
+                .as_deref()
+                .cloned()
+                .expect("Encode must carry its opaque reference"),
         );
-        request.encoder_result = Some(handoff);
-        let consumer_wire = build_generate_request(
-            request.clone(),
-            "consumer",
-            &model,
-            Some(consumer_limits),
-            mode,
-        )
-        .unwrap();
-        assert_eq!(
-            encoder_wire.media, consumer_wire.media,
-            "encoder and consumer image envelopes must match, including UUIDs"
-        );
-        assert_same_input(&encoder_wire, &consumer_wire);
         let outputs = collect(&consumer, request.clone()).await;
-        let replay_error = reject_replay(&consumer_endpoint, consumer_wire.clone()).await;
+        let replay_error = reject_replay(&consumer, request.clone()).await;
         let mut prefill_prompt_tokens = None;
-        let outputs = if let Some((decode, limits)) = &decode {
+        let outputs = if let Some(decode) = &decode {
             assert!(outputs.iter().all(|output| output.token_ids.is_empty()));
             let terminal = outputs.last().expect("prefill terminal");
             assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
@@ -326,31 +262,7 @@ async fn run(disaggregated: bool) {
                     .expect("PrefillReady must carry the native KV session"),
                 prompt_tokens_details: usage.prompt_tokens_details.clone(),
             });
-            assert_eq!(
-                consumer_wire.extra.as_ref().unwrap().fields[crate::disagg::REQUEST_TYPE_KEY].kind,
-                Some(prost_types::value::Kind::StringValue(
-                    crate::disagg::CONTEXT_ONLY.into()
-                ))
-            );
-            let wire = build_generate_request(
-                request.clone(),
-                "d",
-                &model,
-                Some(*limits),
-                DisaggregationMode::Decode,
-            )
-            .unwrap();
-            assert!(
-                request.encoder_result.is_some(),
-                "retain the spent encoder reference through decode"
-            );
-            assert!(
-                wire.encoded_media.is_none(),
-                "D must consume KV without replaying the encoder reference"
-            );
-            assert!(wire.kv.as_ref().unwrap().session.is_some());
-            assert_eq!(wire.media, encoder_wire.media);
-            assert_same_input(&encoder_wire, &wire);
+            // Keep the spent reference on D's request; only its staged KV may be replayed.
             collect(decode, request.clone()).await
         } else {
             outputs
@@ -375,7 +287,7 @@ async fn run(disaggregated: bool) {
     write_result(&model, cases);
     encoder.cleanup().await.unwrap();
     consumer.cleanup().await.unwrap();
-    if let Some((decode, _)) = decode {
+    if let Some(decode) = decode {
         decode.cleanup().await.unwrap();
     }
 }

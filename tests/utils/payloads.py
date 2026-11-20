@@ -509,6 +509,31 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class EncoderImagePayload(ChatPayload):
+    """Image-conditioned output through a vision-disabled EPD consumer."""
+
+    color: str = field(default="green", kw_only=True)
+    split: bool = field(default=False, kw_only=True)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        colors = re.findall(r"\b(red|green)\b", content.lower())
+        assert colors and colors[0] == self.color, content
+        result = response.json()
+        usage = result["usage"]
+        assert usage["prompt_tokens"] > 64, usage
+        assert usage["completion_tokens"] > 0, usage
+        assert (
+            usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        ), usage
+        if self.split:
+            workers = require_router_worker_id(result)
+            assert workers.get("prefill_worker_id") is not None, workers
+            assert workers.get("decode_worker_id") is not None, workers
+            assert workers["prefill_worker_id"] != workers["decode_worker_id"], workers
+
+
+@dataclass
 class StopStringChatPayload(ChatPayload):
     """End a chat completion on its single stop string.
 

@@ -142,9 +142,10 @@ prerequisites must be published in the upstream nightly before these jobs can pa
 The standard serve suite additionally provides `trtllm_image_e_pd` and
 `trtllm_image_e_p_d` configurations. These send two distinct images through the
 HTTP frontend and require correct colors, expanded usage and distinct P/D worker
-IDs for the split topology. They run in the sidecar nightly serve job once its
-runtime includes the matching upstream contract. Source overlays used before
-publication are separate validation evidence, not a stock-nightly pass.
+IDs for the split topology. Both cases are selected in the sidecar nightly serve
+job now and fail until its runtime includes the matching upstream contract.
+Source overlays used before publication are separate validation evidence, not a
+stock-nightly pass.
 
 Engine cleanup uses the shared process manager: graceful shutdown waits for
 observed descendants and remaining session members, including reparented workers.

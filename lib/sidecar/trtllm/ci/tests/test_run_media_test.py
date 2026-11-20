@@ -132,49 +132,23 @@ class MediaResponseTests(unittest.TestCase):
             )
 
     def test_media_failures_keep_the_selected_scenario_in_junit(self):
-        for media in ("image", "video", "audio"):
-            for flag in ("--media", "--scenario"):
-                with (
-                    self.subTest(media=media, flag=flag),
-                    tempfile.TemporaryDirectory() as tmp,
-                ):
-                    argv = [
-                        "run_image_test.py",
-                        flag,
-                        media,
-                        "--binary",
-                        "unused",
-                        "--config",
-                        "unused",
-                        "--results",
-                        tmp,
-                    ]
-                    with (
-                        patch("sys.argv", argv),
-                        patch.object(
-                            runner, "run", side_effect=RuntimeError("engine failed")
-                        ) as run,
-                        contextlib.redirect_stderr(io.StringIO()),
-                    ):
-                        self.assertEqual(runner.main(), 1)
-                    selected = run.call_args.args[0]
-                    self.assertEqual(selected.media, media)
-                    self.assertEqual(selected.scenario, media)
-                    suite = ET.parse(Path(tmp) / "junit.xml").getroot()
-                    self.assertEqual(suite.attrib["failures"], "1")
-                    self.assertEqual(suite.attrib["skipped"], "0")
-                    case = suite.find("testcase")
-                    self.assertEqual(
-                        case.attrib["name"], f"tests::e2e::e2e_real_openengine_{media}"
-                    )
-                    self.assertIn("engine failed", case.find("failure").text)
-
-    def test_epd_failures_are_reported_without_skipping(self):
-        for scenario, test in runner.EPD_TESTS.items():
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+        cases = [
+            (media, flag, media, f"tests::e2e::e2e_real_openengine_{media}")
+            for media in ("image", "video", "audio")
+            for flag in ("--media", "--scenario")
+        ]
+        cases.extend(
+            ("image", "--scenario", scenario, test)
+            for scenario, test in runner.EPD_TESTS.items()
+        )
+        for media, flag, scenario, test in cases:
+            with (
+                self.subTest(media=media, flag=flag, scenario=scenario),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 argv = [
                     "run_image_test.py",
-                    "--scenario",
+                    flag,
                     scenario,
                     "--binary",
                     "unused",
@@ -186,17 +160,20 @@ class MediaResponseTests(unittest.TestCase):
                 with (
                     patch("sys.argv", argv),
                     patch.object(
-                        runner, "run", side_effect=RuntimeError("EPD unsupported")
+                        runner, "run", side_effect=RuntimeError("engine failed")
                     ) as run,
                     contextlib.redirect_stderr(io.StringIO()),
                 ):
                     self.assertEqual(runner.main(), 1)
-                self.assertEqual(run.call_args.args[0].media, "image")
-                self.assertEqual(run.call_args.args[0].scenario, scenario)
+                selected = run.call_args.args[0]
+                self.assertEqual(selected.media, media)
+                self.assertEqual(selected.scenario, scenario)
                 suite = ET.parse(Path(tmp) / "junit.xml").getroot()
                 self.assertEqual(suite.attrib["failures"], "1")
                 self.assertEqual(suite.attrib["skipped"], "0")
-                self.assertEqual(suite.find("testcase").attrib["name"], test)
+                case = suite.find("testcase")
+                self.assertEqual(case.attrib["name"], test)
+                self.assertIn("engine failed", case.find("failure").text)
 
 
 if __name__ == "__main__":

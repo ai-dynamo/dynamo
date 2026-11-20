@@ -79,21 +79,19 @@ impl TrtllmSidecarEngine {
             .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        if request
+        let release_requested = request
             .extra_args
             .as_ref()
             .and_then(|extra| extra.get(RELEASE_ENCODER_RESULT))
             .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        {
-            if !self.mode.is_encode() {
-                return Err(client::invalid_argument(
-                    "encoder handoff release requires an encode worker",
-                ));
-            }
-            let result = request.encoder_result.as_ref().ok_or_else(|| {
-                client::invalid_argument("encoder handoff release requires a reference")
-            })?;
+            == Some(true);
+        let is_release = release_requested && request.is_encoder_result_release();
+        if release_requested && (!self.mode.is_encode() || !is_release) {
+            return Err(client::invalid_argument(
+                "encoder handoff release requires an encode worker and a reference-only request",
+            ));
+        }
+        if is_release && let Some(result) = request.encoder_result.as_ref() {
             client
                 .release_encoder_handoff(crate::encoder_handoff::from_result(result)?)
                 .await?;
@@ -116,8 +114,14 @@ impl TrtllmSidecarEngine {
             return Ok(Box::pin(async_stream::stream! {
                 let encoded = tokio::select! {
                     biased;
-                    _ = ctx.stopped() => return,
-                    _ = shutdown.cancelled() => return,
+                    _ = ctx.stopped() => {
+                        yield Ok(LLMEngineOutput::cancelled());
+                        return;
+                    },
+                    _ = shutdown.cancelled() => {
+                        yield Ok(LLMEngineOutput::cancelled());
+                        return;
+                    },
                     encoded = client.encode(request) => encoded,
                 };
                 let response = match encoded {

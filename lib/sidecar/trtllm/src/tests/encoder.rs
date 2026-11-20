@@ -22,7 +22,13 @@ async fn encode_uses_the_unary_rpc_and_generation_forwards_its_reference() {
     *consumer_service.encoder_role.lock().await = Some("consume".into());
     let consumer_server = FakeServer::start(consumer_service).await;
     let consumer = encoder_consumer_engine(&consumer_server.endpoint);
-    consumer.start(0).await.unwrap();
+    let config = consumer.start(0).await.unwrap();
+    assert_eq!(
+        config
+            .runtime_data
+            .get(dynamo_llm::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT),
+        Some(&json!(true))
+    );
     collect(&consumer, input).await;
     assert_eq!(
         consumer_server.service.requests.lock().await[0].encoded_media,
@@ -32,32 +38,6 @@ async fn encode_uses_the_unary_rpc_and_generation_forwards_its_reference() {
     );
     consumer.cleanup().await.unwrap();
     encoder.cleanup().await.unwrap();
-}
-
-#[tokio::test]
-async fn explicit_encoder_routing_marks_the_stage_required() {
-    use dynamo_llm::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT;
-    let service = FakeTrtllm::default();
-    *service.encoder_role.lock().await = Some("consume".into());
-    let server = FakeServer::start(service).await;
-    let consumer = TrtllmSidecarEngine::from_args(vec![
-        "sidecar".into(),
-        "--grpc-endpoint".into(),
-        server.endpoint.clone(),
-        "--model-path".into(),
-        "model-source".into(),
-        "--disaggregation-mode".into(),
-        "prefill".into(),
-        "--route-to-encoder".into(),
-    ])
-    .unwrap()
-    .0;
-    let config = consumer.start(0).await.unwrap();
-    assert_eq!(
-        config.runtime_data.get(REQUIRES_ENCODER_RESULT),
-        Some(&json!(true))
-    );
-    consumer.cleanup().await.unwrap();
 }
 
 #[tokio::test]

@@ -21,7 +21,12 @@ from tests.serve.conftest import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
-from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
+from tests.utils.payloads import (
+    BasePayload,
+    CachedTokensChatPayload,
+    ChatPayload,
+    EncoderImagePayload,
+)
 
 # Same triangle clip the http fixtures use (see tests/serve/conftest.py), so the
 # local-file and NVDEC paths describe identical content and can assert the same
@@ -371,6 +376,43 @@ def make_image_payload_b64(
         temperature=0.0,
         repeat_count=repeat_count,
     )
+
+
+def make_encoder_image_payloads(*, split: bool) -> list[EncoderImagePayload]:
+    """Two distinct images requiring native encoder handoffs and expanded usage."""
+    payloads = []
+    for color in ("green", "red"):
+        payload = chat_payload(
+            [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,"
+                        + base64.b64encode(
+                            get_multimodal_test_image_bytes(color)
+                        ).decode()
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "What color is the square? Answer with one color.",
+                },
+            ],
+            temperature=0,
+            max_tokens=16,
+            expected_response=[color],
+            extra_body={"nvext": {"extra_fields": ["worker_id"]}},
+        )
+        payloads.append(
+            EncoderImagePayload(
+                body=payload.body,
+                color=color,
+                split=split,
+                expected_response=payload.expected_response,
+                expected_log=payload.expected_log,
+            )
+        )
+    return payloads
 
 
 def make_video_payload(
