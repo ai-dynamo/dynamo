@@ -53,8 +53,6 @@ fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
         })
 }
 
-/// The `request_start` row: published at preprocessing, before the request is
-/// dispatched, so a consumer sees the prompt's blocks at arrival.
 pub(super) fn request_start_record(
     request_id: String,
     x_request_id: Option<String>,
@@ -74,9 +72,21 @@ pub(super) fn request_start_record(
             x_request_id,
             model: Some(model),
             input_tokens: Some(input_tokens as u64),
+            output_tokens: None,
+            cached_tokens: None,
             request_received_ms: Some(tracker.request_received_epoch_ms()),
+            prefill_wait_time_ms: None,
+            prefill_time_ms: None,
+            ttft_ms: None,
+            total_time_ms: None,
+            avg_itl_ms: None,
+            kv_hit_rate: None,
+            kv_transfer_estimated_latency_ms: None,
+            queue_depth: None,
+            worker: None,
+            replay: None,
             routing_hashes: Some(routing_hashes),
-            ..Default::default()
+            finish_reason_metadata: None,
         }),
         tool: None,
         selection: None,

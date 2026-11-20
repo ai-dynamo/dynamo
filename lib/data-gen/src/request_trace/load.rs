@@ -301,15 +301,12 @@ pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace>
                 continue;
             };
             let _schema = record.schema;
-            if record.event_type == "request_payload" {
-                continue;
-            }
             if !matches!(
                 record.event_type.as_str(),
                 "request_end" | "tool_start" | "tool_end" | "tool_error"
             ) {
                 bail!(
-                    "request trace schema only supports request_end/tool_* and request_payload events, got {} at {}:{}",
+                    "request trace schema only supports request_end/tool_* events (request_payload and request_start are skipped), got {} at {}:{}",
                     record.event_type,
                     path.display(),
                     line_index + 1

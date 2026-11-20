@@ -101,7 +101,7 @@ pub enum RequestTraceEventSource {
     Harness,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestTraceMetrics {
     pub request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,7 +137,7 @@ pub struct RequestTraceMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<RequestReplayMetrics>,
     /// Set on `request_start` rows only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_hashes: Option<RequestRoutingHashes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason_metadata: Option<FinishReasonMetadata>,
@@ -150,14 +150,17 @@ pub struct RequestReplayMetrics {
     pub input_sequence_hashes: Vec<u64>,
 }
 
-/// The prompt's KV block hashes as the KV router computes them for worker
-/// selection: with the request's cache salt and LoRA name and the model's
-/// EAGLE block layout, so they equal the keys of the engine's KV events.
-/// Full blocks only. `replay.input_sequence_hashes` on `request_end` uses
-/// default hash options instead, so the two differ for salted, LoRA, and EAGLE
-/// requests.
+/// The prompt's KV block hashes at arrival, as the KV router computes them for
+/// worker selection: with the request's cache salt and LoRA name and the
+/// model's EAGLE block layout, so they equal the keys of the engine's KV
+/// events. Full blocks only. `replay.input_sequence_hashes` on `request_end`
+/// uses default hash options instead, so the two differ for salted, LoRA, and
+/// EAGLE requests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestRoutingHashes {
+    /// Tokens per block. On an EAGLE model each hash spans `block_size + 1`
+    /// tokens, offset by one, so a prompt of `n` tokens has
+    /// `(n - 1) / block_size` hashes instead of `n / block_size`.
     pub block_size: usize,
     /// One unchained hash per full block (the router's `LocalBlockHash`).
     pub local_block_hashes: Vec<u64>,

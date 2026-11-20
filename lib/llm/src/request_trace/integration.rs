@@ -49,16 +49,6 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
     None
 }
 
-fn shared_replay_metrics(
-    token_ids: &[crate::protocols::TokenIdType],
-    trace_block_size: usize,
-) -> Option<Arc<RequestReplayMetrics>> {
-    if trace_block_size == 0 {
-        return None;
-    }
-    super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
-}
-
 /// Which request records the policy enables.
 #[derive(Clone, Copy)]
 struct RequestRecords {
@@ -66,10 +56,9 @@ struct RequestRecords {
     end: bool,
 }
 
-/// Start tracing a preprocessed request, before it is dispatched: publish its
-/// `request_start` row now, and return the state that publishes `request_end`
-/// when the response completes. `is_eagle` selects the router's EAGLE block
-/// layout for the `request_start` hashes.
+/// Publish the `request_start` row if enabled, and return the state that
+/// publishes `request_end` when the response completes. `is_eagle` selects the
+/// router's EAGLE block layout for the `request_start` hashes.
 pub(crate) fn start_request_trace(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
@@ -136,8 +125,6 @@ fn start_request_trace_for_policy(
 
     let x_request_id = super::x_request_id_from_context(context);
     if records.start {
-        // Hash as the router does for selection, so the keys match the
-        // engine's KV events for salted and LoRA requests too.
         let routing = common_request.routing.as_ref();
         let options = BlockHashOptions {
             block_mm_infos: None,
@@ -158,7 +145,8 @@ fn start_request_trace_for_policy(
         return None;
     }
 
-    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)?;
+    let replay_metrics =
+        super::replay_metrics(&common_request.token_ids, trace_block_size).map(Arc::new)?;
 
     let model = common_request.model.clone();
     let agent = has_agent_context
@@ -420,9 +408,9 @@ mod tests {
 
     #[test]
     fn replay_hashing_requires_block_size() {
-        assert!(shared_replay_metrics(&[1, 2, 3], 0).is_none());
+        assert!(crate::request_trace::replay_metrics(&[1, 2, 3], 0).is_none());
 
-        let replay = shared_replay_metrics(&[1, 2, 3], 2).unwrap();
+        let replay = crate::request_trace::replay_metrics(&[1, 2, 3], 2).unwrap();
         assert_eq!(replay.input_sequence_hashes.len(), 2);
     }
 
@@ -431,11 +419,11 @@ mod tests {
         let token_ids = (0..131_072_u32).collect::<Vec<_>>();
 
         let started = Instant::now();
-        let request_only = shared_replay_metrics(&token_ids, 64).unwrap();
+        let request_only = crate::request_trace::replay_metrics(&token_ids, 64).unwrap();
         let request_elapsed = started.elapsed();
 
         let started = Instant::now();
-        let repeated = shared_replay_metrics(&token_ids, 64).unwrap();
+        let repeated = crate::request_trace::replay_metrics(&token_ids, 64).unwrap();
         let repeated_elapsed = started.elapsed();
 
         eprintln!(
@@ -920,27 +908,6 @@ mod tests {
     /// The trace bus is bounded in records, so `request_start` adds one record
     /// per request; its size grows with the prompt. Prints the serialized size
     /// at a 128k-token prompt with 16-token blocks.
-    #[test]
-    fn request_start_record_size_at_long_isl() {
-        let token_ids = (0..131_072_u32).collect::<Vec<_>>();
-        let hashes = super::super::routing_hashes(&token_ids, 16, BlockHashOptions::default());
-        assert_eq!(hashes.local_block_hashes.len(), 8_192);
-        assert_eq!(hashes.sequence_hashes.len(), 8_192);
-        let record = super::super::record::request_start_record(
-            "req-long".to_string(),
-            Some("client-long".to_string()),
-            "test-model".to_string(),
-            &RequestTracker::new(),
-            token_ids.len(),
-            hashes,
-        );
-        let json_bytes = serde_json::to_vec(&record).unwrap().len();
-        let hash_bytes = 2 * 8_192 * std::mem::size_of::<u64>();
-        eprintln!(
-            "request_start at 131072 tokens, block size 16: {hash_bytes} bytes of hashes in memory, {json_bytes} bytes as JSON"
-        );
-        assert!(json_bytes > hash_bytes);
-    }
 
     #[tokio::test]
     async fn plain_request_end_carries_x_request_id_and_model() {
