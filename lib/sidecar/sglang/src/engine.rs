@@ -53,7 +53,7 @@ pub struct SglangSidecarEngine {
 
 enum NativeService {
     Language(NodeTable),
-    Encoder(Encoder),
+    Encoder(Box<Encoder>),
 }
 
 struct StartedState {
@@ -194,7 +194,7 @@ impl SglangSidecarEngine {
                 let tokenizer = encoder.tokenizer().to_owned();
                 let served = encoder.served_name();
                 (
-                    NativeService::Encoder(encoder),
+                    NativeService::Encoder(Box::new(encoder)),
                     DisaggregationMode::Encode,
                     tokenizer,
                     served,
