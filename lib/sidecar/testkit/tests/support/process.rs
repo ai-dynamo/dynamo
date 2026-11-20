@@ -180,7 +180,7 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0, &[])
+        self.spawn_with_args::<F>(endpoint, mode, deadline, &[])
     }
 
     pub fn spawn_with_args<F: ProcessFixture>(
