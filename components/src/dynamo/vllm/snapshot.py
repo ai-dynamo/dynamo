@@ -116,6 +116,7 @@ async def prepare_snapshot_engine(
         embedding_worker=config.embedding_worker,
     )
     engine = setup_vllm_engine(config, stat_logger_factory)
+    engine_client: _ReleaseOnlyKvCache | _GmsCheckpoint
     if (
         getattr(config.engine_args, "load_format", None) != "gms"
         and os.environ.get("DYN_GMS_USE_V1") != "true"
