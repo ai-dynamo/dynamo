@@ -17,7 +17,7 @@
 use std::ops::Deref;
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -214,24 +214,33 @@ impl CheckpointPresence {
 const DEVICE_FILTER_SLOTS: usize = 1 << 18;
 const DEVICE_FILTER_SHIFT: u32 = u64::BITS - DEVICE_FILTER_SLOTS.trailing_zeros();
 
-/// One Device filter slot. Queries load `workers` and nothing else.
+/// The tag of a slot that names no single hash: empty, or shared by the
+/// Device sets of several hashes. A query then reads the record.
+const DEVICE_FILTER_ANY: u32 = 0;
+
+/// One Device filter slot. Queries load `workers` and `tag` and nothing else.
 #[derive(Default)]
 struct DeviceFilterSlot {
     /// Union of the filter bits of the workers in every Device set that maps
     /// here. Bits are cleared only when the last such set empties.
     workers: AtomicU64,
+    /// Fingerprint of the hash whose Device set is the only one that maps
+    /// here, so a query for another hash skips the record read. It is
+    /// [`DEVICE_FILTER_ANY`] from the second set on until the slot empties:
+    /// the slot does not know which hash is left when one of several leaves.
+    tag: AtomicU32,
     /// Number of nonempty Device sets that map here. The mutex serializes
     /// this slot's writers, which hold it for a few instructions.
-    records: Mutex<u32>,
+    records: Mutex<u16>,
 }
 
 // Queries load one slot per block, so a slot stays at two words.
 const _: () = assert!(std::mem::size_of::<DeviceFilterSlot>() == 16);
 
 impl DeviceFilterSlot {
-    /// A worker joined a Device set that maps here; `first` when the set was
-    /// empty before.
-    fn joined(&self, bit: u64, first: bool) {
+    /// A worker joined the Device set of the hash with `fingerprint`, which
+    /// maps here; `first` when the set was empty before.
+    fn joined(&self, bit: u64, first: bool, fingerprint: u32) {
         // A set that was already nonempty keeps this slot from being cleared
         // while its shard guard is held, so a bit seen here stays.
         if !first && self.workers.load(Ordering::Relaxed) & bit != 0 {
@@ -239,15 +248,28 @@ impl DeviceFilterSlot {
         }
         let mut records = self.records.lock();
         self.workers.fetch_or(bit, Ordering::Release);
-        *records += u32::from(first);
+        if first {
+            // A full counter stays full, and its slot is never cleared.
+            *records = records.saturating_add(1);
+            let tag = if *records == 1 {
+                fingerprint
+            } else {
+                DEVICE_FILTER_ANY
+            };
+            self.tag.store(tag, Ordering::Release);
+        }
     }
 
     /// A Device set that maps here lost its last worker.
     fn emptied(&self) {
         let mut records = self.records.lock();
+        if *records == u16::MAX {
+            return;
+        }
         *records = records.saturating_sub(1);
         if *records == 0 {
             self.workers.store(0, Ordering::Release);
+            self.tag.store(DEVICE_FILTER_ANY, Ordering::Release);
         }
     }
 }
@@ -257,8 +279,11 @@ impl DeviceFilterSlot {
 ///
 /// Every registered worker has one of 64 filter bits. A slot's bits are a
 /// superset of the workers held by the Device sets that map to it, so a clear
-/// answer is exact and a set bit only means "read the record". Writers update
-/// a slot under the record's shard guard, before the change is visible.
+/// answer is exact and a set bit only means "read the record". A slot that
+/// holds the Device set of one hash also carries that hash's fingerprint, so
+/// a query for another hash that maps there is answered without a read.
+/// Writers update a slot under the record's shard guard, before the change is
+/// visible.
 struct DeviceFilter {
     slots: Box<[DeviceFilterSlot]>,
 }
@@ -290,9 +315,21 @@ impl DeviceFilter {
         &self.slots[Self::index(hash)]
     }
 
+    /// A nonzero tag from product bits that the slot index does not use.
+    fn fingerprint(hash: u64) -> u32 {
+        (hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) as u32) | 1
+    }
+
     /// Whether a Device set at `hash` may hold a worker with one of `bits`.
     fn may_hold(&self, hash: u64, bits: u64) -> bool {
-        self.slot(hash).workers.load(Ordering::Acquire) & bits != 0
+        let slot = self.slot(hash);
+        if slot.workers.load(Ordering::Acquire) & bits == 0 {
+            return false;
+        }
+        // A tag that names another hash means this hash has no Device set
+        // here, or one that is not visible yet.
+        let tag = slot.tag.load(Ordering::Acquire);
+        tag == DEVICE_FILTER_ANY || tag == Self::fingerprint(hash)
     }
 }
 
@@ -453,7 +490,7 @@ impl CheckpointDirectory {
                 .filter
                 .get_or_init(DeviceFilter::new)
                 .slot(hash)
-                .joined(bit, holders == 1),
+                .joined(bit, holders == 1, DeviceFilter::fingerprint(hash)),
             DeviceMembership::Left if holders == 0 => {
                 if let Some(filter) = self.filter.get() {
                     filter.slot(hash).emptied();
@@ -2089,6 +2126,43 @@ mod tests {
         // The last Device set leaving the slot clears every bit.
         directory.publish_counted(second, vec![(11, 0)], &count, 0b10);
         assert!(!may_hold(11, u64::MAX));
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn device_filter_rules_out_another_hash_in_a_slot_that_names_one() {
+        let directory = CheckpointDirectory::default();
+        let worker = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let count = AtomicUsize::new(0);
+        // Two hashes that share a filter slot but not a fingerprint.
+        let first_hash = 1u64;
+        let second_hash = (2u64..)
+            .find(|&hash| {
+                DeviceFilter::index(hash) == DeviceFilter::index(first_hash)
+                    && DeviceFilter::fingerprint(hash) != DeviceFilter::fingerprint(first_hash)
+            })
+            .unwrap();
+        let may_hold = |hash| directory.filter.get().unwrap().may_hold(hash, u64::MAX);
+        directory.publish_counted(worker, vec![(first_hash, 1)], &count, 0b01);
+        // The slot names the first hash, so the second is ruled out unread.
+        assert!(may_hold(first_hash));
+        assert!(!may_hold(second_hash));
+        // With both sets in the slot it names neither.
+        directory.publish_counted(worker, vec![(second_hash, 1)], &count, 0b01);
+        assert!(may_hold(first_hash));
+        assert!(may_hold(second_hash));
+        // The slot cannot tell which hash is left, so it keeps answering "read".
+        directory.publish_counted(worker, vec![(first_hash, 0)], &count, 0b01);
+        assert!(may_hold(second_hash));
+        assert!(may_hold(first_hash));
+        // Once the slot empties, it names the next hash again.
+        directory.publish_counted(worker, vec![(second_hash, 0)], &count, 0b01);
+        assert!(!may_hold(second_hash));
+        directory.publish_counted(worker, vec![(second_hash, 1)], &count, 0b01);
+        assert!(may_hold(second_hash));
+        assert!(!may_hold(first_hash));
+        directory.publish_counted(worker, vec![(second_hash, 0)], &count, 0b01);
+        assert!(directory.is_empty());
         assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 
