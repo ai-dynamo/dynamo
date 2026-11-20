@@ -4,7 +4,7 @@
 //! Cache and load cost calculation. The host owns snapshots and validates finite scores.
 
 use super::parameters::PolicyParameters;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
 /// each worker score. The shared-cache specialization also omits range traversal code.

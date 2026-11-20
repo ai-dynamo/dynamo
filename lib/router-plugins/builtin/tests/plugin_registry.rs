@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::host::RouterPlugins;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 struct PassThrough;
 

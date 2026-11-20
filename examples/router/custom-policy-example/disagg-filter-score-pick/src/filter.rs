@@ -3,7 +3,7 @@
 
 //! Device-cache filter shared by prefill and decode workers.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 pub(crate) struct MinimumDeviceOverlapFilter {
     pub(crate) min_device_overlap_blocks: f64,

@@ -3,7 +3,7 @@
 
 //! Minimum-cost selection, tie-breaking, and temperature sampling of scored candidates.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use parking_lot::Mutex;
 use std::cell::Cell;
 use std::sync::Arc;

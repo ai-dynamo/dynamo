@@ -1,10 +1,10 @@
 # lib/router/worker-selection
 
-`dynamo-worker-selection` is the worker selection stage and the public plugin API for custom policies (`WorkerFilter`, `WorkerScorer`, `WorkerPicker`). Hosts outside `lib/router` import through `host` and plugins through `dynamo_kv_router::plugins::prelude`.
+`dynamo-worker-selection` is the worker selection stage and the public plugin API for custom policies (`WorkerFilter`, `WorkerScorer`, `WorkerPicker`). Hosts outside `lib/router` import through `host` and plugins through `dynamo_kv_router::plugins::v1alpha1`.
 
 ## Working rules: the public plugin API
 
-`WorkerFilter`, `WorkerScorer`, `WorkerPicker`, the contexts, the candidate views, and `WorkerInputs` are the public Rust contract for custom worker selection (reached by plugins as `dynamo_kv_router::plugins::worker_selection` and the prelude). Treat each public item as a versioned external API.
+`WorkerFilter`, `WorkerScorer`, `WorkerPicker`, the contexts, the candidate views, and `WorkerInputs` are the public Rust contract for custom worker selection (reached by plugins as `dynamo_kv_router::plugins::v1alpha1`). Treat each public item as a versioned external API.
 
 - Do not add a public field, accessor, input group, type, or re-export unless the task explicitly requires a new external policy capability. An internal need in the default scorer, logging, tests, or the selection service does not justify a public API addition.
 - Trace a proposed value to its source before you expose it; record whether it is raw state, a derived estimate, or an intermediate in Dynamo's default formula. Expose raw facts or complete user-facing abstractions, never partial credit, weighted overlap, legacy arithmetic, or another intermediate whose meaning depends on the default policy.

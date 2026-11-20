@@ -1919,11 +1919,11 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn decode_progress_collection_follows_picker_declaration() {
-    use dynamo_kv_router::plugins::prelude::{
-        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    };
-    use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    use dynamo_kv_router::plugins::experimental::decode_progress::{
         DECODE_PROGRESS, DecodeProgressByRow,
+    };
+    use dynamo_kv_router::plugins::v1alpha1::{
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;
 

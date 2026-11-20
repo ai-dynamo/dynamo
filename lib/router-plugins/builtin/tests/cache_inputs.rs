@@ -3,7 +3,7 @@
 
 mod support;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc,

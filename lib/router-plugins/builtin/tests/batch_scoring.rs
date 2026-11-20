@@ -4,7 +4,7 @@
 //! Exercise the batch scoring contract using only public plugin inputs.
 mod support;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc, Mutex,
@@ -289,7 +289,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         vec![Box::new(FailSecondScoreOnce(AtomicUsize::new(0)))],
         Box::new(CheckColumns),
     );
-    let select = |request: &dynamo_kv_router::plugins::prelude::SchedulingRequest| {
+    let select = |request: &dynamo_scheduler::host::SchedulingRequest| {
         policy.select_worker(support::selection_input(&workers, request, 16))
     };
     assert!(
@@ -358,7 +358,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     let error = select().unwrap_err();
     assert!(matches!(
         error,
-        dynamo_kv_router::plugins::prelude::KvSchedulerError::WorkerSelectionPolicy(
+        dynamo_scheduler::host::KvSchedulerError::WorkerSelectionPolicy(
             WorkerSelectionPolicyError::NonFiniteCost {
                 scorer_index: 1,
                 row: 0

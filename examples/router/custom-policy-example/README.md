@@ -24,7 +24,7 @@ Declare `WorkerInputs::CACHE` to read cache data through `candidate.cache()` (fi
 
 Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, that component receives `None`, even if another component requested it. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
 
-Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
+Declare `plugins::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
 
 ### Read Experimental Decode Progress
 
@@ -33,10 +33,10 @@ signal. The declaration enables collection. Import the extension alongside the
 plugin API:
 
 ```rust
-use dynamo_kv_router::plugins::prelude::WorkerInputView;
-use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+use dynamo_kv_router::plugins::experimental::decode_progress::{
     DECODE_PROGRESS, DecodeProgressByRow,
 };
+use dynamo_kv_router::plugins::v1alpha1::WorkerInputView;
 use std::time::Duration;
 
 // Return DECODE_PROGRESS from the picker's required_worker_inputs().

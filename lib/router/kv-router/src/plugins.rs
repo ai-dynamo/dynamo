@@ -3,17 +3,30 @@
 
 //! Public contracts, configuration, and registration for statically linked router plugins.
 //!
-//! Plugin authors implement [`worker_selection`], [`request_classifier`], or the experimental
-//! [`hint_policy`] contract and register their providers with [`RouterPluginRegistry`].
-//! Scheduling owns execution, eligibility, lifecycle synchronization, and capacity accounting.
+//! Plugin authors implement a worker-selection policy or a request classifier and register
+//! their providers with [`RouterPluginRegistry`]. Scheduling owns execution, eligibility,
+//! lifecycle synchronization, and capacity accounting.
 //!
-//! Plugins import [`prelude`]; [`worker_selection`], [`request_classifier`], and [`hint_policy`]
-//! are the per-contract modules behind it.
+//! - [`v1alpha1`]: the plugin API, in one import. Alpha: it can change in a minor release, and
+//!   each change is listed in the release's deprecation notes.
+//! - [`experimental`]: APIs with no compatibility guarantee, one submodule each, imported by
+//!   name.
+//! - [`testing`]: a harness that runs a policy over a described request and workers, behind the
+//!   `plugin-testing` feature.
+//! - [`host`]: what a routing host names to resolve and run plugins. Plugin crates do not
+//!   import it.
+//!
+//! [`worker_selection`], [`request_classifier`], and [`hint_policy`] are the per-contract
+//! modules behind these: each re-exports its whole stage, host items included.
 
+pub mod experimental;
 pub mod hint_policy;
-pub mod prelude;
+pub mod host;
 mod registry;
 pub mod request_classifier;
+#[cfg(any(test, feature = "plugin-testing"))]
+pub mod testing;
+pub mod v1alpha1;
 pub mod worker_selection;
 
 pub use registry::{

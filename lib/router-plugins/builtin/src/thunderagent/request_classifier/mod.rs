@@ -18,7 +18,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use async_trait::async_trait;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+};
+use dynamo_kv_router::plugins::v1alpha1::*;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -264,7 +267,10 @@ impl DispatchGate for ThunderAgentGate {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+        DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+    };
+    use dynamo_kv_router::plugins::v1alpha1::*;
 
     use super::*;
 

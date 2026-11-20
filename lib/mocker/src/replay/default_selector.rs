@@ -3,10 +3,12 @@
 
 //! Synchronous adapter for direct selection and deterministic replay.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::host::{RuntimePolicyConfig, RuntimePolicyUpdate};
+use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_router_policies::default_policy_with_rng;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike, WorkerSelectionResult};
 use parking_lot::Mutex;
 use std::sync::Arc;
 

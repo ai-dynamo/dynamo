@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! What an in-tree host names from the worker-selection stage beyond the plugin contract it
-//! reaches through `dynamo_kv_router::plugins::prelude`: the configuration slices, the
+//! reaches through `dynamo_kv_router::plugins::v1alpha1`: the configuration slices, the
 //! conditional-disaggregation decision inputs, the LoRA filter, and the trace types it renders.
 //! Every item is re-exported from its owning module; this list is the host contract.
 

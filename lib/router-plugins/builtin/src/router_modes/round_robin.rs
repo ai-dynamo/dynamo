@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::no_candidates;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 /// One shared rotation over the workers.
 pub const ROUND_ROBIN: &str = "round-robin";

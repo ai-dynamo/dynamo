@@ -1,6 +1,6 @@
 # lib/router/kv-router
 
-`dynamo-kv-router` is the composition crate: it assembles the kernel and the stages into a running router, puts every transport (HTTP, ZMQ, the replica mesh, Prometheus) behind a feature, and is the one crate plugins name through `plugins::prelude`. Two subdirectories have their own rules: [`src/services/indexer/AGENTS.md`](src/services/indexer/AGENTS.md) and [`src/services/slot_tracker/AGENTS.md`](src/services/slot_tracker/AGENTS.md).
+`dynamo-kv-router` is the composition crate: it assembles the kernel and the stages into a running router, puts every transport (HTTP, ZMQ, the replica mesh, Prometheus) behind a feature, and is the one crate plugins name: `plugins::v1alpha1` for the plugin API, `plugins::experimental` for APIs with no compatibility guarantee, and `plugins::testing` for their tests. Two subdirectories have their own rules: [`src/services/indexer/AGENTS.md`](src/services/indexer/AGENTS.md) and [`src/services/slot_tracker/AGENTS.md`](src/services/slot_tracker/AGENTS.md).
 
 ## Guardrails
 

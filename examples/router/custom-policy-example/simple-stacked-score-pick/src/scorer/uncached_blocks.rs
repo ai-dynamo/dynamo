@@ -3,7 +3,7 @@
 
 //! Uncached-block cost for the stacked scorer stage.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 pub(crate) struct UncachedBlocksScorer;
 

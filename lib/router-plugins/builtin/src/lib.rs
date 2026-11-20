@@ -36,7 +36,7 @@ pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     registry
 }
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
@@ -56,7 +56,8 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::plugins::v1alpha1::*;
 
     use super::*;
 

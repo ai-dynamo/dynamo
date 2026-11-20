@@ -3,7 +3,10 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_hints::WorkerKvTransferKeys;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::host::SelectionTraceSpec;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_router_policies::default_policy;
 use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -159,16 +162,16 @@ fn bench(c: &mut Criterion) {
 }
 
 struct LoadScorer(f64);
-impl dynamo_kv_router::plugins::prelude::WorkerScorer for LoadScorer {
-    fn required_worker_inputs(&self) -> dynamo_kv_router::plugins::prelude::WorkerInputs {
-        dynamo_kv_router::plugins::prelude::WorkerInputs::LOAD
+impl dynamo_kv_router::plugins::v1alpha1::WorkerScorer for LoadScorer {
+    fn required_worker_inputs(&self) -> dynamo_kv_router::plugins::v1alpha1::WorkerInputs {
+        dynamo_kv_router::plugins::v1alpha1::WorkerInputs::LOAD
     }
     fn score(
         &self,
-        _: &dynamo_kv_router::plugins::prelude::WorkerSelectionContext<'_>,
-        candidates: dynamo_kv_router::plugins::prelude::WorkerCandidates<'_>,
+        _: &dynamo_kv_router::plugins::v1alpha1::WorkerSelectionContext<'_>,
+        candidates: dynamo_kv_router::plugins::v1alpha1::WorkerCandidates<'_>,
         costs: &mut [f64],
-    ) -> Result<(), dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyError> {
+    ) -> Result<(), dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
             *cost = candidate.load().unwrap().active_requests() as f64 * self.0;
         }
@@ -177,12 +180,12 @@ impl dynamo_kv_router::plugins::prelude::WorkerScorer for LoadScorer {
 }
 
 struct MinimumPicker;
-impl dynamo_kv_router::plugins::prelude::WorkerPicker for MinimumPicker {
+impl dynamo_kv_router::plugins::v1alpha1::WorkerPicker for MinimumPicker {
     fn pick(
         &self,
-        _: &dynamo_kv_router::plugins::prelude::WorkerSelectionContext<'_>,
-        input: dynamo_kv_router::plugins::prelude::WorkerInputView<'_>,
-    ) -> Result<usize, dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyError> {
+        _: &dynamo_kv_router::plugins::v1alpha1::WorkerSelectionContext<'_>,
+        input: dynamo_kv_router::plugins::v1alpha1::WorkerInputView<'_>,
+    ) -> Result<usize, dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicyError> {
         Ok(input
             .candidates()
             .iter()
@@ -206,10 +209,10 @@ fn stacked(c: &mut Criterion) {
             let scorers = (0..scorer_count)
                 .map(|index| {
                     Box::new(LoadScorer((index + 1) as f64))
-                        as Box<dyn dynamo_kv_router::plugins::prelude::WorkerScorer>
+                        as Box<dyn dynamo_kv_router::plugins::v1alpha1::WorkerScorer>
                 })
                 .collect();
-            let policy = dynamo_kv_router::plugins::prelude::WorkerSelectionPolicy::new(
+            let policy = dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicy::new(
                 SelectionConfig::default(),
                 "prefill",
                 scorers,
@@ -251,7 +254,7 @@ fn shared_cache(c: &mut Criterion) {
                         request.overlap.tier_overlap_blocks = Default::default();
                     }
                     request.shared_cache_hits = Some(
-                        dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(
+                        dynamo_kv_router::plugins::v1alpha1::SharedCacheHits::from_ranges(
                             (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
                         ),
                     );
@@ -287,9 +290,9 @@ fn shared_cache(c: &mut Criterion) {
 /// Like the selection service's config, it caches its hashed keys.
 struct HintWorker {
     topology: std::collections::HashMap<String, String>,
-    keys: dynamo_kv_router::plugins::prelude::WorkerKvTransferKeysCache,
+    keys: dynamo_scheduler::host::WorkerKvTransferKeysCache,
 }
-impl dynamo_kv_router::plugins::prelude::WorkerConfigLike for HintWorker {
+impl dynamo_scheduler::host::WorkerConfigLike for HintWorker {
     fn data_parallel_start_rank(&self) -> u32 {
         0
     }
@@ -305,13 +308,11 @@ impl dynamo_kv_router::plugins::prelude::WorkerConfigLike for HintWorker {
     fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: u32,
-    ) -> Option<dynamo_kv_router::plugins::prelude::KvHintTransferWorkerMetadata<'_>> {
-        Some(
-            dynamo_kv_router::plugins::prelude::KvHintTransferWorkerMetadata {
-                worker_type: "prefill",
-                source_control_endpoint: Some("tcp://worker:23280"),
-            },
-        )
+    ) -> Option<dynamo_scheduler::host::KvHintTransferWorkerMetadata<'_>> {
+        Some(dynamo_scheduler::host::KvHintTransferWorkerMetadata {
+            worker_type: "prefill",
+            source_control_endpoint: Some("tcp://worker:23280"),
+        })
     }
     fn topology_domains(&self) -> Option<&std::collections::HashMap<String, String>> {
         Some(&self.topology)
@@ -319,9 +320,7 @@ impl dynamo_kv_router::plugins::prelude::WorkerConfigLike for HintWorker {
     fn kv_transfer_domain(&self) -> Option<&str> {
         Some("rdma-island")
     }
-    fn kv_transfer_keys(
-        &self,
-    ) -> std::borrow::Cow<'_, dynamo_kv_router::plugins::prelude::WorkerKvTransferKeys> {
+    fn kv_transfer_keys(&self) -> std::borrow::Cow<'_, dynamo_kv_hints::WorkerKvTransferKeys> {
         std::borrow::Cow::Borrowed(self.keys.get_or_init(|| WorkerKvTransferKeys::of(self)))
     }
 }
@@ -373,9 +372,9 @@ fn kv_transfer(c: &mut Criterion) {
                     .collect();
                 sources.sort_unstable();
                 request.kv_transfer_candidates =
-                    Some(dynamo_kv_router::plugins::prelude::KvTransferCandidates {
+                    Some(dynamo_kv_indexer::KvTransferCandidates {
                         block_hashes: (0..128)
-                            .map(dynamo_kv_router::plugins::prelude::ExternalSequenceBlockHash)
+                            .map(dynamo_kv_router::plugins::experimental::hints::ExternalSequenceBlockHash)
                             .collect(),
                         owner_prefix_blocks: sources,
                         source_intervals: Vec::new(),

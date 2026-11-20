@@ -12,7 +12,7 @@ mod worker_selection;
 
 use config::{ConfigError, ThunderAgentConfig};
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 const THUNDERAGENT_CLASSIFIER_TYPE: &str = "thunderagent";
 
@@ -49,10 +49,8 @@ worker_selection:
         let plugins = registry.resolve_plugins(&config).unwrap();
         assert!(plugins.worker_selection().is_some());
         let factory = plugins.request_classifier().unwrap();
-        let context = dynamo_kv_router::plugins::request_classifier::RequestClassifierContext::new(
-            16,
-            Vec::new,
-        );
+        let context =
+            dynamo_kv_router::plugins::v1alpha1::RequestClassifierContext::new(16, Vec::new);
         let _classifier = factory(context);
     }
 }

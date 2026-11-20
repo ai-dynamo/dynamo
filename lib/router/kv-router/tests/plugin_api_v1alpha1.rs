@@ -2,16 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! A worker-selection policy and a request classifier written against
-//! `dynamo_kv_router::plugins::prelude` alone: no other path from this crate, no other
-//! router crate. This file is the surface new plugins target.
+//! `dynamo_kv_router::plugins::v1alpha1` alone, with the experimental dispatch gate imported
+//! by name: no other path from this crate, no other router crate. This file is the surface
+//! new plugins target. The tests below play the routing host, so they also name
+//! `plugins::host` and the router configuration.
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+    DispatchDecision, DispatchGate, DispatchHead,
+};
+use dynamo_kv_router::plugins::host::{
+    HostedSelectionRequest, HostedWorkerPicker, RouterPlugins, SelectionFailure,
+};
+use dynamo_kv_router::plugins::v1alpha1::*;
 
-struct PreludePolicy;
+struct ContractPolicy;
 
-impl WorkerFilter for PreludePolicy {
+impl WorkerFilter for ContractPolicy {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::CACHE
     }
@@ -29,7 +38,7 @@ impl WorkerFilter for PreludePolicy {
     }
 }
 
-impl WorkerScorer for PreludePolicy {
+impl WorkerScorer for ContractPolicy {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
@@ -50,7 +59,7 @@ impl WorkerScorer for PreludePolicy {
     }
 }
 
-impl WorkerPicker for PreludePolicy {
+impl WorkerPicker for ContractPolicy {
     fn pick(
         &self,
         _context: &WorkerSelectionContext<'_>,
@@ -66,9 +75,9 @@ impl WorkerPicker for PreludePolicy {
     }
 }
 
-struct PreludeClassifier;
+struct ContractClassifier;
 
-impl RequestClassifier for PreludeClassifier {
+impl RequestClassifier for ContractClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
@@ -94,34 +103,34 @@ impl RequestClassifier for PreludeClassifier {
     }
 }
 
-fn prelude_provider(
+fn contract_provider(
     _parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     Ok(Arc::new(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type.as_str(),
-            vec![Box::new(PreludePolicy)],
-            vec![Box::new(PreludePolicy)],
-            Box::new(PreludePolicy),
+            vec![Box::new(ContractPolicy)],
+            vec![Box::new(ContractPolicy)],
+            Box::new(ContractPolicy),
         )
     }))
 }
 
 #[test]
-fn prelude_plugins_resolve_through_the_registry() {
-    let _: Box<dyn WorkerFilter> = Box::new(PreludePolicy);
-    let _: Box<dyn WorkerScorer> = Box::new(PreludePolicy);
-    let _: Box<dyn WorkerPicker> = Box::new(PreludePolicy);
-    let _: Box<dyn RequestClassifier> = Box::new(PreludeClassifier);
+fn v1alpha1_plugins_resolve_through_the_registry() {
+    let _: Box<dyn WorkerFilter> = Box::new(ContractPolicy);
+    let _: Box<dyn WorkerScorer> = Box::new(ContractPolicy);
+    let _: Box<dyn WorkerPicker> = Box::new(ContractPolicy);
+    let _: Box<dyn RequestClassifier> = Box::new(ContractClassifier);
 
     let mut registry = RouterPluginRegistry::default();
     registry
-        .register_worker_selection("prelude", Arc::new(prelude_provider))
+        .register_worker_selection("contract", Arc::new(contract_provider))
         .unwrap();
     let registry: RouterPluginRegistry = registry;
     let policy = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(policy.path(), "worker_selection:\n  aggregated: prelude\n  prefill: prelude\n  decode: prelude\n  encode: prelude\n").unwrap();
+    std::fs::write(policy.path(), "worker_selection:\n  aggregated: contract\n  prefill: contract\n  decode: contract\n  encode: contract\n").unwrap();
     let config = KvRouterConfig {
         router_policy_config: Some(policy.path().display().to_string()),
         ..Default::default()
@@ -157,7 +166,7 @@ impl WorkerPicker for ActiveRequestsPicker {
 }
 
 #[test]
-fn active_requests_pickers_select_through_the_prelude_hosted_api() {
+fn active_requests_pickers_select_through_the_hosted_api() {
     #[allow(deprecated)]
     let alias = WorkerInputs::OCCUPANCY;
     assert_eq!(alias, WorkerInputs::ACTIVE_REQUESTS);

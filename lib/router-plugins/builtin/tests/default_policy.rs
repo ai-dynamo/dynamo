@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 mod support;
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::host::RuntimePolicyUpdate;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_router_policies::{default_policy, default_policy_with_rng, default_registry};
+use dynamo_scheduler::host::WorkerIdSet;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
 use parking_lot::Mutex;
@@ -21,7 +24,7 @@ fn seeded(config: &KvRouterConfig, worker_label: &'static str, seed: u64) -> Wor
 
 #[test]
 fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::v1alpha1::*;
     use serde_json::json;
 
     let (workers, mut request) = fixture(2, 160);
@@ -115,7 +118,7 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
 
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::v1alpha1::*;
     for (config, role) in [
         (
             KvRouterConfig {
@@ -172,7 +175,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
 
 #[test]
 fn runtime_cache_tier_weights_change_selection_without_device_credit() {
-    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_kv_router::plugins::v1alpha1::*;
 
     for role in [WorkerType::Prefill, WorkerType::Decode] {
         for name in [
@@ -213,7 +216,7 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
             }
             if name == "shared_cache_multiplier" {
                 request.shared_cache_hits = Some(
-                    dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(
+                    dynamo_kv_router::plugins::v1alpha1::SharedCacheHits::from_ranges(
                         std::iter::once(0..10).collect(),
                     ),
                 );
@@ -424,7 +427,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                 };
                 if mode % 8 >= 4 {
                     request.shared_cache_hits = Some(
-                        dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(vec![
+                        dynamo_kv_router::plugins::v1alpha1::SharedCacheHits::from_ranges(vec![
                             1..3,
                             5..12,
                         ]),
@@ -535,7 +538,7 @@ fn empty_prompt_routes_by_load() {
     request.overlap = Default::default();
     for (worker, load) in &mut request.worker_loads {
         let unloaded = worker.worker_id == 2;
-        *load = dynamo_kv_router::plugins::prelude::WorkerLoadProjection {
+        *load = dynamo_slot_tracker::WorkerLoadProjection {
             active_prefill_tokens: if unloaded { 1616 } else { 1600 },
             active_decode_blocks: if unloaded { 0 } else { 50 },
             ..Default::default()
@@ -932,7 +935,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
             .insert(*worker, if worker.worker_id == 0 { 3 } else { 0 });
     }
     #[allow(clippy::single_range_in_vec_init)]
-    let hits = dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(vec![0..4]);
+    let hits = dynamo_kv_router::plugins::v1alpha1::SharedCacheHits::from_ranges(vec![0..4]);
     request.shared_cache_hits = Some(hits);
 
     let mut registry = default_registry();
@@ -988,8 +991,6 @@ fn patch(parameters: serde_json::Value) -> serde_json::Map<String, serde_json::V
 
 #[test]
 fn selector_runtime_update_keeps_the_seeded_random_stream() {
-    use dynamo_kv_router::plugins::prelude::*;
-
     let (workers, request) = fixture(16, 2048);
     let config = KvRouterConfig {
         router_temperature: 0.7,

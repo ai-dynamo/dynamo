@@ -10,7 +10,7 @@ name.
 - `services::selection::{SelectionService, SelectionServiceBuilder}`: the composed router an
   embedding host or the standalone service runs
 - `plugins`: the plugin registry and the worker-selection and request-classifier contracts;
-  `plugins::prelude` is the single import a plugin needs
+  `plugins::v1alpha1` is the single import a plugin needs
 - `config::KvRouterConfig` with its CLI, environment, and policy-file parsers, converted once
   into the kernel's validated configuration; `scheduling::policy_config` is the YAML policy file
 - `tracking_hash`: the tracking-hash key file read and the context built from the flat config
@@ -50,10 +50,17 @@ reach the kernel and stage types through each owner's `host` module.
 
 ## Writing a Plugin
 
-A statically linked worker-selection policy or request classifier imports
-`dynamo_kv_router::plugins::prelude::*` and depends on this crate alone; the prelude lists
-every contract, signal view, wire type, configuration type, and registry type a plugin
-names (`tests/plugin_api_prelude.rs` is a policy and a classifier written against it).
+A statically linked worker-selection policy or request classifier depends on this crate alone
+and imports `dynamo_kv_router::plugins::v1alpha1::*`, which lists every contract, signal view,
+identity type, and registry type a plugin names (`tests/plugin_api_v1alpha1.rs` is a policy and
+a classifier written against it).
+
+| Module | Holds | Compatibility |
+|---|---|---|
+| `plugins::v1alpha1` | The plugin API | Alpha: can change in a minor release; each change is listed in the release's deprecation notes |
+| `plugins::experimental` | The dispatch gate, hint policies, resident block counts, decode progress; one submodule each, imported by name | None: can change or be removed in any release |
+| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
+| `plugins::host` | What a routing host names to resolve and run plugins | Not for plugin crates |
 
 ## Features
 
@@ -101,11 +108,11 @@ cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
 kernel, or a vocabulary crate. The 1.7 paths keep resolving through 1.9 as deprecated named
 re-exports in `src/compat.rs` (plain structs warn with the new path) and are removed in 1.10;
 see the deprecations page. In-tree hosts import the owner's `host` module; plugins import
-`plugins::prelude`.
+`plugins::v1alpha1`.
 
 | Pre-split path | Owner |
 |---|---|
-| root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
+| root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::v1alpha1`, or `config::` |
 | `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler` |
 | `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad` (this crate cannot see `lib/llm`, which publishes and reads the message) |
 | `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer`) |

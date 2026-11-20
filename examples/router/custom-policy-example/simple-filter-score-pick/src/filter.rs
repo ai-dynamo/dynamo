@@ -3,7 +3,7 @@
 
 //! Device-cache filter for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 
 /// Keeps workers whose device overlap meets the configured minimum.
 pub(crate) struct MinimumDeviceOverlapFilter {

@@ -12,7 +12,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::RequestAwarePicker;
 use scorer::ActiveRequestsScorer;

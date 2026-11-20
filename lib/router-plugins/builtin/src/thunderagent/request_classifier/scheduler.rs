@@ -13,7 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::plugins::experimental::dispatch_gate::DispatchDecision;
+use dynamo_kv_router::plugins::v1alpha1::*;
 use tokio::time::Instant;
 
 use super::super::ThunderAgentConfig;
