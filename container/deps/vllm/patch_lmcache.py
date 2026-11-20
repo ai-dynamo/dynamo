@@ -46,7 +46,6 @@ def main() -> None:
             f"{LMCACHE_VERSION}; update or remove it"
         )
     spec = importlib.util.find_spec("lmcache")
-    assert spec is not None and spec.submodule_search_locations
     package = Path(spec.submodule_search_locations[0]) / "integration" / "vllm"
     for name, (old, new) in PATCHES.items():
         path = package / name

@@ -98,7 +98,9 @@ class _CheckpointLifecycleEngine:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_pause_prepares_checkpoint_on_awake_engine():
+async def test_snapshot_pause_prepares_checkpoint_on_awake_engine(monkeypatch):
+    poll_delay = AsyncMock()
+    monkeypatch.setattr(snapshot.asyncio, "sleep", poll_delay)
     engine = _CheckpointLifecycleEngine()
     controller = VllmEnginePauseController(
         snapshot._ReleaseOnlyKvCache(engine), prepare_for_process_checkpoint=True
@@ -106,6 +108,7 @@ async def test_snapshot_pause_prepares_checkpoint_on_awake_engine():
 
     assert await controller.pause(None) is True
     assert engine.state == "prepared"
+    poll_delay.assert_awaited_once_with(0.05)
     assert await controller.resume() is True
     assert engine.state == "running"
 
