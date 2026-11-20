@@ -650,9 +650,8 @@ impl Runtime {
                     velo_response_drain_window()
                 };
                 velo_response_service
-                    .drain(admission_window, VELO_RESPONSE_DRAIN_HEADROOM)
+                    .shutdown(admission_window, VELO_RESPONSE_DRAIN_HEADROOM)
                     .await;
-                velo_response_service.shutdown().await;
             };
             let (result, ()) = tokio::join!(join_teardown, close_responses);
             result
