@@ -2879,6 +2879,42 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn direct_kv_index_uses_the_configured_event_threads() {
+        let component = make_test_component("direct-kv-threads").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        let router = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                router_event_threads: 4,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(router.ingress.is_none());
+        assert!(matches!(router.indexer, Indexer::Concurrent { .. }));
+    }
+
     #[rstest::rstest]
     #[case::single(1)]
     #[case::concurrent(2)]
