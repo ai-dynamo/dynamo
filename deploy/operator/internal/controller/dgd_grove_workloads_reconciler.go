@@ -166,6 +166,13 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
+	for name, roles := range dynamo.ResolveGroveComponentRoleStatuses(req.DGD, syncedPodCliqueSet) {
+		status, exists := result.ComponentStatus[name]
+		if exists {
+			status.Roles = roles
+			result.ComponentStatus[name] = status
+		}
+	}
 
 	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, scaleErr
 }

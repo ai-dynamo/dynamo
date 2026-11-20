@@ -66,6 +66,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	defer func() { programResult.boundTargetRoleStatus(req.DGD) }()
 	if p.gate == nil || !p.gate.Enabled(features.DisaggregatedSet) {
 		err := failWorkloadProgram(
 			reasonSelectedWorkloadProviderUnavailable,

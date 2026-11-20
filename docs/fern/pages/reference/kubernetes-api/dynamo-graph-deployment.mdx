@@ -284,7 +284,7 @@ The operator maintains observed state under `status`.
 </ParamField>
 
 <ParamField path="status.observedGeneration" type="integer">
-  Most recent `metadata.generation` observed by the controller.
+  Most recent `metadata.generation` whose lowering the controller has applied to its managed resources. This acknowledges the target configuration, not Pod readiness or rollout completion. Target role snapshots from asynchronous child reconcilers may remain absent until those children acknowledge their own current target.
 </ParamField>
 
 <ParamField path="status.restart" type="RestartStatus">
@@ -487,6 +487,10 @@ spec:
 ### ComponentReplicaStatus
 
 Replica information for a single component, keyed by component name in `status.components`.
+
+<ParamField path="roles" type="[]ComponentRoleStatus">
+  Lowered target configuration for the global `status.observedGeneration`. This is the configuration being applied to Pods, not an observation of their running processes. Publication does not wait for readiness or rollout cutover. See [Target Role Configuration](dynamo-component-deployment.mdx#target-role-configuration) for the shape, environment semantics, and availability limits.
+</ParamField>
 
 <ParamField path="componentKind" type="ComponentKind">
   Underlying Kubernetes resource kind backing the component.

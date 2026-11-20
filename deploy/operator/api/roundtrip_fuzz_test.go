@@ -113,6 +113,15 @@ func scrubReservedAnnotations(m map[string]string) map[string]string {
 // types (RawExtension, ObjectMeta).
 func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 	return []any{
+		// Status environment bindings have exactly one known/unknown alternative.
+		func(value *v1beta1.EnvironmentValueStatus, c randfill.Continue) {
+			c.FillNoCustom(value)
+			if value.Value != nil {
+				value.Unresolved = false
+			} else {
+				value.Unresolved = true
+			}
+		},
 		// ObjectMeta: keep randfill defaults but scrub the operator-owned
 		// annotation namespace and drop ManagedFields (the typed conversion
 		// does not preserve it).

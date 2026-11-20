@@ -1257,6 +1257,14 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				)
 				wantFinal.ComponentStatus[component.ComponentName] = componentStatus
 			}
+			t.Log("Target role projections match the synchronized PCS independently of readiness")
+			persistedPCS := &grovev1alpha1.PodCliqueSet{}
+			g.Expect(fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(pcs), persistedPCS)).To(gomega.Succeed())
+			for componentName, roles := range dynamo.ResolveGroveComponentRoleStatuses(dgd, persistedPCS) {
+				componentStatus := wantFinal.ComponentStatus[componentName]
+				componentStatus.Roles = roles
+				wantFinal.ComponentStatus[componentName] = componentStatus
+			}
 			g.Expect(result.ReconcileResult).To(gomega.Equal(wantFinal))
 		})
 	}
