@@ -264,6 +264,18 @@ pub(crate) struct ErrorMessage {
 }
 
 impl ErrorMessage {
+    fn with_chat_content_diagnostic(self, body: &[u8]) -> Self {
+        if let Some(part) = super::chat_content::find_unsupported_content_part(body) {
+            Self {
+                message: part.to_string(),
+                error_type: "unsupported_content_type".to_string(),
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
@@ -2703,7 +2715,8 @@ async fn handler_chat_completions(
     let mut request: NvCreateChatCompletionRequest =
         match parse_json_request("chat completions", &body) {
             Ok(request) => request,
-            Err(error) => {
+            Err((status, Json(error))) => {
+                let error = (status, Json(error.with_chat_content_diagnostic(&body)));
                 lifecycle_request.record_session(&request_id, None);
                 terminal.finish(terminal_outcome_for_error_response(&error));
                 return Err(error);
