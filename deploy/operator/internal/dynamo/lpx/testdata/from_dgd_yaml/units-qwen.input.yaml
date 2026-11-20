@@ -14,22 +14,6 @@ spec:
     lpx:
       buildId: units-qwen
     roles:
-    - name: conductor
-      podTemplate:
-        spec:
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          containers:
-          - name: main
-            image: example.invalid/quasar:test
-            volumeMounts:
-            - name: model-storage
-              mountPath: /nfs
-            env:
-            - name: MODEL_PATH
-              value: $(LPX_MODEL_PATH)
     - name: agent
       podTemplate:
         spec:
@@ -37,15 +21,37 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - name: openengine
+            emptyDir: {}
           containers:
           - name: main
             image: example.invalid/quasar:test
             volumeMounts:
             - name: model-storage
               mountPath: /nfs
+            - name: openengine
+              mountPath: /run/openengine
             env:
             - name: MODEL_PATH
               value: $(LPX_MODEL_PATH)
             resources:
               limits:
                 lpu.nvidia.com/devices: '1'
+          initContainers:
+          - name: runtime
+            image: example.invalid/dynamo-sidecar:test
+            restartPolicy: Always
+            args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            - --node-rank
+            - $(GROVE_PCLQ_POD_INDEX)
+            volumeMounts:
+            - name: model-storage
+              mountPath: /nfs
+              readOnly: true
+            - name: openengine
+              mountPath: /run/openengine

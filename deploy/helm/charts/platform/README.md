@@ -151,6 +151,35 @@ workload for that bundle.
 **Existing deployments:** An LPX workload that the old operator created does not continue across
 this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
 
+##### LPU-only LPX conductors removed
+
+**Change:** Only a hybrid LPX build has a conductor role. An LPU-only build, alone or as the
+target of a speculative pair, serves from its Agent Pods through a `runtime` init container in
+its agent template. Reconciliation rejects a conductor role on an LPU-only build.
+
+**Affected:** Every DGD with an LPX component whose conductor role declares no `runtime` init
+container. In v1.7.x, a conductor role without it is valid only for an LPU-only build.
+
+**Action:** In step 4 of
+[LPX units-only deployment contract](#lpx-units-only-deployment-contract), also change each
+affected component:
+
+1. Remove the conductor role.
+2. Add the `runtime` init container to the agent template, with an agent image whose engine
+   serves through it. Set it up as the v1.7.0 note
+   [Hybrid LPX conductors require the runtime sidecar](#hybrid-lpx-conductors-require-the-runtime-sidecar)
+   describes for a conductor. For the target of a speculative pair, the tokenizer directory is
+   `$(LPX_TARGET_MODEL_PATH)/tokenizer`.
+3. Add `--node-rank $(GROVE_PCLQ_POD_INDEX)` to the arguments of the sidecar.
+
+> [!WARNING]
+> An engine can have more than one Agent Pod, and each Pod runs the sidecar. Only the sidecar of
+> rank 0 serves; the others stand by. Without `--node-rank`, every sidecar has rank 0.
+
+**Existing deployments:** A DGD that keeps the conductor role fails reconciliation with a message
+that contains `conductor requires a hybrid build`. The operator creates no LPX workload for that
+DGD.
+
 ### v1.7.0
 
 #### Deployment Tool Compatibility

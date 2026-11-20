@@ -59,30 +59,22 @@ func resolvePipelineRequests(
 	deployment *v1alpha1.LPXGraphDeployment,
 	currentRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	workload *lpx.Workload,
-	plan *lpx.MaterializationPlan,
+	replicas int32,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, []*lpxv1alpha1.LPUPipelineRequest) {
 	// The reconcile boundary already validated the DGD owner; rendering uses that identity.
 	dgdOwner := metav1.GetControllerOf(deployment)
 
-	// Only multiple workloads need a group identity; sole workloads retain existing LPR names.
-	groupName := ""
-	if plan.ResourcePrefix != plan.PodCliqueSetName {
-		groupName = workload.ServingComponentName()
-	}
-
 	// Model projections are already ordered (default, or draft0..draft7 then target).
 	projections := workload.ModelProjections()
-	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(projections)*int(plan.Replicas))
+	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(projections)*int(replicas))
 	var missing []*lpxv1alpha1.LPUPipelineRequest
 
-	for replica := range plan.Replicas {
-		replicaPlan := plan.ForReplica(replica)
-
+	for replica := range replicas {
 		for index, projection := range projections {
 			if projection.AgentReplicas() == 0 {
 				continue
 			}
-			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
+			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, workload.Group(), projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
 				Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
@@ -92,7 +84,7 @@ func resolvePipelineRequests(
 					lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 				},
-				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
+				Spec: workload.RequestSpec(index, replica),
 			}
 
 			if currentRequest := currentRequests[request.Name]; currentRequest != nil && pipelineRequestMatches(currentRequest, request) {

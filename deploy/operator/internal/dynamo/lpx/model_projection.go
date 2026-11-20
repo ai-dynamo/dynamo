@@ -93,9 +93,8 @@ func (p *ModelProjection) ComponentName() string {
 	return p.stage
 }
 
-// RequestSpec returns a fresh node-local request for one Grove scaling-group
-// replica. The receiver and plan must be non-nil; neither input is mutated.
-func (p *ModelProjection) RequestSpec(plan *MaterializationPlan, agentPodCliqueName string) lpxv1alpha1.LPUPipelineRequestSpec {
+// requestSpec copies the model's placement contract without its Grove names.
+func (p *ModelProjection) requestSpec() lpxv1alpha1.LPUPipelineRequestSpec {
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, len(p.connectors))
 	for i := range p.connectors {
 		p.connectors[i].DeepCopyInto(&connectors[i])
@@ -111,31 +110,18 @@ func (p *ModelProjection) RequestSpec(plan *MaterializationPlan, agentPodCliqueN
 		}
 	}
 
-	spec := lpxv1alpha1.LPUPipelineRequestSpec{
-		MaterializationTarget: lpxv1alpha1.MaterializationTarget{
-			PodCliqueSetReplicaIndex: 0,
-			PodCliqueScalingGroupRef: &lpxv1alpha1.PodCliqueScalingGroupReference{
-				Name: plan.LPXScalingGroup, ReplicaIndex: int64(plan.ReplicaIndex),
-			},
-		},
+	return lpxv1alpha1.LPUPipelineRequestSpec{
 		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
 		PropSyncConnectors: connectors,
 		TargetFamily:       p.targetFamily(),
 		WorkloadMode:       p.schedulerWorkloadMode(),
 		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
 		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
-			AgentPodCliqueRef: lpxv1alpha1.PodCliqueReference{Name: agentPodCliqueName},
 			Model:             p.model,
 			PartitionMappings: mappings,
 		},
 		Partitions: partitions,
 	}
-
-	if plan.CyborgClique != "" {
-		spec.CyborgPodCliqueRef = &lpxv1alpha1.PodCliqueReference{Name: plan.CyborgClique}
-	}
-
-	return spec
 }
 
 // targetFamily translates the normalized build architecture at the LPX wire boundary.

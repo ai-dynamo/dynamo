@@ -156,7 +156,7 @@ func isLPXPodClique(obj client.Object) bool {
 	clique := obj.(*grovev1alpha1.PodClique)
 	role := clique.Annotations[lpxv1alpha1.PodRoleAnnotation]
 	return clique.Annotations[lpx.WorkloadDigestAnnotation] != "" &&
-		(role == lpxv1alpha1.PodRoleAgent || role == lpxv1alpha1.PodRoleConductor || role == lpxv1alpha1.PodRoleCyborgWorker)
+		(role == lpxv1alpha1.PodRoleAgent || role == lpxv1alpha1.PodRoleCyborgWorker)
 }
 
 func isLPXPodCliqueScalingGroup(obj client.Object) bool {

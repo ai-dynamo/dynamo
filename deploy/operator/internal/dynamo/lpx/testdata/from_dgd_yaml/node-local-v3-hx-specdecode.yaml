@@ -328,6 +328,7 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
       labels:
+        lpx.nvidia.com/serving: "true"
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
@@ -347,18 +348,6 @@ spec:
               value: /nfs/node-local-v3-hx-sd-target
             - name: BMC_SSH_ENABLED
               value: "false"
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
             - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
               value: "false"
             - name: LPU_FPGA_RECONFIGURE_METHOD
@@ -367,24 +356,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
-            - name: NATS_SERVER
-              value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
             - name: REDFISH_BMC_ENABLED
               value: "false"
             image: example.invalid/quasar:test
@@ -415,6 +386,8 @@ spec:
             - mountPath: /ssh-pk
               name: ssh-secret
               readOnly: true
+            - mountPath: /run/openengine
+              name: openengine
             - mountPath: /dev/shm
               name: shared-memory
           dnsPolicy: ClusterFirstWithHostNet
@@ -442,6 +415,61 @@ spec:
               name: host-sys
             - mountPath: /dev
               name: host-dev
+          - args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_TARGET_MODEL_PATH)/tokenizer
+            env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "18090"
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/dynamo-sidecar:test
+            name: runtime
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 18090
+            resources: {}
+            restartPolicy: Always
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+              readOnly: true
+            - mountPath: /run/openengine
+              name: openengine
           restartPolicy: Always
           schedulerName: lpx-scheduler
           securityContext:
@@ -467,138 +495,14 @@ spec:
             secret:
               defaultMode: 420
               secretName: ssh-secret
+          - emptyDir: {}
+            name: openengine
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
         replicas: 1
         roleName: agt2
-    - annotations:
-        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d19071f90541a3f3d95ecfdea022b923c02260b2251eef6a96d977d0c44970bf
-        scheduling.lpu.nvidia.com/role: conductor
-      labels:
-        lpx.nvidia.com/serving: "true"
-        nvidia.com/dynamo-component: lpu
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: node-local-v3-hx-specdecode-lpu
-      name: cond
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - env:
-            - name: LPX_ALLOCATION
-              value: agt0:agt1:agt2
-            - name: LPX_DRAFT_MODEL_PATH
-              value: /nfs/node-local-v3-hx-sd-draft
-            - name: LPX_TARGET_MODEL_PATH
-              value: /nfs/node-local-v3-hx-sd-target
-            - name: DRAFT_MODEL_PATH
-              value: $(LPX_DRAFT_MODEL_PATH)
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
-            - name: NATS_SERVER
-              value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: TARGET_MODEL_PATH
-              value: $(LPX_TARGET_MODEL_PATH)
-            image: example.invalid/quasar:test
-            name: main
-            readinessProbe:
-              failureThreshold: 3
-              httpGet:
-                path: /readyz
-                port: 51045
-                scheme: HTTP
-              initialDelaySeconds: 10
-              periodSeconds: 5
-              successThreshold: 1
-              timeoutSeconds: 1
-            resources: {}
-            volumeMounts:
-            - mountPath: /nfs
-              name: model-storage
-            - mountPath: /tmp/dynamo-lpu-ssh
-              name: single-v2-ssh-key
-            - mountPath: /dev/shm
-              name: shared-memory
-          initContainers:
-          - args:
-            - -m
-            - "0600"
-            - /ssh-pk/private.key
-            - /tmp/dynamo-lpu-ssh/private.key
-            command:
-            - /bin/install
-            env:
-            - name: LPX_DRAFT_MODEL_PATH
-              value: /nfs/node-local-v3-hx-sd-draft
-            - name: LPX_TARGET_MODEL_PATH
-              value: /nfs/node-local-v3-hx-sd-target
-            image: example.invalid/lpu-runtime:test
-            name: prepare-ssh-key
-            resources: {}
-            volumeMounts:
-            - mountPath: /tmp/dynamo-lpu-ssh
-              name: single-v2-ssh-key
-            - mountPath: /ssh-pk
-              name: ssh-secret
-              readOnly: true
-          restartPolicy: Always
-          schedulerName: lpx-scheduler
-          securityContext:
-            fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
-          terminationGracePeriodSeconds: 60
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - emptyDir: {}
-            name: single-v2-ssh-key
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - name: ssh-secret
-            secret:
-              defaultMode: 384
-              secretName: ssh-secret
-        replicas: 1
-        roleName: cond
-        startsAfter:
-        - agt0
-        - agt1
-        - agt2
     headlessServiceConfig:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
@@ -606,7 +510,6 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d19071f90541a3f3d95ecfdea022b923c02260b2251eef6a96d977d0c44970bf
       cliqueNames:
-      - cond
       - agt0
       - agt1
       - agt2

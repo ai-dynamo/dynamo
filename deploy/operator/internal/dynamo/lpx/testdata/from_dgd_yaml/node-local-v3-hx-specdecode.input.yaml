@@ -17,10 +17,11 @@ spec:
         buildId: node-local-v3-hx-sd-draft
       roles:
       - name: agent
-        podTemplate: &agent-template
+        podTemplate:
           spec:
             containers:
-            - name: main
+            - &agent-main
+              name: main
               image: example.invalid/quasar:test
               args: []
               resources:
@@ -60,7 +61,8 @@ spec:
                 mountPath: /ssh-pk
                 readOnly: true
             initContainers:
-            - command:
+            - &prepare-lp30
+              command:
               - /bin/lp30-agent-v2-init
               env:
               - name: NODE_NAME
@@ -95,10 +97,10 @@ spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostIPC: true
             hostNetwork: true
-            securityContext:
+            securityContext: &agent-security
               fsGroup: 1000
               fsGroupChangePolicy: OnRootMismatch
-            tolerations:
+            tolerations: &agent-tolerations
             - key: lpu.nvidia.com/node
               operator: Exists
     - name: lpu
@@ -107,60 +109,67 @@ spec:
       lpx:
         buildId: node-local-v3-hx-sd-target
       roles:
-      - name: conductor
+      - name: agent
         podTemplate:
           spec:
             containers:
-            - name: main
-              image: example.invalid/quasar:test
-              env:
-              - name: DRAFT_MODEL_PATH
-                value: $(LPX_DRAFT_MODEL_PATH)
-              - name: TARGET_MODEL_PATH
-                value: $(LPX_TARGET_MODEL_PATH)
-              readinessProbe:
-                httpGet:
-                  path: /readyz
-                  port: 51045
-                  scheme: HTTP
-                failureThreshold: 3
-                initialDelaySeconds: 10
-                periodSeconds: 5
-                successThreshold: 1
-                timeoutSeconds: 1
+            - <<: *agent-main
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
-              - name: single-v2-ssh-key
-                mountPath: /tmp/dynamo-lpu-ssh
-            initContainers:
-            - args:
-              - -m
-              - '0600'
-              - /ssh-pk/private.key
-              - /tmp/dynamo-lpu-ssh/private.key
-              command:
-              - /bin/install
-              image: example.invalid/lpu-runtime:test
-              name: prepare-ssh-key
-              volumeMounts:
-              - mountPath: /tmp/dynamo-lpu-ssh
-                name: single-v2-ssh-key
-              - mountPath: /ssh-pk
-                name: ssh-secret
+              - name: host-dev
+                mountPath: /dev
+              - name: host-sys
+                mountPath: /sys
+              - name: ssh-secret
+                mountPath: /ssh-pk
                 readOnly: true
+              - name: openengine
+                mountPath: /run/openengine
+            initContainers:
+            - *prepare-lp30
+            - name: runtime
+              image: example.invalid/dynamo-sidecar:test
+              restartPolicy: Always
+              args:
+              - lpx
+              - --grpc-endpoint
+              - unix:///run/openengine/openengine.sock
+              - --model-path
+              - $(LPX_TARGET_MODEL_PATH)/tokenizer
+              env:
+              - name: DYN_SYSTEM_PORT
+                value: '18090'
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 18090
+              volumeMounts:
+              - name: model-storage
+                mountPath: /nfs
+                readOnly: true
+              - name: openengine
+                mountPath: /run/openengine
             volumes:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
+            - name: host-dev
+              hostPath:
+                path: /dev
+                type: Directory
+            - name: host-sys
+              hostPath:
+                path: /sys
+                type: Directory
             - name: ssh-secret
               secret:
                 secretName: ssh-secret
-                defaultMode: 384
-            - name: single-v2-ssh-key
+                defaultMode: 420
+            - name: openengine
               emptyDir: {}
-            securityContext:
-              fsGroup: 1000
-              fsGroupChangePolicy: OnRootMismatch
-      - name: agent
-        podTemplate: *agent-template
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+            securityContext: *agent-security
+            tolerations: *agent-tolerations

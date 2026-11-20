@@ -154,7 +154,7 @@ func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Author environment references before any stale allocation bindings")
 			authored := []corev1.EnvVar{
-				{Name: "NOVA_ALLOCATION", Value: "$(LPX_ALLOCATION)"},
+				{Name: "CYBORG_ALLOCATION", Value: "$(LPX_ALLOCATION)"},
 				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 			}
 			pod := corev1.PodSpec{Containers: []corev1.Container{{
