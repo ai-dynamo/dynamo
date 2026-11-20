@@ -8,6 +8,7 @@
 
 pub mod admission_gate;
 pub mod backend;
+mod chat_input;
 pub mod common;
 mod direct_zmq_fan_in;
 mod direct_zmq_sub_pool;

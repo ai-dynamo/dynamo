@@ -24,9 +24,10 @@ on:
         required: true
         type: string
       amd_runner:
-        description: 'Runner to execute tests on (amd64 only)'
-        required: true
+        description: 'AMD64 runner name. Required when amd_runner_labels is empty.'
+        required: false
         type: string
+        default: ''
       target_tag_plain:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true

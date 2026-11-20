@@ -83,8 +83,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       image_tag_suffix: '-enterprise'
       cuda_version: '["13.0"]'
@@ -106,8 +105,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       image_tag_suffix: '-enterprise'
       cuda_version: '["13.0"]'
@@ -126,8 +124,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: 4-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
-      amd_runner_labels: '["gpu-4","amd64","v2","us-west-2"]'
+      amd_runner_labels: '["gpu-4","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       image_tag_suffix: '-enterprise'
       cuda_version: '["13.0"]'
