@@ -27,8 +27,8 @@ operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `
 the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
 through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
 decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
-round-robin `PushRouter`. `prefill_router/mod.rs` coordinates conditional admission and parked
-classifier state; `prefill_router/dispatch.rs` handles the Prefill hop and Decode continuation.
+round-robin `PushRouter`. `prefill_router/conditional_bypass.rs` plans conditional admission;
+`prefill_router/mod.rs` handles the Prefill hop and Decode continuation.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 
@@ -152,11 +152,9 @@ disables bypass for those media requests; text and compatible releasable handoff
 When a Prefill pool is active, handoffs without producer release support always take remote
 Prefill, including cache-hot requests. Their independent consumption survives caller cancellation;
 paired KV cancellation support does not enable disposal of another producer's encoder allocation.
-If a binding changes after conditional admission, the abandoned decode booking is released and
-its classifier lifecycle is parked for the later decode selection. With migration disabled, a
-context-local owner completes it when Prefill alone finishes, or aborts it on error/cancellation;
-actual Decode takes ownership once. This does not enable migration for the request. Genuine
-migration retries keep their outer lifecycle owner. A late untargeted fallback
+If a binding change invalidates a conditional media plan, the router releases the decode
+booking, aborts its classifier lifecycle, and returns retryable `WorkerUnavailable`.
+A late untargeted fallback
 restores the request's prior phase before forwarding. Releasable handoffs can fail before Prefill
 on caller cancellation; staged-KV cleanup always reaches its worker.
 

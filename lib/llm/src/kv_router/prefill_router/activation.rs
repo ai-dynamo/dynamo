@@ -824,6 +824,12 @@ mod tests {
             crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
             serde_json::json!(false),
         );
+        assert!(!ModelManager::requires_encoder_result(&selected));
+        assert!(
+            !resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .encoder_result_requires_prefill
+        );
         selected.runtime_config.runtime_data.insert(
             crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
             serde_json::json!(true),

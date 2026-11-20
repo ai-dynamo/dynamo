@@ -20,6 +20,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
+use super::controller::EncoderPolicy;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
@@ -2758,11 +2759,7 @@ impl ModelManager {
     }
 
     pub(crate) fn requires_encoder_result(card: &ModelDeploymentCard) -> bool {
-        card.runtime_config
-            .runtime_data
-            .get(crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        EncoderPolicy::from_card(card) == EncoderPolicy::EncoderRequired
     }
 
     // -- Worker monitoring --
