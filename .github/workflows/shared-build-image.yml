@@ -547,8 +547,9 @@ jobs:
           DIFF_REPO: ${{ github.repository }}
           DIFF_RUN_ID: ${{ github.run_id }}
           # Container artifact prefix: lets the main-baseline walk look up
-          # compliance-<sha>-<prefix> availability per commit.
-          DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          # compliance-<sha>-<prefix> availability per commit. Must match
+          # artifact_name_prefix below so enterprise resolves its own evidence.
+          DIFF_ARTIFACT_PREFIX: ${{ inputs.image_tag_suffix == '-enterprise' && format('{0}-enterprise', steps.calculate-target-tag.outputs.target_tag_plain) || steps.calculate-target-tag.outputs.target_tag_plain }}
         run: |
           # The build checkout is shallow with no tags. Make the refs each
           # baseline rule needs reachable (all best-effort; a miss just yields an
