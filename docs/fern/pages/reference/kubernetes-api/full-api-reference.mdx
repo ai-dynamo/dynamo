@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 220 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 223 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">79 types</Card>
 <Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">41 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
@@ -2295,6 +2295,12 @@ ServiceReplicaStatus contains replica information for a single service.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
 
+<ParamField path="roles" type="ComponentRoleStatus array">
+Roles describes the lowered target configuration associated with the owning resource's status.observedGeneration, not the configuration of running Pods. This native field shares its schema and semantics with v1beta1. Omission means that a faithful current projection is unavailable; no default is applied.
+See [ComponentRoleStatus](#componentrolestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="componentKind" type="ComponentKind" required={true}>
 ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 See [ComponentKind](#componentkind).
@@ -2659,6 +2665,41 @@ ready indicates the checkpoint artifact is ready for future pods to restore.
 </ParamField>
 </Accordion>
 
+<Accordion id="componentcontainerstatus" title="ComponentContainerStatus">
+ComponentContainerStatus projects a container's lowered launch declarations.
+Shell scripts and image entrypoints are not interpreted.
+
+
+**Kind:** `type`
+**Appears in:** [ComponentRoleStatus](#componentrolestatus)
+
+<ParamField path="name" type="string" required={true}>
+name is the container name from the lowered PodSpec.
+**Validation:** Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="image" type="string" required={true}>
+image is the declared image; tags are not resolved to image digests.
+**Validation:** Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="command" type="string array">
+command is the final declared command, without Kubernetes or shell expansion. Omission does not imply a known image entrypoint.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="args" type="string array">
+args is the final declared argument list, without Kubernetes or shell expansion.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="env" type="object (keys:string, values:EnvironmentValueStatus)">
+env contains the final bindings after sequential Kubernetes-style expansion of the lowered environment. Unavailable references, valueFrom sources, and expansions exceeding the replay or export budget remain unresolved. ConfigMaps, Secrets, images, and provider environments are not read. Missing names are not known absent: envFrom, images, or providers may define additional names.
+See [EnvironmentValueStatus](#environmentvaluestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="v1beta1-componentkind" title="ComponentKind">
 ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
 
@@ -2682,6 +2723,12 @@ ComponentReplicaStatus contains replica information for a single component.
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
+
+<ParamField path="roles" type="ComponentRoleStatus array">
+roles describes the lowered target configuration associated with the owning resource's status.observedGeneration, not the configuration of running Pods. Publication does not wait for Pod readiness or rollout cutover. Omission means no faithful current projection is available, including while a child reconciler has not acknowledged its target, for unsupported provider shapes, or when the projection exceeds the status size budget. No default is applied.
+See [ComponentRoleStatus](#componentrolestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 
 <ParamField path="componentKind" type="ComponentKind" required={true}>
 componentKind is the underlying resource kind (e.g. `PodClique`, `Deployment`, `LeaderWorkerSet`).
@@ -2777,6 +2824,26 @@ See [ProviderOverride](#v1beta1-provideroverride).
 <ParamField path="podTemplate" type="PodTemplateSpec">
 podTemplate defines the complete Pod configuration for this role. Admission permits it only when the enclosing component type supports role-specific Pod templates. For multinode components, every required role must supply one and the role templates own backend-specific leader and worker launch commands.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="componentrolestatus" title="ComponentRoleStatus">
+ComponentRoleStatus describes the lowered target configuration of one logical
+role. It does not describe the configuration of individual running Pods.
+
+
+**Kind:** `type`
+**Appears in:** [ComponentReplicaStatus](#componentreplicastatus), [ServiceReplicaStatus](#servicereplicastatus)
+
+<ParamField path="name" type="string" required={true}>
+name identifies the logical role, such as main, leader, or worker.
+**Validation:** Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="containers" type="ComponentContainerStatus array">
+containers contains the final application and initialization containers, including native runtime sidecars, keyed by their Pod container name.
+See [ComponentContainerStatus](#componentcontainerstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3799,6 +3866,25 @@ See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubern
 <ParamField path="config" type="EndpointPickerConfig">
 config allows specifying EPP `EndpointPickerConfig` directly as a structured object. The operator marshals this to YAML and creates a ConfigMap automatically. Mutually exclusive with `configMapRef`. One of `configMapRef` or `config` must be specified.
 **Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="environmentvaluestatus" title="EnvironmentValueStatus">
+EnvironmentValueStatus is either a known value, including the empty string,
+or an unresolved binding. Partial expansions are never published.
+
+
+**Kind:** `type`
+**Appears in:** [ComponentContainerStatus](#componentcontainerstatus)
+
+<ParamField path="value" type="string">
+value is the resolved literal value. An empty string is a known value.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="unresolved" type="boolean">
+unresolved is true when the binding cannot be resolved from the lowered list or its value cannot be exported within the status size budget.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

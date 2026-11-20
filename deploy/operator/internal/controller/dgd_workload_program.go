@@ -143,11 +143,21 @@ func (r *workloadProgramResult) applyReconcileResult(
 ) {
 	r.Status.State = result.State
 	r.Status.Components = result.ComponentStatus
+	dynamo.BoundComponentRoleStatuses(r.Status.Components)
 	if result.State != nvidiacomv1beta1.DGDStateFailed && rollingUpdateInProgress(r.Status.RollingUpdate) {
 		r.Status.State = nvidiacomv1beta1.DGDStatePending
 	}
 	meta.SetStatusCondition(&r.Status.Conditions, readyCondition(generation, r.Status, result))
 	r.Status.ObservedGeneration = generation
+}
+
+// preserveComponentRoleStatuses keeps target data paired with the unchanged
+// global generation when a program returns partial observations on error.
+func preserveComponentRoleStatuses(previous, next map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
+	for name, status := range next {
+		status.Roles = previous[name].Roles
+		next[name] = status
+	}
 }
 
 func readyCondition(

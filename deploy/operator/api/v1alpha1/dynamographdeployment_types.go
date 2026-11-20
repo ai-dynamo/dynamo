@@ -20,6 +20,7 @@
 package v1alpha1
 
 import (
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -295,6 +296,15 @@ type RollingUpdateStatus struct {
 
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {
+	// Roles describes the lowered target configuration associated with the owning
+	// resource's status.observedGeneration, not the configuration of running Pods.
+	// This native field shares its schema and semantics with v1beta1. Omission
+	// means that a faithful current projection is unavailable; no default is applied.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []v1beta1.ComponentRoleStatus `json:"roles,omitempty"`
+
 	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 	// +required
 	ComponentKind ComponentKind `json:"componentKind"`

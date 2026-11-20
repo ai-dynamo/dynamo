@@ -368,6 +368,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 
 	ready := IsDeploymentReady(deployment)
 	serviceReplicaStatus := &nvidiacomv1beta1.ComponentReplicaStatus{
+		Roles:             []nvidiacomv1beta1.ComponentRoleStatus{dynamo.ResolveComponentRoleStatus(string(dynamo.RoleMain), &deployment.Spec.Template.Spec)},
 		ComponentKind:     nvidiacomv1beta1.ComponentKindDeployment,
 		ComponentNames:    []string{deployment.Name},
 		RuntimeNamespace:  dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment),
@@ -459,6 +460,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
+	lwsReplicaStatus.Roles = []nvidiacomv1beta1.ComponentRoleStatus{
+		dynamo.ResolveComponentRoleStatus(string(dynamo.RoleLeader), &lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec),
+		dynamo.ResolveComponentRoleStatus(string(dynamo.RoleWorker), &lwsObj.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec),
+	}
 	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
 	applyComponentRuntimeStatus(&lwsReplicaStatus, dynamo.ResolveComponentRuntimeStatus(
 		&lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec,
@@ -501,6 +506,13 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
+	// Bound new role data without changing existing replica or readiness observations.
+	if componentReconcileResult.serviceReplicaStatus != nil {
+		statuses := map[string]nvidiacomv1beta1.ComponentReplicaStatus{"component": *componentReconcileResult.serviceReplicaStatus}
+		dynamo.BoundComponentRoleStatuses(statuses)
+		componentReconcileResult.serviceReplicaStatus.Roles = statuses["component"].Roles
+	}
+
 	if componentReconcileResult.serviceReplicaStatus != nil {
 		componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = nil
 		componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = nil
@@ -537,6 +549,9 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Component = componentReconcileResult.serviceReplicaStatus
 	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
+	if dynamoComponentDeployment.Status.Component != nil && !targetRoleStatusFits(dynamoComponentDeployment) {
+		dynamoComponentDeployment.Status.Component.Roles = nil
+	}
 
 	err := r.Status().Update(ctx, dynamoComponentDeployment)
 	if err != nil {
@@ -761,10 +776,15 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 	for range maxRetries - 1 {
 		if err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment); err != nil {
 			err = errors.Wrap(err, "Failed to re-fetch DynamoComponentDeployment")
-			return
+			return dynamoComponentDeployment, err
 		}
 		for _, condition := range conditions {
 			meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+		}
+
+		// Keep condition-only updates writable when retained target roles no longer fit.
+		if dynamoComponentDeployment.Status.Component != nil && !targetRoleStatusFits(dynamoComponentDeployment) {
+			dynamoComponentDeployment.Status.Component.Roles = nil
 		}
 		if err = r.Status().Update(ctx, dynamoComponentDeployment); err != nil {
 			if k8serrors.IsConflict(err) {
@@ -778,13 +798,13 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 	}
 	if err != nil {
 		err = errors.Wrap(err, "Failed to update DynamoComponentDeployment status")
-		return
+		return dynamoComponentDeployment, err
 	}
 	if err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment); err != nil {
 		err = errors.Wrap(err, "Failed to re-fetch DynamoComponentDeployment")
-		return
+		return dynamoComponentDeployment, err
 	}
-	return
+	return dynamoComponentDeployment, err
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt generateResourceOption) (bool, *appsv1.Deployment, error) {

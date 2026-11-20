@@ -1508,6 +1508,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `roles` _[ComponentRoleStatus](#componentrolestatus) array_ | Roles describes the lowered target configuration associated with the owning<br />resource's status.observedGeneration, not the configuration of running Pods.<br />This native field shares its schema and semantics with v1beta1. Omission<br />means that a faithful current projection is unavailable; no default is applied. |  | Optional: \{\} <br /> |
 | `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br />Required: \{\} <br /> |
 | `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  | Required: \{\} <br /> |
 | `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
@@ -1791,6 +1792,27 @@ _Appears in:_
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
+#### ComponentContainerStatus
+
+
+
+ComponentContainerStatus projects a container's lowered launch declarations.
+Shell scripts and image entrypoints are not interpreted.
+
+
+
+_Appears in:_
+- [ComponentRoleStatus](#componentrolestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the container name from the lowered PodSpec. |  | Required: \{\} <br /> |
+| `image` _string_ | image is the declared image; tags are not resolved to image digests. |  | Required: \{\} <br /> |
+| `command` _string array_ | command is the final declared command, without Kubernetes or shell expansion.<br />Omission does not imply a known image entrypoint. |  | Optional: \{\} <br /> |
+| `args` _string array_ | args is the final declared argument list, without Kubernetes or shell expansion. |  | Optional: \{\} <br /> |
+| `env` _object (keys:string, values:[EnvironmentValueStatus](#environmentvaluestatus))_ | env contains the final bindings after sequential Kubernetes-style expansion<br />of the lowered environment. Unavailable references, valueFrom sources, and<br />expansions exceeding the replay or export budget remain unresolved. ConfigMaps,<br />Secrets, images, and provider environments are not read. Missing names are<br />not known absent: envFrom, images, or providers may define additional names. |  | Optional: \{\} <br /> |
+
+
 #### ComponentKind
 
 _Underlying type:_ _string_
@@ -1824,6 +1846,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `roles` _[ComponentRoleStatus](#componentrolestatus) array_ | roles describes the lowered target configuration associated with the owning<br />resource's status.observedGeneration, not the configuration of running Pods.<br />Publication does not wait for Pod readiness or rollout cutover. Omission<br />means no faithful current projection is available, including while a child<br />reconciler has not acknowledged its target, for unsupported provider shapes,<br />or when the projection exceeds the status size budget. No default is applied. |  | Optional: \{\} <br /> |
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br />Required: \{\} <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
@@ -1857,6 +1880,25 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the logical cardinality of this role in one complete component<br />instance. The enclosing component type defines the cardinality. For<br />multinode components, admission defaults and persists omitted values from<br />multinode.nodeCount; leader must be 1 and worker must be<br />multinode.nodeCount minus 1. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the complete Pod configuration for this role. Admission<br />permits it only when the enclosing component type supports role-specific Pod<br />templates. For multinode components, every required role must supply one and<br />the role templates own backend-specific leader and worker launch commands. |  | Optional: \{\} <br /> |
+
+
+#### ComponentRoleStatus
+
+
+
+ComponentRoleStatus describes the lowered target configuration of one logical
+role. It does not describe the configuration of individual running Pods.
+
+
+
+_Appears in:_
+- [ComponentReplicaStatus](#componentreplicastatus)
+- [ServiceReplicaStatus](#servicereplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name identifies the logical role, such as main, leader, or worker. |  | Required: \{\} <br /> |
+| `containers` _[ComponentContainerStatus](#componentcontainerstatus) array_ | containers contains the final application and initialization containers,<br />including native runtime sidecars, keyed by their Pod container name. |  | Optional: \{\} <br /> |
 
 
 #### ComponentType
@@ -2406,6 +2448,24 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | configMapRef references a user-provided ConfigMap containing EPP<br />configuration. Mutually exclusive with `config`. |  | Optional: \{\} <br /> |
 | `config` _EndpointPickerConfig_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### EnvironmentValueStatus
+
+
+
+EnvironmentValueStatus is either a known value, including the empty string,
+or an unresolved binding. Partial expansions are never published.
+
+
+
+_Appears in:_
+- [ComponentContainerStatus](#componentcontainerstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `value` _string_ | value is the resolved literal value. An empty string is a known value. |  | Optional: \{\} <br /> |
+| `unresolved` _boolean_ | unresolved is true when the binding cannot be resolved from the lowered list<br />or its value cannot be exported within the status size budget. |  | Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec

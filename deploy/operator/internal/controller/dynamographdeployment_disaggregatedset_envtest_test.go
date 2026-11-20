@@ -48,10 +48,21 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		reconciler := newEnvtestDSReconcilers()
 
 		By("creating the initial DisaggregatedSet")
-		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		initialResult, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
 		initialDS := fetchTypedDisaggregatedSet(ctx, current)
 		initialRevision := disaggregatedsetutils.ComputeRevision(initialDS.Spec.Roles)
 		Expect(initialDS.Spec.Roles).To(HaveLen(2))
+
+		By("publishing the target roles and global generation before child LWS or Pods exist")
+		Expect(initialResult.Status.ObservedGeneration).To(Equal(current.Generation))
+		for _, componentName := range []string{"prefill", "decode"} {
+			Expect(initialResult.Status.Components[componentName].Roles).To(HaveLen(2))
+			Expect(initialResult.Status.Components[componentName].Roles[0].Name).To(Equal("leader"))
+			Expect(initialResult.Status.Components[componentName].Roles[1].Name).To(Equal("worker"))
+		}
+		current = persistWorkloadProgramStatus(ctx, current, initialResult.Status)
+		Expect(current.Status.Components["prefill"].Roles).To(Equal(initialResult.Status.Components["prefill"].Roles))
+		Expect(disaggregatedsetutils.ComputeRevision(fetchTypedDisaggregatedSet(ctx, current).Spec.Roles)).To(Equal(initialRevision))
 
 		By("updating graph-level metadata and reconciling again")
 		current.Spec.Labels["e2e.dynamo/metadata"] = "updated"
