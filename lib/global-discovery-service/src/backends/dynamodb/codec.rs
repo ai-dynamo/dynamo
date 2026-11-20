@@ -237,7 +237,6 @@ mod tests {
                 availability_zone: Some("us-west-2a".to_owned()),
                 datacenter: None,
             },
-            model: "Qwen/Qwen3-0.6B".to_owned(),
             frontends: vec![Url::parse("http://10.43.1.2:8000/").unwrap()],
         }
     }
@@ -355,7 +354,7 @@ mod tests {
         let first = encode(&registration()).unwrap();
         assert_eq!(encode(&registration()).unwrap(), first);
         let mut changed = registration();
-        changed.model = "Qwen/Qwen3-8B".to_owned();
+        changed.location.region = "us-east-2".to_owned();
         assert_ne!(encode(&changed).unwrap().hash, first.hash);
     }
 

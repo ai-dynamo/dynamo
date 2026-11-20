@@ -41,7 +41,7 @@ pub(super) const RECOVERED_AFTER: Duration = Duration::from_secs(120);
 /// Each watch asks the server to end it after this long and starts again, so
 /// a server that stops answering fails within the client's read timeout
 /// rather than kube's default of nearly five minutes.
-const WATCH_TIMEOUT_SECS: u32 = 50;
+pub(super) const WATCH_TIMEOUT_SECS: u32 = 50;
 
 /// Slices are keyed by (namespace, name).
 pub(super) type SliceKey = (String, String);
@@ -423,10 +423,10 @@ pub(super) async fn follow<I: SliceIndex>(
 /// sends `Init` before each relist attempt, before any request, so a list that
 /// keeps failing would be retried every 800 ms. `Init` is dropped: the cache
 /// starts a relist at its first `InitApply` instead, which works because, with
-/// paging off, a list's slices arrive together.
-fn retried(
-    events: impl Stream<Item = watcher::Result<watcher::Event<EndpointSlice>>>,
-) -> impl Stream<Item = watcher::Result<watcher::Event<EndpointSlice>>> {
+/// paging off, a list's objects arrive together.
+pub(super) fn retried<K>(
+    events: impl Stream<Item = watcher::Result<watcher::Event<K>>>,
+) -> impl Stream<Item = watcher::Result<watcher::Event<K>>> {
     events
         .filter(|event| std::future::ready(!matches!(event, Ok(watcher::Event::Init))))
         .default_backoff()
@@ -530,7 +530,7 @@ mod tests {
     async fn a_relist_that_keeps_failing_backs_off_without_its_init() {
         let attempts = (0..4).flat_map(|_| {
             [
-                Ok(watcher::Event::Init),
+                Ok(watcher::Event::<EndpointSlice>::Init),
                 Err(watcher::Error::NoResourceVersion),
             ]
         });

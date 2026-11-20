@@ -12,7 +12,10 @@ use tokio_util::sync::CancellationToken;
 use crate::PoolSnapshot;
 
 /// Candidate pools from GDS. Partial lists add and update pools; only complete
-/// lists remove them. Relay liveness independently decides which are routable.
+/// lists remove them. A listing says where a pool is, not what it serves, so
+/// each candidate's `model` is empty: route them through
+/// [`crate::RelayGatedPoolCatalog::for_discovery`], which takes each pool's
+/// models from its live Relay views, as it decides which pools are routable.
 pub fn discover_pools(
     client: GlobalDiscoveryClient,
     interval: Duration,
@@ -28,15 +31,7 @@ pub fn discover_pools(
             let mut pools = discovered
                 .borrow_and_update()
                 .values()
-                .filter_map(|pool| {
-                    let model = pool.model.as_deref()?;
-                    Some(Pool::new(
-                        &pool.key,
-                        model,
-                        &pool.location.region,
-                        pool.frontends.clone(),
-                    ))
-                })
+                .map(|pool| Pool::new(&pool.key, "", &pool.location.region, pool.frontends.clone()))
                 .collect::<Vec<_>>();
             // The cache is a map; stable order avoids changing selectors or
             // notifying subscribers when only the map's iteration order differs.

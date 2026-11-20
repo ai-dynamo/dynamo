@@ -177,7 +177,7 @@ def parse_args(
     )
     parser.add_argument(
         "--routing-pool-region",
-        help="Region to register the routing pool in with Global Discovery",
+        help="Region to register the routing pool in, when Global Discovery takes registrations",
     )
     parser.add_argument(
         "--routing-pool-frontends",
@@ -332,13 +332,11 @@ def parse_args(
             parser.error(
                 "--routing-pool-region and --routing-pool-frontends require --routing-pool"
             )
-    elif (
-        routing_pool_region is None
-        or not routing_pool_region
-        or routing_pool_region != routing_pool_region.strip()
+    elif routing_pool_region is not None and (
+        not routing_pool_region or routing_pool_region != routing_pool_region.strip()
     ):
         parser.error(
-            "--routing-pool requires a --routing-pool-region without surrounding whitespace"
+            "--routing-pool-region must be non-empty, without surrounding whitespace"
         )
 
     tuning: list[tuple[str, int]] = []

@@ -120,7 +120,7 @@ impl PoolKey {
     }
 }
 
-pub(crate) fn validate(value: &str, field: &'static str) -> Result<(), PoolKeyError> {
+fn validate(value: &str, field: &'static str) -> Result<(), PoolKeyError> {
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
         return Err(PoolKeyError::InvalidField { field });
     }

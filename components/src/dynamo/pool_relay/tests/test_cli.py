@@ -101,15 +101,22 @@ ROUTING_POOL_ARGS = [
 ]
 
 
-@pytest.mark.parametrize("region", [[], ["--routing-pool-region", " us-east-1"]])
-def test_routing_pool_requires_a_region(
-    region: list[str], capsys: pytest.CaptureFixture[str]
+def test_routing_pool_region_is_optional() -> None:
+    # Global Discovery in MCS mode takes no registrations, so needs no region.
+    config = parse_args(ROUTING_POOL_ARGS, {})
+    assert config.routing_pool == "east/dynamo/blue"
+    assert config.routing_pool_region is None
+
+
+@pytest.mark.parametrize("region", ["", " us-east-1"])
+def test_routing_pool_region_is_checked(
+    region: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert_cli_error(
-        ROUTING_POOL_ARGS + region,
+        ROUTING_POOL_ARGS + ["--routing-pool-region", region],
         {},
         capsys,
-        "--routing-pool requires a --routing-pool-region",
+        "--routing-pool-region must be non-empty",
     )
 
 

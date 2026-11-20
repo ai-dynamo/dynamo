@@ -185,7 +185,7 @@ struct Watched {
 }
 
 /// Changes in a row back to the version before that make a pool's
-/// registration flap. One is a rollback, as of a model changed and changed
+/// registration flap. One is a rollback, as of a region changed and changed
 /// back.
 const FLAPPING_AFTER: u32 = 2;
 
@@ -388,7 +388,7 @@ impl Watched {
                 "this pool's registration keeps switching between two versions, so watchers \
                  see it change at almost every poll. Its PoolRelays send different registrations, \
                  and each write replaces the other's: every PoolRelay of a pool must send the same \
-                 model, location and frontends."
+                 location and frontends."
             );
         }
     }
@@ -915,28 +915,28 @@ mod tests {
         PoolKey::new("west", "dynamo", dgd).unwrap()
     }
 
-    fn pool(dgd: &str, model: &str) -> PoolListing {
+    /// A listing whose region, `m<version>`, tells its versions apart.
+    fn pool(dgd: &str, version: &str) -> PoolListing {
         PoolListing {
             key: key(dgd),
             location: PoolLocation {
-                region: "us-west-2".to_owned(),
+                region: version.to_owned(),
                 availability_zone: None,
                 datacenter: None,
             },
-            model: Some(model.to_owned()),
             frontends: Vec::new(),
             relay_identities: Vec::new(),
         }
     }
 
-    /// A poll's view of `pools`, as `(dgd, model)`, with the model as hash.
+    /// A poll's view of `pools`, as `(dgd, version)`, with the version as hash.
     fn polled(pools: &[(&str, &str)]) -> HashMap<PoolKey, Seen> {
         pools
             .iter()
-            .map(|(dgd, model)| {
+            .map(|(dgd, version)| {
                 let seen = Seen {
-                    listing: pool(dgd, model),
-                    hash: (*model).to_owned(),
+                    listing: pool(dgd, version),
+                    hash: (*version).to_owned(),
                     written: 0,
                     live_until_ms: u64::MAX,
                     lease_until_ms: u64::MAX,
@@ -946,16 +946,14 @@ mod tests {
             .collect()
     }
 
-    /// Events as `+dgd/model` and `-dgd`, in any order.
+    /// Events as `+dgd/version` and `-dgd`, in any order.
     fn described(events: &[PoolEvent]) -> HashSet<String> {
         events
             .iter()
             .map(|event| match event {
-                WatchEvent::Upserted(listing) => format!(
-                    "+{}/{}",
-                    listing.key.dgd_name(),
-                    listing.model.as_deref().unwrap_or_default()
-                ),
+                WatchEvent::Upserted(listing) => {
+                    format!("+{}/{}", listing.key.dgd_name(), listing.location.region)
+                }
                 WatchEvent::Removed(key) => format!("-{}", key.dgd_name()),
                 WatchEvent::Resync(_) => "resync".to_owned(),
             })
@@ -1119,7 +1117,6 @@ mod tests {
         let registration = |dgd: &str| PoolRegistration {
             key: key(dgd),
             location: pool(dgd, "m1").location,
-            model: "m1".to_owned(),
             frontends: Vec::new(),
         };
         // The sort key is `west#dynamo#` and the name.
@@ -1167,9 +1164,9 @@ mod tests {
     fn polls_that_switch_a_pool_between_two_versions_are_noticed() {
         let mut watched = Watched::default();
         let _ = watched.apply_poll(polled(&[("a", "m1")]), 0);
-        for model in ["m2", "m1", "m2"] {
-            let events = watched.apply_poll(polled(&[("a", model)]), 0);
-            assert_eq!(described(&events), set(&[format!("+a/{model}").as_str()]));
+        for version in ["m2", "m1", "m2"] {
+            let events = watched.apply_poll(polled(&[("a", version)]), 0);
+            assert_eq!(described(&events), set(&[format!("+a/{version}").as_str()]));
         }
         assert!(watched.flaps.pools[&key("a")].warned);
         // It is forgotten once it goes.
@@ -1275,7 +1272,6 @@ mod tests {
             registration: PoolRegistration {
                 key: key(dgd),
                 location: pool(dgd, "m1").location,
-                model: "m1".to_owned(),
                 frontends: Vec::new(),
             },
             hash: "m1".to_owned(),
@@ -1339,7 +1335,6 @@ mod tests {
         let registration = PoolRegistration {
             key: key("a"),
             location: pool("a", "m1").location,
-            model: "m1".to_owned(),
             frontends: Vec::new(),
         };
         let Err(DiscoveryError::Unavailable(error)) = store.register(registration).await else {

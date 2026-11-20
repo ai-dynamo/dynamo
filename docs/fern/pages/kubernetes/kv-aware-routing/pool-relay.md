@@ -423,9 +423,10 @@ A relay's cluster ID is, in this order, with every Global Discovery mode:
    and the operator watches the property.
 
 With MCS, the ID must be the name that the MCS implementation gives this cluster, because the Global
-Discovery Service matches the pool's registration to its imports by that name: with `mcs`, leave
-both settings empty to use the About API, and with `karmada`, use this cluster's member cluster name
-in Karmada. With `--pool-discovery registrations`, any stable name that is unique per cluster works.
+Discovery Service lists the pool under that name, and Global Routers match the relay's state streams,
+which name the pool by its ID, to that listing: with `mcs`, leave both settings empty to use the About
+API, and with `karmada`, use this cluster's member cluster name in Karmada. With
+`--pool-discovery registrations`, any stable name that is unique per cluster works.
 
 A relay that sets `DYN_RELAY_ROUTING_POOL` itself needs its own `clusterId`, since that variable
 names the cluster too. A change of a relay's cluster ID restarts its Pods. While the operator cannot

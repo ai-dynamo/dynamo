@@ -236,7 +236,15 @@ async fn run() -> Result<()> {
     };
     let in_flight = Arc::new(InFlightTracker::new());
     let signals = Arc::new(PoolSignals::new(in_flight.clone()));
-    let relay_catalog = if args.relay_view_port.is_some() {
+    // Discovered pools take their models from their Relays' views; static
+    // pools name theirs.
+    let relay_catalog = if discovery.is_some() {
+        Some(Arc::new(RelayGatedPoolCatalog::for_discovery(
+            pools.clone(),
+            shutdown.child_token(),
+            Some(signals.clone()),
+        )))
+    } else if args.relay_view_port.is_some() {
         Some(Arc::new(RelayGatedPoolCatalog::with_signals(
             pools.clone(),
             shutdown.child_token(),

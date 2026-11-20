@@ -4,7 +4,7 @@
 //! Round trips from this process to each region, measured as the time to
 //! open a TCP connection to a pool's first frontend: one round trip.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,7 @@ pub async fn measure_round_trips(
             _ = ticks.tick() => {}
         }
         let snapshot = pools.borrow().clone();
-        let measurements = snapshot.pools().iter().filter_map(|pool| {
+        let measurements = each_pool_once(snapshot.pools()).filter_map(|pool| {
             let frontend = pool.frontends.first()?;
             let address = format!(
                 "{}:{}",
@@ -58,13 +58,19 @@ pub async fn measure_round_trips(
     }
 }
 
+/// A pool serving several models is listed once per model.
+fn each_pool_once(pools: &[Pool]) -> impl Iterator<Item = &Pool> {
+    let mut seen = HashSet::new();
+    pools.iter().filter(move |pool| seen.insert(&pool.id))
+}
+
 /// The median round trip to each region's pools, over the pools measured.
 fn region_medians(
     pools: &[Pool],
     round_trips: &HashMap<PoolId, Duration>,
 ) -> HashMap<String, Duration> {
     let mut by_region = HashMap::<&str, Vec<Duration>>::new();
-    for pool in pools {
+    for pool in each_pool_once(pools) {
         if let Some(round_trip) = round_trips.get(&pool.id) {
             let region = pool.location.region.as_str();
             by_region.entry(region).or_default().push(*round_trip);
@@ -112,8 +118,10 @@ mod tests {
             pool("ohio-c", "qwen", &["http://ohio-c:8000"]),
             pool("tokyo-a", "qwen", &["http://tokyo-a:8000"]),
             pool("tokyo-b", "qwen", &["http://tokyo-b:8000"]),
+            // A pool serving a second model counts once.
+            pool("ohio-a", "llama", &["http://ohio-a:8000"]),
         ];
-        for pool in &mut pools[3..] {
+        for pool in &mut pools[3..5] {
             pool.location.region = "ap-northeast-1".to_owned();
         }
         let round_trips = HashMap::from([

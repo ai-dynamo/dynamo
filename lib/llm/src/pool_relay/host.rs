@@ -166,12 +166,13 @@ pub struct PoolRelayConfig {
     /// replicas from. `None` reads none.
     pub global_discovery_url: Option<Url>,
     /// DGD coordinates published to the Global Routers. Requires global discovery and WAN transport.
-    /// The Relay also registers the pool with Global Discovery under the one model it serves.
+    /// The Relay also registers the pool with Global Discovery while the service takes
+    /// registrations; one that finds pools through MCS takes none.
     pub routing_pool: Option<dynamo_global_common::PoolKey>,
-    /// Region the routing pool is registered in. Required with `routing_pool`.
+    /// Region the routing pool is registered in. Needed to register; MCS mode needs none.
     pub routing_pool_region: Option<String>,
-    /// Frontends the Global Routers send the routing pool's requests to. In MCS mode, Global
-    /// Discovery takes them from MCS instead.
+    /// Frontends the Global Routers send the routing pool's requests to, sent with the
+    /// registration. In MCS mode, Global Discovery takes them from MCS instead.
     pub routing_pool_frontends: Vec<Url>,
 }
 
@@ -341,9 +342,11 @@ pub struct PoolRelayHealth {
     /// last list and its router connections, so this does not affect
     /// `healthy` or readiness.
     pub global_routers_stale_reason: Option<String>,
-    /// Why the routing pool is not registered with Global Discovery: no
-    /// single model to register, or the last call failed. Global Routers send
-    /// an unregistered pool nothing, but the Relay keeps serving and retrying,
+    /// Why the routing pool is not registered though Global Discovery takes
+    /// registrations: it has not said yet whether it does, the pool has no
+    /// region, or the last call failed. `None` while registered, and while
+    /// the service takes no registrations, as with MCS. Global Routers send an
+    /// unregistered pool nothing, but the Relay keeps serving and retrying,
     /// so this does not affect `healthy` or readiness.
     pub routing_pool_unregistered_reason: Option<String>,
 }
@@ -710,13 +713,12 @@ impl PoolRelay {
                 pool.cluster_id() == cluster_id,
                 "routing pool cluster must match the Relay cluster"
             );
-            let region = config
-                .routing_pool_region
-                .clone()
-                .filter(|region| !region.is_empty() && region.trim() == region);
+            let region = config.routing_pool_region.clone();
             anyhow::ensure!(
-                region.is_some(),
-                "routing_pool requires a routing_pool_region without surrounding whitespace"
+                region
+                    .as_ref()
+                    .is_none_or(|region| !region.is_empty() && region.trim() == region),
+                "routing_pool_region must be non-empty, without surrounding whitespace"
             );
             for frontend in &config.routing_pool_frontends {
                 anyhow::ensure!(
@@ -728,6 +730,8 @@ impl PoolRelay {
                 config.global_discovery_url.is_some() && transport_config.is_some(),
                 "routing_pool requires global_discovery_url and WAN transport"
             );
+            // Without a region the pool registers nowhere, which MCS mode
+            // does not need.
             region.map(|region| PoolLocation {
                 region,
                 availability_zone: None,
@@ -877,29 +881,31 @@ impl PoolRelay {
             topology.clone(),
             supervisor_complete.clone(),
         );
-        // Validation above makes all three present together.
-        let routing_pool_registration = match (
-            config.routing_pool.clone(),
-            routing_pool_location,
-            discovery_client.clone(),
-        ) {
-            (Some(pool), Some(location), Some(client)) => Some(RoutingPoolRegistration::spawn(
-                client,
-                pool,
-                location,
-                config.routing_pool_frontends,
-                topology.watch(),
-                cancel.child_token(),
-            )),
-            _ => None,
-        };
-        let global_routers = discovery_client.map(|client| {
+        let global_routers = discovery_client.clone().map(|client| {
             RouterCache::spawn(
                 client,
                 GLOBAL_ROUTERS_REFRESH_INTERVAL,
                 cancel.child_token(),
             )
         });
+        // Validation above makes a routing pool come with a client, and so
+        // with the router list, which says whether the service takes
+        // registrations.
+        let routing_pool_registration = match (
+            config.routing_pool.clone(),
+            discovery_client,
+            global_routers.as_ref(),
+        ) {
+            (Some(pool), Some(client), Some(routers)) => Some(RoutingPoolRegistration::spawn(
+                client,
+                pool,
+                routing_pool_location,
+                config.routing_pool_frontends,
+                routers.accepts_pool_registrations(),
+                cancel.child_token(),
+            )),
+            _ => None,
+        };
         if let (Some(pool), Some(transport), Some(routers)) = (
             config.routing_pool,
             transport.as_ref(),
@@ -3311,11 +3317,13 @@ mod tests {
         let pool = dynamo_global_common::PoolKey::new("test-dc", "dynamo", "blue").unwrap();
         for (config, expected) in [
             (
+                // A region is optional, since MCS mode needs none, but checked.
                 PoolRelayConfig {
                     routing_pool: Some(pool.clone()),
+                    routing_pool_region: Some(" us-east-1".to_owned()),
                     ..PoolRelayConfig::default()
                 },
-                "routing_pool requires a routing_pool_region",
+                "routing_pool_region must be non-empty, without surrounding whitespace",
             ),
             (
                 // `blue:8000` parses as a URL with scheme `blue`.

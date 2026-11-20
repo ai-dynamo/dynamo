@@ -185,7 +185,6 @@ pub(super) fn listing(registration: &PoolRegistration) -> PoolListing {
     PoolListing {
         key: registration.key.clone(),
         location: registration.location.clone(),
-        model: Some(registration.model.clone()),
         frontends: registration.frontends.clone(),
         relay_identities: Vec::new(),
     }
@@ -326,15 +325,15 @@ mod tests {
         PoolKey::new("west", "dynamo", dgd).unwrap()
     }
 
-    fn registration(dgd: &str, model: &str) -> PoolRegistration {
+    /// A registration whose region, `m<version>`, tells its versions apart.
+    fn registration(dgd: &str, version: &str) -> PoolRegistration {
         PoolRegistration {
             key: key(dgd),
             location: PoolLocation {
-                region: "us-west-2".to_owned(),
+                region: version.to_owned(),
                 availability_zone: None,
                 datacenter: None,
             },
-            model: model.to_owned(),
             frontends: vec![
                 Url::parse("http://10.43.1.3:8000/").unwrap(),
                 Url::parse("http://10.43.1.2:8000/").unwrap(),
@@ -394,7 +393,7 @@ mod tests {
         let Some(Ok(WatchEvent::Upserted(changed))) = watch.next().await else {
             panic!("expected the change");
         };
-        assert_eq!(changed.model.as_deref(), Some("m2"));
+        assert_eq!(changed.location.region, "m2");
     }
 
     #[tokio::test(start_paused = true)]

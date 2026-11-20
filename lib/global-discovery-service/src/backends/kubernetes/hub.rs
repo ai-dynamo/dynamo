@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, PoolEvent, PoolListing, Snapshot, WatchEvent,
@@ -14,6 +14,7 @@ use crate::pool_discovery::{
 };
 use async_trait::async_trait;
 use dynamo_global_common::{PoolKey, PoolLocation, address_identity};
+use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +22,7 @@ use url::Url;
 
 use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints, tcp_port};
 use super::mcs::{self, McsImplementation};
+use super::regions::ClusterRegions;
 
 /// One pool per (source cluster, namespace, DGD name), from imported
 /// EndpointSlices. MCS merges same-named exports from several clusters into
@@ -29,9 +31,14 @@ use super::mcs::{self, McsImplementation};
 ///
 /// One watch per directory feeds a cache that serves `list` and every
 /// `list_and_watch` stream. The watch starts on first use and stops when the
-/// directory is dropped.
+/// directory is dropped. A pool's region comes from [`ClusterRegions`] as it
+/// is read: a list shows a new region at once, a watcher with the pool's next
+/// event.
 #[derive(Debug)]
-pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
+pub struct McsPoolDirectory {
+    slices: SliceDirectory<PoolIndex>,
+    regions: Arc<ClusterRegions>,
+}
 
 /// The Service in front of a pool's frontends, named `<DGD name><suffix>`
 /// and exported like the PoolRelay Service. Its Ready endpoints on the named
@@ -70,40 +77,70 @@ impl McsPoolDirectory {
     /// pool also works. Each PoolRelay Service is named
     /// `<DGD name><pool_service_suffix>`. A pool's Ready frontends become its
     /// `frontends`, but they do not make it live without a Ready PoolRelay.
-    /// The client's connect and read timeouts should add up to under 90 s, so
-    /// a server that stops answering shows up as failures.
+    /// `regions` places each pool's cluster. The client's connect and read
+    /// timeouts should add up to under 90 s, so a server that stops answering
+    /// shows up as failures.
     pub fn new(
         imports: Client,
         mcs: McsImplementation,
         pool_service_suffix: String,
         frontends: FrontendService,
+        regions: ClusterRegions,
     ) -> anyhow::Result<Self> {
         frontends.check(&pool_service_suffix)?;
-        Ok(Self(SliceDirectory::new(
-            Api::all(imports),
-            mcs::imported_selector(mcs),
-            PoolNaming {
-                mcs,
-                pool_service_suffix,
-                frontends,
-                portless: Mutex::default(),
-                frontendless: Mutex::default(),
-            },
-        )))
+        Ok(Self {
+            slices: SliceDirectory::new(
+                Api::all(imports),
+                mcs::imported_selector(mcs),
+                PoolNaming {
+                    mcs,
+                    pool_service_suffix,
+                    frontends,
+                    portless: Mutex::default(),
+                    frontendless: Mutex::default(),
+                },
+            ),
+            regions: Arc::new(regions),
+        })
     }
 }
 
 #[async_trait]
 impl Directory<PoolListing, PoolKey> for McsPoolDirectory {
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
-        self.0.list().await
+        let mut snapshot = self.slices.list().await?;
+        self.regions.first_read().await;
+        locate(&self.regions, &mut snapshot.items);
+        Ok(snapshot)
     }
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
     ) -> Result<WatchStream<PoolListing, PoolKey>, DiscoveryError> {
-        self.0.list_and_watch(cancel_token).await
+        let events = self.slices.list_and_watch(cancel_token).await?;
+        self.regions.first_read().await;
+        let regions = Arc::clone(&self.regions);
+        Ok(Box::pin(events.map(move |event| {
+            event.map(|event| match event {
+                WatchEvent::Upserted(mut listing) => {
+                    locate(&regions, std::slice::from_mut(&mut listing));
+                    WatchEvent::Upserted(listing)
+                }
+                WatchEvent::Resync(mut snapshot) => {
+                    locate(&regions, &mut snapshot.items);
+                    WatchEvent::Resync(snapshot)
+                }
+                removed @ WatchEvent::Removed(_) => removed,
+            })
+        })))
+    }
+}
+
+/// Gives each listing its cluster's region.
+fn locate(regions: &ClusterRegions, listings: &mut [PoolListing]) {
+    for listing in listings {
+        listing.location = regions.location(listing.key.cluster_id());
     }
 }
 
@@ -193,7 +230,8 @@ impl PoolNaming {
     }
 }
 
-/// MCS knows only the pool's cluster, so its location is named after it.
+/// MCS knows only the pool's cluster, so its location is named after it
+/// until [`locate`] reads the cluster's region.
 fn location(cluster: &str) -> PoolLocation {
     PoolLocation {
         region: cluster.to_owned(),
@@ -372,7 +410,6 @@ impl PoolIndex {
         let listing = PoolListing {
             key: key.clone(),
             location: location(key.cluster_id()),
-            model: None,
             frontends,
             relay_identities,
         };
@@ -420,6 +457,67 @@ mod tests {
     use super::*;
 
     const SUFFIX: &str = "-pool-relay";
+
+    /// A Kubernetes API that lists `slices` and Karmada's `clusters`, and
+    /// holds every watch open without events.
+    async fn fake_api(slices: &[EndpointSlice], clusters: serde_json::Value) -> Client {
+        let lists = [
+            serde_json::json!({
+                "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList",
+                "metadata": {"resourceVersion": "1"}, "items": slices,
+            }),
+            serde_json::json!({
+                "apiVersion": "cluster.karmada.io/v1alpha1", "kind": "ClusterList",
+                "metadata": {"resourceVersion": "1"}, "items": clusters,
+            }),
+        ];
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let [slices, clusters] = lists.clone();
+            async move {
+                let query = request.uri().query().unwrap_or_default();
+                if query.contains("watch=true") {
+                    std::future::pending::<()>().await;
+                }
+                let karmada = request.uri().path().starts_with("/apis/cluster.karmada.io/");
+                axum::Json(if karmada { clusters } else { slices })
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Client::try_from(kube::Config::new(url.parse().unwrap())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_listed_pool_takes_its_clusters_region() {
+        let slices = ["east", "west", "north"]
+            .map(|cluster| slice(cluster, "mocker", "a1b2c", &[("10.43.0.1", true)]));
+        let cluster = |name: &str, region: &str| {
+            serde_json::json!({"metadata": {"name": name}, "spec": {"region": region}})
+        };
+        let clusters = serde_json::json!([cluster("east", "eu-east-9"), cluster("west", "us-west-2")]);
+        let client = fake_api(&slices, clusters).await;
+        let configured = HashMap::from([("east".to_owned(), "us-east-2".to_owned())]);
+        let regions = ClusterRegions::new(configured, Some(client.clone()));
+        let pools = McsPoolDirectory::new(
+            client,
+            McsImplementation::Karmada,
+            SUFFIX.to_owned(),
+            naming().frontends,
+            regions,
+        )
+        .unwrap();
+        let listed = pools.list().await.unwrap();
+        let region = |cluster: &str| {
+            let pool = listed.items.iter().find(|pool| pool.key.cluster_id() == cluster);
+            pool.unwrap().location.region.clone()
+        };
+        // The flag wins over Karmada, which places the clusters the flag
+        // leaves out; a cluster neither places is named after itself.
+        assert_eq!(region("east"), "us-east-2");
+        assert_eq!(region("west"), "us-west-2");
+        assert_eq!(region("north"), "north");
+    }
 
     fn naming() -> PoolNaming {
         PoolNaming {
@@ -624,7 +722,6 @@ mod tests {
         let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
         assert_eq!(listing.location.region, "west");
         assert_eq!(listing.relay_identities, ["ip:10.43.66.175"]);
-        assert_eq!(listing.model, None);
     }
 
     #[test]

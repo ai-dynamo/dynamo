@@ -112,7 +112,6 @@ fn registration() -> PoolRegistration {
             availability_zone: Some("usw2-az1".into()),
             datacenter: None,
         },
-        model: "Qwen/Qwen3-0.6B".into(),
         frontends: vec!["http://10.1.22.20:8000".parse().unwrap()],
     }
 }
@@ -228,8 +227,8 @@ async fn a_cut_off_body_is_a_request_error() {
 #[tokio::test]
 async fn lists_pools_and_whether_the_list_is_complete() {
     let fake = FakeService::new(r#"{ "routers": [] }"#);
-    // An older service still lists capabilities and capacity, which the
-    // client ignores.
+    // An older service still lists a model, capabilities and capacity,
+    // which the client ignores.
     fake.0.lock().unwrap().pools_body = r#"{
         "pools": [{
             "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1" },
@@ -254,7 +253,6 @@ async fn lists_pools_and_whether_the_list_is_complete() {
         [PoolListing {
             key: registered.key,
             location: registered.location,
-            model: Some(registered.model),
             frontends: registered.frontends,
             relay_identities: vec!["ip:10.1.22.30".into()],
         }]
@@ -295,7 +293,6 @@ async fn registers_a_pool() {
                 "availability_zone": "usw2-az1",
                 "datacenter": null
             },
-            "model": "Qwen/Qwen3-0.6B",
             "frontends": ["http://10.1.22.20:8000/"]
         })]
     );
@@ -329,8 +326,7 @@ fn pools_body(dgd_names: &[&str], complete: bool) -> String {
         .map(|dgd_name| {
             json!({
                 "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": dgd_name },
-                "location": { "region": "us-west-2", "availability_zone": null, "datacenter": null },
-                "model": "Qwen/Qwen3-0.6B"
+                "location": { "region": "us-west-2", "availability_zone": null, "datacenter": null }
             })
         })
         .collect::<Vec<_>>();
