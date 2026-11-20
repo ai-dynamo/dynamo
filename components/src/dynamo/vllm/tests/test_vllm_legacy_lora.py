@@ -13,6 +13,8 @@ import pytest
 
 pytest.importorskip("vllm.lora.request")
 
+from vllm.config import StructuredOutputsConfig  # noqa: E402
+
 from dynamo.common.constants import (  # noqa: E402
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
@@ -56,6 +58,7 @@ def _make_prefill_handler():
             additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 1056},
             cache_config=SimpleNamespace(block_size=16),
             lora_config=None,
+            structured_outputs_config=StructuredOutputsConfig(backend="auto"),
         ),
     )
     handler.generate_endpoint = object()
@@ -110,6 +113,8 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert kwargs["ignore_weights"] is True
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
+    assert runtime_config.runtime_data["vllm_structured_output_backend"] == '"auto"'
+    assert runtime_config.runtime_data["vllm_structural_tag_format_supported"] == "true"
     token_budget = json.loads(runtime_config.runtime_data["token_budget"])
     assert token_budget["combined_limit"] == 8192
     assert runtime_config.kv_event_publishing_enabled is True
