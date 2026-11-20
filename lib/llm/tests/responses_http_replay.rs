@@ -1556,6 +1556,44 @@ async fn input_tokens_counts_input() {
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn input_tokens_uses_reasoning_replay_precedence() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        let encoded = format!("trtllm-reasoning-v1:{}", STANDARD.encode("x".repeat(3000)));
+        let summary = json!([{ "type": "summary_text", "text": "fallback" }]);
+        for (reasoning, expected) in [
+            (
+                json!({"type":"reasoning", "summary":[], "encrypted_content":encoded}),
+                1003,
+            ),
+            (
+                json!({"type":"reasoning", "summary":summary, "encrypted_content":encoded,
+                       "content":[{"type":"reasoning_text", "text":"plain"}]}),
+                4,
+            ),
+            (
+                json!({"type":"reasoning", "summary":summary, "encrypted_content":"foreign"}),
+                5,
+            ),
+        ] {
+            let response =
+                post_input_tokens(&svc, &json!({"model":MODEL, "input":[reasoning]})).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["input_tokens"],
+                expected
+            );
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 /// The endpoint must answer for models this frontend does not serve.
 ///
 #[tokio::test]

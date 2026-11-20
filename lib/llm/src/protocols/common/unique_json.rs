@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
+pub(super) const DUPLICATE_OBJECT_FIELD: &str = "duplicate JSON object field";
+
 /// Reject repeated JSON object keys at every depth without echoing the keys.
 pub(crate) struct UniqueJsonValue(pub(crate) Value);
 
@@ -70,7 +72,7 @@ impl<'de> Deserialize<'de> for UniqueJsonValue {
                 let mut values = serde_json::Map::new();
                 while let Some((key, UniqueJsonValue(value))) = map.next_entry()? {
                     if values.insert(key, value).is_some() {
-                        return Err(serde::de::Error::custom("duplicate JSON object field"));
+                        return Err(serde::de::Error::custom(DUPLICATE_OBJECT_FIELD));
                     }
                 }
                 Ok(UniqueJsonValue(Value::Object(values)))

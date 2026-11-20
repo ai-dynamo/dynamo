@@ -9,7 +9,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
-use super::unique_json::UniqueJsonValue;
+use super::unique_json::{DUPLICATE_OBJECT_FIELD, UniqueJsonValue};
 
 /// The legacy prefix contract and the explicitly selected artifact contract.
 #[derive(Clone, PartialEq)]
@@ -35,8 +35,15 @@ impl Serialize for MetadataUpload {
 
 impl<'de> Deserialize<'de> for MetadataUpload {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let UniqueJsonValue(value) = UniqueJsonValue::deserialize(deserializer)
-            .map_err(|_| serde::de::Error::custom("invalid metadata_upload JSON"))?;
+        let UniqueJsonValue(value) =
+            UniqueJsonValue::deserialize(deserializer).map_err(|error| {
+                let message = if error.to_string().starts_with(DUPLICATE_OBJECT_FIELD) {
+                    "duplicate metadata_upload field"
+                } else {
+                    "invalid metadata_upload JSON"
+                };
+                serde::de::Error::custom(message)
+            })?;
         let object = value
             .as_object()
             .ok_or_else(|| serde::de::Error::custom("metadata_upload must be an object"))?;

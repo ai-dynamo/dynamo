@@ -3,7 +3,6 @@
 
 //! Native template metadata and custom/client-search protocol adaptation.
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dynamo_protocols::types::responses::CustomToolParamFormat;
 
 use super::super::tools::custom_input_or_raw;
@@ -22,26 +21,64 @@ pub struct ResponsesToolContext {
         HashMap<usize, MessagePhase>,
     )>,
     pub history_phases: HashMap<usize, MessagePhase>,
-    pub(super) history_tool_names: HashMap<String, Vec<String>>,
+    pub(super) history_tool_calls: HashMap<String, Vec<HistoricalToolCall>>,
     pub(super) tool_choice_name: Option<String>,
     pub(super) selected_tools: Option<HashSet<(Option<String>, String)>>,
 }
 
-const KIMI_BARE_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v1_";
+const KIMI_BARE_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v2_";
 
-pub(super) fn encode_kimi_bare_call_id(call_id: &str) -> String {
-    format!(
-        "{KIMI_BARE_CALL_ID_PREFIX}{}",
-        URL_SAFE_NO_PAD.encode(call_id)
-    )
+#[derive(Clone, Debug)]
+pub(super) struct HistoricalToolCall {
+    name: String,
+    kimi_bare: bool,
 }
 
-fn is_kimi_bare_call_id(call_id: &str) -> bool {
-    call_id
-        .strip_prefix(KIMI_BARE_CALL_ID_PREFIX)
-        .filter(|payload| !payload.is_empty())
-        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
-        .is_some_and(|bytes| std::str::from_utf8(&bytes).is_ok())
+pub(super) fn history_tool_calls(
+    input: &InputParam,
+    names: &ToolNameMap,
+) -> HashMap<String, Vec<HistoricalToolCall>> {
+    let mut history: HashMap<String, Vec<HistoricalToolCall>> = HashMap::new();
+    let InputParam::Items(items) = input else {
+        return history;
+    };
+    for item in items {
+        let (call_id, item_id, name, namespace) = match item {
+            InputItem::Item(Item::FunctionCall(call)) => (
+                call.call_id.as_str(),
+                call.id.as_deref(),
+                call.name.as_str(),
+                call.namespace.as_deref(),
+            ),
+            InputItem::Item(Item::CustomToolCall(call)) => (
+                call.call_id.as_str(),
+                Some(call.id.as_str()),
+                call.name.as_str(),
+                call.namespace.as_deref(),
+            ),
+            InputItem::Item(Item::ToolSearchCall(call)) => {
+                let Some(call_id) = call.call_id.as_deref() else {
+                    continue;
+                };
+                (call_id, None, "tool_search", None)
+            }
+            _ => continue,
+        };
+        // Backend call IDs may repeat across turns. Match spelling to the
+        // original item occurrence and require its paired item ID.
+        history
+            .entry(call_id.to_owned())
+            .or_default()
+            .push(HistoricalToolCall {
+                name: names.encode(namespace, name),
+                kimi_bare: namespace.is_some()
+                    && item_id.is_some_and(|id| {
+                        id.starts_with("fc_")
+                            && call_id.strip_prefix(KIMI_BARE_CALL_ID_PREFIX) == Some(id)
+                    }),
+            });
+    }
+    history
 }
 
 fn search_call_id(id: Option<&str>) -> anyhow::Result<&str> {
@@ -393,16 +430,19 @@ impl NvCreateChatCompletionRequest {
             if let ChatCompletionRequestMessage::Assistant(message) = message {
                 for call in message.tool_calls.iter_mut().flatten() {
                     let occurrence = occurrences.entry(&call.id).or_default();
-                    let original = context
-                        .history_tool_names
+                    let historical = context
+                        .history_tool_calls
                         .get(&call.id)
-                        .and_then(|names| names.get(*occurrence))
+                        .and_then(|calls| calls.get(*occurrence));
+                    let original = historical
+                        .map(|call| &call.name)
                         .unwrap_or(&call.function.name);
-                    call.function.name = if context.kimi_replay && is_kimi_bare_call_id(&call.id) {
-                        context.names.decode(original).1.to_string()
-                    } else {
-                        resolve(original)
-                    };
+                    call.function.name =
+                        if context.kimi_replay && historical.is_some_and(|call| call.kimi_bare) {
+                            context.names.decode(original).1.to_string()
+                        } else {
+                            resolve(original)
+                        };
                     *occurrence += 1;
                 }
             }
@@ -620,7 +660,7 @@ impl ResponseParams {
         }
         let (name, namespace, custom) = self.tool_identity(emitted);
         let call_id = if self.preserve_tool_spelling && namespace.is_some() && emitted == name {
-            encode_kimi_bare_call_id(&call_id)
+            format!("{KIMI_BARE_CALL_ID_PREFIX}{item_id}")
         } else {
             call_id
         };
