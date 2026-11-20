@@ -58,10 +58,9 @@ not make code public to test it.
    scheduler work, `ProcessFixture` to launch a sidecar process.
 2. Write the scenario once, as an async function generic over that trait, such
    as `async fn streaming<F: SidecarFixture>()`.
-3. Enroll it for each backend in `enroll_baseline!`
-   (`sidecar_mocker_integration.rs`) or `migration_tests!`
-   (`router_sidecar_mocker_integration.rs`), or with a per-backend
-   `#[tokio::test]` wrapper.
+3. Enroll it for each backend: in `enroll_baseline!`
+   (`sidecar_mocker_integration.rs`), or with a per-backend `#[tokio::test]`
+   wrapper (`router_sidecar_mocker_integration.rs`).
 4. Keep native protocol details in `tests/support/<backend>.rs`. Put a real
    backend difference in a named fixture value, not an `if backend` branch. A
    check that applies to one backend only is an explicit test for it.
