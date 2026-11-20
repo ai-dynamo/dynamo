@@ -49,6 +49,16 @@ enum Handler {
     Http(EngineHttpCallback),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Worker is shutting down")]
+struct EngineRoutesClosed;
+
+impl IntoResponse for EngineRoutesClosed {
+    fn into_response(self) -> Response {
+        (StatusCode::SERVICE_UNAVAILABLE, self.to_string()).into_response()
+    }
+}
+
 /// Registry for both legacy callbacks and method-aware handlers on `/engine/*`.
 #[derive(Clone, Default)]
 pub struct EngineRouteRegistry {
@@ -162,7 +172,7 @@ impl EngineRouteRegistry {
         callback: impl FnOnce() -> F + Send + 'static,
     ) -> anyhow::Result<T> {
         let guard = self.active.clone().read_owned().await;
-        anyhow::ensure!(!self.is_closed(), "worker engine routes are shutting down");
+        anyhow::ensure!(!self.is_closed(), EngineRoutesClosed);
         // HTTP cancellation must not detach a Python operation from the barrier.
         tokio::spawn(async move {
             let _guard = guard;
@@ -194,7 +204,7 @@ pub(crate) async fn dispatch(
     body: Bytes,
 ) -> Response {
     if registry.is_closed() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Worker is shutting down").into_response();
+        return EngineRoutesClosed.into_response();
     }
     // Exact legacy routes keep their precedence and body-only callback contract.
     if let Some(callback) = registry.get(&path) {
@@ -204,6 +214,7 @@ pub(crate) async fn dispatch(
         };
         return match callback(payload).await {
             Ok(response) => (StatusCode::OK, response.to_string()).into_response(),
+            Err(error) if error.is::<EngineRoutesClosed>() => EngineRoutesClosed.into_response(),
             Err(error) => {
                 tracing::error!(path, %error, "Engine route handler failed");
                 (
@@ -248,6 +259,7 @@ pub(crate) async fn dispatch(
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
         },
+        Err(error) if error.is::<EngineRoutesClosed>() => EngineRoutesClosed.into_response(),
         Err(error) => {
             tracing::error!(path, %error, "Engine HTTP handler failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -336,14 +348,19 @@ mod tests {
             // its admitted engine operation is still running.
             active.abort();
             assert!(active.await.unwrap_err().is_cancelled());
-            registry.close();
             let idle = registry.wait_for_idle();
             tokio::pin!(idle);
             assert!(futures::poll!(&mut idle).is_pending());
+            // This request passed dispatch's first check and is waiting for admission.
+            let racing = dispatch(&registry, "control".into(), Method::POST, Bytes::new());
+            tokio::pin!(racing);
+            assert!(futures::poll!(&mut racing).is_pending());
+            registry.close();
             release.notify_one();
             tokio::time::timeout(std::time::Duration::from_secs(5), idle)
                 .await
                 .unwrap();
+            assert_eq!(racing.await.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert!(cached(serde_json::Value::Null).await.is_err());
             assert_eq!(
                 dispatch(&registry, "control".into(), Method::POST, Bytes::new())
