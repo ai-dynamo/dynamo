@@ -26,11 +26,6 @@ pub async fn run(
     let router_config = engine_config.local_model().router_config();
     crate::kv_router::plugins::RouterPluginBuilder::default()
         .validate_config(&router_config.kv_router_config)?;
-    crate::kv_router::check_hint_policies_route_on_kv_path(
-        router_config.router_mode,
-        &router_config.kv_router_config,
-        &crate::kv_router::EVERY_ROLE,
-    )?;
 
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..

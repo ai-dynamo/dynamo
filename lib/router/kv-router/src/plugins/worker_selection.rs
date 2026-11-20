@@ -30,18 +30,17 @@ pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 pub use dynamo_scheduler::{
-    Commitments, KvCopyLocations, KvCopySource, WorkerCapacityExt, WorkerInfoExt,
-    WorkerLoadInputExt,
+    KvCopyLocations, KvCopySource, WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt,
 };
 pub use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
-    HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
-    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
-    ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
-    SelectionTraceSpec, SharedCacheHits, SharedCacheType, WorkerCacheData, WorkerCacheInput,
-    WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput,
-    WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    HintContext, HintEmitter, HintError, HostedSelectionRequest, HostedWorkerPicker, PreparedRows,
+    RankVisitor, RowPick, RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError,
+    RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace,
+    SelectionTraceRow, SelectionTraceSpec, SharedCacheHits, SharedCacheType, WorkerCacheData,
+    WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
+    WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
     WorkerSelectionPolicyError,
 };
 

@@ -3,10 +3,13 @@
 
 //! Startup parameters and provider registration for the default policy.
 
-use dynamo_kv_router::plugins::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use dynamo_kv_router::plugins::prelude::*;
+
 use super::{Preset, policy_for_role};
+use crate::kv_fetch::{self, KvFetchParameters};
 
 /// Policy type of the `kvcr` preset, selected under a `worker_selection` role.
 pub const KVCR_POLICY_TYPE: &str = "kvcr";
@@ -22,6 +25,42 @@ struct Parameters {
     disk_cache_hit_weight: Option<f64>,
     shared_cache_multiplier: Option<f64>,
     router_temperature: Option<f64>,
+    /// The hints the policy sends with the worker it books, by name; replaces the preset's
+    /// default list. `[]` sends none.
+    enable_hints: Option<Vec<String>>,
+    /// Each enabled hint's parameters, keyed by its name.
+    hint_parameters: HashMap<String, serde_json::Value>,
+}
+
+/// The hints a policy instance sends, resolved from `enable_hints` and `hint_parameters` once at
+/// startup. Unlike [`PolicyParameters`], not part of the runtime-patchable snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct HintSettings {
+    pub(super) kv_fetch: Option<KvFetchParameters>,
+}
+
+impl HintSettings {
+    /// The hints `preset` sends when its parameters list none: `kvcr` fetches the copies it
+    /// credits, the default cost sends nothing.
+    pub(super) fn default_for(preset: Preset) -> Self {
+        match preset {
+            Preset::Default => Self::default(),
+            Preset::Kvcr => Self {
+                kv_fetch: Some(KvFetchParameters::default()),
+            },
+        }
+    }
+
+    /// The emitter a policy with these settings attaches; `None` sends no hints. `credited` is
+    /// whether the policy's score assumed the copy a fetch would make.
+    pub(super) fn emitter(
+        &self,
+        credited: bool,
+    ) -> Result<Option<Arc<dyn HintEmitter>>, WorkerSelectionPolicyProviderError> {
+        self.kv_fetch
+            .map(|parameters| kv_fetch::KvFetch::emitter(parameters, credited))
+            .transpose()
+    }
 }
 
 /// Only the startup values consumed by the default scorer and picker.
@@ -44,6 +83,71 @@ impl From<&SelectionConfig> for PolicyParameters {
 }
 
 impl Parameters {
+    /// Resolve `enable_hints` and `hint_parameters` for `preset`, rejecting names no default
+    /// policy knows, parameters for a hint that is not enabled, and copy credit without the fetch
+    /// that would send the copies.
+    fn hints(&self, preset: Preset) -> Result<HintSettings, WorkerSelectionPolicyProviderError> {
+        let Some(names) = &self.enable_hints else {
+            if let Some(name) = self.hint_parameters.keys().next() {
+                return Err(WorkerSelectionPolicyProviderError::new(format!(
+                    "hint_parameters configures {name:?}, but enable_hints is not set; list the hints to send, such as enable_hints: [{}]",
+                    kv_fetch::HINT_NAME
+                )));
+            }
+            let settings = HintSettings::default_for(preset);
+            return Ok(settings);
+        };
+        let mut settings = HintSettings::default();
+        for name in names {
+            match name.as_str() {
+                kv_fetch::HINT_NAME => {
+                    if settings.kv_fetch.is_some() {
+                        return Err(WorkerSelectionPolicyProviderError::new(format!(
+                            "enable_hints lists {name:?} more than once"
+                        )));
+                    }
+                    let parameters = match self.hint_parameters.get(name) {
+                        Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                            WorkerSelectionPolicyProviderError::new(format!(
+                                "invalid hint_parameters.{name}: {error}"
+                            ))
+                        })?,
+                        None => KvFetchParameters::default(),
+                    };
+                    kv_fetch::KvFetch::new(parameters, false)?;
+                    settings.kv_fetch = Some(parameters);
+                }
+                _ => {
+                    return Err(WorkerSelectionPolicyProviderError::new(format!(
+                        "enable_hints names unknown hint {name:?}; available: {}",
+                        kv_fetch::HINT_NAME
+                    )));
+                }
+            }
+        }
+        if let Some(name) = self
+            .hint_parameters
+            .keys()
+            .find(|name| !names.contains(name))
+        {
+            return Err(WorkerSelectionPolicyProviderError::new(format!(
+                "hint_parameters configures {name:?}, which enable_hints does not enable"
+            )));
+        }
+        if preset == Preset::Kvcr
+            && self
+                .shared_cache_multiplier
+                .is_some_and(|multiplier| multiplier > 0.0)
+            && settings.kv_fetch.is_none()
+        {
+            return Err(WorkerSelectionPolicyProviderError::new(format!(
+                "shared_cache_multiplier credits the booked worker for KV it would copy, which only the {} hint tells it to fetch; enable it, or set shared_cache_multiplier to 0",
+                kv_fetch::HINT_NAME
+            )));
+        }
+        Ok(settings)
+    }
+
     fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
         for (name, value) in [
             ("overlap_score_credit", self.overlap_score_credit),
@@ -152,9 +256,16 @@ pub(crate) fn register(
             Arc::new(move |parameters| {
                 let parameters: Parameters = parameters.deserialize()?;
                 parameters.validate()?;
+                let hints = parameters.hints(preset)?;
                 Ok(Arc::new(
                     move |config: &SelectionConfig, role, _partition| {
-                        policy_for_role(config.clone(), role, parameters.resolve(config), preset)
+                        policy_for_role(
+                            config.clone(),
+                            role,
+                            parameters.resolve(config),
+                            hints,
+                            preset,
+                        )
                     },
                 ))
             }),

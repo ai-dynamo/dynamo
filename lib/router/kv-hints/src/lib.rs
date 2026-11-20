@@ -8,8 +8,12 @@
 //! it.
 //!
 //! - [`wire`]: the hint message and its versioned actions ([`KvHint`], [`KvHintAction`],
-//!   [`KvSourceLocationsPayload`]) and the runtime-config keys a worker advertises the
+//!   [`KvSourceLocationsPayload`]), the constructors of the actions Dynamo's own policies emit
+//!   ([`KvHintAction::kv_fetch`]), and the runtime-config keys a worker advertises the
 //!   capability under.
+//! - [`copy`]: the copy a booked worker can make ([`KvCopySource`]) and where its source's
+//!   blocks are ([`KvCopyLocations`]); the router computes both for a booking and hands them to
+//!   the worker-selection policy's hint emitter.
 //! - [`transfer`]: the source choice. A worker's hashed hint identity
 //!   ([`WorkerKvTransferKeys`]), the [`KvTransferTarget`] view a selection reads, the
 //!   [`KvTransferScope`] a summary answers, and [`KvTransferSourceSummary`], which groups the
@@ -33,17 +37,20 @@
 //! no transport, no stage logic of its own. The scheduler kernel, `dynamo-kv-router`, and the
 //! hosts consume it; no stage depends on it.
 
+pub mod copy;
 pub mod keys;
 pub mod transfer;
 pub mod wire;
 
+pub use copy::{KvCopyLocations, KvCopySource};
 pub use keys::{KvHintTransferWorkerMetadata, KvTransferEnforcement, WorkerKvTransferKeysCache};
 pub use transfer::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
     ResolvedTransferSource, WorkerKvTransferKeys,
 };
 pub use wire::{
-    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_FETCH_ACTION_TYPE, KV_FETCH_ACTION_VERSION, KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvHintActionLimitError,
     KvSourceLocationsPayload, MAX_KV_HINT_ACTIONS,
 };

@@ -304,7 +304,7 @@ fn prompt_request(selection_id: &str) -> SelectAndReserveRequest {
 }
 
 /// `kvcr` credits worker 2 for the six blocks it can copy from worker 1, books it, and commits
-/// it to that copy; `kv_fetch`, on by default under `kvcr`, sends the copy as `kv.fetch@1.0`.
+/// it to that copy; the `kv_fetch` hint it sends by default carries the copy as `kv.fetch@1.0`.
 #[tokio::test]
 async fn kvcr_books_a_copy_that_kv_fetch_sends() {
     let (service, _policy_file) = kvcr_service(
@@ -344,21 +344,25 @@ worker_selection:
     );
 }
 
-/// `kvcr` commits copies, so its role needs a hint that sends them: the default `kv_fetch` when the
-/// entry lists no `hints`, or a listed `kv_fetch`. Listing `hints` without one fails the
-/// partition's setup, and the worker can't be scheduled, with the reason naming the fix.
+/// `kvcr` commits copies, so it must send `kv_fetch`: by default, or listed in `enable_hints`.
+/// Copy credit with the fetch disabled is rejected when the policy is registered, before any
+/// worker arrives.
 #[tokio::test]
-async fn kvcr_partitions_need_a_hint_that_sends_copies() {
+async fn kvcr_with_copy_credit_must_send_kv_fetch() {
     for (hints, sends_copies) in [
         ("", true),
-        ("    hints:\n      - type: kv_fetch\n", true),
-        ("    hints: []\n", false),
+        (", enable_hints: [kv_fetch]", true),
+        (", enable_hints: []", false),
     ] {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
             format!(
-                "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hints}"
+                "worker_selection:
+  aggregated:
+    type: kvcr
+    parameters: {{shared_cache_multiplier: 0.5{hints}}}
+"
             ),
         )
         .unwrap();
@@ -370,31 +374,27 @@ async fn kvcr_partitions_need_a_hint_that_sends_copies() {
         };
         let mut registry = default_registry();
         register(&mut registry).unwrap();
-        let service = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
+        let built = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
             .indexer_threads(1)
             .build()
-            .await
-            .unwrap();
-        let record = service
-            .upsert_worker(WorkerRequest {
-                kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
-                ..worker(1)
-            })
-            .await
-            .unwrap();
-        let reasons = record.not_schedulable_reasons.join("; ");
-        assert_eq!(
-            reasons.contains(
-                "commits KV copies, but none of the hints in worker_selection.aggregated.hints sends them"
-            ),
-            !sends_copies,
-            "hints={hints:?}: {reasons}"
-        );
+            .await;
+        match built {
+            Ok(_service) => assert!(sends_copies, "hints={hints:?}: built"),
+            Err(error) => {
+                assert!(!sends_copies, "hints={hints:?}: {error}");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("only the kv_fetch hint tells it to fetch"),
+                    "hints={hints:?}: {error}"
+                );
+            }
+        }
     }
 }
 
 /// `kv_fetch` sends a fetch `kvcr` didn't commit only when it adds at least
-/// `min_additional_blocks` beyond the booked worker's own prefix, and always sends a committed one.
+/// `min_additional_blocks` beyond the booked worker's own prefix, and always sends a credited one.
 /// Without copy credit, `kvcr` commits nothing.
 #[tokio::test]
 async fn kv_fetch_holds_only_uncommitted_fetches_to_min_additional_blocks() {
@@ -407,10 +407,11 @@ async fn kv_fetch_holds_only_uncommitted_fetches_to_min_additional_blocks() {
 worker_selection:
   aggregated:
     type: kvcr
-    parameters: {{shared_cache_multiplier: {multiplier}}}
-    hints:
-      - type: kv_fetch
-        parameters: {{min_additional_blocks: {min_additional_blocks}}}
+    parameters:
+      shared_cache_multiplier: {multiplier}
+      enable_hints: [kv_fetch]
+      hint_parameters:
+        kv_fetch: {{min_additional_blocks: {min_additional_blocks}}}
 "#
         ))
         .await;

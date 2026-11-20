@@ -3799,6 +3799,7 @@ version = "1.8.0"
 dependencies = [
  "async-trait",
  "crossbeam-queue",
+ "dynamo-kv-hints",
  "dynamo-router-protocol",
  "dynamo-session-affinity",
  "dynamo-slot-tracker",

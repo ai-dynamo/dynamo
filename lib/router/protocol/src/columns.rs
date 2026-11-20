@@ -45,14 +45,14 @@ impl WorkerInputs {
     ///
     /// Which plugin kinds receive each group:
     ///
-    /// | Group | Filters | Scorers | Pickers | Hint policies |
+    /// | Group | Filters | Scorers | Pickers | Hint emitters |
     /// | --- | --- | --- | --- | --- |
     /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
     /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
     /// | `KV_COPY` | No | Yes | No | The booked worker's copy source |
     ///
     /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
-    /// booking's committed copy, which the role's `Commitments::KV_COPY` hint policy sends.
+    /// booking's committed copy, which the policy's hint emitter, declaring `KV_COPY` too, sends.
     pub const KV_COPY: Self = Self(1 << 6);
     /// Previous name of [`Self::KV_COPY`].
     // TODO(v1.9): Remove this alias.

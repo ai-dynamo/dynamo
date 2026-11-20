@@ -1,44 +1,42 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! What the router does for one role, worked out once from its plugins' declarations.
+//! What the router does for a role, from its worker-selection policy's declarations.
 //!
-//! [`resolve_role`] reads every configured plugin's declarations when the router is built for a
-//! role, checks that they fit together, and records the result in a [`RouterResponsibilities`].
-//! Each part of the router reads one field instead of deriving its piece from the plugins.
+//! Resolved once per partition when the policy is built. The policy's filters, scorers, and
+//! picker say which worker inputs selection needs; its hint emitter, if any, says whether a
+//! booking also needs the booked worker's copy source. Everything the router then does for the
+//! role, from which indexes it keeps to whether it computes copy sources, follows from these.
 
-use crate::hint_policy::RoleHintPolicies;
-use crate::hint_policy::runtime::HintPolicySlot;
+use std::sync::Arc;
+
 use dynamo_router_protocol::worker_type::WorkerType;
-use dynamo_worker_selection::{WorkerInputs, WorkerSelectionPolicy};
+use dynamo_worker_selection::{HintEmitter, WorkerInputs, WorkerSelectionPolicy};
 
-/// What the router does for one role, worked out once from its plugins' declarations.
+/// The router's responsibilities for one role, resolved from its policy.
+#[derive(Clone)]
 pub(crate) struct RouterResponsibilities {
-    /// Union of the worker-selection policy's inputs and those of the configured hint policies.
-    /// Decides which resources start: the KV index and its event subscription, the shared cache,
-    /// load tracking. Default hint policies add nothing.
+    /// The optional worker inputs whose resources the router prepares: the policy's own, plus
+    /// what its hint emitter reads at booking.
     pub(crate) prepare_inputs: WorkerInputs,
-    /// Some scorer reads [`WorkerInputs::KV_COPY`]: compute a copy offer for every candidate,
-    /// keep the request's block chain, for previews as well as bookings, and commit the selected
-    /// worker to its offer.
-    pub(crate) commit_kv_copy: bool,
-    /// Some hint policy, configured or default, reads [`WorkerInputs::KV_COPY`]: compute the
-    /// booked worker's copy source at booking.
-    pub(crate) compute_booked_copy_source: bool,
-    /// The role's hint policies in run order: the one that sends committed copies first, then
-    /// configured order.
-    pub(crate) run_hint_policies: Vec<HintPolicySlot>,
+    /// The policy's scorers read copy offers, so every selection, preview or booking, computes
+    /// copy sources and the booked worker's copy is the one its score credited.
+    pub(crate) scores_kv_copy: bool,
+    /// The hint emitter reads the booked worker's copy source, so bookings compute it even when
+    /// scoring did not.
+    pub(crate) books_kv_copy: bool,
+    /// The emitter the router calls after each booking; `None` sends no hints.
+    pub(crate) hint_emitter: Option<Arc<dyn HintEmitter>>,
 }
 
 impl RouterResponsibilities {
-    /// The worker inputs whose resources the router starts for this role.
     pub(crate) fn prepare_inputs(&self) -> WorkerInputs {
         self.prepare_inputs
     }
 
-    /// The role's hint-policy names, in run order.
-    pub(crate) fn hint_policy_names(&self) -> impl Iterator<Item = &str> {
-        self.run_hint_policies.iter().map(|slot| slot.name.as_ref())
+    /// Whether bookings run a hint emitter.
+    pub(crate) fn emits_hints(&self) -> bool {
+        self.hint_emitter.is_some()
     }
 }
 
@@ -47,165 +45,219 @@ impl std::fmt::Debug for RouterResponsibilities {
         formatter
             .debug_struct("RouterResponsibilities")
             .field("prepare_inputs", &self.prepare_inputs)
-            .field("commit_kv_copy", &self.commit_kv_copy)
-            .field(
-                "compute_booked_copy_source",
-                &self.compute_booked_copy_source,
-            )
-            .field(
-                "run_hint_policies",
-                &self.hint_policy_names().collect::<Vec<_>>(),
-            )
+            .field("scores_kv_copy", &self.scores_kv_copy)
+            .field("books_kv_copy", &self.books_kv_copy)
+            .field("emits_hints", &self.emits_hints())
             .finish()
     }
 }
 
-/// A role's plugins don't fit together. Each message names the fix.
+/// A worker-selection policy whose declarations the router cannot serve for its role.
 #[derive(Debug, thiserror::Error)]
 pub enum PluginConfigError {
-    #[error(
-        "hint policies {first:?} and {second:?} for {role} both send committed KV copies; keep one of them"
-    )]
-    ConflictingCopyConsumers {
-        role: &'static str,
-        first: String,
-        second: String,
-    },
-    #[error(
-        "hint policy {policy:?} for {role} reads KV copy sources, which need a local, event-driven KV index without a remote or predicted-TTL indexer; enable KV events or remove the policy"
-    )]
-    CopySourcesUnavailable { role: &'static str, policy: String },
-    #[error(
-        "the worker-selection policy for {role} commits KV copies, but none of the hints in worker_selection.{role}.hints sends them; add one that does, such as kv_fetch"
-    )]
-    UnsentCopies { role: &'static str },
-    #[error(
-        "the worker-selection policy for {role} commits KV copies, but none of its default hints sends them; list one that does, such as kv_fetch, in worker_selection.{role}.hints"
-    )]
-    UnsentDefaultCopies { role: &'static str },
     #[error(
         "the worker-selection policy for {role} reads KV copy offers, which need a local, event-driven KV index without a remote or predicted-TTL indexer; enable KV events or select a policy without copy credit"
     )]
     CopyOffersUnavailable { role: &'static str },
     #[error(
-        "hint policy {policy:?} for {role} declares {inputs}, which hint policies can't read; a hint policy may declare only WorkerInputs::KV_COPY"
+        "the worker-selection policy for {role} reads KV copy offers, so the worker it books is committed to a copy, but its hints do not read the copy to send it; attach a hint emitter that declares WorkerInputs::KV_COPY, such as kv_fetch"
     )]
-    UnreadableHintInputs {
-        role: &'static str,
-        policy: String,
-        inputs: String,
-    },
+    UnsentCopies { role: &'static str },
+    #[error(
+        "the hint emitter of the worker-selection policy for {role} declares {inputs}, which hints can't read; a hint emitter may declare only WorkerInputs::KV_COPY"
+    )]
+    UnreadableHintInputs { role: &'static str, inputs: String },
 }
 
-/// Work out the router's responsibilities for one role, or reject the config with a message that
-/// names the fix.
+/// Resolve the router's responsibilities for `role` from `selection`.
 ///
-/// Rejects the config when:
-/// - the selection commits copies (a scorer reads [`WorkerInputs::KV_COPY`]) and no hint policy
-///   declares [`Commitments::KV_COPY`](crate::hint_policy::Commitments::KV_COPY), or more than
-///   one does;
-/// - the selection, or a configured hint policy, reads [`WorkerInputs::KV_COPY`] but the KV index
-///   can't keep the request's block chain (`kv_chain_retention` is false).
-///
-/// Default hint policies are passive: they add no inputs, and do without copy data where the
-/// index can't provide it.
-///
-/// Also rejects any hint policy, default or configured, that declares an input other than
-/// [`WorkerInputs::KV_COPY`]: [`HintContext`](crate::hint_policy::HintContext) can't serve
-/// it, so the router would start resources the policy never reads.
+/// `kv_chain_retention` is whether the partition's KV index keeps the matched block chain, which
+/// copy sources need. A policy that scores copy offers without it is rejected; one whose emitter
+/// merely reads the booked worker's copy source runs without copies, since that is best effort.
 pub(crate) fn resolve_role(
     role: WorkerType,
     selection: &WorkerSelectionPolicy,
-    hint_policies: RoleHintPolicies,
     kv_chain_retention: bool,
 ) -> Result<RouterResponsibilities, PluginConfigError> {
     let role_label = role.as_str();
-    let (policies, defaults) = hint_policies.into_parts();
     let selection_inputs = selection.required_worker_inputs();
-    let commit_kv_copy = selection_inputs.contains(WorkerInputs::KV_COPY);
-    if commit_kv_copy && !kv_chain_retention {
-        return Err(PluginConfigError::CopyOffersUnavailable { role: role_label });
-    }
-    let mut prepare_inputs = selection_inputs;
-    let mut consumers: Vec<HintPolicySlot> = Vec::new();
-    let mut others = Vec::with_capacity(policies.len());
-    for (name, policy) in policies {
-        let slot = HintPolicySlot::new(name, policy);
-        let inputs = slot.policy.required_worker_inputs();
-        let unreadable = inputs.without(WorkerInputs::KV_COPY);
-        if unreadable != WorkerInputs::NONE {
-            return Err(PluginConfigError::UnreadableHintInputs {
-                role: role_label,
-                policy: slot.name.to_string(),
-                inputs: input_names(unreadable),
-            });
-        }
-        if !defaults {
-            prepare_inputs = prepare_inputs | inputs;
-            if slot.reads_copy_source && !kv_chain_retention {
-                return Err(PluginConfigError::CopySourcesUnavailable {
-                    role: role_label,
-                    policy: slot.name.to_string(),
-                });
-            }
-        }
-        if slot.consumes_kv_copy {
-            if let Some(first) = consumers.first() {
-                return Err(PluginConfigError::ConflictingCopyConsumers {
-                    role: role_label,
-                    first: first.name.to_string(),
-                    second: slot.name.to_string(),
-                });
-            }
-            consumers.push(slot);
-        } else {
-            others.push(slot);
-        }
-    }
-    if commit_kv_copy && consumers.is_empty() {
-        return Err(if defaults {
-            PluginConfigError::UnsentDefaultCopies { role: role_label }
-        } else {
-            PluginConfigError::UnsentCopies { role: role_label }
+    let hint_inputs = selection.hint_inputs();
+    let unreadable = hint_inputs.without(WorkerInputs::KV_COPY);
+    if unreadable != WorkerInputs::NONE {
+        return Err(PluginConfigError::UnreadableHintInputs {
+            role: role_label,
+            inputs: input_names(unreadable),
         });
     }
-    consumers.append(&mut others);
-    let compute_booked_copy_source = consumers.iter().any(|slot| slot.reads_copy_source);
+    let scores_kv_copy = selection_inputs.contains(WorkerInputs::KV_COPY);
+    let books_kv_copy = hint_inputs.contains(WorkerInputs::KV_COPY);
+    if scores_kv_copy && !kv_chain_retention {
+        return Err(PluginConfigError::CopyOffersUnavailable { role: role_label });
+    }
+    if scores_kv_copy && !books_kv_copy {
+        return Err(PluginConfigError::UnsentCopies { role: role_label });
+    }
     Ok(RouterResponsibilities {
-        prepare_inputs,
-        commit_kv_copy,
-        compute_booked_copy_source,
-        run_hint_policies: consumers,
+        prepare_inputs: selection_inputs | hint_inputs,
+        scores_kv_copy,
+        books_kv_copy,
+        hint_emitter: selection.hint_emitter().cloned(),
     })
 }
 
-/// Check, for a routing host building a router, that one role's plugins fit together, and return
-/// the worker inputs whose resources the router starts for that role: the worker-selection
-/// policy's, plus those of the role's configured hint policies.
-///
-/// Rejects the same configurations as the router's own setup, with a message that names the fix.
-/// `kv_chain_retention` is whether the role's KV index keeps the request's block chain.
+/// Check that `selection` fits `role`, and return the worker inputs whose resources the router
+/// must prepare for it: the policy's own, plus what its hint emitter reads at booking. Hosts
+/// call this when they build a router, so a bad policy fails before it serves.
 pub fn check_role(
     role: WorkerType,
     selection: &WorkerSelectionPolicy,
-    hint_policies: RoleHintPolicies,
     kv_chain_retention: bool,
 ) -> Result<WorkerInputs, PluginConfigError> {
-    resolve_role(role, selection, hint_policies, kv_chain_retention)
-        .map(|responsibilities| responsibilities.prepare_inputs())
+    resolve_role(role, selection, kv_chain_retention).map(|resolved| resolved.prepare_inputs())
 }
 
-/// `inputs` as the constants that name them, for error messages.
 fn input_names(inputs: WorkerInputs) -> String {
     [
         (WorkerInputs::CACHE, "CACHE"),
         (WorkerInputs::LOAD, "LOAD"),
         (WorkerInputs::PREFERRED_TAINT, "PREFERRED_TAINT"),
         (WorkerInputs::ACTIVE_REQUESTS, "ACTIVE_REQUESTS"),
+        (WorkerInputs::RESIDENT_BLOCKS, "RESIDENT_BLOCKS"),
     ]
     .into_iter()
     .filter(|(input, _)| inputs.contains(*input))
-    .map(|(_, name)| format!("WorkerInputs::{name}"))
+    .map(|(_, name)| name)
     .collect::<Vec<_>>()
     .join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_kv_hints::KvHintAction;
+    use dynamo_worker_selection::{
+        HintContext, HintError, SelectionConfig, WorkerCandidates, WorkerInputView, WorkerPicker,
+        WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    };
+
+    struct Declaring(WorkerInputs);
+
+    impl WorkerScorer for Declaring {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn score(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            _candidates: WorkerCandidates<'_>,
+            _costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            Ok(())
+        }
+    }
+
+    struct FirstPicker;
+
+    impl WorkerPicker for FirstPicker {
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
+    }
+
+    struct Emitter(WorkerInputs);
+
+    impl HintEmitter for Emitter {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn emit(&self, _context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn selection(inputs: WorkerInputs) -> WorkerSelectionPolicy {
+        WorkerSelectionPolicy::new(
+            SelectionConfig::default(),
+            "test",
+            vec![Box::new(Declaring(inputs))],
+            Box::new(FirstPicker),
+        )
+    }
+
+    #[test]
+    fn a_policy_without_hints_prepares_only_its_own_inputs() {
+        let resolved =
+            resolve_role(WorkerType::Prefill, &selection(WorkerInputs::LOAD), true).unwrap();
+        assert_eq!(resolved.prepare_inputs(), WorkerInputs::LOAD);
+        assert!(!resolved.scores_kv_copy && !resolved.books_kv_copy);
+        assert!(!resolved.emits_hints());
+    }
+
+    #[test]
+    fn an_emitter_that_reads_copies_adds_them_to_the_prepared_inputs() {
+        let policy =
+            selection(WorkerInputs::LOAD).with_hints(Arc::new(Emitter(WorkerInputs::KV_COPY)));
+        let resolved = resolve_role(WorkerType::Prefill, &policy, true).unwrap();
+        assert_eq!(
+            resolved.prepare_inputs(),
+            WorkerInputs::LOAD | WorkerInputs::KV_COPY
+        );
+        assert!(!resolved.scores_kv_copy && resolved.books_kv_copy);
+        assert!(resolved.emits_hints());
+        // Best effort: without chain retention the emitter runs and reads no copy.
+        resolve_role(WorkerType::Prefill, &policy, false).unwrap();
+    }
+
+    #[test]
+    fn a_scorer_that_reads_copy_offers_needs_an_emitter_that_sends_them() {
+        let committing = || selection(WorkerInputs::CACHE | WorkerInputs::KV_COPY);
+        let paired = committing().with_hints(Arc::new(Emitter(WorkerInputs::KV_COPY)));
+        let resolved = resolve_role(WorkerType::Prefill, &paired, true).unwrap();
+        assert!(resolved.scores_kv_copy && resolved.books_kv_copy);
+
+        for policy in [
+            committing(),
+            committing().with_hints(Arc::new(Emitter(WorkerInputs::NONE))),
+        ] {
+            let error = resolve_role(WorkerType::Prefill, &policy, true).unwrap_err();
+            assert!(
+                matches!(error, PluginConfigError::UnsentCopies { role: "prefill" }),
+                "{error}"
+            );
+        }
+
+        // Copy offers need an index that keeps the block chain.
+        let paired = committing().with_hints(Arc::new(Emitter(WorkerInputs::KV_COPY)));
+        let error = resolve_role(WorkerType::Prefill, &paired, false).unwrap_err();
+        assert!(
+            matches!(error, PluginConfigError::CopyOffersUnavailable { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_emitter_may_declare_only_copies() {
+        let policy = selection(WorkerInputs::LOAD).with_hints(Arc::new(Emitter(
+            WorkerInputs::CACHE | WorkerInputs::KV_COPY | WorkerInputs::ACTIVE_REQUESTS,
+        )));
+        let error = resolve_role(WorkerType::Decode, &policy, true).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                PluginConfigError::UnreadableHintInputs { role: "decode", inputs }
+                    if inputs == "CACHE | ACTIVE_REQUESTS"
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            check_role(WorkerType::Decode, &selection(WorkerInputs::LOAD), true).unwrap(),
+            WorkerInputs::LOAD
+        );
+    }
 }

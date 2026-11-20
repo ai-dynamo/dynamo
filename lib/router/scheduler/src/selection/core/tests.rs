@@ -47,71 +47,52 @@ fn local_core_with(
         config,
         indexer_threads,
         cancel_token,
-        default_hints(),
-        None,
+        SelectionHost::default(),
+        Some(fetch_policy_factory()),
         WorkerType::Aggregated,
         None,
     )
 }
 
-/// Stands in for the builtin `kv_fetch` hint policy, which hosts install as the default hint
-/// policy: it sends committed copies and best-effort fetches as `kv.fetch@1.0`.
+/// Stands in for the builtin `kv_fetch` hint, which `kvcr` sends by default: a best-effort
+/// `kv.fetch@1.0` of the booked worker's copy source.
 struct TestFetch;
 
-impl crate::hint_policy::HintPolicy for TestFetch {
+impl dynamo_worker_selection::HintEmitter for TestFetch {
     fn required_worker_inputs(&self) -> dynamo_worker_selection::WorkerInputs {
         dynamo_worker_selection::WorkerInputs::KV_COPY
     }
 
-    fn commitments(&self) -> crate::hint_policy::Commitments {
-        crate::hint_policy::Commitments::KV_COPY
-    }
-
-    fn build_hints(
+    fn emit(
         &self,
-        context: &crate::hint_policy::HintContext<'_>,
-    ) -> Result<Vec<dynamo_kv_hints::KvHintAction>, crate::hint_policy::HintPolicyError> {
-        let committed = context.committed_kv_copy();
-        let Some(copy) = committed.or(context.kv_copy_source()) else {
+        context: &dynamo_worker_selection::HintContext<'_>,
+    ) -> Result<Vec<dynamo_kv_hints::KvHintAction>, dynamo_worker_selection::HintError> {
+        let Some(locations) = context.kv_copy_locations() else {
             return Ok(Vec::new());
         };
-        let Some(locations) = context.kv_copy_locations(copy) else {
-            return match committed {
-                Some(_) => Err(crate::hint_policy::HintPolicyError::new(
-                    "the copy source is no longer reachable",
-                )),
-                None => Ok(Vec::new()),
-            };
-        };
-        let payload = KvSourceLocationsPayload {
-            source_control_endpoint: locations.source_address().to_string(),
-            block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
-        };
-        Ok(vec![dynamo_kv_hints::KvHintAction::unnumbered(
-            "kv.fetch",
-            "1.0",
-            serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap(),
+        Ok(vec![dynamo_kv_hints::KvHintAction::kv_fetch(
+            KvSourceLocationsPayload::of(locations),
         )])
     }
 }
 
-/// [`TestFetch`] as every role's default hint policy, as hosts register `kv_fetch`.
-fn default_hints() -> SelectionHost {
-    use crate::hint_policy::{HintPolicyConstructor, HintPolicyFactory};
-
-    let fetch = || {
-        vec![(
-            Arc::from("kv_fetch"),
-            HintPolicyConstructor::shared(TestFetch),
-        )]
-    };
-    host_with_hints(HintPolicyFactory::from_roles([
-        (WorkerType::Aggregated, fetch(), true),
-        (WorkerType::Prefill, fetch(), true),
-        (WorkerType::Decode, fetch(), true),
-        (WorkerType::Encode, fetch(), true),
-    ]))
+/// The reference policy sending [`TestFetch`], as `kvcr` sends `kv_fetch`.
+fn fetch_policy_factory() -> WorkerSelectionPolicyFactory {
+    with_hints(None, TestFetch)
 }
+
+/// `factory`, the reference policy when `None`, sending `emitter`'s hints.
+fn with_hints(
+    factory: Option<WorkerSelectionPolicyFactory>,
+    emitter: impl dynamo_worker_selection::HintEmitter + 'static,
+) -> WorkerSelectionPolicyFactory {
+    let inner = factory.unwrap_or_else(crate::test_utils::reference_policy_factory);
+    let emitter: Arc<dyn dynamo_worker_selection::HintEmitter> = Arc::new(emitter);
+    Arc::new(move |config, role, partition| {
+        inner(config, role, partition).with_hints(Arc::clone(&emitter))
+    })
+}
+
 fn core_with(
     config: RouterConfig,
     host: SelectionHost,
@@ -512,15 +493,6 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
     assert_eq!(error.status_code(), 503);
 }
 
-fn host_with_hints(policies: crate::hint_policy::HintPolicyFactory) -> SelectionHost {
-    SelectionHost {
-        hints: HostHints {
-            policies: Some(policies),
-        },
-        ..SelectionHost::default()
-    }
-}
-
 /// Two event-driven workers; worker 1 holds every block of an 8-token
 /// prompt. `configure` adjusts each registration before upsert.
 async fn hint_fixture(
@@ -538,16 +510,15 @@ async fn hint_fixture_with(
     hint_fixture_on(local_core(config), prompt_tokens, configure).await
 }
 
-/// Like [`hint_fixture`], with `host`'s hint policies and an optional worker-selection policy.
+/// Like [`hint_fixture`], with an explicit worker-selection policy, whose hints are the ones sent.
 async fn hint_policy_fixture(
-    host: SelectionHost,
-    policy_factory: Option<WorkerSelectionPolicyFactory>,
+    policy_factory: WorkerSelectionPolicyFactory,
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
     let core = core_with(
         test_config(true),
-        host,
-        policy_factory,
+        SelectionHost::default(),
+        Some(policy_factory),
         WorkerType::Aggregated,
         None,
     );
@@ -4684,15 +4655,12 @@ async fn peer_bindings_converge_by_version() {
     assert_eq!(bound_worker(&peer, "s"), Some(3));
 }
 
-mod hint_policies {
+mod policy_hints {
     use super::*;
-    use crate::hint_policy::{
-        Commitments, HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError,
-        HintPolicyFactory, KvHintAction,
-    };
+    use dynamo_kv_hints::KvHintAction;
     use dynamo_worker_selection::{
-        WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-        WorkerSelectionContext, WorkerSelectionPolicyError,
+        HintContext, HintEmitter, HintError, WorkerCandidates, WorkerInputView, WorkerInputs,
+        WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
     };
 
     /// Scores each worker by its negated device overlap, so cache reuse wins.
@@ -4752,28 +4720,6 @@ mod hint_policies {
         }))
     }
 
-    fn hints_with(policies: Vec<(&str, HintPolicyConstructor)>) -> SelectionHost {
-        host_with_hints(
-            HintPolicyFactory::for_all_roles(
-                policies
-                    .into_iter()
-                    .map(|(name, constructor)| (name.to_string(), constructor)),
-            )
-            .unwrap(),
-        )
-    }
-
-    fn hints(policies: Vec<(&str, Recorder)>) -> SelectionHost {
-        host_with_hints(
-            HintPolicyFactory::for_all_roles(
-                policies.into_iter().map(|(name, policy)| {
-                    (name.to_string(), HintPolicyConstructor::shared(policy))
-                }),
-            )
-            .unwrap(),
-        )
-    }
-
     /// Records how often it runs, and emits one action naming the booked worker and prompt length.
     #[derive(Clone)]
     struct Recorder {
@@ -4788,11 +4734,8 @@ mod hint_policies {
         }
     }
 
-    impl HintPolicy for Recorder {
-        fn build_hints(
-            &self,
-            context: &HintContext<'_>,
-        ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+    impl HintEmitter for Recorder {
+        fn emit(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![KvHintAction::unnumbered(
                 "test.record",
@@ -4834,14 +4777,10 @@ mod hint_policies {
     }
 
     #[tokio::test]
-    async fn bookings_compose_policies_in_order_and_previews_never_run_them() {
+    async fn bookings_run_the_policys_emitter_and_previews_never_do() {
         let recorder = Recorder::new();
-        let (core, _entry, tokens) = hint_policy_fixture(
-            hints(vec![("record", recorder.clone())]),
-            None,
-            hint_capable,
-        )
-        .await;
+        let (core, _entry, tokens) =
+            hint_policy_fixture(with_hints(None, recorder.clone()), hint_capable).await;
         let mut preview = select_request();
         preview.prompt = prompt_of(&tokens);
         preview.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
@@ -4850,13 +4789,13 @@ mod hint_policies {
 
         let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
         assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
-        let hint = response.kv_hint.expect("composed hint");
+        let hint = response.kv_hint.expect("the emitter's hint");
         let actions: Vec<_> = hint
             .actions
             .iter()
             .map(|action| format!("{}:{}", action.action_id, action.action_type))
             .collect();
-        // Configured policies replace the default `kv_fetch`; the stage numbers their actions.
+        // The core numbers the emitter's actions.
         assert_eq!(actions, ["a1:test.record"]);
         assert_eq!(hint.message_id, "to-worker-2");
         assert_eq!(hint.actions[0].payload["worker_id"], serde_json::json!(2));
@@ -4866,22 +4805,18 @@ mod hint_policies {
     async fn workers_without_router_hint_get_no_hint() {
         let recorder = Recorder::new();
         let (core, _entry, tokens) =
-            hint_policy_fixture(hints(vec![("record", recorder.clone())]), None, |_| {}).await;
+            hint_policy_fixture(with_hints(None, recorder.clone()), |_| {}).await;
         let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
         assert!(response.kv_hint.is_none());
-        // The stage skips the policies of a worker that can't receive their hints.
+        // The core skips the emitter for a worker that can't receive its hints.
         assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn replayed_reservations_run_hint_policies_for_the_booked_worker() {
+    async fn replayed_reservations_run_the_emitter_for_the_booked_worker() {
         let recorder = Recorder::new();
-        let (core, _entry, tokens) = hint_policy_fixture(
-            hints(vec![("record", recorder.clone())]),
-            overlap_policy(),
-            hint_capable,
-        )
-        .await;
+        let (core, _entry, tokens) =
+            hint_policy_fixture(with_hints(overlap_policy(), recorder.clone()), hint_capable).await;
         let mut select = select_request();
         select.selection_id = Some("two-phase".to_string());
         select.prompt = prompt_of(&tokens);
@@ -4898,7 +4833,6 @@ mod hint_policies {
         assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
         let hint = reserved.kv_hint.expect("the booked worker's actions");
         assert_eq!(hint.message_id, "two-phase");
-        // Only the configured policy runs.
         assert_eq!(hint.actions.len(), 1);
         assert_eq!(hint.actions[0].action_id, "a1");
         assert_eq!(hint.actions[0].payload["worker_id"], serde_json::json!(1));
@@ -4910,12 +4844,8 @@ mod hint_policies {
 
     #[tokio::test]
     async fn concurrent_bookings_get_their_own_context() {
-        let (core, _entry, _tokens) = hint_policy_fixture(
-            hints(vec![("record", Recorder::new())]),
-            overlap_policy(),
-            hint_capable,
-        )
-        .await;
+        let (core, _entry, _tokens) =
+            hint_policy_fixture(with_hints(overlap_policy(), Recorder::new()), hint_capable).await;
         let core = Arc::new(core);
         let bookings = (1..=8usize).map(|blocks| {
             let core = Arc::clone(&core);
@@ -4977,30 +4907,24 @@ mod hint_policies {
         }))
     }
 
-    /// Sends the committed copy, or nothing when `silent`.
+    /// Sends the booked worker's copy, or fails the booking when `fail`.
     #[derive(Clone)]
     struct CopySender {
-        silent: bool,
+        fail: bool,
     }
 
-    impl HintPolicy for CopySender {
-        fn commitments(&self) -> Commitments {
-            Commitments::KV_COPY
+    impl HintEmitter for CopySender {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::KV_COPY
         }
 
-        fn build_hints(
-            &self,
-            context: &HintContext<'_>,
-        ) -> Result<Vec<KvHintAction>, HintPolicyError> {
-            let Some(copy) = context.committed_kv_copy() else {
+        fn emit(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintError> {
+            if self.fail {
+                return Err(HintError::new("the sender is broken"));
+            }
+            let Some(locations) = context.kv_copy_locations() else {
                 return Ok(Vec::new());
             };
-            if self.silent {
-                return Ok(Vec::new());
-            }
-            let locations = context
-                .kv_copy_locations(copy)
-                .ok_or_else(|| HintPolicyError::new("the source left"))?;
             Ok(vec![KvHintAction::unnumbered(
                 "test.copy",
                 "1",
@@ -5020,13 +4944,9 @@ mod hint_policies {
     }
 
     #[tokio::test]
-    async fn a_committed_copy_goes_to_its_consumer() {
+    async fn a_committed_copy_goes_to_the_policys_emitter() {
         let (core, _entry, tokens) = hint_policy_fixture(
-            hints_with(vec![(
-                "copy",
-                HintPolicyConstructor::shared(CopySender { silent: false }),
-            )]),
-            copy_policy(),
+            with_hints(copy_policy(), CopySender { fail: false }),
             hint_capable,
         )
         .await;
@@ -5048,13 +4968,9 @@ mod hint_policies {
     }
 
     #[tokio::test]
-    async fn an_unsent_committed_copy_fails_and_releases_the_booking() {
+    async fn a_failing_emitter_fails_and_releases_the_booking() {
         let (core, _entry, tokens) = hint_policy_fixture(
-            hints_with(vec![(
-                "copy",
-                HintPolicyConstructor::shared(CopySender { silent: true }),
-            )]),
-            copy_policy(),
+            with_hints(copy_policy(), CopySender { fail: true }),
             hint_capable,
         )
         .await;
@@ -5064,12 +4980,10 @@ mod hint_policies {
             let error = core
                 .select_and_reserve(request)
                 .await
-                .expect_err("the committed copy went unsent");
+                .expect_err("the emitter failed");
             // The second attempt reuses the ID, so the first released its claim.
             assert!(
-                error
-                    .to_string()
-                    .contains("did not send the committed KV copy"),
+                error.to_string().contains("the sender is broken"),
                 "{error}"
             );
         }
@@ -5078,11 +4992,7 @@ mod hint_policies {
     #[tokio::test]
     async fn a_reservation_sends_the_copy_its_selection_committed() {
         let (core, _entry, tokens) = hint_policy_fixture(
-            hints_with(vec![(
-                "copy",
-                HintPolicyConstructor::shared(CopySender { silent: false }),
-            )]),
-            copy_policy(),
+            with_hints(copy_policy(), CopySender { fail: false }),
             hint_capable,
         )
         .await;
@@ -5115,11 +5025,7 @@ mod hint_policies {
     #[tokio::test]
     async fn a_committed_copy_whose_source_left_books_without_it() {
         let (core, _entry, tokens) = hint_policy_fixture(
-            hints_with(vec![(
-                "copy",
-                HintPolicyConstructor::shared(CopySender { silent: false }),
-            )]),
-            copy_policy(),
+            with_hints(copy_policy(), CopySender { fail: false }),
             hint_capable,
         )
         .await;
@@ -5145,53 +5051,15 @@ mod hint_policies {
     }
 
     #[tokio::test]
-    async fn a_committing_selection_needs_a_copy_consumer() {
+    async fn a_committing_policy_needs_an_emitter_that_reads_the_copy() {
+        // The recorder reads no copy, so the committed copies would go unsent.
         let core = core_with(
             test_config(true),
-            hints(vec![("record", Recorder::new())]),
-            copy_policy(),
+            SelectionHost::default(),
+            Some(with_hints(copy_policy(), Recorder::new())),
             WorkerType::Aggregated,
             None,
         );
-        let record = core
-            .upsert_worker(worker_with_kv_events(1))
-            .await
-            .expect("upsert");
-        assert!(
-            record.not_schedulable_reasons.iter().any(|reason| reason
-                .contains("none of the hints in worker_selection.aggregated.hints sends them")),
-            "{record:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn conflicting_plugins_fail_partition_setup() {
-        #[derive(Clone)]
-        struct Consumer;
-        impl HintPolicy for Consumer {
-            fn commitments(&self) -> Commitments {
-                Commitments::KV_COPY
-            }
-            fn build_hints(
-                &self,
-                _context: &HintContext<'_>,
-            ) -> Result<Vec<KvHintAction>, HintPolicyError> {
-                Ok(Vec::new())
-            }
-        }
-        let factory = HintPolicyFactory::for_all_roles([
-            ("one".to_string(), HintPolicyConstructor::shared(Consumer)),
-            ("two".to_string(), HintPolicyConstructor::shared(Consumer)),
-        ])
-        .unwrap();
-        let core = core_with(
-            test_config(true),
-            host_with_hints(factory),
-            None,
-            WorkerType::Aggregated,
-            None,
-        );
-        // Partition setup fails, so the worker is recorded as not schedulable, with the reason.
         let record = core
             .upsert_worker(worker_with_kv_events(1))
             .await
@@ -5200,7 +5068,7 @@ mod hint_policies {
             record
                 .not_schedulable_reasons
                 .iter()
-                .any(|reason| reason.contains("keep one")),
+                .any(|reason| reason.contains("its hints do not read the copy")),
             "{record:?}"
         );
     }

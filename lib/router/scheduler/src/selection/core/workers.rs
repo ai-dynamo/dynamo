@@ -8,7 +8,6 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
-use crate::hint_policy::RoleHintPolicies;
 use crate::kv_hints::hint_capable_partition;
 use crate::resolve::resolve_role;
 use dynamo_kv_indexer::Indexer;
@@ -320,7 +319,6 @@ impl SelectionCore {
                 let KvIndexSource::Owned(ingress) = &self.host.cache.index;
                 let indexer = ingress.open(&self.index_registry, &key, block_size);
                 let responsibilities = self.partition_responsibilities(
-                    &key,
                     &selector,
                     indexer.supports_kv_transfer_chain_retention(),
                 )?;
@@ -435,27 +433,14 @@ impl SelectionCore {
         ingress.detach(record).await;
     }
 
-    /// Construct this partition's hint policies and resolve its role's responsibilities with its
-    /// worker-selection policy.
+    /// Resolve this partition's role's responsibilities from its worker-selection policy.
     fn partition_responsibilities(
         &self,
-        key: &RoutingPartitionId,
         selector: &WorkerSelectionPolicy,
         kv_chain_retention: bool,
     ) -> Result<RouterResponsibilities, SelectionError> {
-        let hint_policies = match &self.host.hints.policies {
-            Some(factory) => {
-                factory.instances(&self.config.selection, self.worker_type, key.as_ref())
-            }
-            None => RoleHintPolicies::none(),
-        };
-        resolve_role(
-            self.worker_type,
-            selector,
-            hint_policies,
-            kv_chain_retention,
-        )
-        .map_err(|error| SelectionError::Internal(error.to_string()))
+        resolve_role(self.worker_type, selector, kv_chain_retention)
+            .map_err(|error| SelectionError::Internal(error.to_string()))
     }
 
     pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {
