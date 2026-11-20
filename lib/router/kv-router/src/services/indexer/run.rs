@@ -28,6 +28,8 @@ pub struct IndexerConfig {
     pub routing_group: String,
     /// Initial `workers` derive multimodal pad values from engine identities.
     pub engine_owned_mm_identity: bool,
+    /// Initial `workers` send one remove per block however many times they stored it.
+    pub idempotent_stores: bool,
     pub peers: Option<String>,
     pub access_log: Option<PathBuf>,
     pub trace_id_header: HeaderName,
@@ -165,6 +167,7 @@ async fn run_common(
                     block_size,
                     None,
                     config.engine_owned_mm_identity,
+                    config.idempotent_stores,
                 )
                 .await?;
         }

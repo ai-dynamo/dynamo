@@ -7,6 +7,11 @@ mod jpeg_turbo;
 mod loader;
 mod rdma;
 
+/// Client-safe image download failures, also used by the Python error bridge.
+pub const IMAGE_FETCH_FORBIDDEN_MESSAGE: &str = "Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.";
+/// Client-safe recovery advice for a missing image.
+pub const IMAGE_FETCH_NOT_FOUND_MESSAGE: &str = "Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.";
+
 use anyhow::{Context, Result};
 use dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage;
 

@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 
 from dynamo._core import Context
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
@@ -243,7 +244,8 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                     # fault"). The URL is not echoed back: the client sent it,
                     # and it has no length limit.
                     raise InvalidArgument(
-                        f"input_reference could not be fetched (HTTP {exc.status})"
+                        IMAGE_FETCH_ERROR_MESSAGES.get(exc.status)
+                        or f"input_reference could not be fetched (HTTP {exc.status})"
                     ) from exc
 
             result = await asyncio.to_thread(

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES, UUID_ONLY_VARIANT_KEY
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -40,7 +41,6 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
-UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
 IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
 
@@ -263,7 +263,13 @@ class ImageLoader:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
         # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
         # (most phone cameras), which report image.format == "MPO".
-        with Image.open(image_data, formats=["JPEG", "PNG", "WEBP"]) as image:
+        try:
+            image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
+        except Image.DecompressionBombError as exc:
+            raise HttpStatusError(
+                413, "Image exceeds the decoded pixel limit", "image"
+            ) from exc
+        with image:
             if max_pixels is not None and image.width * image.height > max_pixels:
                 raise HttpStatusError(
                     413, "Image exceeds the decoded pixel limit", "image"
@@ -370,6 +376,8 @@ class ImageLoader:
                 e.status,
                 describe_media_source(image_url),
             )
+            if message := IMAGE_FETCH_ERROR_MESSAGES.get(e.status):
+                raise HttpStatusError(400, message, image_url) from e
             raise
         except HttpTimeoutError as e:
             logger.error(

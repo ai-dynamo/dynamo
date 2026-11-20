@@ -26,6 +26,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -283,7 +284,7 @@ func newProviderTestWorkload(
 		return &grovev1alpha1.PodCliqueSet{ObjectMeta: objectMeta}
 	case workloadProviderDisaggregatedSet:
 		ds := newDisaggregatedSetObject()
-		ds.SetName(disaggregatedSetName(dgd))
+		ds.SetName(disaggregatedset.Name(dgd))
 		ds.SetNamespace(dgd.Namespace)
 		ds.SetOwnerReferences(ownerReferences)
 		return ds

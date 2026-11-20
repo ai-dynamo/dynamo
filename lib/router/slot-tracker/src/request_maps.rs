@@ -5,8 +5,8 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use std::collections::HashMap;
 
 use super::single::RequestId;
-use crate::prelude::WorkerWithDpRank;
 use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RequestBooking {
@@ -167,12 +167,12 @@ impl RequestIndex {
         counts
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn is_empty(&self) -> bool {
         self.request_to_booking.is_empty() && self.request_to_lora.is_empty()
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn worker_len(&self) -> usize {
         self.request_to_booking.len()
     }
