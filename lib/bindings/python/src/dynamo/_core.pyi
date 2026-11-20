@@ -117,6 +117,14 @@ class DistributedRuntime:
         """
         ...
 
+    @property
+    def response_plane(self) -> str:
+        """
+        The response transport this runtime uses ("tcp", "quic" or "velo"),
+        after the default and the TLS fallback are applied.
+        """
+        ...
+
     def set_health_status(self, ready: bool) -> None:
         """
         Explicitly set the system-level health status (Ready / NotReady).
