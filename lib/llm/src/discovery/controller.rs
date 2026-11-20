@@ -1792,7 +1792,7 @@ mod tests {
 
     fn encoder_consumer(id: u64, checksum: &str, required: bool) -> DesiredInstance {
         let mut worker = instance(id, checksum);
-        let original_checksum = worker.card.mdcsum();
+        let original_checksum = worker.card.mdcsum().to_owned();
         worker
             .card
             .runtime_config
