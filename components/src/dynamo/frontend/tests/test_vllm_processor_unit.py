@@ -7,7 +7,6 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
-import importlib.util
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -51,23 +50,6 @@ from dynamo.llm.exceptions import (
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
 # stub list does not cover those submodules).
 
-HAS_QWEN3_TOOL_PARSER = (
-    importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
-    or importlib.util.find_spec("vllm.tool_parsers.qwen3coder_tool_parser") is not None
-)
-
-
-def _resolve_qwen3_tool_parser_class():
-    try:
-        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
-
-        return Qwen3EngineToolParser
-    except ImportError:
-        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
-
-        return Qwen3CoderToolParser
-
-
 # Needs vllm packages, but never touches a GPU.
 pytestmark = [
     pytest.mark.unit,
@@ -82,10 +64,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
-    pytest.mark.skipif(
-        not HAS_QWEN3_TOOL_PARSER,
-        reason="requires vllm qwen3 tool parser",
-    ),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -3642,10 +3620,12 @@ class TestSchemaAwareToolParser:
             "</function></tool_call>"
         )
 
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=_resolve_qwen3_tool_parser_class(),
+            tool_parser_class=Qwen3EngineToolParser,
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 
@@ -3763,6 +3743,62 @@ class TestPreprocessRawRequestControls:
             default_thinking_mode="disabled",
         )
         assert "thinking_mode" not in result.chat_template_kwargs
+
+
+class _FakeResponseFormatConsumingReasoningParser:
+    def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+        del tokenizer, chat_template_kwargs, model_config
+
+    def adjust_request(self, request):
+        request.response_format = None
+        return request
+
+
+class TestChatParamsResponseFormat:
+    """The renderer must see the caller's response_format, as in vLLM's serving.
+
+    vLLM renders from build_chat_params() before any parser adjusts the request,
+    and renderers such as Kimi K3 consume ChatParams.response_format directly.
+    Stock vLLM 0.33.0's Mistral renderer/tokenizer do not forward that field.
+    """
+
+    def _prepare(self, tokenizer, request_extra, **parsers):
+        request_for_sampling, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                **request_extra,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=parsers.get("tool_parser_class"),
+            reasoning_parser_class=parsers.get("reasoning_parser_class"),
+        )
+        return request_for_sampling, chat_params
+
+    def test_without_parsers(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(tokenizer, {})
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format.type == "json_object"
+
+    def test_reasoning_parser_clears_it(self, tokenizer):
+        # No tools: only the reasoning parser runs, as for a Mistral json_object request.
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer,
+            {},
+            reasoning_parser_class=_FakeResponseFormatConsumingReasoningParser,
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format is None
+
+    def test_tool_parser_clears_it(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer,
+            {"tools": TOOL_REQUEST["tools"], "tool_choice": "auto"},
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format is None
 
 
 class _FakeStructuralTagReasoningParser:
@@ -4603,23 +4639,6 @@ class TestToolCallGuidedDecoding:
             "tool_choice": "auto",
             "reasoning": False,
         }
-
-    def test_missing_registry_uses_parser_method(self, tokenizer, monkeypatch):
-        class CompatibleParser(_FakeStructuralTagParser):
-            structural_tag_model = "qwen_3_coder"
-
-        parser = CompatibleParser()
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
-
-        guided = build_tool_call_guided_decoding(
-            self._request(tokenizer),
-            parser,
-            structural_tag_mode="on",
-            structural_tag_scope="always",
-        )
-
-        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
-        assert len(parser.requests) == 1
 
     # Parser-created grammar must survive preprocessing as guided decoding.
     @pytest.mark.asyncio
@@ -6173,7 +6192,6 @@ class TestToolCallGrammarReasoningStart:
     async def _reasoning_requested(
         self,
         tokenizer,
-        monkeypatch,
         *,
         prompt_text,
         reasoning_parser_class,
@@ -6188,7 +6206,6 @@ class TestToolCallGrammarReasoningStart:
             parsers.append(parser)
             return parser
 
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
         request = {**TOOL_REQUEST, "tool_choice": "auto"}
         if chat_template_kwargs is not None:
             request["chat_template_kwargs"] = chat_template_kwargs
@@ -6241,7 +6258,6 @@ class TestToolCallGrammarReasoningStart:
     async def test_reasoning_start(
         self,
         tokenizer,
-        monkeypatch,
         prompt_text,
         parser_start,
         excludes_reasoning,
@@ -6249,7 +6265,6 @@ class TestToolCallGrammarReasoningStart:
     ):
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text=prompt_text,
             reasoning_parser_class=_prompt_reasoning_parser(parser_start),
             structural_tag_excludes_reasoning=excludes_reasoning,
@@ -6267,14 +6282,13 @@ class TestToolCallGrammarReasoningStart:
     )
     @pytest.mark.asyncio
     async def test_glm_prompt_state_overrides_false_thinking_flag(
-        self, tokenizer, monkeypatch, prompt_text, parser_name, expected
+        self, tokenizer, prompt_text, parser_name, expected
     ):
         """Only GLM prompt markers override a false flag when tool guidance starts."""
         from vllm.reasoning import ReasoningParserManager
 
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text=prompt_text,
             reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(
                 parser_name
@@ -6284,12 +6298,9 @@ class TestToolCallGrammarReasoningStart:
         assert reasoning == [expected]
 
     @pytest.mark.asyncio
-    async def test_no_reasoning_parser_keeps_post_reasoning_tag(
-        self, tokenizer, monkeypatch
-    ):
+    async def test_no_reasoning_parser_keeps_post_reasoning_tag(self, tokenizer):
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text="<|im_start|>assistant\n<think>",
             reasoning_parser_class=None,
         )
