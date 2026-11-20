@@ -26,6 +26,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
+    Deprecated,
     add_argument,
     nullable_float,
     nullable_int,
@@ -47,6 +48,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
 
 # Matches MAX_SESSION_AFFINITY_ENTRIES in lib/router/session-affinity.
 DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
+
 
 # TODO(v1.7): Remove --active-prefill-tokens-threshold.
 _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
@@ -197,6 +199,21 @@ class RouterArgGroup(ArgGroup):
         self.include_frontend_only = include_frontend_only
         self.env = env
 
+    def _session_affinity_deprecation(self, key: str) -> Optional[Deprecated]:
+        # TODO(v1.9): Remove the frontend's --router-session-affinity-* flags.
+        # Only the frontend's flags move to the policy file. A worker still
+        # advertises its TTL and mode on its model card with them.
+        if not self.include_frontend_only:
+            return None
+        # The router mode is not known when the flags are registered, so the
+        # warning itself names the two modes that have no policy type yet.
+        return Deprecated(
+            f"session_affinity: {{{key}}} on a role under worker_selection in "
+            "--router-policy-config (keep the flag with --router-mode direct or "
+            "device-aware-weighted, which a policy file cannot select yet)",
+            remove_in="v1.9",
+        )
+
     def add_arguments(self, parser) -> None:
         if self.env is None:
             if "DYN_ADMISSION_CONTROL" in os.environ:
@@ -300,6 +317,7 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+            deprecated=self._session_affinity_deprecation("ttl_secs: SECONDS"),
             env=self.env,
         )
         if self.include_frontend_only:
@@ -323,6 +341,7 @@ class RouterArgGroup(ArgGroup):
                 ),
                 arg_type=int,
                 dest="session_affinity_max_entries",
+                deprecated=self._session_affinity_deprecation("max_entries: N"),
                 env=self.env,
             )
         add_argument(
@@ -337,6 +356,7 @@ class RouterArgGroup(ArgGroup):
             ),
             choices=("hard", "soft"),
             dest="session_affinity_mode",
+            deprecated=self._session_affinity_deprecation("mode: hard|soft"),
             env=self.env,
         )
         add_argument(

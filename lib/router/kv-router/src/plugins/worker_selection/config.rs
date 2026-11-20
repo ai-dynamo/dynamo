@@ -14,15 +14,24 @@
 //!       router_temperature: 0.5
 //!     hints:                                   # optional: the role's hints, in run order
 //!       - type: my_hint                        # any linked hint policy
+//!     session_affinity: true                   # optional: keep a session on one worker
 //! ```
 //!
 //! A role whose entry lists no `hints` runs its default hints; `hints: []` runs none.
+//!
+//! `session_affinity` is read by the router, not by the policy: `true` is a 300 s idle TTL in
+//! `hard` mode, `{ttl_secs, mode, max_entries}` tunes it, and `false` turns it off for the role.
 //!
 //! The older `instances:` list, which named a `{type, parameters}` pair once and referenced it
 //! from each role by name, is deprecated and still accepted.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::time::Duration;
 
+use dynamo_session_affinity::{
+    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinity, SessionAffinityMode,
+};
 use serde::Deserialize;
 
 use crate::plugins::hint_policy::{HintPolicyEntry, RawHintPolicyEntry, resolve_hints};
@@ -33,29 +42,54 @@ use dynamo_router_protocol::WorkerType;
 /// Process-wide configuration for worker selection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerSelectionConfig {
-    aggregated: Option<WorkerSelectionPolicySelection>,
-    prefill: Option<WorkerSelectionPolicySelection>,
-    decode: Option<WorkerSelectionPolicySelection>,
-    encode: Option<WorkerSelectionPolicySelection>,
+    aggregated: Option<RoleSelection>,
+    prefill: Option<RoleSelection>,
+    decode: Option<RoleSelection>,
+    encode: Option<RoleSelection>,
     instances: HashMap<String, WorkerSelectionInstance>,
+}
+
+/// One role's entry: the policy it selects, and the settings the router owns. The router's
+/// settings sit beside the policy so that two roles with the same policy share one factory.
+#[derive(Debug, Clone, PartialEq)]
+struct RoleSelection {
+    policy: WorkerSelectionPolicySelection,
+    session_affinity: Option<SessionAffinitySetting>,
+}
+
+fn policy(role: &Option<RoleSelection>) -> Option<&WorkerSelectionPolicySelection> {
+    role.as_ref().map(|role| &role.policy)
 }
 
 impl WorkerSelectionConfig {
     /// The policy selected for a full-request worker pool.
     pub fn aggregated(&self) -> Option<&WorkerSelectionPolicySelection> {
-        self.aggregated.as_ref()
+        policy(&self.aggregated)
     }
 
     pub(crate) fn prefill(&self) -> Option<&WorkerSelectionPolicySelection> {
-        self.prefill.as_ref()
+        policy(&self.prefill)
     }
 
     pub(crate) fn decode(&self) -> Option<&WorkerSelectionPolicySelection> {
-        self.decode.as_ref()
+        policy(&self.decode)
     }
 
     pub(crate) fn encode(&self) -> Option<&WorkerSelectionPolicySelection> {
-        self.encode.as_ref()
+        policy(&self.encode)
+    }
+
+    /// What a role's entry says about session affinity; `None` when it does not say. An
+    /// `encode` entry cannot set it.
+    pub fn session_affinity(&self, worker_type: WorkerType) -> Option<SessionAffinitySetting> {
+        match worker_type {
+            WorkerType::Aggregated => &self.aggregated,
+            WorkerType::Prefill => &self.prefill,
+            WorkerType::Decode => &self.decode,
+            WorkerType::Encode => &self.encode,
+        }
+        .as_ref()
+        .and_then(|role| role.session_affinity)
     }
 
     /// The hints a role's entry lists, in order; `None` when it lists none, so the role runs its
@@ -80,6 +114,40 @@ impl WorkerSelectionConfig {
         let mut names = self.instances.keys().cloned().collect::<Vec<_>>();
         names.sort_unstable();
         names
+    }
+}
+
+/// A role's `session_affinity` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAffinitySetting {
+    /// `false`: the role has no session affinity.
+    Disabled,
+    /// `true` or a mapping.
+    Enabled(SessionAffinitySpec),
+}
+
+/// How one role keeps a session on the worker it first ran on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionAffinitySpec {
+    /// How long an idle session stays bound.
+    pub ttl: Duration,
+    pub mode: SessionAffinityMode,
+    /// Most sessions the role's table holds; `None` leaves the host's limit.
+    pub max_entries: Option<NonZeroUsize>,
+}
+
+impl SessionAffinitySpec {
+    /// The TTL of `session_affinity: true`.
+    pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
+}
+
+impl Default for SessionAffinitySpec {
+    fn default() -> Self {
+        Self {
+            ttl: Self::DEFAULT_TTL,
+            mode: SessionAffinityMode::Hard,
+            max_entries: None,
+        }
     }
 }
 
@@ -186,6 +254,50 @@ struct RawInlineSelection {
     parameters: serde_yaml::Value,
     #[serde(default)]
     hints: Option<Vec<RawHintPolicyEntry>>,
+    #[serde(default)]
+    session_affinity: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSessionAffinity {
+    ttl_secs: Option<u64>,
+    mode: Option<SessionAffinityMode>,
+    max_entries: Option<NonZeroUsize>,
+}
+
+fn resolve_session_affinity(
+    location: &str,
+    value: serde_yaml::Value,
+) -> Result<SessionAffinitySetting, RouterPolicyConfigError> {
+    let raw: RawSessionAffinity = match value {
+        serde_yaml::Value::Bool(false) => return Ok(SessionAffinitySetting::Disabled),
+        serde_yaml::Value::Bool(true) => {
+            return Ok(SessionAffinitySetting::Enabled(
+                SessionAffinitySpec::default(),
+            ));
+        }
+        serde_yaml::Value::Mapping(_) => serde_yaml::from_value(value).map_err(|source| {
+            RouterPolicyConfigError::Validation(format!("{location}: {source}"))
+        })?,
+        _ => {
+            return Err(RouterPolicyConfigError::Validation(format!(
+                "{location} must be true, false, or a {{ttl_secs, mode, max_entries}} mapping"
+            )));
+        }
+    };
+    let defaults = SessionAffinitySpec::default();
+    let ttl = raw.ttl_secs.map_or(defaults.ttl, Duration::from_secs);
+    if SessionAffinity::validate_ttl(ttl).is_err() {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location}.ttl_secs must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS}"
+        )));
+    }
+    Ok(SessionAffinitySetting::Enabled(SessionAffinitySpec {
+        ttl,
+        mode: raw.mode.unwrap_or(defaults.mode),
+        max_entries: raw.max_entries,
+    }))
 }
 
 impl RawWorkerSelectionConfig {
@@ -232,38 +344,63 @@ impl RawWorkerSelectionConfig {
 
         let resolve_role = |role: &str,
                             raw: Option<serde_yaml::Value>|
-         -> Result<
-            Option<WorkerSelectionPolicySelection>,
-            RouterPolicyConfigError,
-        > {
+         -> Result<Option<RoleSelection>, RouterPolicyConfigError> {
             let location = format!("worker_selection.{role}");
-            let raw = raw
+            let Some(raw) = raw
                 .map(|value| RawRoleSelection::from_value(role, value))
-                .transpose()?;
-            Ok(match raw {
-                None => None,
-                Some(RawRoleSelection::Named(name)) => {
+                .transpose()?
+            else {
+                return Ok(None);
+            };
+            let inline = match raw {
+                RawRoleSelection::Named(name) => {
                     validate_identifier(&name, "policy", &location)?;
-                    Some(WorkerSelectionPolicySelection::Named(name))
+                    return Ok(Some(RoleSelection {
+                        policy: WorkerSelectionPolicySelection::Named(name),
+                        session_affinity: None,
+                    }));
                 }
-                Some(RawRoleSelection::Inline(inline)) => {
-                    if inline.policy_type == "default" {
-                        return Err(RouterPolicyConfigError::Validation(format!(
-                            "{location} type 'default' takes no parameters; write `{role}: default`"
-                        )));
-                    }
-                    let hints = inline
-                        .hints
-                        .map(|hints| resolve_hints(&format!("{location}.hints"), hints))
-                        .transpose()?;
-                    Some(WorkerSelectionPolicySelection::Inline(resolve_instance(
-                        inline.policy_type,
-                        inline.parameters,
-                        hints,
-                        &location,
-                    )?))
+                RawRoleSelection::Inline(inline) => inline,
+            };
+            let session_affinity = inline
+                .session_affinity
+                .map(|value| {
+                    resolve_session_affinity(&format!("{location}.session_affinity"), value)
+                })
+                .transpose()?;
+            if session_affinity.is_some() && role == "encode" {
+                return Err(RouterPolicyConfigError::Validation(format!(
+                    "{location}.session_affinity is not supported for encode"
+                )));
+            }
+            let policy = if inline.policy_type == "default" {
+                // The mapping form exists so `default` can carry the router's own keys.
+                let no_parameters = matches!(
+                    &inline.parameters,
+                    serde_yaml::Value::Mapping(parameters) if parameters.is_empty()
+                );
+                if !no_parameters || inline.hints.is_some() {
+                    return Err(RouterPolicyConfigError::Validation(format!(
+                        "{location} type 'default' takes no parameters or hints"
+                    )));
                 }
-            })
+                WorkerSelectionPolicySelection::Named(inline.policy_type)
+            } else {
+                let hints = inline
+                    .hints
+                    .map(|hints| resolve_hints(&format!("{location}.hints"), hints))
+                    .transpose()?;
+                WorkerSelectionPolicySelection::Inline(resolve_instance(
+                    inline.policy_type,
+                    inline.parameters,
+                    hints,
+                    &location,
+                )?)
+            };
+            Ok(Some(RoleSelection {
+                policy,
+                session_affinity,
+            }))
         };
 
         Ok(WorkerSelectionConfig {

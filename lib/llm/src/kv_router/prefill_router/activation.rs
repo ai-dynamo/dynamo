@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::SessionAffinitySetting;
 use dynamo_scheduler::host::PrefillLoadEstimator;
 use dynamo_worker_selection::host::{ConditionalDisaggConfig, make_conditional_disagg_policy};
 use std::sync::Arc;
@@ -138,6 +139,7 @@ impl PrefillRouter {
             prefill_load_estimator,
             session_affinity_ttl_secs,
             session_affinity_mode,
+            None,
             model_name,
             namespace,
             load_thresholds,
@@ -166,6 +168,7 @@ impl PrefillRouter {
             decode_supports_prefill_cancellation: false,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
+            policy_file_session_affinity: None,
             conditional_disagg_policy: make_conditional_disagg_policy(None),
             conditional_disagg_prefill_busy_threshold: None,
             conditional_disagg_decode_busy_threshold: None,
@@ -191,6 +194,7 @@ impl PrefillRouter {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
+        policy_file_session_affinity: Option<SessionAffinitySetting>,
         model_name: String,
         namespace: String,
         load_thresholds: LoadThresholdHandle,
@@ -225,6 +229,7 @@ impl PrefillRouter {
             decode_supports_prefill_cancellation,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
+            policy_file_session_affinity,
             conditional_disagg_policy,
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
@@ -320,6 +325,7 @@ impl PrefillRouter {
                 session_affinity_ttl: context.session_affinity_ttl,
                 session_affinity_mode: context.session_affinity_mode,
             },
+            context.policy_file_session_affinity,
         );
         let prefill_router_mode = routing.router_mode;
 
@@ -349,8 +355,8 @@ impl PrefillRouter {
             advertised = routing.is_advertised,
             is_eagle = advertisement.is_eagle,
             block_size = prefill_block_size,
-            session_affinity_ttl = ?routing.session_affinity_ttl,
-            session_affinity_mode = ?routing.session_affinity_mode,
+            session_affinity = ?routing.session_affinity.spec,
+            session_affinity_source = ?routing.session_affinity.source,
             kv_tuning = ?routing.kv_router_config,
             "Activating prefill router"
         );
@@ -374,12 +380,8 @@ impl PrefillRouter {
                 )
                 .await?;
 
-            let affinity = create_affinity_coordinator(
-                routing.session_affinity_ttl,
-                routing.session_affinity_mode,
-                client.clone(),
-            )
-            .await?;
+            let affinity =
+                create_affinity_coordinator(routing.session_affinity.spec, client.clone()).await?;
 
             Arc::new(
                 RoutingHost::builder(client, RouterMode::KV)
@@ -395,12 +397,8 @@ impl PrefillRouter {
                 &routing.kv_router_config.unwrap_or_default(),
                 &[crate::worker_type::WorkerType::Prefill],
             )?;
-            let affinity = create_affinity_coordinator(
-                routing.session_affinity_ttl,
-                routing.session_affinity_mode,
-                client.clone(),
-            )
-            .await?;
+            let affinity =
+                create_affinity_coordinator(routing.session_affinity.spec, client.clone()).await?;
 
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
@@ -519,6 +517,7 @@ impl PrefillRouter {
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 session_affinity_mode: router_ref.session_affinity_mode,
+                policy_file_session_affinity: router_ref.policy_file_session_affinity,
                 model_name: router_ref.model_name.clone(),
                 load_thresholds: load_thresholds.clone(),
                 parent_token: cancel_token.child_token(),
@@ -928,6 +927,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            None,
             "test-model".into(),
             namespace,
             LoadThresholdHandle::new(Default::default()),
@@ -1236,6 +1236,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            None,
             "test-model".into(),
             namespace,
             LoadThresholdHandle::new(Default::default()),
@@ -1554,6 +1555,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            None,
             "test-model".into(),
             namespace,
             LoadThresholdHandle::new(Default::default()),
@@ -1756,6 +1758,7 @@ mod tests {
                 None,
                 None,
                 SessionAffinityMode::Hard,
+                None,
                 "test-model".into(),
                 namespace.clone(),
                 LoadThresholdHandle::new(Default::default()),

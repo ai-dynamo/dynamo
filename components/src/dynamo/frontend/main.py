@@ -29,7 +29,10 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import uvloop
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import (
+    DEFAULT_SESSION_AFFINITY_MAX_ENTRIES,
+    build_router_config,
+)
 from dynamo.llm import (
     AisPerfConfig,
     EngineType,
@@ -469,9 +472,15 @@ async def async_main():
         loop.add_signal_handler(sig, signal_handler)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
-        config.session_affinity_max_entries
-    )
+    # The variable is deprecated user input, so do not create it for the default:
+    # a parser built later in this process would warn about a setting nobody made.
+    if (
+        config.session_affinity_max_entries != DEFAULT_SESSION_AFFINITY_MAX_ENTRIES
+        or SESSION_AFFINITY_MAX_ENTRIES_ENV in os.environ
+    ):
+        os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
+            config.session_affinity_max_entries
+        )
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. FrontendConfig.validate resolved the router mode,
     # so this never returns None.

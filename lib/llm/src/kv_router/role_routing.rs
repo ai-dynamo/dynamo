@@ -5,13 +5,15 @@
 //!
 //! A frontend routes two kinds of worker pool: serving sets (aggregated or decode), and the
 //! prefill pool in front of a decode set. A role's settings come from the frontend's
-//! [`RouterConfig`] and from the `router_config` its workers advertise on their model card.
-//! The rules that combine the two live here.
+//! [`RouterConfig`], from the frontend's policy file, and from the `router_config` its workers
+//! advertise on their model card. The rules that combine them live here.
 
 use std::borrow::Cow;
 use std::time::Duration;
 
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::{SessionAffinitySetting, SessionAffinitySpec};
+use dynamo_kv_router::scheduling::RouterPolicyConfigError;
 use dynamo_runtime::pipeline::RouterMode;
 
 use crate::entrypoint::RouterConfig;
@@ -41,6 +43,112 @@ pub(crate) fn serving_set_routing<'a>(
     Cow::Owned(routing)
 }
 
+/// Where a role's session affinity was configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionAffinitySource {
+    /// The role's `session_affinity` in the frontend's policy file.
+    PolicyFile,
+    /// The `router_config` the role's workers advertise.
+    WorkerCard,
+    /// The frontend's `--router-session-affinity-*` flags.
+    FrontendFlags,
+    /// The decode set's card or flags, inherited by a prefill pool that configures nothing.
+    DecodeSet,
+}
+
+/// A role's session affinity; `spec` is `None` when the role has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RoleSessionAffinity {
+    pub(crate) spec: Option<SessionAffinitySpec>,
+    pub(crate) source: SessionAffinitySource,
+}
+
+impl RoleSessionAffinity {
+    fn from_policy_file(setting: SessionAffinitySetting) -> Self {
+        Self {
+            spec: match setting {
+                SessionAffinitySetting::Enabled(spec) => Some(spec),
+                SessionAffinitySetting::Disabled => None,
+            },
+            source: SessionAffinitySource::PolicyFile,
+        }
+    }
+
+    fn from_ttl(
+        ttl: Option<Duration>,
+        mode: SessionAffinityMode,
+        source: SessionAffinitySource,
+    ) -> Self {
+        Self {
+            spec: ttl.map(|ttl| SessionAffinitySpec {
+                ttl,
+                mode,
+                max_entries: None,
+            }),
+            source,
+        }
+    }
+}
+
+/// A role's `session_affinity` in the frontend's policy file, if the file sets it.
+///
+/// Pass the frontend's own configuration. A worker set that advertises carries its workers'
+/// policy-file path, which names a file this process does not read.
+pub(crate) fn policy_file_session_affinity(
+    frontend: &RouterConfig,
+    worker_type: WorkerType,
+) -> Result<Option<SessionAffinitySetting>, RouterPolicyConfigError> {
+    Ok(frontend
+        .kv_router_config
+        .worker_selection_config()?
+        .and_then(|config| config.session_affinity(worker_type)))
+}
+
+/// Resolve the session affinity of a serving worker set (aggregated or decode).
+///
+/// The role's entry in the frontend's policy file wins, `false` included. Without one, the
+/// set's advertised TTL is taken whole (none advertised means no affinity) with the frontend's
+/// mode, and a set that advertises nothing uses the frontend's flags.
+pub(crate) fn serving_set_session_affinity(
+    advertised: Option<&RouterConfig>,
+    frontend: &RouterConfig,
+    worker_type: WorkerType,
+) -> Result<RoleSessionAffinity, RouterPolicyConfigError> {
+    if let Some(setting) = policy_file_session_affinity(frontend, worker_type)? {
+        return Ok(RoleSessionAffinity::from_policy_file(setting));
+    }
+    let (ttl_secs, source) = match advertised {
+        Some(advertised) => (
+            advertised.session_affinity_ttl_secs,
+            SessionAffinitySource::WorkerCard,
+        ),
+        None => (
+            frontend.session_affinity_ttl_secs,
+            SessionAffinitySource::FrontendFlags,
+        ),
+    };
+    Ok(RoleSessionAffinity::from_ttl(
+        ttl_secs.map(Duration::from_secs),
+        frontend.session_affinity_mode,
+        source,
+    ))
+}
+
+/// The session-affinity TTL in seconds and the mode that a prefill pool inherits from the
+/// decode set it fronts, when the pool configures nothing itself.
+///
+/// `decode_set` is the set's [`serving_set_routing`] result, which holds its card or flag
+/// value. The set's resolved [`RoleSessionAffinity`] must not be used here: it can come from
+/// the policy file's `decode` entry, which applies to the decode role alone.
+pub(crate) fn inherited_prefill_session_affinity(
+    decode_set: &RouterConfig,
+) -> (Option<u64>, SessionAffinityMode) {
+    (
+        decode_set.session_affinity_ttl_secs,
+        decode_set.session_affinity_mode,
+    )
+}
+
 /// What the prefill hop inherits from the decode set it fronts.
 #[derive(Debug)]
 pub(crate) struct DecodeRouting {
@@ -48,6 +156,8 @@ pub(crate) struct DecodeRouting {
     /// The decode set's KV configuration as handed to the prefill router. `None` leaves an
     /// inheriting prefill KV router on its defaults.
     pub(crate) kv_router_config: Option<KvRouterConfig>,
+    /// The decode set's card or flag TTL and mode. Never its policy-file `session_affinity`:
+    /// a role's entry in the file applies to that role alone.
     pub(crate) session_affinity_ttl: Option<Duration>,
     pub(crate) session_affinity_mode: SessionAffinityMode,
 }
@@ -57,8 +167,7 @@ pub(crate) struct DecodeRouting {
 pub(crate) struct PrefillRouting {
     pub(crate) router_mode: RouterMode,
     pub(crate) kv_router_config: Option<KvRouterConfig>,
-    pub(crate) session_affinity_ttl: Option<Duration>,
-    pub(crate) session_affinity_mode: SessionAffinityMode,
+    pub(crate) session_affinity: RoleSessionAffinity,
     /// Whether the prefill workers advertised their own `router_config`.
     pub(crate) is_advertised: bool,
 }
@@ -71,19 +180,29 @@ pub(crate) struct PrefillRouting {
 /// That is what lets a deployment run KV-routed prefill in front of round-robin decode. The
 /// session-affinity mode is always the decode set's, which is the frontend's.
 ///
+/// `policy_file` is the `prefill` entry's `session_affinity` in the frontend's policy file.
+/// When the file sets it, it replaces the session affinity of either case above.
+///
 /// An advertised KV configuration has `router_track_active_blocks` turned off: prefill routing
 /// is prompt-side, and crediting decode blocks here would double-count load. The caller turns
 /// it off in the configuration a silent prefill pool inherits.
 pub(crate) fn prefill_routing(
     advertised: Option<RouterConfig>,
     decode: DecodeRouting,
+    policy_file: Option<SessionAffinitySetting>,
 ) -> PrefillRouting {
+    let policy_file = policy_file.map(RoleSessionAffinity::from_policy_file);
     let Some(advertised) = advertised else {
         return PrefillRouting {
             router_mode: decode.router_mode,
             kv_router_config: decode.kv_router_config,
-            session_affinity_ttl: decode.session_affinity_ttl,
-            session_affinity_mode: decode.session_affinity_mode,
+            session_affinity: policy_file.unwrap_or_else(|| {
+                RoleSessionAffinity::from_ttl(
+                    decode.session_affinity_ttl,
+                    decode.session_affinity_mode,
+                    SessionAffinitySource::DecodeSet,
+                )
+            }),
             is_advertised: false,
         };
     };
@@ -93,10 +212,15 @@ pub(crate) fn prefill_routing(
     PrefillRouting {
         router_mode: advertised.router_mode,
         kv_router_config: Some(kv_router_config),
-        session_affinity_ttl: advertised
-            .session_affinity_ttl_secs
-            .map(Duration::from_secs),
-        session_affinity_mode: decode.session_affinity_mode,
+        session_affinity: policy_file.unwrap_or_else(|| {
+            RoleSessionAffinity::from_ttl(
+                advertised
+                    .session_affinity_ttl_secs
+                    .map(Duration::from_secs),
+                decode.session_affinity_mode,
+                SessionAffinitySource::WorkerCard,
+            )
+        }),
         is_advertised: true,
     }
 }
@@ -112,6 +236,7 @@ pub(crate) fn log_serving_set_routing(
     worker_type: WorkerType,
     advertised: bool,
     routing: &RouterConfig,
+    session_affinity: &RoleSessionAffinity,
 ) {
     tracing::info!(
         model_name,
@@ -119,8 +244,8 @@ pub(crate) fn log_serving_set_routing(
         ?worker_type,
         router_mode = ?routing.router_mode,
         advertised,
-        session_affinity_ttl = ?routing.session_affinity_ttl_secs.map(Duration::from_secs),
-        session_affinity_mode = ?routing.session_affinity_mode,
+        session_affinity = ?session_affinity.spec,
+        session_affinity_source = ?session_affinity.source,
         busy_thresholds = ?routing.load_threshold_config,
         kv_tuning = ?routing
             .router_mode
@@ -132,7 +257,36 @@ pub(crate) fn log_serving_set_routing(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
+    use dynamo_kv_router::scheduling::RouterPolicyConfig;
+
     use super::*;
+
+    /// A frontend whose policy file holds `yaml`.
+    fn frontend_with_policy_file(yaml: &str) -> RouterConfig {
+        let frontend = RouterConfig {
+            kv_router_config: KvRouterConfig {
+                router_policy_config: Some("frontend-policy.yaml".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        frontend
+            .kv_router_config
+            .policy_config_cache
+            .set(RouterPolicyConfig::from_yaml(yaml).unwrap())
+            .expect("empty cache");
+        frontend
+    }
+
+    fn spec(ttl_secs: u64, mode: SessionAffinityMode) -> SessionAffinitySpec {
+        SessionAffinitySpec {
+            ttl: Duration::from_secs(ttl_secs),
+            mode,
+            max_entries: None,
+        }
+    }
 
     fn decode(router_mode: RouterMode, session_affinity_ttl: Option<Duration>) -> DecodeRouting {
         DecodeRouting {
@@ -184,7 +338,7 @@ mod tests {
             ..Default::default()
         });
 
-        let resolved = prefill_routing(None, decode);
+        let resolved = prefill_routing(None, decode, None);
 
         assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
         let kv_router_config = resolved.kv_router_config.expect("decode KV config");
@@ -201,13 +355,169 @@ mod tests {
         let decode_ttl = Some(Duration::from_secs(300));
         let advertised = RouterConfig::new(RouterMode::KV, KvRouterConfig::default());
         assert_eq!(
-            prefill_routing(Some(advertised), decode(RouterMode::KV, decode_ttl))
-                .session_affinity_ttl,
-            None,
+            prefill_routing(Some(advertised), decode(RouterMode::KV, decode_ttl), None)
+                .session_affinity,
+            RoleSessionAffinity {
+                spec: None,
+                source: SessionAffinitySource::WorkerCard,
+            },
         );
         assert_eq!(
-            prefill_routing(None, decode(RouterMode::KV, decode_ttl)).session_affinity_ttl,
-            decode_ttl,
+            prefill_routing(None, decode(RouterMode::KV, decode_ttl), None).session_affinity,
+            RoleSessionAffinity {
+                spec: Some(spec(300, SessionAffinityMode::Hard)),
+                source: SessionAffinitySource::DecodeSet,
+            },
+        );
+    }
+
+    #[test]
+    fn serving_set_affinity_is_the_policy_file_then_the_card_then_the_flags() {
+        let flags = |mut frontend: RouterConfig| {
+            frontend.session_affinity_ttl_secs = Some(300);
+            frontend.session_affinity_mode = SessionAffinityMode::Soft;
+            frontend
+        };
+        // A card carries its workers' policy-file path. Reading it would fail: no such file.
+        let card = RouterConfig {
+            session_affinity_ttl_secs: Some(900),
+            kv_router_config: KvRouterConfig {
+                router_policy_config: Some("worker-policy.yaml".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolve = |card: Option<&RouterConfig>, frontend: &RouterConfig, worker_type| {
+            serving_set_session_affinity(card, frontend, worker_type).unwrap()
+        };
+
+        let frontend = flags(frontend_with_policy_file(
+            r#"
+worker_selection:
+  decode: {type: alpha, session_affinity: {ttl_secs: 60}}
+  aggregated: {type: alpha, session_affinity: false}
+"#,
+        ));
+        // The file's entry is taken whole: its mode, not the flag's.
+        assert_eq!(
+            resolve(Some(&card), &frontend, WorkerType::Decode),
+            RoleSessionAffinity {
+                spec: Some(spec(60, SessionAffinityMode::Hard)),
+                source: SessionAffinitySource::PolicyFile,
+            }
+        );
+        // `false` turns the role off although the flag and the card set a TTL.
+        assert_eq!(
+            resolve(Some(&card), &frontend, WorkerType::Aggregated),
+            RoleSessionAffinity {
+                spec: None,
+                source: SessionAffinitySource::PolicyFile,
+            }
+        );
+
+        // A role the file says nothing about keeps the card and flag rules.
+        let frontend = flags(frontend_with_policy_file(
+            "worker_selection:\n  prefill: {type: alpha, session_affinity: true}\n",
+        ));
+        assert_eq!(
+            resolve(Some(&card), &frontend, WorkerType::Decode),
+            RoleSessionAffinity {
+                spec: Some(spec(900, SessionAffinityMode::Soft)),
+                source: SessionAffinitySource::WorkerCard,
+            }
+        );
+        assert_eq!(
+            resolve(
+                Some(&RouterConfig::default()),
+                &frontend,
+                WorkerType::Decode
+            )
+            .spec,
+            None
+        );
+        assert_eq!(
+            resolve(None, &frontend, WorkerType::Decode),
+            RoleSessionAffinity {
+                spec: Some(spec(300, SessionAffinityMode::Soft)),
+                source: SessionAffinitySource::FrontendFlags,
+            }
+        );
+    }
+
+    #[test]
+    fn prefill_affinity_is_the_policy_file_before_the_card_or_the_decode_set() {
+        let policy_file = SessionAffinitySetting::Enabled(SessionAffinitySpec {
+            ttl: Duration::from_secs(60),
+            mode: SessionAffinityMode::Soft,
+            max_entries: NonZeroUsize::new(8),
+        });
+        let from_file = RoleSessionAffinity::from_policy_file(policy_file);
+        let decode_ttl = Some(Duration::from_secs(300));
+        let mut advertised = RouterConfig::new(RouterMode::KV, KvRouterConfig::default());
+        advertised.session_affinity_ttl_secs = Some(900);
+
+        assert_eq!(
+            prefill_routing(
+                Some(advertised),
+                decode(RouterMode::KV, decode_ttl),
+                Some(policy_file)
+            )
+            .session_affinity,
+            from_file,
+        );
+        assert_eq!(
+            prefill_routing(None, decode(RouterMode::KV, decode_ttl), Some(policy_file))
+                .session_affinity,
+            from_file,
+        );
+        assert_eq!(
+            prefill_routing(
+                None,
+                decode(RouterMode::KV, decode_ttl),
+                Some(SessionAffinitySetting::Disabled)
+            )
+            .session_affinity
+            .spec,
+            None,
+        );
+    }
+
+    /// The file's `decode.session_affinity` is the decode role's alone. A prefill pool that
+    /// configures nothing inherits the decode set's card or flag TTL, which this file leaves
+    /// unset.
+    #[test]
+    fn silent_prefill_pool_does_not_inherit_the_policy_files_decode_affinity() {
+        let frontend = frontend_with_policy_file(
+            "worker_selection:\n  decode: {type: alpha, session_affinity: true}\n",
+        );
+        let decode_set = serving_set_routing(None, &frontend);
+        assert!(
+            serving_set_session_affinity(None, &frontend, WorkerType::Decode)
+                .unwrap()
+                .spec
+                .is_some()
+        );
+
+        let (inherited_ttl_secs, inherited_mode) = inherited_prefill_session_affinity(&decode_set);
+        assert_eq!(inherited_ttl_secs, None);
+
+        let resolved = prefill_routing(
+            None,
+            DecodeRouting {
+                router_mode: decode_set.router_mode,
+                kv_router_config: None,
+                session_affinity_ttl: inherited_ttl_secs.map(Duration::from_secs),
+                session_affinity_mode: inherited_mode,
+            },
+            policy_file_session_affinity(&frontend, WorkerType::Prefill).unwrap(),
+        );
+
+        assert_eq!(
+            resolved.session_affinity,
+            RoleSessionAffinity {
+                spec: None,
+                source: SessionAffinitySource::DecodeSet,
+            }
         );
     }
 
@@ -217,7 +527,8 @@ mod tests {
         advertised.kv_router_config.router_track_active_blocks = true;
         advertised.kv_router_config.router_temperature = 0.5;
 
-        let resolved = prefill_routing(Some(advertised), decode(RouterMode::RoundRobin, None));
+        let resolved =
+            prefill_routing(Some(advertised), decode(RouterMode::RoundRobin, None), None);
 
         assert_eq!(resolved.router_mode, RouterMode::KV);
         let kv_router_config = resolved.kv_router_config.expect("advertised KV config");
