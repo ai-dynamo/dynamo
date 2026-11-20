@@ -63,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             echo "  SGLANG_DECODE2_HTTP_PORT           Second decode HTTP port (default: 30060)"
             echo "  SGLANG_DECODE2_GRPC_PORT           Second decode gRPC port (default: 30070)"
             echo "  SGLANG_DECODE2_KV_EVENT_PORT       Second decode KV-event port (default: 5587)"
+            echo "  DYN_NCCL_PORT1                     First prefill rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
+            echo "  DYN_NCCL_PORT2                     Second prefill rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
+            echo "  DYN_NCCL_PORT3                     First decode rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
+            echo "  DYN_NCCL_PORT4                     Second decode rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
             echo "  SGLANG_BOOTSTRAP_HOST              Advertised prefill bootstrap host (default: 127.0.0.1)"
             echo "  SGLANG_PAGE_SIZE                   KV-event block size (default: 64)"
             echo "  MAX_MODEL_LEN                      Maximum model length (default: 4096)"
@@ -92,6 +96,22 @@ dyn_worker_ports SGLANG_PREFILL1 1 HTTP=30000 GRPC=30010 KV_EVENT=5557
 dyn_worker_ports SGLANG_PREFILL2 2 HTTP=30020 GRPC=30030 KV_EVENT=5567
 dyn_worker_ports SGLANG_DECODE1 3 HTTP=30040 GRPC=30050 KV_EVENT=5577
 dyn_worker_ports SGLANG_DECODE2 4 HTTP=30060 GRPC=30070 KV_EVENT=5587
+# Without --nccl-port, SGLang picks a random free rendezvous port in 22000-29999,
+# which can take a port the test harness reserved for a listener that has not bound yet.
+SGLANG_PREFILL1_NCCL_ARGS=()
+SGLANG_PREFILL2_NCCL_ARGS=()
+SGLANG_DECODE1_NCCL_ARGS=()
+SGLANG_DECODE2_NCCL_ARGS=()
+if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+    SGLANG_PREFILL1_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 1 "")
+    SGLANG_PREFILL2_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 2 "")
+    SGLANG_DECODE1_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 3 "")
+    SGLANG_DECODE2_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 4 "")
+    SGLANG_PREFILL1_NCCL_ARGS=(--nccl-port "$SGLANG_PREFILL1_NCCL_PORT")
+    SGLANG_PREFILL2_NCCL_ARGS=(--nccl-port "$SGLANG_PREFILL2_NCCL_PORT")
+    SGLANG_DECODE1_NCCL_ARGS=(--nccl-port "$SGLANG_DECODE1_NCCL_PORT")
+    SGLANG_DECODE2_NCCL_ARGS=(--nccl-port "$SGLANG_DECODE2_NCCL_PORT")
+fi
 SGLANG_LISTENERS=$(sglang_listener_count "${EXTRA_ARGS[@]}")
 sglang_check_listener_ports "$SGLANG_PREFILL1_HTTP_PORT" "$SGLANG_PREFILL1_GRPC_PORT" "$SGLANG_LISTENERS"
 sglang_check_listener_ports "$SGLANG_PREFILL2_HTTP_PORT" "$SGLANG_PREFILL2_GRPC_PORT" "$SGLANG_LISTENERS"
@@ -125,6 +145,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL1_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL1_HTTP_PORT" \
     --grpc-port "$SGLANG_PREFILL1_GRPC_PORT" \
+    "${SGLANG_PREFILL1_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl \
@@ -142,6 +163,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL2_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL2_HTTP_PORT" \
     --grpc-port "$SGLANG_PREFILL2_GRPC_PORT" \
+    "${SGLANG_PREFILL2_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl \
@@ -159,6 +181,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE1_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE1_HTTP_PORT" \
     --grpc-port "$SGLANG_DECODE1_GRPC_PORT" \
+    "${SGLANG_DECODE1_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl \
@@ -176,6 +199,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE2_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE2_HTTP_PORT" \
     --grpc-port "$SGLANG_DECODE2_GRPC_PORT" \
+    "${SGLANG_DECODE2_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl \
