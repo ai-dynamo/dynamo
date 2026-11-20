@@ -13,7 +13,6 @@ use dynamo_backend_common::{
     GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings, MetricsCtx,
     PreprocessedRequest, RuntimeConfig, WorkerConfig,
 };
-use dynamo_llm::local_model::runtime_config::ENCODER_SUPPORTED_MODALITIES;
 use dynamo_llm::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT;
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
@@ -484,12 +483,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         );
         let mut config = model.engine_config();
         config.served_model_name = Some(info.served_model_name.clone());
-        if self.mode.is_encode() {
-            config.runtime_data.insert(
-                ENCODER_SUPPORTED_MODALITIES.into(),
-                serde_json::json!(["image_url"]),
-            );
-        }
         if self.route_to_encoder {
             config.runtime_data.insert(
                 REQUIRES_ENCODER_RESULT.into(),

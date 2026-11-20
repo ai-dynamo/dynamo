@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
-    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_llm::local_model::runtime_config::TOKEN_BUDGET_RUNTIME_KEY;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
@@ -30,8 +30,6 @@ use crate::proto as pb;
 use crate::test_fixtures::*;
 
 mod e2e;
-mod encoder;
-mod encoder_cleanup;
 mod kv_routing;
 
 // ---------------------------------------------------------------------------
@@ -41,20 +39,9 @@ mod kv_routing;
 #[derive(Clone, Default)]
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
-    encode_requests: Arc<Mutex<Vec<pb::EncodeRequest>>>,
-    encode_started: Arc<tokio::sync::Notify>,
-    encoder_role: Arc<Mutex<Option<String>>>,
-    encoder_schema_release: Arc<Mutex<Option<String>>>,
     target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
     affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
-    released_encoder_handoffs: Arc<Mutex<Vec<pb::EncodedMediaRef>>>,
-    encoder_release_error: Arc<Mutex<Option<tonic::Code>>>,
-    invalid_encode_response: Arc<AtomicBool>,
-    encoder_release_started: Arc<tokio::sync::Notify>,
-    encoder_release_resume: Arc<tokio::sync::Notify>,
-    encoder_release_completions: Arc<Mutex<Vec<oneshot::Receiver<()>>>>,
-    hang_encoder_release: Arc<AtomicBool>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     hang: Arc<AtomicBool>,
     /// Simulates a server that has not yet accepted the request, so the RPC
@@ -71,7 +58,6 @@ struct FakeTrtllm {
     served_model_name: Arc<Mutex<Option<String>>>,
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
-    server_info_calls: Arc<AtomicUsize>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
     /// Injected metadata errors returned by either RPC.
     metadata_errors_served: Arc<AtomicUsize>,
@@ -106,24 +92,9 @@ impl pb::inference_server::Inference for FakeTrtllm {
 
     async fn encode(
         &self,
-        request: Request<pb::EncodeRequest>,
+        _: Request<pb::EncodeRequest>,
     ) -> Result<Response<pb::EncodeResponse>, Status> {
-        let request = request.into_inner();
-        self.encode_requests.lock().await.push(request.clone());
-        self.encode_started.notify_one();
-        if self.hang_before_stream.load(Ordering::SeqCst) {
-            std::future::pending::<()>().await;
-        }
-        Ok(Response::new(pb::EncodeResponse {
-            request_id: if self.invalid_encode_response.load(Ordering::SeqCst) {
-                "wrong-request".into()
-            } else {
-                request.request_id
-            },
-            encoded_media: Some(pb::EncodedMediaRef {
-                opaque_state: vec![1, 2, 3],
-            }),
-        }))
+        Err(Status::unimplemented("Encode is tested in sidecar testkit"))
     }
 
     async fn generate(
@@ -266,9 +237,6 @@ impl pb::control_server::Control for FakeTrtllm {
             self.model_info_unavailable.notify_one();
             return Err(Status::unavailable("not serving yet"));
         }
-        if self.encoder_role.lock().await.is_some() {
-            return Ok(Response::new(encoder_model_info()));
-        }
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             served_model_name: self
@@ -289,45 +257,29 @@ impl pb::control_server::Control for FakeTrtllm {
 
     async fn release_encoded_media(
         &self,
-        request: Request<pb::ReleaseEncodedMediaRequest>,
+        _: Request<pb::ReleaseEncodedMediaRequest>,
     ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
-        let cache = request
-            .into_inner()
-            .encoded_media
-            .ok_or_else(|| Status::invalid_argument("missing encoded_media"))?;
-        let (_handler, completion) = oneshot::channel();
-        self.encoder_release_completions
-            .lock()
-            .await
-            .push(completion);
-        self.released_encoder_handoffs.lock().await.push(cache);
-        self.encoder_release_started.notify_one();
-        if self.hang_encoder_release.load(Ordering::SeqCst) {
-            self.encoder_release_resume.notified().await;
-        }
-        if let Some(code) = self.encoder_release_error.lock().await.take() {
-            return Err(Status::new(code, "encoder release failed"));
-        }
-        Ok(Response::new(pb::ReleaseEncodedMediaResponse {}))
+        Err(Status::unimplemented(
+            "ReleaseEncodedMedia is tested in sidecar testkit",
+        ))
     }
 
     async fn abort(
         &self,
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
-        match request.into_inner().target {
-            Some(pb::abort_request::Target::RequestId(id)) => {
-                self.aborts.lock().await.push(id);
-            }
+        let request_id = match request.into_inner().target {
+            Some(pb::abort_request::Target::RequestId(id)) => id,
             other => {
                 return Err(Status::invalid_argument(format!(
                     "unexpected abort target {other:?}"
                 )));
             }
-        }
+        };
+        self.aborts.lock().await.push(request_id.clone());
         Ok(Response::new(pb::AbortResponse {
             status: pb::AbortStatus::Aborted as i32,
-            message: "aborted".into(),
+            message: format!("aborted {request_id}"),
         }))
     }
 
@@ -335,32 +287,12 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        self.server_info_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(code) = *self.server_info_error.lock().await {
             self.metadata_errors_served.fetch_add(1, Ordering::SeqCst);
             return Err(Status::new(code, "temporary metadata failure"));
         }
-        let encoder_role = self.encoder_role.lock().await.clone();
-        let mut identity = pb::ServerInfo::default();
-        if let Some(role) = encoder_role.as_deref() {
-            identity.engine_role = if role == "encode" {
-                pb::EngineRole::Encoder as i32
-            } else {
-                pb::EngineRole::Aggregated as i32
-            };
-            identity.schema_release = self
-                .encoder_schema_release
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_else(|| include_str!("../proto/REVISION").trim().into());
-        }
         if !self.kv_routing.load(Ordering::SeqCst) {
-            return if encoder_role.is_some() {
-                Ok(Response::new(identity))
-            } else {
-                Err(Status::unimplemented("GetServerInfo is not used"))
-            };
+            return Err(Status::unimplemented("GetServerInfo is not used"));
         }
         let mut fields = [
             (
@@ -406,7 +338,7 @@ impl pb::control_server::Control for FakeTrtllm {
                 max_batched_tokens: Some(2048),
                 ..Default::default()
             }),
-            ..identity
+            ..Default::default()
         }))
     }
 
@@ -474,7 +406,7 @@ impl pb::control_server::Control for FakeTrtllm {
 
     async fn shutdown(
         &self,
-        _request: Request<pb::ShutdownRequest>,
+        _: Request<pb::ShutdownRequest>,
     ) -> Result<Response<pb::ShutdownResponse>, Status> {
         Err(Status::unimplemented("engine shutdown is not implemented"))
     }
@@ -596,32 +528,6 @@ fn engine_in_mode(
     mode: DisaggregationMode,
 ) -> TrtllmSidecarEngine {
     engine_with(endpoint, transport(connections), None, mode)
-}
-
-fn encoder_consumer_engine(endpoint: &str) -> TrtllmSidecarEngine {
-    TrtllmSidecarEngine::from_args(
-        [
-            "sidecar",
-            "--grpc-endpoint",
-            endpoint,
-            "--model-path",
-            "model-source",
-            "--route-to-encoder",
-        ]
-        .map(str::to_string)
-        .to_vec(),
-    )
-    .unwrap()
-    .0
-}
-
-fn request_with_encoder_result() -> PreprocessedRequest {
-    let mut req = request();
-    add_images(&mut req, ["https://example.com/image.png"]);
-    req.encoder_result = Some(json!({
-        "opaque_state": "AQID"
-    }));
-    req
 }
 
 /// The one place a test engine is built. Everything a test varies -- the
@@ -915,74 +821,59 @@ async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
     );
 }
 
+/// A decode request holding transferred KV blocks must outlive its client until
+/// the first token proves the transfer landed -- dropping the stream earlier
+/// strands the prefill worker's blocks. It must not outlive it any longer than
+/// that, or a cancelled request generates its whole budget with no consumer.
 #[tokio::test]
-async fn cancellation_dispatches_only_staged_kv_handoffs() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        for mode in [DisaggregationMode::Decode, AGG] {
-            let service = FakeTrtllm::default();
-            service.hang.store(true, Ordering::SeqCst);
-            if !mode.is_decode() {
-                *service.encoder_role.lock().await = Some("consume".into());
-            }
-            let server = FakeServer::start(service).await;
-            let (engine, req) = if mode.is_decode() {
-                let mut req = request();
-                req.prefill_result = Some(PrefillResult {
-                    disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
-                    prompt_tokens_details: None,
-                });
-                (engine_in_mode(&server.endpoint, 1, mode), req)
-            } else {
-                (
-                    encoder_consumer_engine(&server.endpoint),
-                    request_with_encoder_result(),
-                )
-            };
-            engine.start(0).await.unwrap();
-            let context = dynamo_backend_common::testing::mock_context();
-            context.stop_generating();
-            let mut stream = engine
-                .generate(req, GenerateContext::new(context, None))
-                .await
-                .unwrap();
+async fn a_cancelled_decode_request_survives_only_until_the_transfer_lands() {
+    let service = FakeTrtllm::default();
+    service.hang.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    engine.start(0).await.expect("start");
 
-            let first = stream.next().await.unwrap().unwrap();
-            if mode.is_decode() {
-                assert_eq!(first.finish_reason, None);
-                assert_eq!(first.token_ids, [42]);
-                let terminal = stream.next().await.unwrap().unwrap();
-                assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-                assert_eq!(server.service.requests.lock().await.len(), 1);
-            } else {
-                assert_eq!(first.finish_reason, Some(FinishReason::Cancelled));
-                assert!(server.service.requests.lock().await.is_empty());
-            }
-            engine.cleanup().await.unwrap();
-        }
-    })
-    .await
-    .expect("cancellation must resume after the transfer lands");
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut req = request();
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: None,
+    });
+    let mut stream = engine
+        .generate(req, GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+
+    context.stop_generating();
+    // Still deferring: nothing has confirmed the KV transfer yet.
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.finish_reason, None,
+        "the deferral outlasts the client"
+    );
+    assert!(!first.token_ids.is_empty());
+
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("the deferral lifts once a token lands")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
 #[tokio::test]
 async fn abort_sends_the_abort_rpc_to_the_server() {
-    for mode in [AGG, DisaggregationMode::Encode] {
-        let service = FakeTrtllm::default();
-        if mode.is_encode() {
-            *service.encoder_role.lock().await = Some("encode".into());
-        }
-        let server = FakeServer::start(service).await;
-        let engine = engine_in_mode(&server.endpoint, 1, mode);
-        engine.start(0).await.expect("start");
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
 
-        let context = dynamo_backend_common::testing::mock_context();
-        let request_id = context.id().to_string();
-        engine.abort(context).await;
+    let context = dynamo_backend_common::testing::mock_context();
+    let request_id = context.id().to_string();
+    engine.abort(context).await;
 
-        // Native work must stop even when the local stream has already ended.
-        assert_eq!(server.service.aborts.lock().await.as_slice(), [request_id]);
-        engine.cleanup().await.unwrap();
-    }
+    // The cancelled generation's ID must reach TensorRT-LLM, not just produce a
+    // local terminal, or the server keeps generating.
+    assert_eq!(server.service.aborts.lock().await.as_slice(), [request_id]);
 }
 
 #[tokio::test]
@@ -1267,69 +1158,65 @@ async fn cleanup_terminates_an_in_flight_request() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
+/// A decode leg's cancellation deferral has to cover the dispatch itself, not
+/// just the streaming loop. `generate` sends the request and then awaits
+/// response headers, so a cancellation that wins that race abandons a request
+/// the engine has already accepted and begun pulling KV for -- stranding the
+/// prefill worker's blocks with no leg left to claim them. Shutdown still wins.
 #[tokio::test]
-async fn cancellation_during_dispatch_defers_only_staged_kv() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        for mode in [DisaggregationMode::Decode, AGG] {
-            let service = FakeTrtllm::default();
-            service.hang_before_stream.store(true, Ordering::SeqCst);
-            if !mode.is_decode() {
-                *service.encoder_role.lock().await = Some("consume".into());
-            }
-            let server = FakeServer::start(service).await;
-            let (engine, req) = if mode.is_decode() {
-                let mut req = request();
-                req.prefill_result = Some(PrefillResult {
-                    disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
-                    prompt_tokens_details: None,
-                });
-                (engine_in_mode(&server.endpoint, 1, mode), req)
-            } else {
-                (
-                    encoder_consumer_engine(&server.endpoint),
-                    request_with_encoder_result(),
-                )
-            };
-            let engine = Arc::new(engine);
-            engine.start(0).await.unwrap();
-            let context = dynamo_backend_common::testing::mock_context();
-            let mut dispatch = tokio::spawn({
-                let engine = Arc::clone(&engine);
-                let context = context.clone();
-                async move {
-                    engine
-                        .generate(req, GenerateContext::new(context, None))
-                        .await
-                }
-            });
+async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
+    let service = FakeTrtllm::default();
+    service.hang_before_stream.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = Arc::new(engine_in_mode(
+        &server.endpoint,
+        1,
+        DisaggregationMode::Decode,
+    ));
+    engine.start(0).await.expect("start");
 
-            // The engine accepted the request but has withheld response headers.
-            while server.service.requests.lock().await.is_empty() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            context.stop_generating();
-            let mut stream = if mode.is_decode() {
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
-                        .await
-                        .is_err()
-                );
-                engine.cleanup().await.unwrap();
-                dispatch.await.unwrap().unwrap()
-            } else {
-                tokio::time::timeout(Duration::from_secs(5), &mut dispatch)
-                    .await
-                    .expect("encoder consumer cancellation must not wait for headers")
-                    .unwrap()
-                    .unwrap()
-            };
-            let terminal = stream.next().await.unwrap().unwrap();
-            assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-            engine.cleanup().await.unwrap();
+    let mut decode_request = request();
+    decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: None,
+    });
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut dispatch = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let context = context.clone();
+        async move {
+            engine
+                .generate(decode_request, GenerateContext::new(context, None))
+                .await
         }
-    })
-    .await
-    .expect("shutdown must release deferred dispatch");
+    });
+
+    // The fake records the request before it withholds response headers, which
+    // is exactly the window this test is about: the engine has the request and
+    // the sidecar does not know it yet.
+    while server.service.requests.lock().await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    context.stop_generating();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+            .await
+            .is_err(),
+        "the dispatch must outlive the client's cancellation"
+    );
+
+    engine.cleanup().await.expect("cleanup");
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
+        .await
+        .expect("shutdown must release the dispatch")
+        .expect("dispatch task")
+        .expect("generate");
+    let terminal = stream
+        .next()
+        .await
+        .expect("a terminal item")
+        .expect("terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
 // Regression: eager discovery must neither bypass Worker start nor reconnect

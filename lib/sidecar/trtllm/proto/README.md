@@ -5,10 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Vendored OpenEngine protocol
 
-This is an exact snapshot of the native encoded-media contract at local source
-commit `59f1d5a7062629cf8c47031391a67a716b80b1ff`. This revision is a local-only validation checkpoint,
-not a published release. Matching TRT-LLM bindings are required; EPD startup
-checks the engine schema release against `REVISION`.
+This is an exact snapshot of the native encoded-media contract at published
+[OpenEngine source commit 59f1d5a](https://github.com/ai-dynamo/openengine/tree/59f1d5a7062629cf8c47031391a67a716b80b1ff/proto/openengine/v1).
+It is not yet a released protocol/runtime. Matching TRT-LLM bindings are required;
+EPD startup checks the engine schema release against `REVISION`.
 
 The contract separates unary Encode, streaming Generate, and idempotent output
 release. Framework-native references stay opaque to the sidecar. It adds no

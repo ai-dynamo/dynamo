@@ -199,6 +199,15 @@ impl<P: Protocol> Controller<P> {
         handle
     }
 
+    pub fn received_count(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|handle| handle.reached(Event::Received))
+            .count()
+    }
+
     pub async fn open(&self, request: &P::Request) -> Result<OpenedRequest<P>, P::Error> {
         let handle = self
             .requests
@@ -257,6 +266,14 @@ pub struct OpenedRequest<P: Protocol> {
 }
 
 impl<P: Protocol> OpenedRequest<P> {
+    /// Record a unary response and finish its request guard.
+    pub fn finish(self, response: P::Response) -> P::Response {
+        let mut observed = self.handle.0.observed.lock().unwrap();
+        observed.responses.push(response.clone());
+        P::record_tokens(&response, &mut observed.tokens);
+        response
+    }
+
     pub fn wrap(
         self,
         mut source: BoxStream<'static, Result<P::Response, P::Error>>,
