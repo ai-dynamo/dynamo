@@ -3115,9 +3115,15 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
 
 /// Create a new router with optional DRT metrics integration.
 ///
-/// When `drt_metrics` is provided, the `/metrics` handler will also include
-/// metrics from the DRT's registry tree (anything created via `metrics().create*()`).
-pub fn router(
+/// When `drt_metrics` is provided, `/metrics` serves the DRT registry tree's
+/// combined output, the same merged view the DRT's OTLP export reads, with each
+/// family declared once. `registry` must then be attached to that tree with
+/// [`MetricsRegistry::add_prometheus_registry`](dynamo_runtime::metrics::MetricsRegistry::add_prometheus_registry)
+/// for its families to appear; `HttpService::build` does this once the service
+/// is fully built. Without `drt_metrics` (standalone KVBM), `/metrics` serves
+/// `registry` alone. Crate-private so that a DRT-backed router cannot be wired
+/// without that attachment from outside.
+pub(crate) fn router(
     registry: Registry,
     path: Option<String>,
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
@@ -3136,51 +3142,54 @@ pub fn router(
     (vec![doc], route)
 }
 
-/// Unified metrics handler.
-///
-/// Gathers from the local HTTP-service registry first, then appends any
-/// metrics from the DRT's registry tree (if configured).
-async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
-    let encoder = prometheus::TextEncoder::new();
-    let metric_families = state.registry.gather();
-    let mut buffer = vec![];
-    if encoder.encode(&metric_families, &mut buffer).is_err() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to encode metrics",
-        )
-            .into_response();
+impl MetricsHandlerState {
+    /// The `/metrics` body.
+    ///
+    /// With a DRT, its combined output, which includes this service's registry
+    /// once it is attached. If that gather fails, fall back to this service's
+    /// own metrics rather than serving nothing.
+    fn render(&self) -> anyhow::Result<String> {
+        if let Some(drt_metrics) = &self.drt_metrics {
+            match drt_metrics.prometheus_expfmt_combined() {
+                Ok(text) => return Ok(text),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Failed to gather DRT metrics; serving HTTP service metrics only"
+                    );
+                }
+            }
+        }
+        let mut buffer = vec![];
+        prometheus::TextEncoder::new().encode(&self.registry.gather(), &mut buffer)?;
+        Ok(String::from_utf8(buffer)?)
     }
+}
 
-    let mut metrics = match String::from_utf8(buffer) {
-        Ok(metrics) => metrics,
-        Err(_) => {
-            return (
+/// Unified metrics handler. See [`MetricsHandlerState::render`].
+///
+/// Renders on the blocking pool: the gather runs update callbacks, some of
+/// which take the Python GIL.
+async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
+    match tokio::task::spawn_blocking(move || state.render()).await {
+        Ok(Ok(metrics)) => (StatusCode::OK, metrics).into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Failed to encode metrics");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to encode metrics",
             )
-                .into_response();
+                .into_response()
         }
-    };
-
-    // Append DRT registry tree metrics (anything created via metrics().create*()).
-    if let Some(ref drt_metrics) = state.drt_metrics {
-        match drt_metrics.prometheus_expfmt_combined() {
-            Ok(drt_text) => {
-                if !drt_text.is_empty() {
-                    if !metrics.is_empty() && !metrics.ends_with('\n') {
-                        metrics.push('\n');
-                    }
-                    metrics.push_str(&drt_text);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to gather DRT metrics: {}", e);
-            }
+        Err(error) => {
+            tracing::warn!(%error, "metrics render task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to encode metrics",
+            )
+                .into_response()
         }
     }
-
-    (StatusCode::OK, metrics).into_response()
 }
 
 #[cfg(test)]
@@ -6398,5 +6407,133 @@ mod tests {
             let histogram = metric.get_histogram();
             histogram.sample_count() == 1 && histogram.sample_sum() == 0.125
         }));
+    }
+
+    mod metrics_handler_state {
+        use super::*;
+        use dynamo_runtime::metrics::{AttachedPrometheusRegistry, MetricsRegistry};
+
+        fn declared(text: &str) -> Vec<&str> {
+            text.lines()
+                .filter_map(|line| line.strip_prefix("# TYPE "))
+                .filter_map(|rest| rest.split_whitespace().next())
+                .collect()
+        }
+
+        fn counter(registry: &Registry, name: &str) {
+            registry
+                .register(Box::new(prometheus::IntCounter::new(name, "help").unwrap()))
+                .unwrap();
+        }
+
+        /// Wire the handler state the way `HttpService::build` does: the local
+        /// registry attached to the DRT tree, the handler serving the tree.
+        fn attached(
+            local: Registry,
+            drt: &MetricsRegistry,
+        ) -> (MetricsHandlerState, AttachedPrometheusRegistry) {
+            let attachment = drt.add_prometheus_registry(local.clone());
+            let state = MetricsHandlerState {
+                registry: Arc::new(local),
+                drt_metrics: Some(drt.clone()),
+            };
+            (state, attachment)
+        }
+
+        /// With the local registry attached, the OTLP export path
+        /// (`metric_families_combined`) sees it, and `/metrics` declares each
+        /// family exactly once.
+        #[test]
+        fn local_registry_is_exported_and_scraped_once() {
+            let drt = MetricsRegistry::new();
+            counter(
+                &drt.get_prometheus_registry(),
+                "dynamo_component_probe_total",
+            );
+            let local = Registry::new();
+            counter(&local, "dynamo_frontend_requests_total");
+            let (state, _attachment) = attached(local, &drt);
+
+            let exported: Vec<String> = drt
+                .metric_families_combined()
+                .unwrap()
+                .families
+                .iter()
+                .map(|family| family.name().to_string())
+                .collect();
+            assert!(exported.contains(&"dynamo_frontend_requests_total".to_string()));
+            assert!(exported.contains(&"dynamo_component_probe_total".to_string()));
+
+            let text = state.render().unwrap();
+            assert_eq!(
+                declared(&text),
+                [
+                    "dynamo_component_probe_total",
+                    "dynamo_frontend_requests_total"
+                ],
+                "{text}"
+            );
+        }
+
+        /// A family in both registries with the same help and type is merged
+        /// into one family, with the series from both.
+        #[test]
+        fn family_in_both_registries_is_declared_once() {
+            let drt = MetricsRegistry::new();
+            counter(&drt.get_prometheus_registry(), "dynamo_shared_total");
+            let local = Registry::new();
+            let labelled = prometheus::IntCounterVec::new(
+                prometheus::Opts::new("dynamo_shared_total", "help"),
+                &["source"],
+            )
+            .unwrap();
+            labelled.with_label_values(&["local"]).inc();
+            local.register(Box::new(labelled)).unwrap();
+            let (state, _attachment) = attached(local, &drt);
+
+            let text = state.render().unwrap();
+            assert_eq!(declared(&text), ["dynamo_shared_total"], "{text}");
+            assert!(
+                text.contains("dynamo_shared_total{source=\"local\"} 1"),
+                "{text}"
+            );
+        }
+
+        /// Without a DRT (standalone KVBM, tests) only the local registry is
+        /// served.
+        #[test]
+        fn without_drt_serves_local_registry() {
+            let local = Registry::new();
+            counter(&local, "kvbm_probe_total");
+            let state = MetricsHandlerState {
+                registry: Arc::new(local),
+                drt_metrics: None,
+            };
+            assert_eq!(declared(&state.render().unwrap()), ["kvbm_probe_total"]);
+        }
+
+        /// While a help/type conflict still fails the whole DRT gather (#18910),
+        /// `/metrics` falls back to the HTTP service's own metrics rather than
+        /// an error.
+        #[test]
+        fn merge_conflict_falls_back_to_local_registry() {
+            let drt = MetricsRegistry::new();
+            drt.get_prometheus_registry()
+                .register(Box::new(
+                    prometheus::IntGauge::new("dynamo_conflict", "gauge help").unwrap(),
+                ))
+                .unwrap();
+            let local = Registry::new();
+            counter(&local, "dynamo_conflict");
+            counter(&local, "dynamo_frontend_requests_total");
+            let (state, _attachment) = attached(local, &drt);
+
+            let text = state.render().unwrap();
+            assert_eq!(
+                declared(&text),
+                ["dynamo_conflict", "dynamo_frontend_requests_total"],
+                "{text}"
+            );
+        }
     }
 }

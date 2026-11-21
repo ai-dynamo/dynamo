@@ -860,8 +860,12 @@ impl std::fmt::Debug for MetricsRegistry {
 impl MetricsRegistry {
     /// Create a new metrics registry with an empty Prometheus registry and callback lists
     pub fn new() -> Self {
+        Self::from_prometheus_registry(prometheus::Registry::new())
+    }
+
+    fn from_prometheus_registry(registry: prometheus::Registry) -> Self {
         Self {
-            prometheus_registry: Arc::new(std::sync::RwLock::new(prometheus::Registry::new())),
+            prometheus_registry: Arc::new(std::sync::RwLock::new(registry)),
             child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
@@ -871,7 +875,9 @@ impl MetricsRegistry {
 
     /// Add a child registry to be included in combined /metrics output.
     ///
-    /// Dedup is by underlying Prometheus registry pointer, so repeated registration via clones is safe.
+    /// Dedup is by the child `MetricsRegistry`'s own `Arc` (shared by its
+    /// clones), so registering the same registry, or a clone of it, again is
+    /// a no-op.
     pub fn add_child_registry(&self, child: &MetricsRegistry) {
         let child_ptr = Arc::as_ptr(&child.prometheus_registry);
         let mut guard = self.child_registries.write().unwrap();
@@ -882,6 +888,29 @@ impl MetricsRegistry {
             return;
         }
         guard.push(child.clone());
+    }
+
+    /// Attach a plain `prometheus::Registry` as a child, so both `/metrics`
+    /// (`prometheus_expfmt_combined`) and the OTLP export
+    /// (`metric_families_combined`) include its families. The registry is
+    /// shared, not copied: collectors registered into it later are seen too.
+    ///
+    /// For a component that owns its own `prometheus::Registry`, such as the
+    /// HTTP frontend. The registry stays attached until the returned handle is
+    /// dropped, so a component that is torn down and rebuilt on the same
+    /// runtime does not leave its old metrics behind. Each call attaches a new
+    /// child; attaching one registry twice gathers it twice.
+    #[must_use = "the registry is detached when the handle is dropped"]
+    pub fn add_prometheus_registry(
+        &self,
+        registry: prometheus::Registry,
+    ) -> AttachedPrometheusRegistry {
+        let child = Self::from_prometheus_registry(registry);
+        self.add_child_registry(&child);
+        AttachedPrometheusRegistry {
+            parent: Arc::downgrade(&self.child_registries),
+            child: child.prometheus_registry,
+        }
     }
 
     fn registries_for_combined_scrape(&self) -> Vec<MetricsRegistry> {
@@ -1246,6 +1275,33 @@ impl FamilyMerger {
         let mut merged: Vec<prometheus::proto::MetricFamily> = self.by_name.into_values().collect();
         merged.sort_by(|a, b| a.name().cmp(b.name()));
         merged
+    }
+}
+
+/// A `prometheus::Registry` attached to a [`MetricsRegistry`] tree by
+/// [`MetricsRegistry::add_prometheus_registry`]. Dropping it detaches the
+/// registry.
+pub struct AttachedPrometheusRegistry {
+    parent: std::sync::Weak<std::sync::RwLock<Vec<MetricsRegistry>>>,
+    child: Arc<std::sync::RwLock<prometheus::Registry>>,
+}
+
+impl std::fmt::Debug for AttachedPrometheusRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachedPrometheusRegistry")
+            .field("attached", &(self.parent.strong_count() > 0))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for AttachedPrometheusRegistry {
+    fn drop(&mut self) {
+        if let Some(parent) = self.parent.upgrade() {
+            parent
+                .write()
+                .unwrap()
+                .retain(|registry| !Arc::ptr_eq(&registry.prometheus_registry, &self.child));
+        }
     }
 }
 
@@ -2322,6 +2378,46 @@ mod test_metric_families_combined {
 
     fn names(fs: &[prometheus::proto::MetricFamily]) -> Vec<&str> {
         fs.iter().map(|f| f.name()).collect()
+    }
+
+    /// A plain `prometheus::Registry` attached with `add_prometheus_registry`
+    /// reaches both the scrape and the export, including collectors registered
+    /// after it was attached, and leaves both when the handle is dropped.
+    #[test]
+    fn attached_prometheus_registry_is_scraped_exported_and_detached() {
+        let root = registry();
+        let own = prometheus::Registry::new();
+        own.register(Box::new(
+            prometheus::IntCounter::new("dynamo_frontend_early_total", "Early").unwrap(),
+        ))
+        .unwrap();
+        let attached = root.add_prometheus_registry(own.clone());
+        own.register(Box::new(
+            prometheus::IntGauge::new("dynamo_frontend_late", "Late").unwrap(),
+        ))
+        .unwrap();
+
+        let ours = ["dynamo_frontend_early_total", "dynamo_frontend_late"];
+        let exported = root.metric_families_combined().unwrap().families;
+        let text = root.prometheus_expfmt_combined().unwrap();
+        for name in ours {
+            assert!(names(&exported).contains(&name), "{name} not exported");
+            assert_eq!(
+                text.matches(&format!("# TYPE {name} ")).count(),
+                1,
+                "{name} not declared exactly once:\n{text}"
+            );
+        }
+
+        drop(attached);
+        let exported = root.metric_families_combined().unwrap().families;
+        let text = root.prometheus_expfmt_combined().unwrap();
+        for name in ours {
+            assert!(!names(&exported).contains(&name), "{name} still exported");
+            assert!(!text.contains(name), "{name} still scraped:\n{text}");
+        }
+        // The rest of the tree is untouched.
+        assert!(names(&exported).contains(&"dynamo_native_total"));
     }
 
     #[test]

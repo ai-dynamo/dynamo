@@ -979,6 +979,23 @@ pub struct HttpService {
     /// Admin routes, served on their own listener when enabled.
     admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
+    /// The registry the HTTP service's own metrics are registered into.
+    prometheus_registry: metrics::Registry,
+    /// Keeps `prometheus_registry` attached to the DRT's metrics tree (so the
+    /// DRT's OTLP export and `/metrics` include it) for as long as any clone
+    /// of this service is alive. In the dynamic-model path that is until the
+    /// runtime shuts down: the model watcher and `_endpoint_enabler_task` in
+    /// `entrypoint/input/http.rs` hold clones.
+    ///
+    /// One service per DRT is the supported shape:
+    /// - A service built later on the same DRT while this one is alive gathers
+    ///   both registries, and a series both report keeps this one's value.
+    /// - The request-plane, tokio, transport and frontend perf/tokenizer
+    ///   metrics are process-wide statics registered once per process
+    ///   (`ensure_*_registered_prometheus`), so only the first service's
+    ///   registry has them; a service rebuilt on the same DRT after the first
+    ///   is dropped does not serve or export them.
+    _drt_metrics_attachment: Option<Arc<dynamo_runtime::metrics::AttachedPrometheusRegistry>>,
 }
 
 /// Admin routes and the address they are served on.
@@ -1153,6 +1170,12 @@ fn default_admin_port() -> u16 {
 impl HttpService {
     pub fn builder() -> HttpServiceConfigBuilder {
         HttpServiceConfigBuilder::default()
+    }
+
+    /// The registry this service's own metrics (`dynamo_frontend_*` and the
+    /// rest) are registered into.
+    pub fn prometheus_registry(&self) -> &metrics::Registry {
+        &self.prometheus_registry
     }
 
     pub fn state_clone(&self) -> Arc<State> {
@@ -1747,9 +1770,9 @@ impl HttpServiceConfigBuilder {
         // System routes (health, metrics, models) — debug-level spans
         let mut system_routes = vec![
             metrics::router(
-                registry,
+                registry.clone(),
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
-                config.drt_metrics,
+                config.drt_metrics.clone(),
             ),
             if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
@@ -1920,6 +1943,14 @@ impl HttpServiceConfigBuilder {
             None
         };
 
+        // Attach only once nothing above can fail, so a failed build leaves no
+        // registry behind on the DRT. Dropping the last clone of the service
+        // detaches it.
+        let drt_metrics_attachment = config
+            .drt_metrics
+            .as_ref()
+            .map(|drt_metrics| Arc::new(drt_metrics.add_prometheus_registry(registry.clone())));
+
         Ok(HttpService {
             state,
             router,
@@ -1938,6 +1969,8 @@ impl HttpServiceConfigBuilder {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
             }),
+            prometheus_registry: registry,
+            _drt_metrics_attachment: drt_metrics_attachment,
         })
     }
 
