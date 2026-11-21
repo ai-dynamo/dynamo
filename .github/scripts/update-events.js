@@ -6,7 +6,7 @@ const ICS_URL = 'https://calendar.google.com/calendar/ical/c_c2448d2efb09eac2dde
 const ALLOWED_ONLINE_HOSTS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', 'webex.com'];
 
 function escapeMd(str) {
-  return str.replace(/\r?\n/g, ' ').replace(/[[\]|`*_~]/g, '\\$&');
+  return str.replace(/\r?\n/g, ' ').replace(/[\\[\]|`*_~]/g, '\\$&');
 }
 
 function safeUrl(url) {
