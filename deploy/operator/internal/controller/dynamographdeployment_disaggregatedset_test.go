@@ -226,7 +226,7 @@ func TestSyncDGDStableServicePrunesManagedMetadataAndPreservesExternalMetadata(t
 	require.Equal(t, "new", stored.Annotations["example.com/current-annotation"])
 	require.Equal(t, "label", stored.Labels["external.example.com/keep"])
 	require.Equal(t, "annotation", stored.Annotations["external.example.com/keep"])
-	require.NotEmpty(t, stored.Annotations[managedServiceMetadataAnnotation])
+	require.NotEmpty(t, stored.Annotations[commoncontroller.ManagedServiceMetadataAnnotation])
 }
 
 func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {

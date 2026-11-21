@@ -19,13 +19,13 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -41,13 +41,6 @@ import (
 type disaggregatedSetStableResourcesReconciler struct {
 	client   client.Client
 	renderer *dcdWorkloadRenderer
-}
-
-const managedServiceMetadataAnnotation = "nvidia.com/dynamo-managed-service-metadata"
-
-type managedServiceMetadata struct {
-	Labels      []string `json:"labels,omitempty"`
-	Annotations []string `json:"annotations,omitempty"`
 }
 
 func newDisaggregatedSetStableResourcesReconciler(
@@ -207,7 +200,7 @@ func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(
 		}
 		created := desired.DeepCopy()
 		var metadataErr error
-		created.Labels, created.Annotations, metadataErr = reconcileDGDStableServiceMetadata(nil, desired)
+		created.Labels, created.Annotations, metadataErr = commoncontroller.ReconcileServiceMetadata(nil, desired)
 		if metadataErr != nil {
 			return metadataErr
 		}
@@ -232,7 +225,7 @@ func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(
 	updated.Spec = *desired.Spec.DeepCopy()
 	normalizeDGDStableServiceSpec(&updated.Spec)
 	var metadataErr error
-	updated.Labels, updated.Annotations, metadataErr = reconcileDGDStableServiceMetadata(existing, desired)
+	updated.Labels, updated.Annotations, metadataErr = commoncontroller.ReconcileServiceMetadata(existing, desired)
 	if metadataErr != nil {
 		return metadataErr
 	}
@@ -249,55 +242,6 @@ func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(
 		return nil
 	}
 	return r.client.Update(ctx, updated)
-}
-
-func reconcileDGDStableServiceMetadata(
-	existing *corev1.Service,
-	desired *corev1.Service,
-) (map[string]string, map[string]string, error) {
-	labels := map[string]string{}
-	annotations := map[string]string{}
-	previous := managedServiceMetadata{}
-	if existing != nil {
-		maps.Copy(labels, existing.Labels)
-		maps.Copy(annotations, existing.Annotations)
-		if raw := existing.Annotations[managedServiceMetadataAnnotation]; raw != "" {
-			if err := json.Unmarshal([]byte(raw), &previous); err != nil {
-				return nil, nil, fmt.Errorf("decode managed Service metadata inventory: %w", err)
-			}
-		}
-	}
-	for _, key := range previous.Labels {
-		delete(labels, key)
-	}
-	for _, key := range previous.Annotations {
-		delete(annotations, key)
-	}
-
-	desiredAnnotations := maps.Clone(desired.Annotations)
-	delete(desiredAnnotations, managedServiceMetadataAnnotation)
-	maps.Copy(labels, desired.Labels)
-	maps.Copy(annotations, desiredAnnotations)
-
-	next := managedServiceMetadata{
-		Labels:      sortedMetadataKeys(desired.Labels),
-		Annotations: sortedMetadataKeys(desiredAnnotations),
-	}
-	raw, err := json.Marshal(next)
-	if err != nil {
-		return nil, nil, fmt.Errorf("encode managed Service metadata inventory: %w", err)
-	}
-	annotations[managedServiceMetadataAnnotation] = string(raw)
-	return labels, annotations, nil
-}
-
-func sortedMetadataKeys(metadata map[string]string) []string {
-	keys := make([]string, 0, len(metadata))
-	for key := range metadata {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func normalizeDGDStableServiceSpec(spec *corev1.ServiceSpec) {

@@ -184,6 +184,10 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
+	desiredService := service.DeepCopy()
+	if err := commoncontroller.StampManagedServiceMetadata(service); err != nil {
+		return nil, err
+	}
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -200,7 +204,7 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		return nil, nil
 	}
 
-	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
+	if err := r.syncServiceMetadata(ctx, dgd, syncedService, desiredService, componentName); err != nil {
 		logger.Error(err, "Failed to update main component service", "component", componentName)
 		return nil, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
 	}
@@ -214,32 +218,15 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	return resource, nil
 }
 
-// syncServiceAnnotations merges the desired annotations onto an already-synced Service
-// and updates it when any changed. SyncResource hashes and copies only the spec, so
-// metadata edits on the DGD never converge onto the Service without this.
-func (r *groveStableResourcesReconciler) syncServiceAnnotations(
+// desired must be a copy taken before SyncResource.
+func (r *groveStableResourcesReconciler) syncServiceMetadata(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	service *corev1.Service,
-	desired map[string]string,
+	desired *corev1.Service,
 	componentName string,
 ) error {
-	if service.Annotations == nil {
-		service.Annotations = make(map[string]string)
-	}
-
-	changed := false
-	for key, value := range desired {
-		if current, ok := service.Annotations[key]; !ok || current != value {
-			service.Annotations[key] = value
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-
-	if err := r.Update(ctx, service); err != nil {
+	if _, err := commoncontroller.SyncManagedServiceMetadata(ctx, r, service, desired); err != nil {
 		if r.GetRecorder() != nil {
 			r.GetRecorder().Eventf(
 				dgd,
@@ -279,6 +266,10 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		return nil, r.deleteOwnedService(ctx, dgd, grove.ElasticEPLeaderServiceName(params.ServiceName))
 	}
 
+	desiredService := service.DeepCopy()
+	if err := commoncontroller.StampManagedServiceMetadata(service); err != nil {
+		return nil, err
+	}
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -295,7 +286,7 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		return nil, nil
 	}
 
-	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
+	if err := r.syncServiceMetadata(ctx, dgd, syncedService, desiredService, componentName); err != nil {
 		return nil, fmt.Errorf("failed to update the elastic-EP leader service %s: %w", componentName, err)
 	}
 

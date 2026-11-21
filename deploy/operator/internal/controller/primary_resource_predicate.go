@@ -22,8 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-// DGD renderers consume metadata as well as spec; status alone is not input.
-func dgdPrimaryPredicate() predicate.Predicate {
+// DGD and DCD renderers consume metadata as well as spec; status alone is not input.
+func workloadPrimaryPredicate() predicate.Predicate {
 	return predicate.Or(
 		commoncontroller.GenerationOrDeletionChangedPredicate(),
 		predicate.AnnotationChangedPredicate{},

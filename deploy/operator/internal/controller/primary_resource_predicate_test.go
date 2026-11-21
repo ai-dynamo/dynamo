@@ -32,7 +32,7 @@ import (
 func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.T) {
 	t.Log("The primary predicate combines metadata and generation/deletion changes, not status")
 	old := &v1beta1.DynamoGraphDeployment{Generation: 1}
-	filter := dgdPrimaryPredicate()
+	filter := workloadPrimaryPredicate()
 	for _, test := range []struct {
 		name   string
 		mutate func(*v1beta1.DynamoGraphDeployment)
@@ -56,6 +56,25 @@ func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.
 			changed := old.DeepCopy()
 			test.mutate(changed)
 			assert.Equal(t, test.want, filter.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: changed}))
+		})
+	}
+}
+
+func TestDCDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.T) {
+	t.Log("DCD label removal must enqueue reconciliation without a generation change")
+	old := &v1beta1.DynamoComponentDeployment{Generation: 1}
+	for _, test := range []struct {
+		name   string
+		mutate func(*v1beta1.DynamoComponentDeployment)
+		want   bool
+	}{
+		{"remove label", func(o *v1beta1.DynamoComponentDeployment) { delete(o.Labels, "example.com/team") }, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			old.Labels = map[string]string{"example.com/team": "blue"}
+			changed := old.DeepCopy()
+			test.mutate(changed)
+			assert.Equal(t, test.want, workloadPrimaryPredicate().Update(event.UpdateEvent{ObjectOld: old, ObjectNew: changed}))
 		})
 	}
 }

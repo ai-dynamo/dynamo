@@ -422,33 +422,64 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 	}
 }
 
-func TestGroveStableResourcesReconcilerConvergesLeaderServiceAnnotations(t *testing.T) {
-	t.Log("Reconcile a single-pod elastic-EP component so the leader Service is created")
+func TestGroveStableResourcesReconcilerConvergesServiceMetadata(t *testing.T) {
+	t.Log("Reconcile a single-pod elastic-EP component with Kubernetes discovery so both Services are created")
 	ctx := context.Background()
 	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
-	dgd.Spec.Annotations = map[string]string{"example.com/note": "before"}
+	dgd.Spec.Labels = map[string]string{"example.com/old-label": "old"}
+	dgd.Spec.Annotations = map[string]string{"example.com/old-note": "old", "example.com/note": "before"}
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
-		t.Fatalf("first Reconcile returned an error: %v", err)
+	reconciler.config = &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+	}
+	_, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil)
+	require.NoError(t, err)
+	componentServiceName := dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")
+	serviceNames := []string{componentServiceName, grove.ElasticEPLeaderServiceName(componentServiceName)}
+
+	t.Log("Add external metadata to each stored Service and record its selector")
+	selectors := map[string]map[string]string{}
+	for _, name := range serviceNames {
+		service := &corev1.Service{}
+		require.NoError(t, kubeClient.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
+		require.Equal(t, "old", service.Labels["example.com/old-label"])
+		service.Labels["external.example.com/keep"] = "label"
+		service.Annotations["external.example.com/keep"] = "annotation"
+		require.NoError(t, kubeClient.Update(ctx, service))
+		selectors[name] = service.Spec.Selector
 	}
 
-	t.Log("Edit the DGD annotation and reconcile again")
-	dgd.Spec.Annotations["example.com/note"] = "after"
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
-		t.Fatalf("second Reconcile returned an error: %v", err)
+	t.Log("Replace the authored metadata and reconcile again")
+	dgd.Spec.Labels = map[string]string{"example.com/new-label": "new"}
+	dgd.Spec.Annotations = map[string]string{"example.com/new-note": "new", "example.com/note": "after"}
+	_, err = reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil)
+	require.NoError(t, err)
+
+	t.Log("Verify managed metadata converged, removed keys are pruned, and external and bookkeeping keys survive")
+	resourceVersions := map[string]string{}
+	for _, name := range serviceNames {
+		service := &corev1.Service{}
+		require.NoError(t, kubeClient.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
+		require.NotContains(t, service.Labels, "example.com/old-label", name)
+		require.NotContains(t, service.Annotations, "example.com/old-note", name)
+		require.Equal(t, "new", service.Labels["example.com/new-label"], name)
+		require.Equal(t, "new", service.Annotations["example.com/new-note"], name)
+		require.Equal(t, "after", service.Annotations["example.com/note"], name)
+		require.Equal(t, "label", service.Labels["external.example.com/keep"], name)
+		require.Equal(t, "annotation", service.Annotations["external.example.com/keep"], name)
+		require.NotEmpty(t, service.Annotations[commoncontroller.ManagedServiceMetadataAnnotation], name)
+		require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey], name)
+		require.Equal(t, selectors[name], service.Spec.Selector, name)
+		resourceVersions[name] = service.ResourceVersion
 	}
 
-	t.Log("Verify the edit converged onto the Service, which SyncResource alone would not do")
-	service := &corev1.Service{}
-	key := types.NamespacedName{
-		Name:      grove.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
-		Namespace: dgd.Namespace,
-	}
-	if err := kubeClient.Get(ctx, key, service); err != nil {
-		t.Fatalf("expected the leader Service to exist: %v", err)
-	}
-	if got := service.Annotations["example.com/note"]; got != "after" {
-		t.Errorf("annotation example.com/note = %q, want %q", got, "after")
+	t.Log("Verify a steady-state reconcile writes nothing")
+	_, err = reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil)
+	require.NoError(t, err)
+	for _, name := range serviceNames {
+		service := &corev1.Service{}
+		require.NoError(t, kubeClient.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
+		require.Equal(t, resourceVersions[name], service.ResourceVersion, name)
 	}
 }
 

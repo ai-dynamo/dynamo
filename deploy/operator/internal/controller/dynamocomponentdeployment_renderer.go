@@ -599,13 +599,32 @@ func (r *dcdWorkloadRenderer) generateService(
 		return nil, false, err
 	}
 
+	// A managed DCD's pod template carries the current authored labels. Its object
+	// labels may still contain keys removed from the parent, because SyncResource copies only spec.
+	serviceDCD := dcd
+	if _, managed := managedDGDUIDForDCD(dcd); managed {
+		serviceDCD = dcd.DeepCopy()
+		serviceDCD.Labels = map[string]string{}
+		for _, key := range []string{
+			commonconsts.KubeLabelDynamoComponent,
+			commonconsts.KubeLabelDynamoNamespace,
+			commonconsts.KubeLabelDynamoGraphDeploymentName,
+			commonconsts.KubeLabelDynamoWorkerHash,
+			commonconsts.KubeLabelDynamoComponentClass,
+		} {
+			if value, ok := dcd.Labels[key]; ok {
+				serviceDCD.Labels[key] = value
+			}
+		}
+	}
+
 	svc, err := componentdeployment.RenderService(componentdeployment.ServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
 		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   dynamo.GetDCDComponentName(dcd),
-		Labels:          dynamo.GetDCDKubeLabels(dcd),
+		Labels:          dynamo.GetDCDKubeLabels(serviceDCD),
 		Annotations:     annotations,
 		IsK8sDiscovery:  isK8sDiscovery,
 	})
