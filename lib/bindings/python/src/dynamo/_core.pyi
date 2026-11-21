@@ -2185,6 +2185,7 @@ async def register_model(
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
     skip_model_assets: bool = False,
+    revision: Optional[str] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2203,6 +2204,10 @@ async def register_model(
     to register a minimal card without fetching or loading weights, configuration,
     or tokenizer files. Audio models retain their metadata by default; external
     audio adapters must explicitly opt in. Audio aliases are preserved in both paths.
+
+    A Hugging Face `model_path` is fetched at `revision` (a branch, tag, or commit;
+    None is the default branch). Pass the revision the engine loads, so the card's
+    tokenizer and templates match its weights.
 
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
@@ -2288,10 +2293,13 @@ class MediaFetcher:
     def allowed_media_domains(self, domains: List[str]) -> None: ...
     def timeout_ms(self, timeout_ms: int) -> None: ...
 
-async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
+async def fetch_model(
+    remote_name: str, ignore_weights: bool = False, revision: Optional[str] = None
+) -> str:
     """
     Download a model from Hugging Face, returning its local path.
     If `ignore_weights` is True, only fetches tokenizer and config files.
+    `revision` is a Hugging Face branch, tag, or commit; None is the default branch.
     Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
     """
     ...

@@ -27,7 +27,7 @@ class QwenGridParams:
 
 
 def load_qwen_grid_params(
-    model_name: str, trust_remote_code: bool = False
+    model_name: str, trust_remote_code: bool = False, revision: Optional[str] = None
 ) -> QwenGridParams | None:
     """Load Qwen VL grid parameters from model config.
 
@@ -38,10 +38,10 @@ def load_qwen_grid_params(
     """
     try:
         processor = AutoImageProcessor.from_pretrained(
-            model_name, trust_remote_code=trust_remote_code
+            model_name, trust_remote_code=trust_remote_code, revision=revision
         )
         vision_config = AutoConfig.from_pretrained(
-            model_name, trust_remote_code=trust_remote_code
+            model_name, trust_remote_code=trust_remote_code, revision=revision
         ).vision_config
 
         patch_size: int = processor.patch_size

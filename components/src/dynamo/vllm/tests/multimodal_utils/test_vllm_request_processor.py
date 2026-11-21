@@ -52,6 +52,7 @@ def _processor(
     frontend_decoding: bool = False,
     media_limits: dict[str, int] | None = None,
     real_image_loader: bool = False,
+    revision: str | None = None,
 ) -> mod.VllmMultimodalRequestProcessor:
     engine_client = None
     if media_limits is not None:
@@ -79,6 +80,7 @@ def _processor(
             load_audio=AsyncMock(return_value=None),
         ),
         use_unified_vision_chunk=unified_vision_chunk,
+        revision=revision,
     )
 
 
@@ -2257,11 +2259,28 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
 def test_qwen_prefill_handoff_fails_fast_without_grid_metadata(monkeypatch):
     processor = _processor()
     monkeypatch.setattr(
-        mod, "load_qwen_grid_params", lambda model, trust_remote_code=False: None
+        mod,
+        "load_qwen_grid_params",
+        lambda model, trust_remote_code=False, revision=None: None,
     )
 
     with pytest.raises(RuntimeError, match="cannot initialize decode mRoPE"):
         processor.initialize_prefill_handoff()
+
+
+def test_qwen_prefill_handoff_loads_grid_params_at_the_engine_revision(monkeypatch):
+    processor = _processor(revision="v1.0")
+    revisions = []
+
+    def load_grid_params(model, trust_remote_code=False, revision=None):
+        revisions.append(revision)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(mod, "load_qwen_grid_params", load_grid_params)
+
+    processor.initialize_prefill_handoff()
+
+    assert revisions == ["v1.0"]
 
 
 def test_qwen_handoff_computes_grid_for_pil_images():
@@ -2589,6 +2608,26 @@ def test_k3_placeholders_skip_the_mistral_path(model_type: str):
 
 class TestLoadQwenGridParams:
     """Tests for embedding dimensions loaded from Qwen vision configs."""
+
+    def test_loads_processor_and_config_at_the_requested_revision(self):
+        processor = SimpleNamespace(
+            patch_size=16, merge_size=2, min_pixels=65536, max_pixels=16777216
+        )
+        vision_config = SimpleNamespace(hidden_size=1024, out_hidden_size=2048)
+        with (
+            patch.object(
+                qwen_mod.AutoImageProcessor, "from_pretrained", return_value=processor
+            ) as load_processor,
+            patch.object(
+                qwen_mod.AutoConfig,
+                "from_pretrained",
+                return_value=SimpleNamespace(vision_config=vision_config),
+            ) as load_config,
+        ):
+            qwen_mod.load_qwen_grid_params("Qwen/Qwen3-VL-2B-Instruct", revision="v1.0")
+
+        assert load_processor.call_args.kwargs["revision"] == "v1.0"
+        assert load_config.call_args.kwargs["revision"] == "v1.0"
 
     @pytest.mark.parametrize(
         ("deepstack_config", "expected_decode_embedding_dim"),

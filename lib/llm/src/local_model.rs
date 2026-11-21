@@ -549,6 +549,16 @@ impl LocalModel {
         super::hub::from_hf(remote_name, ignore_weights).await
     }
 
+    /// [`LocalModel::fetch`] at a Hugging Face `revision` (branch, tag, or commit) instead of the
+    /// repository's default branch; `None` is [`LocalModel::fetch`].
+    pub async fn fetch_at_revision(
+        remote_name: &str,
+        revision: Option<&str>,
+        ignore_weights: bool,
+    ) -> anyhow::Result<PathBuf> {
+        super::hub::from_hf_at_revision(remote_name, revision, ignore_weights).await
+    }
+
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
     }

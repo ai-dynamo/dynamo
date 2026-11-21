@@ -8,6 +8,7 @@ import importlib.util
 import logging
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -71,7 +72,9 @@ def _image_loader_class_reading_current_env() -> type:
     return module.ImageLoader
 
 
-def _encode_handler_with_cache_env(monkeypatch, cache_size_env) -> EncodeWorkerHandler:
+def _encode_handler_with_cache_env(
+    monkeypatch, cache_size_env, revision=None
+) -> EncodeWorkerHandler:
     """Run the real ``EncodeWorkerHandler.__init__`` with the heavy parts stubbed."""
     monkeypatch.setenv("DYN_MM_IMAGE_CACHE_SIZE", cache_size_env)
 
@@ -82,7 +85,7 @@ def _encode_handler_with_cache_env(monkeypatch, cache_size_env) -> EncodeWorkerH
         encode_worker_handler, "_load_image_processor", lambda engine_args: object()
     )
     monkeypatch.setattr(
-        encode_worker_handler, "load_vision_model", lambda *args, **kwargs: object()
+        encode_worker_handler, "load_vision_model", MagicMock(return_value=object())
     )
     monkeypatch.setattr(
         encode_worker_handler,
@@ -94,6 +97,7 @@ def _encode_handler_with_cache_env(monkeypatch, cache_size_env) -> EncodeWorkerH
         model="model",
         trust_remote_code=False,
         enforce_eager=True,
+        revision=revision,
     )
     return EncodeWorkerHandler(engine_args, EmbeddingTransferMode.LOCAL)
 
@@ -119,6 +123,19 @@ async def test_encode_worker_image_cache_capacity_follows_env(
         assert keys[0] not in loader._image_cache
         if expected_capacity:
             assert keys[-1] in loader._image_cache
+    finally:
+        handler.cleanup()
+        await handler.send_complete_checker_task
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_loads_the_vision_model_at_the_engine_revision(
+    monkeypatch,
+):
+    handler = _encode_handler_with_cache_env(monkeypatch, "8", revision="v1.0")
+    try:
+        kwargs = encode_worker_handler.load_vision_model.call_args.kwargs
+        assert kwargs.get("revision") == "v1.0"
     finally:
         handler.cleanup()
         await handler.send_complete_checker_task
@@ -196,7 +213,7 @@ def test_image_processor_receives_engine_mm_processor_kwargs(monkeypatch):
 
     def mock_from_pretrained(model, **kwargs):
         assert model == "model"
-        assert kwargs == {"trust_remote_code": True, **expected}
+        assert kwargs == {"trust_remote_code": True, "revision": None, **expected}
         return sentinel
 
     monkeypatch.setattr(
@@ -208,9 +225,31 @@ def test_image_processor_receives_engine_mm_processor_kwargs(monkeypatch):
         model="model",
         trust_remote_code=True,
         mm_processor_kwargs=expected,
+        revision=None,
     )
 
     assert encode_worker_handler._load_image_processor(engine_args) is sentinel
+
+
+def test_image_processor_loads_the_engine_revision(monkeypatch):
+    captured = {}
+
+    def mock_from_pretrained(model, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        encode_worker_handler.AutoImageProcessor,
+        "from_pretrained",
+        mock_from_pretrained,
+    )
+    engine_args = SimpleNamespace(
+        model="org/model", trust_remote_code=False, revision="v1.0"
+    )
+
+    encode_worker_handler._load_image_processor(engine_args)
+
+    assert captured.get("revision") == "v1.0"
 
 
 def test_cache_key_for_url_image_is_unchanged():

@@ -13,7 +13,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -2831,21 +2831,8 @@ def test_maybe_freeze_gc_after_init_runs_once(monkeypatch, enabled):
     assert freeze.call_count == (1 if enabled else 0)
 
 
-@pytest.mark.asyncio
-async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
-    vllm_main = _load_vllm_main()
-    order: list[str] = []
-    monkeypatch.setattr(
-        vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
-    )
-    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
-
-    async def fake_register_model(*_args, **_kwargs):
-        order.append("register_model")
-
-    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
-    # Stub everything register_vllm_model calls before register_model; this
-    # test covers only the freeze ordering.
+def _stub_register_vllm_model_inputs(monkeypatch, vllm_main) -> None:
+    """Stub everything register_vllm_model calls before register_model."""
     for name in (
         "ModelRuntimeConfig",
         "publish_vllm_structural_tag_reasoning_policy",
@@ -2883,17 +2870,52 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
         },
     )
 
-    config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
-    vllm_config = Mock(lora_config=None)
 
+async def _register_aggregated_chat_model(vllm_main, config) -> None:
     await vllm_main.register_vllm_model(
         dynamo_llm.ModelInput.Tokens,
         dynamo_llm.ModelType.Chat,
         Mock(),
         config,
         Mock(),
-        vllm_config,
+        Mock(lora_config=None),
         worker_type=dynamo_llm.WorkerType.Aggregated,
     )
 
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
+    vllm_main = _load_vllm_main()
+    order: list[str] = []
+    monkeypatch.setattr(
+        vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
+    )
+    monkeypatch.setattr(vllm_main, "_gc_frozen_after_init", False)
+
+    async def fake_register_model(*_args, **_kwargs):
+        order.append("register_model")
+
+    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
+    _stub_register_vllm_model_inputs(monkeypatch, vllm_main)
+
+    config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
+    await _register_aggregated_chat_model(vllm_main, config)
+
     assert order == ["freeze_gc_heap", "register_model"]
+
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_registers_the_revision_vllm_loads(monkeypatch):
+    vllm_main = _load_vllm_main()
+    register = AsyncMock()
+    monkeypatch.setattr(vllm_main, "register_model", register)
+    _stub_register_vllm_model_inputs(monkeypatch, vllm_main)
+
+    config = Mock(
+        freeze_gc_after_init=False,
+        dyn_default_thinking_mode=None,
+        model_revision="v1.0",
+    )
+    await _register_aggregated_chat_model(vllm_main, config)
+
+    assert register.await_args.kwargs["revision"] == "v1.0"

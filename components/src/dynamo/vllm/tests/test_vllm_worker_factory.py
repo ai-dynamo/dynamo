@@ -2676,6 +2676,8 @@ async def test_encode_registration_preserves_ngc_identity_across_local_caches(tm
         register.assert_awaited_once()
         assert register.await_args.args[3] == model
         assert register.await_args.kwargs["model_name"] == "public-model"
+        # Revisions name Hugging Face commits; NGC sources register without one.
+        assert register.await_args.kwargs["revision"] is None
 
 
 @pytest.mark.asyncio

@@ -1114,6 +1114,14 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
 
+    /// Hugging Face commit the metadata files were read from, when they came from a Hub cache
+    /// snapshot. A consumer that fetches them from the Hub (`hf://` locations) downloads this
+    /// commit, so it reads the bytes the worker hashed even after the default branch moves.
+    /// Older frontends ignore it and keep resolving the default branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub source_revision: Option<String>,
+
     /// Model information
     pub model_info: Option<ModelInfoType>,
 
@@ -2132,9 +2140,38 @@ impl ModelDeploymentCard {
                 let (repo, _) = parse_hf_uri(uri)?;
                 if let std::collections::hash_map::Entry::Vacant(e) = hf_snapshots.entry(repo) {
                     let repo_name = e.key().clone();
-                    let snap = crate::hub::from_hf(&repo_name, /* ignore_weights = */ true)
+                    // Prefer the commit the worker read its files from: the default branch
+                    // may have moved on since. If that commit is unavailable here (an offline
+                    // cache that predates it), the default branch may still hold the same
+                    // bytes, as it did before cards carried a commit; checksums decide.
+                    let revision = (repo_name == source)
+                        .then_some(self.source_revision.as_deref())
+                        .flatten();
+                    let at_revision = match revision {
+                        Some(revision) => crate::hub::from_hf_at_revision(
+                            &repo_name,
+                            Some(revision),
+                            /* ignore_weights = */ true,
+                        )
                         .await
-                        .with_context(|| format!("hub::from_hf({repo_name})"))?;
+                        .inspect_err(|err| {
+                            tracing::warn!(
+                                repo = %repo_name,
+                                revision,
+                                error = %err,
+                                "cannot fetch model metadata at the worker's revision; \
+                                 trying the default branch",
+                            )
+                        })
+                        .ok(),
+                        None => None,
+                    };
+                    let snap = match at_revision {
+                        Some(snap) => snap,
+                        None => crate::hub::from_hf(&repo_name, /* ignore_weights = */ true)
+                            .await
+                            .with_context(|| format!("hub::from_hf({repo_name})"))?,
+                    };
                     e.insert(snap);
                 }
             }
@@ -2392,6 +2429,7 @@ impl ModelDeploymentCard {
             slug: Slug::from_string(&display_name),
             display_name,
             source_path: None,
+            source_revision: crate::hub::snapshot_commit(local_path),
             model_info,
             tokenizer,
             gen_config,
@@ -3827,6 +3865,151 @@ mod tests {
         );
         assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
+    }
+
+    const MAIN_COMMIT: &str = "1111111111111111111111111111111111111111";
+    const PINNED_COMMIT: &str = "2222222222222222222222222222222222222222";
+
+    /// Copy the TinyLlama fixture into `<hub>/models--org--name/snapshots/<commit>`.
+    fn hf_snapshot_at(hub: &Path, model: &str, commit: &str) -> anyhow::Result<PathBuf> {
+        let snapshot = hub
+            .join(format!("models--{}", model.replace('/', "--")))
+            .join("snapshots")
+            .join(commit);
+        std::fs::create_dir_all(&snapshot)?;
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        for entry in std::fs::read_dir(&src)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), snapshot.join(entry.file_name()))?;
+        }
+        Ok(snapshot)
+    }
+
+    #[test]
+    fn source_revision_records_the_snapshot_commit() -> anyhow::Result<()> {
+        let hub = tempfile::tempdir()?;
+        let snapshot = hf_snapshot_at(hub.path(), "test-org/model", PINNED_COMMIT)?;
+        let card = ModelDeploymentCard::load_from_disk(&snapshot, None)?;
+        assert_eq!(card.source_revision.as_deref(), Some(PINNED_COMMIT));
+
+        let local =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let card = ModelDeploymentCard::load_from_disk(&local, None)?;
+        assert_eq!(
+            card.source_revision, None,
+            "a plain directory has no commit"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_revision_is_optional_on_the_wire() -> anyhow::Result<()> {
+        let mut card = ModelDeploymentCard::with_name_only("m");
+        // Cards without a commit serialize exactly as before, so older frontends see no change.
+        assert!(
+            !serde_json::to_value(&card)?
+                .as_object()
+                .unwrap()
+                .contains_key("source_revision")
+        );
+        // Cards from older workers have no field and deserialize with none.
+        let older: ModelDeploymentCard = serde_json::from_value(serde_json::to_value(&card)?)?;
+        assert_eq!(older.source_revision, None);
+
+        card.source_revision = Some(PINNED_COMMIT.to_string());
+        let round_trip: ModelDeploymentCard = serde_json::from_value(serde_json::to_value(&card)?)?;
+        assert_eq!(round_trip.source_revision.as_deref(), Some(PINNED_COMMIT));
+        // Workers with the same files stay in one WorkerSet whether or not they report a commit:
+        // the files' checksums already identify the content.
+        assert_eq!(
+            round_trip.mdcsum(),
+            ModelDeploymentCard::with_name_only("m").mdcsum()
+        );
+        Ok(())
+    }
+
+    /// An offline frontend whose cache predates the worker's commit keeps serving when the
+    /// default branch it has holds the same metadata bytes (a weights-only commit), as before.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_config_falls_back_to_the_default_branch_when_the_commit_is_unavailable()
+    -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let model = "test-org/weights-only-update";
+        let worker_hub = workspace.path().join("worker-hub");
+        let worker_snapshot = hf_snapshot_at(&worker_hub, model, PINNED_COMMIT)?;
+        let frontend_hub = workspace.path().join("frontend-hub");
+        hf_snapshot_at(&frontend_hub, model, MAIN_COMMIT)?;
+        let refs = frontend_hub.join("models--test-org--weights-only-update/refs");
+        std::fs::create_dir_all(&refs)?;
+        std::fs::write(refs.join("main"), MAIN_COMMIT)?;
+
+        let mut card = ModelDeploymentCard::load_from_disk(&worker_snapshot, None)?;
+        assert_eq!(card.source_revision.as_deref(), Some(PINNED_COMMIT));
+        card.set_source_path(PathBuf::from(model));
+        card.move_to_url(&format!("hf://{model}/"))?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path().to_str().unwrap())),
+                ("HF_HUB_CACHE", Some(frontend_hub.to_str().unwrap())),
+                ("HF_HUB_OFFLINE", Some("1")),
+                ("HF_HOME", None),
+                ("MODEL_EXPRESS_CACHE_PATH", None),
+                ("MODEL_EXPRESS_URL", Some("http://127.0.0.1:9")),
+            ],
+            card.download_config(None),
+        )
+        .await
+    }
+
+    /// The worker read its metadata from a pinned commit after `main` moved on. The frontend must
+    /// resolve the card's `hf://` files at that commit; at `main` the checksums cannot match.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_config_resolves_hf_files_at_the_workers_commit() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let hub = workspace.path().join("hub");
+        let model = "test-org/pinned-model";
+        let pinned = hf_snapshot_at(&hub, model, PINNED_COMMIT)?;
+        let main = hf_snapshot_at(&hub, model, MAIN_COMMIT)?;
+        std::fs::write(
+            main.join("generation_config.json"),
+            br#"{"temperature": 0.5}"#,
+        )?;
+        let refs = hub.join("models--test-org--pinned-model/refs");
+        std::fs::create_dir_all(&refs)?;
+        std::fs::write(refs.join("main"), MAIN_COMMIT)?;
+
+        let mut card = ModelDeploymentCard::load_from_disk(&pinned, None)?;
+        card.set_source_path(PathBuf::from(model));
+        card.move_to_url(&format!("hf://{model}/"))?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path().to_str().unwrap())),
+                ("HF_HUB_CACHE", Some(hub.to_str().unwrap())),
+                ("HF_HUB_OFFLINE", Some("1")),
+                ("HF_HOME", None),
+                ("MODEL_EXPRESS_CACHE_PATH", None),
+            ],
+            async {
+                card.download_config(None).await?;
+                let (gen_config, _) = card
+                    .iter_metadata_files()
+                    .into_iter()
+                    .find(|(cf, _)| cf.basename() == Some("generation_config.json"))
+                    .expect("generation_config.json in the card");
+                let resolved = std::fs::read(gen_config.path().expect("resolved locally"))?;
+                assert_eq!(
+                    resolved,
+                    std::fs::read(pinned.join("generation_config.json"))?
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
     }
 }
 

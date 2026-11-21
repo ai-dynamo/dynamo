@@ -1110,6 +1110,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             enable_frontend_decoding=enable_frontend_decoding,
             embedding_loader=embedding_loader,
             trust_remote_code=config.engine_args.trust_remote_code,
+            revision=config.model_revision,
         )
 
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
@@ -2450,6 +2451,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # LoRA cards need base-model metadata, not weights.
             ignore_weights=True,
             max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
+            revision=self.config.model_revision,
         )
 
     async def _unregister_lora_discovery(self, lora_name: str) -> None:
