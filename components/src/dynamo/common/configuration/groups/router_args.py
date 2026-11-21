@@ -268,7 +268,7 @@ class RouterArgGroup(ArgGroup):
             # argparse lists no choices here: the router checks a policy type
             # against its registry at startup.
             mode_help += (
-                f" One of the router modes {', '.join(mode_choices)}, or the name "
+                f" One of the router modes {', '.join(ROUTER_MODE_MAP)}, or the name "
                 "of a registered worker-selection policy type, such as "
                 "dynamo-two-tier-cost-fn, which every worker role then uses with "
                 "the type's default parameters. Any other value fails at startup."
