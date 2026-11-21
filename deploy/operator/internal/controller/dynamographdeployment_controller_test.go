@@ -26,7 +26,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -1561,7 +1560,7 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	}
 
 	t.Log("Preserve live horizontal scale while keeping grouped role cardinalities")
-	preserveGrovePodCliqueSetReplicas(desired, existing, nil)
+	preserveGrovePodCliqueSetReplicas(desired, existing)
 
 	t.Log("Verify existing scale, grouped cardinalities and new-resource defaults")
 	replicasByClique := map[string]int32{}
@@ -1584,73 +1583,6 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[3].Replicas).To(gomega.Equal(int32(9)))
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[4].Replicas).To(gomega.Equal(int32(4)))
-}
-
-func TestPreserveGrovePodCliqueSetReplicasSkipsCheckpointGatedComponents(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	desired := &grovev1alpha1.PodCliqueSet{
-		Spec: grovev1alpha1.PodCliqueSetSpec{
-			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
-					{
-						Name: "worker",
-						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoComponent: "worker",
-						},
-						Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
-					},
-				},
-				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
-					{Name: "decode", Replicas: new(int32(0))},
-				},
-			},
-		},
-	}
-	existing := &grovev1alpha1.PodCliqueSet{
-		Spec: grovev1alpha1.PodCliqueSetSpec{
-			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
-					{Name: "worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
-				},
-				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
-					{Name: "decode", Replicas: new(int32(7))},
-				},
-			},
-		},
-	}
-
-	preserveGrovePodCliqueSetReplicas(desired, existing, map[string]*checkpoint.CheckpointInfo{
-		"worker": {
-			Enabled:       true,
-			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		},
-		"decode": {
-			Enabled:       true,
-			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		},
-	})
-
-	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(0)))
-	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
-	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(0)))
-
-	preserveGrovePodCliqueSetReplicas(desired, existing, map[string]*checkpoint.CheckpointInfo{
-		"worker": {
-			Enabled:       true,
-			Ready:         true,
-			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		},
-		"decode": {
-			Enabled:       true,
-			Ready:         true,
-			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		},
-	})
-
-	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(5)))
-	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
-	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(7)))
 }
 
 func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {

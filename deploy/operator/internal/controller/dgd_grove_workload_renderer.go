@@ -20,10 +20,8 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -105,11 +103,7 @@ func (r *groveWorkloadRenderer) Render(
 	}
 	prepareGroveTopologyConstraintUpgrade(desired, existingPodCliqueSet)
 	preserveGrovePodCliqueSetOrder(desired, existingPodCliqueSet)
-	preserveGrovePodCliqueSetReplicas(
-		desired,
-		existingPodCliqueSet,
-		checkpointInfos,
-	)
+	preserveGrovePodCliqueSetReplicas(desired, existingPodCliqueSet)
 
 	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, req.DGD, req.IsDelegated, desired)
 	if err != nil {
@@ -315,27 +309,16 @@ func prepareLegacyGroveTopologyConstraintRepair(
 }
 
 // Keep Grove-owned scaling state stable across parent PCS reconciliation.
-// Horizontal replicas are driven through scale subresources.
+// Horizontal replicas are driven through scale subresources, including the
+// zero hold for components waiting for a checkpoint.
 //
 //nolint:gocyclo // Grove scale fields share one ordered snapshot traversal.
 func preserveGrovePodCliqueSetReplicas(
 	desired *grovev1alpha1.PodCliqueSet,
 	existing *grovev1alpha1.PodCliqueSet,
-	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) {
 	if desired == nil || existing == nil {
 		return
-	}
-
-	// Let checkpoint-gated components retain their generated zero replicas.
-	replicaPreserveSkips := map[string]struct{}{}
-	for componentName, info := range checkpointInfoByComponent {
-		if info != nil &&
-			info.Enabled &&
-			info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-			!info.Ready {
-			replicaPreserveSkips[strings.ToLower(componentName)] = struct{}{}
-		}
 	}
 
 	cliquesInScalingGroups := make(map[string]struct{})
@@ -359,11 +342,6 @@ func preserveGrovePodCliqueSetReplicas(
 		if _, inScalingGroup := cliquesInScalingGroups[clique.Name]; inScalingGroup {
 			continue
 		}
-		if componentName := clique.Labels[commonconsts.KubeLabelDynamoComponent]; componentName != "" {
-			if _, skip := replicaPreserveSkips[strings.ToLower(componentName)]; skip {
-				continue
-			}
-		}
 		if replicas, ok := cliqueReplicasByName[clique.Name]; ok {
 			clique.Spec.Replicas = replicas
 		}
@@ -380,9 +358,6 @@ func preserveGrovePodCliqueSetReplicas(
 	// Preserve scale-owned fields in generated configuration order.
 	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
 		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
-		if _, skip := replicaPreserveSkips[strings.ToLower(config.Name)]; skip {
-			continue
-		}
 		if replicas, ok := scalingGroupReplicasByName[config.Name]; ok {
 			config.Replicas = replicas
 		}
