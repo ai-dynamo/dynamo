@@ -2809,7 +2809,7 @@ mod tests {
                 let params = ResponseParams {
                     tools: Some(
                         serde_json::from_value(serde_json::json!([
-                            {"type":"custom", "name":"cd"}
+                            {"type":"custom", "name":"cd", "format":{"type":"text"}}
                         ]))
                         .unwrap(),
                     ),
