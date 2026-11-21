@@ -57,6 +57,44 @@ def test_replay_api_rejects_weka_timestamp_basis_for_other_formats(basis):
 
 
 @pytest.mark.parametrize(
+    "option",
+    [
+        {"weka_client": "agentx"},
+        {
+            "weka_chat_template": {
+                "request_tokens": 5,
+                "user_tokens": 7,
+                "assistant_tokens": 6,
+                "tail_tokens": 2,
+                "append_tail_tokens": 1,
+            }
+        },
+    ],
+)
+def test_replay_api_rejects_weka_import_options_for_other_formats(option):
+    (name,) = option
+    with pytest.raises(ValueError, match=f"{name} requires trace_format='weka'"):
+        replay_api.run_trace_replay("unused.jsonl", **option)
+
+
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ({"weka_client": "AgentX"}, "weka_client: "),
+        ({"weka_chat_template": {"request_tokens": 5}}, "weka_chat_template: "),
+    ],
+)
+def test_replay_api_names_an_invalid_weka_import_option(option, message):
+    with pytest.raises(ValueError, match=message):
+        replay_api.run_trace_replay(
+            "unused.jsonl",
+            trace_format="weka",
+            execution_model="target-model",
+            **option,
+        )
+
+
+@pytest.mark.parametrize(
     ("basis", "error"),
     [
         ("unknown", ValueError),
