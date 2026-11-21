@@ -344,6 +344,23 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         - With no generation prompt or no recognized open/closed reasoning
           suffix, Dynamo retains the request-based decision.
 
+        **JSON constraints active from the first token.** With the `glm47`
+        unified family, Dynamo streams JSON directly for `response_format`
+        requests using `json_object` or `json_schema` when the selected decode
+        worker reports that JSON constraints apply from the first generated
+        token. Requests that require a tool call or name a tool keep tool-call
+        parsing. To apply JSON constraints immediately even when the prompt
+        ends in `<think>`, use these engine settings:
+
+        - **SGLang:** Leave the engine's `--reasoning-parser` unset.
+        - **vLLM:** Leave the engine's `--reasoning-parser` unset, or pass
+          `--structured-outputs-config '{"enable_in_reasoning":true}'`.
+
+        When streaming JSON directly, Dynamo skips reasoning parsing and
+        preserves literal `<think>` markers inside JSON strings in `content`.
+        If grammar timing is unknown, Dynamo uses its reasoning parser and
+        may buffer JSON until the response ends.
+
         A `max_thinking_tokens` budget also enables the reasoning gate when the
         rendered prompt leaves reasoning open, even without JSON or
         required/named-tool constraints. The budget caps reasoning tokens;
