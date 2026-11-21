@@ -320,6 +320,9 @@ struct PrefillBuildContext {
     session_affinity_mode: SessionAffinityMode,
     policy_file_session_affinity: Option<SessionAffinitySetting>,
     model_name: String,
+    /// Set once the explicit-endpoint path has warned about an advertised `router_config`;
+    /// shared by every activation attempt of one router.
+    advertisement_warned: Arc<std::sync::atomic::AtomicBool>,
     load_thresholds: crate::discovery::LoadThresholdHandle,
     parent_token: CancellationToken,
     task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,

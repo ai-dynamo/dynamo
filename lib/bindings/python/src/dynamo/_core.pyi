@@ -2203,13 +2203,13 @@ async def register_model(
         declare it literally at each call site.
 
     Routing:
-        `router_config` lets a worker set declare how the frontend should route
-        to it, overriding the frontend's global `--router-mode`. Omit it to
-        inherit that global. Combined with `worker_type`, this is how a
-        disaggregated deployment gives its prefill and decode tiers different
-        strategies — for example a prefill tier registered with
-        `RouterConfig(RouterMode.KV)` in front of a decode tier registered with
-        `RouterConfig(RouterMode.RoundRobin)`.
+        `router_config` is deprecated and scheduled for removal in v1.9. Give
+        each role its policy under `worker_selection` in the frontend's
+        `--router-policy-config` file instead; a frontend with a policy file
+        ignores `router_config`, except for text-input workers. On a frontend
+        without one, it lets a worker set declare how the frontend should
+        route to it, overriding the frontend's global `--router-mode`; omit it
+        to inherit that global.
 
     When `ignore_weights` is true, remote HuggingFace model resolution skips
     weight files and downloads only the metadata needed for registration.

@@ -44,13 +44,15 @@ The `aggregated`, `prefill`, and `decode` roles accept the key on any policy typ
 
 A role's `busy_threshold` rejects requests: once every eligible worker of the role is past it, the request fails with HTTP 529. The `prefill_busy_threshold_frac` and `decode_busy_threshold_frac` keys of a [policy class](configuration-and-tuning.md#policy-class-queues) in the same file do not reject. They hold the request in the router queue until a worker is free; see [Queue Backpressure](#queue-backpressure).
 
-A role whose entry has no `busy_threshold` keeps the earlier rules for now. A worker set that advertises router settings uses its own threshold flags, and a worker set that advertises nothing uses the frontend's:
+A role whose entry has no `busy_threshold` uses the frontend's threshold flags for now:
 
 - `--active-decode-blocks-threshold`
 - `--active-prefill-tokens-threshold`
 - `--active-prefill-tokens-threshold-frac`
 
-A prefill pool without the key uses the same advertised or flag thresholds as the decode set it fronts, not the `decode` entry of the policy file. On the frontend, `--active-decode-blocks-threshold` and `--active-prefill-tokens-threshold-frac` and their environment variables are deprecated and scheduled for removal in v1.9; see [Deprecations](../../../../reference/general/releases/deprecations.mdx#v180). The absolute `--active-prefill-tokens-threshold` was deprecated earlier and has no policy-file key. The frontend logs each role's starting thresholds and where they came from (`busy_thresholds_source`) on the `Activating router` line, and for a prefill pool on the `Prefill pool busy thresholds` line.
+A prefill pool without the key uses the same flags, not the `decode` entry of the policy file. On the frontend, `--active-decode-blocks-threshold` and `--active-prefill-tokens-threshold-frac` and their environment variables are deprecated and scheduled for removal in v1.9; see [Deprecations](../../../../reference/general/releases/deprecations.mdx#v180). The absolute `--active-prefill-tokens-threshold` was deprecated earlier and has no policy-file key. The frontend logs each role's starting thresholds and where they came from (`busy_thresholds_source`) on the `Activating router` line, and for a prefill pool on the `Prefill pool busy thresholds` line.
+
+The threshold flags that workers advertise count only on a frontend without a policy file, and for text-input workers. There, a worker set that advertises router settings uses its own threshold flags, a worker set that advertises nothing uses the frontend's, and a prefill pool uses the same advertised or flag thresholds as the decode set it fronts.
 
 A worker set in direct routing mode has no busy thresholds, because the caller picks its workers. Its prefill pool has none either: the pool follows the mode of the decode set it fronts, whatever mode the prefill workers advertise.
 

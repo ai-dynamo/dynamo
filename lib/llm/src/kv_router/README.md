@@ -107,7 +107,7 @@ hops.
 |---|---|---|---|---|
 | Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
 | Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
-| Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
+| Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode, unless the host has a policy file (deprecated) | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
 | Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | On failure, falls back to inline encoding downstream. |
 
 ### Prefill hop
@@ -118,6 +118,8 @@ hops.
   decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
 - A prefill that finishes the whole request (for example EOS on the one-token step) is returned
   directly; decode does not run.
+- Its KV router tracks neither active nor output blocks, whatever the prefill card, the decode
+  set or the policy file's `router` section configures: prefill load is prompt-side.
 - `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's

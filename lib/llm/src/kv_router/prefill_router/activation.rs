@@ -6,7 +6,7 @@ use dynamo_kv_router::plugins::worker_selection::SessionAffinitySetting;
 use dynamo_scheduler::host::PrefillLoadEstimator;
 use dynamo_worker_selection::host::{ConditionalDisaggConfig, make_conditional_disagg_policy};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
@@ -31,7 +31,7 @@ use crate::{
     entrypoint::RouterConfig,
     kv_router::{
         RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource,
-        role_routing::{self, DecodeRouting},
+        role_routing::{self, AdvertisedRouting, DecodeRouting},
     },
     model_card::ModelDeploymentCard,
     protocols::common::timing::WORKER_TYPE_PREFILL,
@@ -93,6 +93,31 @@ fn resolve_advertisement_from_cards(
     }
 
     Ok(advertisement)
+}
+
+/// The advertisement of an explicit-endpoint target, which is how the Runtime EPP reaches its
+/// prefill pool. Its cards are read here and never pass the frontend's discovery boundary, so
+/// the rule that boundary applies is applied here: a `host` with a policy file ignores the
+/// cards' `router_config`. `warn` gets what the host does with the first advertisement.
+fn resolve_legacy_advertisement(
+    mut cards: Vec<ModelDeploymentCard>,
+    decode_router_mode: RouterMode,
+    host: Option<&KvRouterConfig>,
+    warn: impl FnOnce(AdvertisedRouting),
+) -> Result<PrefillAdvertisement> {
+    let mut first_advertised = None;
+    for card in &mut cards {
+        let advertised = role_routing::advertised_routing(card, host);
+        // Cleared on every card, so an ignored mode cannot count as a conflict below.
+        if advertised == Some(AdvertisedRouting::Ignored) {
+            card.router_config = None;
+        }
+        first_advertised = first_advertised.or(advertised);
+    }
+    if let Some(advertised) = first_advertised {
+        warn(advertised);
+    }
+    resolve_advertisement_from_cards(&cards, decode_router_mode)
 }
 
 impl PrefillRouter {
@@ -312,7 +337,8 @@ impl PrefillRouter {
                 context.decode_router_mode,
             )?,
             WorkerSetTarget::Legacy(endpoint) => {
-                Self::resolve_prefill_advertisement(context, endpoint).await?
+                Self::resolve_prefill_advertisement(context, endpoint, kv_router_config.as_ref())
+                    .await?
             }
         };
         // Everything the hop uses comes from the prefill card when it says so,
@@ -326,7 +352,8 @@ impl PrefillRouter {
                 session_affinity_mode: context.session_affinity_mode,
             },
             context.policy_file_session_affinity,
-        );
+        )
+        .map_err(anyhow::Error::msg)?;
         let prefill_router_mode = routing.router_mode;
 
         // A block size of 0 means the card never declared one, so it cannot be
@@ -431,6 +458,7 @@ impl PrefillRouter {
     async fn resolve_prefill_advertisement(
         context: &PrefillBuildContext,
         endpoint: &Endpoint,
+        host: Option<&KvRouterConfig>,
     ) -> Result<PrefillAdvertisement> {
         let endpoint_id = endpoint.id();
         let instances = endpoint
@@ -459,8 +487,17 @@ impl PrefillRouter {
             })
             .collect();
 
-        resolve_advertisement_from_cards(&cards, context.decode_router_mode)
-            .with_context(|| format!("prefill endpoint {endpoint_id}"))
+        resolve_legacy_advertisement(cards, context.decode_router_mode, host, |advertised| {
+            // Activation is retried every second while it fails.
+            if !context.advertisement_warned.swap(true, Ordering::Relaxed) {
+                role_routing::warn_advertised_routing(
+                    &context.model_name,
+                    &endpoint_id.to_string(),
+                    advertised,
+                );
+            }
+        })
+        .with_context(|| format!("prefill endpoint {endpoint_id}"))
     }
 
     async fn drive_target(
@@ -471,6 +508,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         load_thresholds: LoadThresholdHandle,
     ) {
+        let advertisement_warned = Arc::new(AtomicBool::new(false));
         loop {
             let target = target_rx.borrow_and_update().clone();
             let Some(target) = target else {
@@ -520,6 +558,7 @@ impl PrefillRouter {
                 session_affinity_mode: router_ref.session_affinity_mode,
                 policy_file_session_affinity: router_ref.policy_file_session_affinity,
                 model_name: router_ref.model_name.clone(),
+                advertisement_warned: advertisement_warned.clone(),
                 load_thresholds: load_thresholds.clone(),
                 parent_token: cancel_token.child_token(),
                 task_guard: router_ref.task_guard.clone(),
@@ -683,6 +722,8 @@ mod tests {
 
     fn card(router_config: Option<RouterConfig>) -> ModelDeploymentCard {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
+        // Prefill workers take tokens; a text-input card keeps its advertisement.
+        card.model_input = crate::model_type::ModelInput::Tokens;
         card.router_config = router_config;
         card
     }
@@ -701,6 +742,48 @@ mod tests {
         assert_eq!(
             resolved.router_config.map(|config| config.router_mode),
             Some(RouterMode::KV)
+        );
+    }
+
+    #[test]
+    fn explicit_endpoint_host_with_a_policy_file_ignores_the_prefill_cards() {
+        let advertising = card(Some(RouterConfig::new(
+            RouterMode::RoundRobin,
+            KvRouterConfig::default(),
+        )));
+        let with_policy_file = KvRouterConfig {
+            router_policy_config: Some("policy.yaml".to_string()),
+            ..Default::default()
+        };
+        let resolve = |cards: &[ModelDeploymentCard], host: Option<&KvRouterConfig>| {
+            let mut warned = None;
+            let advertisement =
+                resolve_legacy_advertisement(cards.to_vec(), RouterMode::KV, host, |advertised| {
+                    warned = Some(advertised)
+                })
+                .unwrap();
+            (
+                advertisement.router_config.map(|config| config.router_mode),
+                warned,
+            )
+        };
+        let honored = (
+            Some(RouterMode::RoundRobin),
+            Some(AdvertisedRouting::Honored { replaceable: true }),
+        );
+
+        let cards = [advertising.clone()];
+        assert_eq!(
+            resolve(&cards, Some(&with_policy_file)),
+            (None, Some(AdvertisedRouting::Ignored))
+        );
+        // Still honored without a policy file.
+        assert_eq!(resolve(&cards, Some(&KvRouterConfig::default())), honored);
+        assert_eq!(resolve(&cards, None), honored);
+        // The first card speaks for the pool, but any advertising card is warned about.
+        assert_eq!(
+            resolve(&[card(None), advertising], Some(&with_policy_file)),
+            (None, Some(AdvertisedRouting::Ignored))
         );
     }
 
@@ -900,9 +983,10 @@ mod tests {
             .iter()
             .map(|worker| worker.instance().id())
             .collect();
+        // What a prefill worker started with `--router-track-output-blocks` advertises.
         let kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_track_output_blocks: true,
             ..Default::default()
         };
         let group_id = endpoint.id().to_string();
@@ -1199,13 +1283,30 @@ mod tests {
             .start_with_registration()
             .await
             .unwrap();
-        let kv_config = KvRouterConfig {
+        // The prefill pool advertises nothing, so the hop inherits the frontend's
+        // config: its policy file turns block tracking on, and the frontend hands
+        // the config down with active blocks off.
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_active_blocks: true\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
-        let mut advertised = card(Some(RouterConfig::new(RouterMode::KV, kv_config)));
-        advertised.kv_cache_block_size = 64;
+        kv_config.apply_policy_config().unwrap();
+        kv_config.router_track_active_blocks = false;
+        let mut silent = card(None);
+        silent.kv_cache_block_size = 64;
+        // Only the explicit-endpoint router below reads the card in discovery.
+        let mut advertising = silent.clone();
+        advertising.router_config = Some(RouterConfig::new(
+            RouterMode::RoundRobin,
+            KvRouterConfig::default(),
+        ));
         worker_runtime
             .discovery()
             .register(
@@ -1213,7 +1314,7 @@ mod tests {
                     namespace.clone(),
                     "workers".into(),
                     "prefill".into(),
-                    &advertised,
+                    &advertising,
                 )
                 .unwrap(),
             )
@@ -1232,14 +1333,14 @@ mod tests {
             RouterMode::KV,
             false,
             64,
-            None,
+            Some(kv_config.clone()),
             SelectionPolicySource::Registry,
             None,
             None,
             SessionAffinityMode::Hard,
             None,
             "test-model".into(),
-            namespace,
+            namespace.clone(),
             LoadThresholdHandle::new(Default::default()),
             frontend_runtime.child_token(),
             None,
@@ -1247,9 +1348,9 @@ mod tests {
         let (_admissions, admitted_ids) = watch::channel(vec![worker.instance().id()]);
         router.set_target(Some(WorkerSetTarget::Committed(CommittedWorkerSetTarget {
             group: endpoint.id().to_string(),
-            endpoint,
+            endpoint: endpoint.clone(),
             generation: 1,
-            card: Arc::new(advertised),
+            card: Arc::new(silent),
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1259,6 +1360,46 @@ mod tests {
         })
         .await
         .expect("prefill target must activate");
+        let binding = router.binding.load_full().unwrap();
+        let hop_config = binding
+            .router
+            .kv_router_if_enabled()
+            .expect("the hop inherits KV mode")
+            .kv_router_config();
+        assert!(
+            !hop_config.router_track_active_blocks && !hop_config.router_track_output_blocks,
+            "the policy file must not turn block tracking back on for the prefill hop"
+        );
+
+        // The Runtime EPP's constructor, which lists the pool's cards itself: the host has a
+        // policy file, so the round-robin the listed card advertises does not route the hop.
+        let (activation_tx, activation_rx) = oneshot::channel();
+        let explicit_endpoint_router = PrefillRouter::new(
+            activation_rx,
+            Arc::new(ModelManager::new()),
+            RouterMode::KV,
+            64,
+            Some(kv_config),
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            "test-model".into(),
+            namespace,
+            LoadThresholdHandle::new(Default::default()),
+            frontend_runtime.child_token(),
+        );
+        assert!(activation_tx.send(endpoint).is_ok());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while explicit_endpoint_router.lifecycle_state() != PrefillLifecycleState::Active {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("explicit prefill endpoint must activate");
+        let explicit_binding = explicit_endpoint_router.binding.load_full().unwrap();
+        assert_eq!(explicit_binding.prefill_router_mode, RouterMode::KV);
+        drop(explicit_binding);
+        drop(explicit_endpoint_router);
 
         // Exercise the production generate path, discovery, TCP dispatch, and
         // cancellation propagation for all output modes and both refusal paths.

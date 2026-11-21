@@ -7,6 +7,10 @@
 //! prefill pool in front of a decode set. A role's settings come from the frontend's
 //! [`RouterConfig`], from the frontend's policy file, and from the `router_config` its workers
 //! advertise on their model card. The rules that combine them live here.
+//!
+//! Advertising a `router_config` is deprecated. A frontend with a policy file ignores it (see
+//! [`advertised_routing`]), so the `advertised` inputs below are set on a frontend without one,
+//! and for text-input workers.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -18,8 +22,82 @@ use dynamo_runtime::pipeline::RouterMode;
 
 use crate::discovery::LoadThresholdConfig;
 use crate::entrypoint::RouterConfig;
+use crate::model_card::ModelDeploymentCard;
+use crate::model_type::ModelInput;
 use crate::session_affinity::SessionAffinityMode;
 use crate::worker_type::WorkerType;
+
+/// What a host does with the `router_config` a model card advertises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdvertisedRouting {
+    /// The host routes the card's role from its own configuration.
+    Ignored,
+    /// The card routes its worker set. `replaceable` is false while a policy file cannot
+    /// express what the card asks for.
+    Honored { replaceable: bool },
+}
+
+/// What `host` does with the `router_config` on `card`; `None` when the card advertises nothing.
+///
+/// A host with a policy file routes every role from its own configuration and ignores the
+/// card. The Python frontend accepts a file only in KV mode; an embedder that sets one beside
+/// another mode ignores cards as well.
+///
+/// A text-input card is still honored there. A policy file routes on the KV path, which needs
+/// frontend tokenization, so until a file can pick the path per role the card's mode is the
+/// only way such a worker set is served.
+pub(crate) fn advertised_routing(
+    card: &ModelDeploymentCard,
+    host: Option<&KvRouterConfig>,
+) -> Option<AdvertisedRouting> {
+    let advertised = card.router_config.as_ref()?;
+    let text_input = card.model_input == ModelInput::Text;
+    if !text_input && host.is_some_and(|host| host.router_policy_config.is_some()) {
+        return Some(AdvertisedRouting::Ignored);
+    }
+    // A policy file cannot select these two modes yet.
+    let replaceable = !text_input
+        && !matches!(
+            advertised.router_mode,
+            RouterMode::Direct | RouterMode::DeviceAwareWeighted
+        );
+    Some(AdvertisedRouting::Honored { replaceable })
+}
+
+/// Warn that a worker set's cards advertise a `router_config`, and say what the host does with
+/// it. Callers log this once per worker set, not per card.
+pub(crate) fn warn_advertised_routing(
+    model_name: &str,
+    worker_set: &str,
+    advertised: AdvertisedRouting,
+) {
+    // The honored wording holds for a worker that admission then rejects, too.
+    let consequence = match advertised {
+        AdvertisedRouting::Ignored => {
+            "is ignored because this router has a policy file (--router-policy-config): \
+             configure the role under worker_selection there. Router flags on workers are \
+             deprecated and will be removed in v1.9"
+        }
+        AdvertisedRouting::Honored { replaceable: true } => {
+            "is deprecated and will be removed in v1.9. This router still routes a worker set \
+             by what its admitted workers advertise. Remove the router flags from the workers \
+             and configure the role under worker_selection in the frontend's \
+             --router-policy-config"
+        }
+        AdvertisedRouting::Honored { replaceable: false } => {
+            "is deprecated and will be removed in v1.9. This router still routes a worker set \
+             by what its admitted workers advertise. A policy file cannot replace this \
+             advertisement yet (router mode direct or device-aware-weighted, or text-input \
+             workers): until it can, keep the worker flags, or set --router-mode on a frontend \
+             without a policy file"
+        }
+    };
+    tracing::warn!(
+        model_name,
+        %worker_set,
+        "Worker model cards advertise router_config, which {consequence}"
+    );
+}
 
 /// Resolve the routing settings of a serving worker set (aggregated or decode).
 ///
@@ -176,7 +254,9 @@ pub(crate) struct RoleBusyThresholds {
 /// is not checked, whatever a card or a flag says. A role without the key keeps `inherited`,
 /// the thresholds of the serving set's [`serving_set_routing`] result, and reports
 /// `inherited_from`. For the prefill pool that is the decode set's result, never the file's
-/// `decode` entry: a role's entry in the file applies to that role alone.
+/// `decode` entry: a role's entry in the file applies to that role alone. A card's thresholds
+/// are part of its `router_config`, so they reach `inherited` only where the card is honored
+/// (see [`advertised_routing`]).
 ///
 /// Pass the frontend's own configuration, as for [`policy_file_session_affinity`].
 pub(crate) fn role_busy_thresholds(
@@ -239,19 +319,23 @@ pub(crate) struct PrefillRouting {
 /// `policy_file` is the `prefill` entry's `session_affinity` in the frontend's policy file.
 /// When the file sets it, it replaces the session affinity of either case above.
 ///
-/// An advertised KV configuration has `router_track_active_blocks` turned off: prefill routing
-/// is prompt-side, and crediting decode blocks here would double-count load. The caller turns
-/// it off in the configuration a silent prefill pool inherits.
+/// Whichever KV configuration the hop gets, it tracks neither active nor output blocks: prefill
+/// routing is prompt-side, and crediting decode blocks here would double-count load. The policy
+/// file's `router` settings are finalized first, because the KV router applies them again and
+/// would turn both back on. An unreadable policy file is the error.
 pub(crate) fn prefill_routing(
     advertised: Option<RouterConfig>,
     decode: DecodeRouting,
     policy_file: Option<SessionAffinitySetting>,
-) -> PrefillRouting {
+) -> Result<PrefillRouting, String> {
     let policy_file = policy_file.map(RoleSessionAffinity::from_policy_file);
     let Some(advertised) = advertised else {
-        return PrefillRouting {
+        return Ok(PrefillRouting {
             router_mode: decode.router_mode,
-            kv_router_config: decode.kv_router_config,
+            kv_router_config: decode
+                .kv_router_config
+                .map(without_block_tracking)
+                .transpose()?,
             session_affinity: policy_file.unwrap_or_else(|| {
                 RoleSessionAffinity::from_ttl(
                     decode.session_affinity_ttl,
@@ -260,14 +344,12 @@ pub(crate) fn prefill_routing(
                 )
             }),
             is_advertised: false,
-        };
+        });
     };
 
-    let mut kv_router_config = advertised.kv_router_config;
-    kv_router_config.router_track_active_blocks = false;
-    PrefillRouting {
+    Ok(PrefillRouting {
         router_mode: advertised.router_mode,
-        kv_router_config: Some(kv_router_config),
+        kv_router_config: Some(without_block_tracking(advertised.kv_router_config)?),
         session_affinity: policy_file.unwrap_or_else(|| {
             RoleSessionAffinity::from_ttl(
                 advertised
@@ -278,7 +360,14 @@ pub(crate) fn prefill_routing(
             )
         }),
         is_advertised: true,
-    }
+    })
+}
+
+fn without_block_tracking(mut config: KvRouterConfig) -> Result<KvRouterConfig, String> {
+    config.finalize_policy_config()?;
+    config.router_track_active_blocks = false;
+    config.router_track_output_blocks = false;
+    Ok(config)
 }
 
 /// Log the settings a serving worker set routes with, each time its pipeline is built.
@@ -388,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn silent_prefill_pool_inherits_the_decode_set_unchanged() {
+    fn silent_prefill_pool_inherits_the_decode_set() {
         let mut decode = decode(RouterMode::RoundRobin, None);
         decode.kv_router_config = Some(KvRouterConfig {
             router_temperature: 0.5,
@@ -396,12 +485,12 @@ mod tests {
             ..Default::default()
         });
 
-        let resolved = prefill_routing(None, decode, None);
+        let resolved = prefill_routing(None, decode, None).unwrap();
 
         assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
         let kv_router_config = resolved.kv_router_config.expect("decode KV config");
         assert_eq!(kv_router_config.router_temperature, 0.5);
-        assert!(kv_router_config.router_track_active_blocks);
+        assert!(!kv_router_config.router_track_active_blocks);
         assert!(!resolved.is_advertised);
     }
 
@@ -414,6 +503,7 @@ mod tests {
         let advertised = RouterConfig::new(RouterMode::KV, KvRouterConfig::default());
         assert_eq!(
             prefill_routing(Some(advertised), decode(RouterMode::KV, decode_ttl), None)
+                .unwrap()
                 .session_affinity,
             RoleSessionAffinity {
                 spec: None,
@@ -421,7 +511,9 @@ mod tests {
             },
         );
         assert_eq!(
-            prefill_routing(None, decode(RouterMode::KV, decode_ttl), None).session_affinity,
+            prefill_routing(None, decode(RouterMode::KV, decode_ttl), None)
+                .unwrap()
+                .session_affinity,
             RoleSessionAffinity {
                 spec: Some(spec(300, SessionAffinityMode::Hard)),
                 source: SessionAffinitySource::DecodeSet,
@@ -520,11 +612,13 @@ worker_selection:
                 decode(RouterMode::KV, decode_ttl),
                 Some(policy_file)
             )
+            .unwrap()
             .session_affinity,
             from_file,
         );
         assert_eq!(
             prefill_routing(None, decode(RouterMode::KV, decode_ttl), Some(policy_file))
+                .unwrap()
                 .session_affinity,
             from_file,
         );
@@ -534,6 +628,7 @@ worker_selection:
                 decode(RouterMode::KV, decode_ttl),
                 Some(SessionAffinitySetting::Disabled)
             )
+            .unwrap()
             .session_affinity
             .spec,
             None,
@@ -568,7 +663,8 @@ worker_selection:
                 session_affinity_mode: inherited_mode,
             },
             policy_file_session_affinity(&frontend, WorkerType::Prefill).unwrap(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             resolved.session_affinity,
@@ -639,11 +735,61 @@ worker_selection:
         advertised.kv_router_config.router_temperature = 0.5;
 
         let resolved =
-            prefill_routing(Some(advertised), decode(RouterMode::RoundRobin, None), None);
+            prefill_routing(Some(advertised), decode(RouterMode::RoundRobin, None), None).unwrap();
 
         assert_eq!(resolved.router_mode, RouterMode::KV);
         let kv_router_config = resolved.kv_router_config.expect("advertised KV config");
         assert!(!kv_router_config.router_track_active_blocks);
         assert_eq!(kv_router_config.router_temperature, 0.5);
+    }
+
+    #[test]
+    fn prefill_hop_never_tracks_output_blocks() {
+        let by_flag = KvRouterConfig {
+            router_track_output_blocks: true,
+            ..Default::default()
+        };
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut by_policy_file = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        by_policy_file.apply_policy_config().unwrap();
+        // A silent pool gets the frontend's config with active blocks already off.
+        let handed_down = |frontend: &KvRouterConfig| KvRouterConfig {
+            router_track_active_blocks: false,
+            ..frontend.clone()
+        };
+        for (case, advertised, inherited) in [
+            ("inherited, set by flag", None, Some(handed_down(&by_flag))),
+            (
+                "inherited, set in the policy file",
+                None,
+                Some(handed_down(&by_policy_file)),
+            ),
+            (
+                "advertised",
+                Some(RouterConfig::new(RouterMode::KV, by_flag)),
+                None,
+            ),
+        ] {
+            let mut decode = decode(RouterMode::KV, None);
+            decode.kv_router_config = inherited;
+            let mut resolved = prefill_routing(advertised, decode, None)
+                .unwrap()
+                .kv_router_config
+                .expect("KV config");
+            // The KV router applies the policy file again, then validates. An
+            // invalid config keeps the hop from ever activating.
+            resolved.apply_policy_config().unwrap();
+            assert_eq!(resolved.validate(), Ok(()), "{case}");
+            assert!(!resolved.router_track_active_blocks, "{case}");
+            assert!(!resolved.router_track_output_blocks, "{case}");
+        }
     }
 }

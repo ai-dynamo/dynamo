@@ -13,7 +13,12 @@ For the routing cost model and worker-selection behavior, see
 
 ## Configuration Scope and Precedence
 
-The Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
+Configure routing on the Frontend. A Frontend started with `--router-policy-config` routes every worker role from its own flags and policy file, and ignores router settings that workers advertise on their model deployment cards. Text-input workers are the exception: a policy file cannot route them yet, so the Frontend still honors what they advertise.
+
+> [!WARNING]
+> **Deprecated.** Router flags on workers (`--router-mode` and the `--router-*` and threshold flags that travel with it, on `dynamo.vllm`, `dynamo.sglang`, `dynamo.trtllm`, and `dynamo.mocker`) are scheduled for removal in v1.9. Set each role's policy under `worker_selection` in the Frontend's policy file instead. See [Deprecations](../../../../reference/general/releases/deprecations.mdx#v180).
+
+The rest of this section describes a Frontend without a policy file, which still honors advertised settings. There, the Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
 
 Every replica admitted to a worker set must have the same model deployment card (MDC) checksum after discovery normalization and tokenizer overrides. A worker set is defined by namespace, component, endpoint, model, and worker type. The first valid card observed by a Frontend reserves the set's configuration; replicas with a different checksum receive no traffic and cannot disrupt that configuration.
 
@@ -33,7 +38,9 @@ over the incumbent. The Frontend logs each newly rejected cohort at `ERROR`.
 Checksum equality is stricter than equivalent serving behavior. Different advertised
 router settings, absent versus explicit defaults, and different model `source_path`
 values can produce different checksums even when workers could serve requests the
-same way. These differences reject only the newcomer. Supported legacy cards still
+same way. These differences reject only the newcomer. A Frontend with a policy file
+drops advertised router settings before it takes the checksum, so workers with and
+without router flags join one worker set there (text-input workers excepted). Supported legacy cards still
 join when existing discovery-boundary normalization produces matching checksums;
 there is no additional equivalence check or normalized materialization fingerprint.
 The MDC checksum algorithm and metadata-cache identity are unchanged.
@@ -533,13 +540,15 @@ role's setting is its own: a role does not use another role's entry. Only the fr
 key. The standalone router and the inference-gateway endpoint picker accept it in a policy file
 and ignore it.
 
-A role whose entry has no `session_affinity` keeps the earlier rules for now. A worker set that
-advertises router settings uses its own `--router-session-affinity-ttl-secs`, and has no affinity
-when it sets none. A worker set that advertises nothing uses the frontend's
-`--router-session-affinity-ttl-secs`. In both cases the mode and the entry limit are the
-frontend's `--router-session-affinity-mode` and `--router-session-affinity-max-entries`. A
-prefill pool that advertises nothing uses the decode set's advertised or flag TTL, not the
-`decode` entry of the policy file.
+A role whose entry has no `session_affinity` uses the frontend's
+`--router-session-affinity-ttl-secs`, `--router-session-affinity-mode`, and
+`--router-session-affinity-max-entries` for now. A prefill pool without an entry uses the same
+flags, not the `decode` entry of the policy file.
+
+The `--router-session-affinity-ttl-secs` that workers advertise counts only on a frontend
+without a policy file, and for text-input workers. There, a worker set that advertises router settings uses its own TTL and
+has no affinity when it sets none, a worker set that advertises nothing uses the frontend's
+flags, and a prefill pool that advertises nothing uses the decode set's advertised or flag TTL.
 
 The three frontend flags and their `DYN_ROUTER_SESSION_AFFINITY_*` environment variables are
 deprecated and scheduled for removal in v1.9; see
