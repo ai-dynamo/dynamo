@@ -161,7 +161,7 @@ On a single machine you can run either of two configurations:
 | **Discovery** | Local filesystem | etcd |
 | **Events** | ZMQ (in-process) | NATS |
 | **Scope** | Single machine only | Single **or** multi-node |
-| **Failure cleanup** | None | Lease-based auto-cleanup (default 10s TTL) — a crashed worker's endpoints are removed automatically and the frontend reroutes |
+| **Failure cleanup** | Expiry-based (10s TTL) — a crashed worker's endpoint files are deleted once they go unrefreshed for longer than the TTL | Lease-based auto-cleanup (30s TTL by default; set `ETCD_LEASE_TTL` to change it) — a crashed worker's endpoints are removed after its lease expires and the frontend reroutes |
 | **KV events / routing / planner** | Not available | Available |
 | **Matches production / Kubernetes** | No | Yes |
 

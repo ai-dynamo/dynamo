@@ -26,7 +26,8 @@ use tokio_util::sync::CancellationToken;
 use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 /// How long until a key expires. We keep the keys alive by touching the files.
-/// 10s is the same as our etcd lease expiry.
+/// This is FileStore's own expiry, separate from the etcd lease TTL (30s by default,
+/// set with `ETCD_LEASE_TTL`).
 const DEFAULT_TTL: Duration = Duration::from_secs(10);
 
 /// Don't do keep-alive any more often than this. Limits the disk write load.
