@@ -1,0 +1,12 @@
+{
+  "metadata": {
+    "generation": 6,
+    "resourceVersion": "807643579"
+  },
+  "spec": {
+    "replicas": 0
+  },
+  "status": {
+    "replicas": 0
+  }
+}

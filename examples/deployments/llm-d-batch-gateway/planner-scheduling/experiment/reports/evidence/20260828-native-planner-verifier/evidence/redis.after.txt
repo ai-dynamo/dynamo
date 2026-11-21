@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+llm-d.ai/v1alpha1
+dynamo-batch
+0
+1787953182161
+d-1787953122.1612728
