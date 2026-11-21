@@ -219,6 +219,25 @@ class TestDiagnosticsRecorder:
         recorder = DiagnosticsRecorder(config=cfg)
         assert not recorder.enabled
 
+    def test_no_periodic_report_without_interval_when_dashboard_enabled(self, tmp_path):
+        # The live dashboard is on by default; the recorder never binds the port.
+        default_port = PlannerConfig.model_fields["live_dashboard_port"].default
+        cfg = _make_config(
+            str(tmp_path), report_interval_hours=None, live_dashboard_port=default_port
+        )
+        recorder = DiagnosticsRecorder(config=cfg)
+        assert recorder.enabled
+
+        data = _synthetic_ticks(num_ticks=3)
+        for ti, eff, obs, gpu in data:
+            # Same sequence as the planner tick loop in core/base.py.
+            recorder.record(ti, eff, obs, gpu)
+            if recorder.should_generate_report(ti.now_s):
+                recorder.generate_report()
+
+        assert len(recorder._snapshots) == 3
+        assert os.listdir(tmp_path) == []
+
     def test_enabled_when_interval_set(self, tmp_path):
         cfg = _make_config(str(tmp_path), report_interval_hours=1.0)
         recorder = DiagnosticsRecorder(config=cfg)
