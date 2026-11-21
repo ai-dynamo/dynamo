@@ -448,7 +448,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
 		}, selectedName)
-	})
+	}, commonController.WithPreservedListOrder(dynamo.DCDUsesOrderedEnvironment(dynamoComponentDeployment)))
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
@@ -790,7 +790,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(ctx context.Context, opt generateResourceOption) (bool, *appsv1.Deployment, error) {
 	modified, depl, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
 		return r.generateDeployment(ctx, opt)
-	})
+	}, commonController.WithPreservedListOrder(dynamo.DCDUsesOrderedEnvironment(opt.dynamoComponentDeployment)))
 	if err != nil {
 		return false, nil, errors.Wrap(err, "create or update deployment")
 	}

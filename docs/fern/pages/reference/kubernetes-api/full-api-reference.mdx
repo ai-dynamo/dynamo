@@ -566,6 +566,12 @@ BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtll
 **Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="env" type="EnvVar array">
+Env supplies general environment defaults, distinct from component Envs and extraPodSpec.mainContainer.env. It maps directly to v1beta1 spec.env. Container-specific definitions take precedence. Semantic ordering is selected by the immutable operator origin; older origins retain legacy composition. No default is applied. For origins &gt;= 1.8.0, admission requires unique names within this list, even when the list is unchanged on update. Component overrides remain allowed.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="annotations" type="object (keys:string, values:string)">
 Annotations to add to generated Kubernetes resources for this component (such as Pod, Service, and Ingress when applicable).
 **Validation:** Optional: \&#123;\&#125;
@@ -1184,7 +1190,7 @@ See [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec).
 </ParamField>
 
 <ParamField path="envs" type="EnvVar array">
-Envs are environment variables applied to all services in the deployment unless overridden by service-specific configuration.
+Envs are environment variables applied to all services in the deployment unless overridden by service-specific configuration. Names must be unique within this list. For origins &gt;= 1.8.0, admission rejects duplicates even on unchanged updates. Earlier or missing origins permit only a completely unchanged pre-existing duplicate list; changing the list requires unique names. Same-named service overrides remain allowed.
 See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3074,6 +3080,12 @@ backendFramework specifies the backend framework.
 **Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="env" type="EnvVar array">
+env supplies general environment defaults for main and declared runtime containers. Container-specific env overrides entries with the same name. For origins using semantic environment composition, source-list order is preserved and cross-layer references are topologically ordered; cycles fail rendering. Graph-generated DCDs carry the DGD spec.env here so the original layers remain separate until operator defaults are available. Older origins retain legacy sorted composition. No default is applied. For origins &gt;= 1.8.0, admission requires unique names within this list, even when the list is unchanged on update. Container overrides remain allowed.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="name" type="string" required={true}>
 name is the stable logical identifier for this component within its DynamoGraphDeployment. It must be unique within the parent's `spec.components` list. For standalone DynamoComponentDeployment objects, the defaulting webhook populates `name` from `metadata.name` on admission, so users typically do not need to set it explicitly. `name` is decoupled from the underlying Kubernetes resource name so that the operator can rename child workloads (e.g. suffixing worker DCDs with a hash during rolling updates) without losing the stable identity that downstream consumers (labels, status maps, DGDSA references, planner RBAC, EPP filters) depend on.
 **Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`  Required: \&#123;\&#125;
@@ -3681,7 +3693,7 @@ See [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentshar
 </ParamField>
 
 <ParamField path="env" type="EnvVar array">
-env is prepended to every component's environment. Component-specific env entries with the same name take precedence and may reference values from this list.
+env supplies general environment defaults for main and declared runtime containers. Container-specific definitions with the same name take precedence. For operator origins &gt;= 1.8.0, relative order is preserved within each source list and cross-layer references are topologically ordered; cycles fail rendering. Earlier or missing origins retain legacy sorted composition. Generated DCDs preserve this list as spec.env. Names must be unique within this list. For origins &gt;= 1.8.0, admission rejects duplicates even on unchanged updates. Earlier or missing origins permit only a completely unchanged pre-existing duplicate list; changing the list requires unique names. Same-named container overrides remain allowed.
 See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
