@@ -45,7 +45,7 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
-# About twice the longest vCluster port-forward outage seen in CI (64 s).
+# Longer than the vCluster API outages seen in CI (64 s and 87 s).
 _VCLUSTER_POLL_OUTAGE_BUDGET_SECONDS = 120
 _RetryParams = ParamSpec("_RetryParams")
 _RetryResult = TypeVar("_RetryResult")
@@ -512,7 +512,7 @@ class ManagedDGDR:
                 aiohttp.ClientConnectionError,
                 aiohttp.ClientPayloadError,
             ) as error:
-                # The tunnel watchdog can outlast the per-call retries, so keep
+                # A vCluster API outage can outlast the per-call retries, so keep
                 # polling through a bounded outage instead of ending the wait.
                 if outage_started is None:
                     outage_started = read_started
