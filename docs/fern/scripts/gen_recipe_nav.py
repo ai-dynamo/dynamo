@@ -13,7 +13,11 @@ the catalog and the provider order cannot drift between surfaces:
   * ``model-recipes/overview.mdx``: the provider filter's radio inputs and
     chips (``provider-inputs`` and ``provider-chips`` spans), and the order of
     the model cards and each card's ``data-targets`` list (``recipe-cards``
-    span).
+    span), and the lifecycle badge definitions below the catalog
+    (``badge-legend`` span).
+  * ``model-recipes/<page>.mdx``: the Target Badges table, one row per
+    catalog target (``target-badges`` span), and the badge line in each target
+    summary panel that names its catalog target with ``data-target``.
   * ``components/RecipeStyles.tsx``: the per-provider chip-highlight and
     card-filter CSS rules (``provider-chip-rules`` and
     ``provider-filter-rules`` spans).
@@ -37,6 +41,17 @@ recipe's ``provider``, so every filter chip finds its cards. The script sets
 each card's ``data-targets`` to the recipe's target ids; the ``RecipeCount``
 component counts the cards and those ids in the browser. A per-card list, not a
 committed total, keeps the counts right when two recipe PRs merge cleanly.
+
+Lifecycle badges come from ``targets[].badge`` and belong to a deployment
+target, so they render on the recipe page, never on the overview's model
+cards. Every recipe page carries a ``target-badges`` span, which lists every
+catalog target with its badge, so no target can go without one on the page. A
+page's ``dynamo-target-picker-summary`` panel may also name its catalog
+target, ``data-target="<target id>"``; the script then writes the badge as the
+panel's first fact. Both stay empty while none of the recipe's targets has a
+badge, and the definitions table appears on the overview once any target has
+one. ``BADGES`` below is the one place that holds the display names and
+definitions.
 
 Usage (from any cwd; paths resolve relative to this file):
 
@@ -82,7 +97,47 @@ CARD_START = re.compile(r'^(\s*)<div className="dynamo-model-card"')
 CARD_PROVIDER = re.compile(r'data-recipe-card\b[^>]*?\bdata-provider="([^"]*)"')
 CARD_PAGE = re.compile(r'className="dynamo-card-link" href="([^"]+)"')
 CARD_TARGETS = re.compile(r' data-targets="[^"]*"')
+PANEL = 'className="dynamo-target-picker-summary"'
+PANEL_TARGET = re.compile(r'\bdata-target="([^"]*)"')
+PANEL_BADGE = 'className="dynamo-target-badge"'
 TARGET_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+@dataclass(frozen=True)
+class Badge:
+    key: str
+    label: str
+    meaning: str
+
+
+# Lifecycle badges, highest first. The keys match validate.py's BADGES and the
+# badge styles in components/RecipeStyles.tsx. Labels and meanings are written
+# into JSX attributes and a Markdown table: no double quotes, braces, or pipes.
+BADGES = (
+    Badge(
+        "nvidia-certified",
+        "NVIDIA Certified",
+        "Certified and supported by NVIDIA through NIM Factory. Includes "
+        "everything Optimized means.",
+    ),
+    Badge(
+        "optimized",
+        "Optimized",
+        "Perf-tuned and benchmarked by NVIDIA. Includes everything Functional "
+        "means.",
+    ),
+    Badge(
+        "functional",
+        "Functional",
+        "Deployed and served end to end by NVIDIA. Not perf-tuned.",
+    ),
+    Badge(
+        "community",
+        "Community",
+        "Contributed and maintained by the community. Not checked by NVIDIA.",
+    ),
+)
+BADGE_KEYS = tuple(b.key for b in BADGES)
 
 
 class CatalogError(Exception):
@@ -105,6 +160,10 @@ class Recipe:
     slug: str
     targets: tuple[str, ...]
     generation: tuple[int, ...] = (0,)
+    # One entry per target, in target order; None where a target has no badge.
+    badges: tuple[str | None, ...] = ()
+    # One (runtime, GPUs, topology) row per target, for the Target Badges table.
+    details: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -171,6 +230,8 @@ def parse_recipe(entry: dict, providers: dict[str, Provider], source: str) -> Re
         slug=entry.get("slug") or Path(page).stem,
         targets=parse_targets(entry, source),
         generation=parse_generation(entry, source),
+        badges=parse_badges(entry, source),
+        details=parse_details(entry),
     )
 
 
@@ -184,6 +245,41 @@ def parse_targets(entry: dict, source: str) -> tuple[str, ...]:
                 "or '-'"
             )
     return ids
+
+
+def parse_badges(entry: dict, source: str) -> tuple[str | None, ...]:
+    """Return each target's lifecycle badge, or None where it has none yet."""
+    badges = tuple(t.get("badge") for t in entry.get("targets") or [])
+    for badge in badges:
+        if badge is not None and badge not in BADGE_KEYS:
+            raise CatalogError(
+                f"{source}: badge {badge!r} must be one of {', '.join(BADGE_KEYS)}"
+            )
+    return badges
+
+
+RUNTIMES = (("vllm", "vLLM"), ("sglang", "SGLang"), ("trtllm", "TensorRT-LLM"))
+
+
+def parse_details(entry: dict) -> tuple[tuple[str, str, str], ...]:
+    """Return each target's runtime, GPUs, and topology as table cells."""
+    rows = []
+    for target in entry.get("targets") or []:
+        raw = str((target.get("runtime") or {}).get("framework") or "")
+        folded = raw.casefold().replace("tensorrt-llm", "trtllm")
+        runtime = next((name for key, name in RUNTIMES if key in folded), raw)
+        hardware = target.get("hardware") or {}
+        gpus = " ".join(
+            part
+            for part in (
+                f"{hardware['count']}x" if hardware.get("count") else "",
+                str(hardware.get("gpu") or ""),
+            )
+            if part
+        )
+        topology = str(target.get("topology") or "").capitalize()
+        rows.append(tuple(cell.replace("|", "/") for cell in (runtime, gpus, topology)))
+    return tuple(rows)
 
 
 def parse_generation(entry: dict, source: str) -> tuple[int, ...]:
@@ -329,6 +425,39 @@ def render_filter_rules(groups: list[Group]) -> list[str]:
     ]
 
 
+def badges_present(groups: list[Group]) -> list[Badge]:
+    """Return the badges some active recipe target carries, highest first."""
+    held = {b for g in groups for r in g.recipes for b in r.badges}
+    return [b for b in BADGES if b.key in held]
+
+
+def badge_pill(badge: Badge) -> str:
+    return (
+        f'<span className="dynamo-badge dynamo-badge-{badge.key}" '
+        f'title="{badge.meaning}">{badge.label}</span>'
+    )
+
+
+def render_badge_legend(groups: list[Group]) -> list[str]:
+    """Render the badge definitions section shown below the catalog."""
+    if not badges_present(groups):
+        return []
+    # Blank lines keep the heading and table apart from the marker comments.
+    lines = [
+        "",
+        "## Recipe Badges",
+        "",
+        "Each deployment target of a recipe carries a badge that shows how much "
+        "NVIDIA has validated. Open a recipe and choose a target to see its "
+        "badge.",
+        "",
+        "| Badge | What it means |",
+        "| --- | --- |",
+    ]
+    lines += [f"| {badge_pill(b)} | {b.meaning} |" for b in BADGES]
+    return lines + [""]
+
+
 def render_index(text: str, groups: list[Group]) -> str:
     """Rewrite index.yaml's ``recipes:`` list in sidebar order."""
     lines = text.split("\n")
@@ -467,6 +596,68 @@ def set_targets(line: str, recipe: Recipe) -> str:
     return f'{line[:-1]} data-targets="{" ".join(recipe.targets)}">'
 
 
+def render_target_badges(recipe: Recipe) -> list[str]:
+    """Render a recipe page's Target Badges section, one row per catalog target.
+
+    Empty while none of the recipe's targets has a badge.
+    """
+    if not any(recipe.badges):
+        return []
+    by_key = {b.key: b for b in BADGES}
+    lines = [
+        "",
+        "## Target Badges",
+        "",
+        "Each deployment target carries its own badge. See "
+        "[Recipe Badges](overview.mdx#recipe-badges) for what each one means.",
+        "",
+        "| Target | Runtime | GPUs | Topology | Badge |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for tid, badge, (runtime, gpus, topology) in zip(
+        recipe.targets, recipe.badges, recipe.details
+    ):
+        pill = badge_pill(by_key[badge]) if badge else "Not assigned"
+        lines.append(f"| `{tid}` | {runtime} | {gpus} | {topology} | {pill} |")
+    return lines + [""]
+
+
+def set_target_badges(text: str, recipe: Recipe) -> str:
+    """Write each tagged target panel's badge into a recipe page.
+
+    A ``dynamo-target-picker-summary`` panel that names its catalog target with
+    ``data-target`` gets the target's badge as its first fact. Stale badge
+    lines are dropped, so a panel whose target has no badge shows none.
+    """
+    badges = dict(zip(recipe.targets, recipe.badges))
+    by_key = {b.key: b for b in BADGES}
+    out = []
+    for line in text.split("\n"):
+        if PANEL_BADGE in line:
+            continue
+        out.append(line)
+        target = PANEL_TARGET.search(line) if PANEL in line else None
+        if not target:
+            continue
+        tid = target.group(1)
+        if tid not in badges:
+            raise CatalogError(
+                f"{recipe.page}: a target panel names data-target={tid!r}, which "
+                f"is not a target id in recipes/{recipe.id}.yaml"
+            )
+        if not line.rstrip().endswith(">"):
+            raise CatalogError(
+                f"{recipe.page}: the {tid} target panel's opening <div> must end "
+                "on its first line"
+            )
+        if badges[tid]:
+            out.append(
+                f'<span className="dynamo-target-badge"><b>Badge</b>'
+                f"{badge_pill(by_key[badges[tid]])}</span>"
+            )
+    return "\n".join(out)
+
+
 def build() -> dict[Path, str]:
     """Return the generated contents of every output file."""
     providers, ranked, recipes = load_catalog()
@@ -494,6 +685,9 @@ def build() -> dict[Path, str]:
         lambda _: render_provider_chips(groups),
         OVERVIEW_MDX,
     )
+    overview = splice(
+        overview, "badge-legend", lambda _: render_badge_legend(groups), OVERVIEW_MDX
+    )
 
     styles = STYLES_TSX.read_text(encoding="utf-8")
     styles = splice(
@@ -508,7 +702,23 @@ def build() -> dict[Path, str]:
 
     index = render_index(INDEX_YAML.read_text(encoding="utf-8"), groups)
 
-    return {NAV_YML: nav, OVERVIEW_MDX: overview, STYLES_TSX: styles, INDEX_YAML: index}
+    outputs = {
+        NAV_YML: nav,
+        OVERVIEW_MDX: overview,
+        STYLES_TSX: styles,
+        INDEX_YAML: index,
+    }
+    for recipe in recipes:
+        page = FERN_DIR / recipe.page
+        if page.exists():
+            text = splice(
+                page.read_text(encoding="utf-8"),
+                "target-badges",
+                lambda _, recipe=recipe: render_target_badges(recipe),
+                page,
+            )
+            outputs[page] = set_target_badges(text, recipe)
+    return outputs
 
 
 def main(argv: list[str] | None = None) -> int:

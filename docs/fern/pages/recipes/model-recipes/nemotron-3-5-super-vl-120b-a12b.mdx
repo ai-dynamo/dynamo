@@ -105,111 +105,113 @@ The **B200 Certified** targets use only [Dynamo Enterprise Support](../../enterp
 
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h100" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h100" data-variant="agg" data-target="vllm-agg-h100">
 <span><b>GPUs</b> 4x H100 (2 workers)</span>
 <span><b>Parallelism</b> TP2 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h100" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h100" data-variant="disagg" data-target="vllm-disagg-h100">
 <span><b>GPUs</b> 4x H100 (1P1D)</span>
 <span><b>Parallelism</b> TP2 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg" data-target="vllm-agg-h200">
 <span><b>GPUs</b> 2x H200 (2 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg" data-target="vllm-disagg-h200">
 <span><b>GPUs</b> 2x H200 (1P1D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg" data-target="vllm-agg-b200">
 <span><b>GPUs</b> 4x B200 (4 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg" data-target="vllm-disagg-b200">
 <span><b>GPUs</b> 5x B200 (3P2D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200-certified" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200-certified" data-variant="agg" data-target="vllm-agg-b200-certified">
+<span className="dynamo-target-badge"><b>Badge</b><span className="dynamo-badge dynamo-badge-nvidia-certified" title="Certified and supported by NVIDIA through NIM Factory. Includes everything Optimized means.">NVIDIA Certified</span></span>
 <span><b>GPUs</b> 4x B200 (4 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 <span><b>Images</b> vllm-runtime-enterprise:1.7.0, dynamo-frontend-enterprise:1.7.0</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200-certified" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200-certified" data-variant="disagg" data-target="vllm-disagg-b200-certified">
+<span className="dynamo-target-badge"><b>Badge</b><span className="dynamo-badge dynamo-badge-nvidia-certified" title="Certified and supported by NVIDIA through NIM Factory. Includes everything Optimized means.">NVIDIA Certified</span></span>
 <span><b>GPUs</b> 5x B200 (3P2D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 <span><b>Images</b> vllm-runtime-enterprise:1.7.0, dynamo-frontend-enterprise:1.7.0</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg" data-target="vllm-agg-gb200">
 <span><b>GPUs</b> 4x GB200 (4 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg" data-target="vllm-disagg-gb200">
 <span><b>GPUs</b> 5x GB200 (3P2D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP3</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="agg" data-target="vllm-agg-b300">
 <span><b>GPUs</b> 4x B300 (4 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="agg" data-target="vllm-agg-gb300">
 <span><b>GPUs</b> 4x GB300 (4 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b300" data-variant="disagg" data-target="vllm-disagg-b300">
 <span><b>GPUs</b> 5x B300 (3P2D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP3</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg" data-target="vllm-disagg-gb300">
 <span><b>GPUs</b> 5x GB300 (3P2D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP3</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="vr200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="vr200" data-variant="agg" data-target="vllm-agg-vr200">
 <span><b>GPUs</b> 11x VR200 (11 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="vr200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="vr200" data-variant="disagg" data-target="vllm-disagg-vr200">
 <span><b>GPUs</b> 11x VR200 (7P4D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP5</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="trtllm" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="trtllm" data-variant="agg" data-target="trtllm-agg-b200">
 <span><b>GPUs</b> 4x B200 (4 workers)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP3</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-recipe-framework="trtllm" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="trtllm" data-variant="disagg" data-target="trtllm-disagg-b200">
 <span><b>GPUs</b> 4x B200 (2P2D)</span>
 <span><b>Parallelism</b> TP1 per worker</span>
 <span><b>Speculative decoding</b> MTP3</span>
@@ -218,6 +220,35 @@ The **B200 Certified** targets use only [Dynamo Enterprise Support](../../enterp
 </div>
 
 <div className="dynamo-super-vl-deployment">
+
+{/* target-badges:begin — generated by scripts/gen_recipe_nav.py, do not edit */}
+
+## Target Badges
+
+Each deployment target carries its own badge. See [Recipe Badges](overview.mdx#recipe-badges) for what each one means.
+
+| Target | Runtime | GPUs | Topology | Badge |
+| --- | --- | --- | --- | --- |
+| `vllm-agg-h100` | vLLM | 4x H100 | Aggregated | Not assigned |
+| `vllm-disagg-h100` | vLLM | 4x H100 | Disaggregated | Not assigned |
+| `vllm-agg-h200` | vLLM | 2x H200 | Aggregated | Not assigned |
+| `vllm-disagg-h200` | vLLM | 2x H200 | Disaggregated | Not assigned |
+| `vllm-agg-b200` | vLLM | 4x B200 | Aggregated | Not assigned |
+| `vllm-disagg-b200` | vLLM | 5x B200 | Disaggregated | Not assigned |
+| `vllm-agg-b200-certified` | vLLM | 4x B200 | Aggregated | <span className="dynamo-badge dynamo-badge-nvidia-certified" title="Certified and supported by NVIDIA through NIM Factory. Includes everything Optimized means.">NVIDIA Certified</span> |
+| `vllm-disagg-b200-certified` | vLLM | 5x B200 | Disaggregated | <span className="dynamo-badge dynamo-badge-nvidia-certified" title="Certified and supported by NVIDIA through NIM Factory. Includes everything Optimized means.">NVIDIA Certified</span> |
+| `vllm-agg-gb200` | vLLM | 4x GB200 | Aggregated | Not assigned |
+| `vllm-disagg-gb200` | vLLM | 5x GB200 | Disaggregated | Not assigned |
+| `vllm-agg-b300` | vLLM | 4x B300 | Aggregated | Not assigned |
+| `vllm-disagg-b300` | vLLM | 5x B300 | Disaggregated | Not assigned |
+| `vllm-agg-gb300` | vLLM | 4x GB300 | Aggregated | Not assigned |
+| `vllm-disagg-gb300` | vLLM | 5x GB300 | Disaggregated | Not assigned |
+| `vllm-agg-vr200` | vLLM | 11x VR200 | Aggregated | Not assigned |
+| `vllm-disagg-vr200` | vLLM | 11x VR200 | Disaggregated | Not assigned |
+| `trtllm-agg-b200` | TensorRT-LLM | 4x B200 | Aggregated | Not assigned |
+| `trtllm-disagg-b200` | TensorRT-LLM | 4x B200 | Disaggregated | Not assigned |
+
+{/* target-badges:end */}
 
 ## Prerequisites
 
