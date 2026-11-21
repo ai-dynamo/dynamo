@@ -68,4 +68,36 @@ deny = [
 	# Ensure we don't depend on openssl
     { name = "native-tls" },
     { name = "openssl-sys" },
+
+    # Media-codec allowlist for Rust crates. It is the counterpart of
+    # container/compliance/policy/codec_policy.yaml, which gates the image
+    # files. Its deny_components list repeats these crate names, and
+    # container/compliance/tests/test_scan_codecs.py keeps the two in sync.
+    # AAC
+    { crate = "symphonia-codec-aac", reason = "AAC decoder, outside the media-codec allowlist" },
+    { crate = "fdk-aac", reason = "AAC codec (libfdk-aac), outside the media-codec allowlist" },
+    { crate = "fdk-aac-sys", reason = "AAC codec (libfdk-aac), outside the media-codec allowlist" },
+    { crate = "faad2", reason = "AAC decoder (libfaad2), outside the media-codec allowlist" },
+    { crate = "faad2-sys", reason = "AAC decoder (libfaad2), outside the media-codec allowlist" },
+    { crate = "redlux", reason = "AAC decoder, outside the media-codec allowlist" },
+    # H.264
+    { crate = "openh264", reason = "H.264 codec (OpenH264), outside the media-codec allowlist" },
+    { crate = "openh264-sys", reason = "H.264 codec (OpenH264), outside the media-codec allowlist" },
+    { crate = "openh264-sys2", reason = "H.264 codec (OpenH264), outside the media-codec allowlist" },
+    { crate = "x264", reason = "H.264 encoder (libx264), outside the media-codec allowlist" },
+    { crate = "x264-sys", reason = "H.264 encoder (libx264), outside the media-codec allowlist" },
+    { crate = "x264-dev", reason = "H.264 encoder (libx264), outside the media-codec allowlist" },
+    { crate = "less-avc", reason = "H.264 encoder, outside the media-codec allowlist" },
+    # H.265
+    { crate = "x265", reason = "H.265 encoder (libx265), outside the media-codec allowlist" },
+    { crate = "x265-sys", reason = "H.265 encoder (libx265), outside the media-codec allowlist" },
+    { crate = "libde265", reason = "H.265 decoder (libde265), outside the media-codec allowlist" },
+    { crate = "libde265-sys", reason = "H.265 decoder (libde265), outside the media-codec allowlist" },
 ]
+
+# The FFmpeg bindings must link the in-tree FFmpeg build. The `build` feature
+# compiles FFmpeg from source with its default codec set instead, and every
+# `build-lib-*` feature turns `build` on.
+[[bans.features]]
+crate = "ffmpeg-sys-next"
+deny = ["build"]

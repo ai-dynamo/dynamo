@@ -332,6 +332,7 @@ areas:
   - dev/sanity_check.py
   - dynamo.code-workspace
   - hatch_build.py
+  - lib/patches/
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/

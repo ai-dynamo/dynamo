@@ -17,6 +17,12 @@
 # vllm/sglang media-library cleanup. New third-party bundled media libraries must
 # be either removed or added to `exceptions` with a reason + owner — never
 # silently allowlisted.
+#
+# The file scan cannot see a codec that is compiled into a Rust binary. The
+# [bans] list in the root deny.toml blocks Rust crates that carry these codecs,
+# and the pre-merge cargo-deny check enforces it. deny_components below repeats
+# those crate names, so the SBOM gate also fails on a Rust codec crate in a
+# Dynamo build. A unit test keeps the two lists in sync.
 
 # Filesystem globs (matched against absolute paths under the scan root) for
 # media-codec libraries / binaries that must not ship. libav*/libsw* are matched
@@ -75,6 +81,23 @@ deny_components:
   - name: x264
   - name: x265
   - name: fdk-aac
+  # Rust codec crates from the [bans] list in the root deny.toml. The image SBOM
+  # lists the Rust crates of the ai-dynamo-runtime build. x264, x265 and fdk-aac
+  # above also match the Rust crates of those names.
+  - name: symphonia-codec-aac
+  - name: fdk-aac-sys
+  - name: faad2
+  - name: faad2-sys
+  - name: redlux
+  - name: openh264
+  - name: openh264-sys
+  - name: openh264-sys2
+  - name: x264-sys
+  - name: x264-dev
+  - name: less-avc
+  - name: x265-sys
+  - name: libde265
+  - name: libde265-sys
 
 # Absolute-path prefixes whose media libraries are OUR in-tree ffmpeg, built with
 # the narrow decoder/encoder allowlist in wheel_builder.Dockerfile. Matches here
