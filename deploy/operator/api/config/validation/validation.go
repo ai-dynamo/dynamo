@@ -18,9 +18,12 @@
 package validation
 
 import (
+	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -44,7 +47,57 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 		validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators")),
 		validateIngress(&config.Ingress, field.NewPath("ingress")),
 		validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh")),
+		validateGlobalDiscovery(&config.GlobalDiscovery, field.NewPath("globalDiscovery")),
 	)
+}
+
+// validateGlobalDiscovery checks the settings that DynamoPoolRelays with
+// spec.globalDiscovery register their pools with.
+func validateGlobalDiscovery(globalDiscovery *configv1alpha1.GlobalDiscoveryConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// A PoolRelay needs both settings to register, in forms that it accepts.
+	switch {
+	case globalDiscovery.URL == "" && globalDiscovery.Region != "":
+		allErrs = append(allErrs, field.Required(fldPath.Child("url"), "must be set with region"))
+	case globalDiscovery.URL != "" && globalDiscovery.Region == "":
+		allErrs = append(allErrs, field.Required(fldPath.Child("region"), "must be set with url"))
+	}
+	if globalDiscovery.URL != "" {
+		if err := CheckHTTPURL(globalDiscovery.URL); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("url"), globalDiscovery.URL, err.Error()))
+		}
+	}
+	if HasSurroundingSpace(globalDiscovery.Region) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("region"), globalDiscovery.Region, "must not have surrounding whitespace"))
+	}
+	return allErrs
+}
+
+// HTTPURLPattern is the URL rule that CheckHTTPURL and the DynamoPoolRelay schema's
+// frontends share: http or https; a DNS name whose last label is not all digits, a
+// dotted-quad IPv4 address or a bracketed IPv6 address; a port from 1 to 65535; and
+// no white space, control character or comma, at which a list of frontends splits.
+const HTTPURLPattern = `^https?://(([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?[.])*([0-9]*[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?|[0-9]+-[-A-Za-z0-9]*[A-Za-z0-9])|((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|\[[0-9A-Fa-f:.]+\])(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?([/?#][^\p{Cc}\p{Z},]*)?$`
+
+var httpURL = regexp.MustCompile(HTTPURLPattern)
+
+// CheckHTTPURL returns an error unless value matches HTTPURLPattern, which keeps
+// to URLs that the PoolRelay's URL parser accepts.
+func CheckHTTPURL(value string) error {
+	if !httpURL.MatchString(value) {
+		return fmt.Errorf("must be an HTTP(S) URL whose host is a DNS name, an IPv4 address or a bracketed IPv6 address, "+
+			"with a port from 1 to 65535 and no white space or comma, not %q", value)
+	}
+	return nil
+}
+
+// HasSurroundingSpace reports whether value starts or ends with a character
+// that the PoolRelay's Python CLI strips: Unicode white space or U+001C-U+001F.
+func HasSurroundingSpace(value string) bool {
+	return strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
+	}) != value
 }
 
 func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.Path) field.ErrorList {

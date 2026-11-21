@@ -184,6 +184,14 @@ dynamo:
     existingSecretName: ''
     secure: true
 
+  # Global Discovery Service for the DynamoPoolRelays with spec.globalDiscovery.
+  # Set both values or neither.
+  globalDiscovery:
+    # -- Root URL of the Global Discovery Service. Format: `http://host:8080/`
+    url: ""
+    # -- This cluster's region, which the pools register in.
+    region: ""
+
   metrics:
     prometheusEndpoint: ""
     podMonitors:

@@ -284,6 +284,15 @@ dynamo-operator:
         # when tlsMode is "MUTUAL".
         caCertificates: ""
 
+    # Global Discovery Service for the DynamoPoolRelays with spec.globalDiscovery.
+    # Set both values or neither. Until both are set, such a Relay is left as it
+    # is, with Ready False and reason GlobalDiscoveryNotConfigured.
+    globalDiscovery:
+      # -- Root URL of the Global Discovery Service. Format: `http://host:8080/`
+      url: ""
+      # -- This cluster's region, which the pools register in.
+      region: ""
+
     # Metrics configuration
     metrics:
       # -- Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables
