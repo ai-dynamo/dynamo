@@ -20,8 +20,14 @@
 # KUBECONFIG at it, and grant the same read access there.
 #
 # With the default --registration-storage=memory, one instance keeps only the
-# registrations it receives, so run one, and have every PoolRelay register
-# with it.
+# registrations it receives. To run one in each cluster, export this Service,
+# import it into every cluster that runs an instance, this one included, and
+# add --peer-service=global-discovery-service, so the instances share their
+# registrations. With Karmada, place its ServiceImport on each of those
+# clusters, not only on the others, or read the control plane as above and
+# add --peer-namespace=global-discovery: an instance that does not find itself
+# in the import keeps its pool lists incomplete. With
+# --registration-storage=dynamodb, the instances share the table instead.
 apiVersion: v1
 kind: Namespace
 metadata:
