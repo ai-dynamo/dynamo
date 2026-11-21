@@ -90,6 +90,15 @@ try:
 except pynvml.NVMLError as e:
     print(f"NVML init failed ({e}) -- GPU monitoring disabled")
 
+
+def _gpu_memory_total_gib(handle) -> float:
+    try:
+        return pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024**3)
+    except pynvml.NVMLError_NotSupported:
+        # Unified-memory GPUs may not expose framebuffer memory through NVML.
+        return 0.0
+
+
 PROCESS_COLORS = [
     "#00e5ff",
     "#ff1744",
@@ -701,8 +710,7 @@ class MetricsCollector:
                 if isinstance(name, bytes):
                     name = name.decode("utf-8")
                 self.gpu_names.append(name)
-                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                self.gpu_mem_total_gib.append(mem.total / (1024**3))
+                self.gpu_mem_total_gib.append(_gpu_memory_total_gib(handle))
                 self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
                 self._gpu_top_ids.append([])
                 self.gpu_util.append(deque(maxlen=maxlen_main))
@@ -1595,10 +1603,12 @@ def main():
             name = pynvml.nvmlDeviceGetName(handle)
             if isinstance(name, bytes):
                 name = name.decode("utf-8")
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            total_gib = mem.total / (1024**3)
-            print(f"GPU {i}: {name} ({total_gib:.1f} GiB)")
-            GPU_MEM_TOTAL_GIB.labels(gpu=str(i)).set(total_gib)
+            total_gib = _gpu_memory_total_gib(handle)
+            if total_gib > 0:
+                print(f"GPU {i}: {name} ({total_gib:.1f} GiB)")
+                GPU_MEM_TOTAL_GIB.labels(gpu=str(i)).set(total_gib)
+            else:
+                print(f"GPU {i}: {name} (memory unavailable)")
     else:
         print("No NVIDIA GPUs detected -- CPU + Disk only")
     print()
