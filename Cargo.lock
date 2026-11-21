@@ -3502,6 +3502,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sglang-generate",
+ "dynamo-sglang-mocker",
  "dynamo-sidecar-common",
  "futures",
  "rand 0.9.4",
@@ -9498,6 +9499,8 @@ dependencies = [
 [[package]]
 name = "sglang-api-types"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445ae1031a16227c066c3e9dfb338407bed4d62994d0637c8b2fae05fa993344"
 dependencies = [
  "bytes",
  "prost 0.14.3",
