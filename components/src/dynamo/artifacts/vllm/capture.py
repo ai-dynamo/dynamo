@@ -154,9 +154,10 @@ class VllmArtifactSession:
     logprob_width: int
     prompt: tuple[int, ...] | None
     tokens: list[int]
-    selected: list[float]
-    candidates: list[list[int]]
-    candidate_scores: list[list[float]]
+    selected: np.ndarray | None
+    candidates: np.ndarray | None
+    candidate_scores: np.ndarray | None
+    logprob_rows: int
     routes: MoeRoutes | None
     error: bool
     _closed: bool
@@ -241,9 +242,10 @@ class VllmArtifactSession:
         session.logprob_width = logprob_width
         session.prompt = None
         session.tokens = []
-        session.selected = []
-        session.candidates = []
-        session.candidate_scores = []
+        session.selected = None
+        session.candidates = None
+        session.candidate_scores = None
+        session.logprob_rows = 0
         session.routes = None
         session.error = False
         session._closed = False
@@ -266,12 +268,28 @@ class VllmArtifactSession:
             + 8192
             + len(session.profile) * 512
         )
-        session.reserved_bytes = route_elements * 16 + source_bound * 4
+        row_scratch = 256 * logprob_width if "topk_logprobs" in contents else 0
+        session.reserved_bytes = route_elements * 16 + source_bound * 4 + row_scratch
         if source_bound > 64 << 20:
             raise ValueError("artifact exceeds supported worst-case size")
         if mode == "inline_base64" and source_bound * 4 // 3 + 4 > 1 << 20:
             raise ValueError("artifact exceeds inline worst-case size")
         session.budget.reserve(session.reserved_bytes)
+        try:
+            selected_rows = max_tokens if "selected_logprobs" in contents else 0
+            candidate_rows = max_tokens if "topk_logprobs" in contents else 0
+            session.selected = np.empty(selected_rows, dtype=np.float32)
+            session.candidates = np.empty(
+                (candidate_rows, logprob_width), dtype=np.int64
+            )
+            session.candidate_scores = np.empty(
+                (candidate_rows, logprob_width), dtype=np.float32
+            )
+        except Exception:
+            session._discard()
+            session.budget.release(session.reserved_bytes)
+            session.reserved_bytes = 0
+            raise
         return session
 
     async def observe_async(self, output, prompt_token_ids):
@@ -298,8 +316,10 @@ class VllmArtifactSession:
         if self.error or self._closed:
             return
         try:
-            if getattr(output, "index", 0) != 0:
+            if output.index != 0:
                 raise ValueError("unexpected artifact choice")
+            entries = output.logprobs
+            native = output.routed_experts
             prompt = tuple(prompt_token_ids) if prompt_token_ids is not None else None
             if prompt is None or len(prompt) > self.max_prompt:
                 raise ValueError("exact prompt IDs unavailable or exceed admission")
@@ -313,15 +333,16 @@ class VllmArtifactSession:
                 raise ValueError("completion exceeds admission")
             self.tokens.extend(tokens)
             if self.contents & {"selected_logprobs", "topk_logprobs"}:
-                entries = getattr(output, "logprobs", None)
                 if entries is None and not tokens:
                     entries = []
                 if entries is None or len(entries) != len(tokens):
                     raise ValueError("requested logprobs unavailable")
                 for token, entry in zip(tokens, entries):
                     row = _validated_logprob_row(entry, token, self.logprob_width)
+                    row_index = self.logprob_rows
                     if "selected_logprobs" in self.contents:
-                        self.selected.append(row[token])
+                        assert self.selected is not None
+                        self.selected[row_index] = row[token]
                     if "topk_logprobs" in self.contents:
                         ranked = sorted(
                             row.items(),
@@ -329,9 +350,15 @@ class VllmArtifactSession:
                         )[: self.logprob_width]
                         if len(ranked) != self.logprob_width:
                             raise ValueError("requested candidate width unavailable")
-                        self.candidates.append([candidate for candidate, _ in ranked])
-                        self.candidate_scores.append([value for _, value in ranked])
-            native = getattr(output, "routed_experts", None)
+                        assert self.candidates is not None
+                        assert self.candidate_scores is not None
+                        self.candidates[row_index] = [
+                            candidate for candidate, _ in ranked
+                        ]
+                        self.candidate_scores[row_index] = [
+                            value for _, value in ranked
+                        ]
+                    self.logprob_rows += 1
             if native is not None and "moe_routes" in self.contents:
                 if (
                     not isinstance(native, np.ndarray)
@@ -350,7 +377,7 @@ class VllmArtifactSession:
                 )
         except (ValueError, TypeError, AttributeError):
             self.error = True
-            self._discard()
+            self.close()
 
     def _view(self):
         if self.error or self.prompt is None:
@@ -361,19 +388,18 @@ class VllmArtifactSession:
                 raise ValueError("requested routes unavailable")
             components.append(self.routes)
         if "selected_logprobs" in self.contents:
+            assert self.selected is not None
             components.append(
                 SelectedLogprobs(
                     len(self.prompt),
-                    Tensor.from_array(np.asarray(self.selected, dtype=np.float32)),
+                    Tensor.from_array(self.selected[: self.logprob_rows]),
                 )
             )
         if "topk_logprobs" in self.contents:
-            candidates = np.asarray(self.candidates, dtype=np.int64).reshape(
-                -1, self.logprob_width
-            )
-            scores = np.asarray(self.candidate_scores, dtype=np.float32).reshape(
-                -1, self.logprob_width
-            )
+            assert self.candidates is not None
+            assert self.candidate_scores is not None
+            candidates = self.candidates[: self.logprob_rows]
+            scores = self.candidate_scores[: self.logprob_rows]
             if candidates.ndim != 2 or scores.shape != candidates.shape:
                 raise ValueError("top-k logprobs do not have constant width")
             components.append(
@@ -457,6 +483,7 @@ class VllmArtifactSession:
         self.routes = None
         self.prompt = None
         self.tokens = []
-        self.selected = []
-        self.candidates = []
-        self.candidate_scores = []
+        self.selected = None
+        self.candidates = None
+        self.candidate_scores = None
+        self.logprob_rows = 0
