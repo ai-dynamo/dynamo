@@ -99,3 +99,40 @@ def test_install_test_only_packages_removes_failed_target(monkeypatch, tmp_path)
 
     assert not Path(target).exists()
     assert not common._test_only_pip_targets
+
+
+class _MarkedNode:
+    def __init__(self, marks: set[str]):
+        self._marks = marks
+
+    def get_closest_marker(self, name: str):
+        return getattr(pytest.mark, name).mark if name in self._marks else None
+
+
+class _MarkedRequest:
+    def __init__(self, marks: set[str]):
+        self.node = _MarkedNode(marks)
+
+
+@pytest.mark.parametrize(
+    ("worker_id", "marks", "expected_sleeps"),
+    [
+        ("gw152", {"gpu_0"}, []),
+        ("gw152", {"gpu_1"}, [2280]),
+        ("gw3", {"xpu_2"}, [45]),
+    ],
+    ids=["gpu_0-no-stagger", "gpu_1-staggered", "xpu_2-staggered"],
+)
+def test_prepare_deployment_xdist_stagger(
+    monkeypatch, worker_id, marks, expected_sleeps
+):
+    sleeps: list[float] = []
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", worker_id)
+    monkeypatch.setattr(common.time, "sleep", sleeps.append)
+
+    prep = common._prepare_deployment(
+        _config(), _MarkedRequest(marks), ports=None, extra_env=None
+    )
+    common._cleanup_prepared_deployment(prep)
+
+    assert sleeps == expected_sleeps
