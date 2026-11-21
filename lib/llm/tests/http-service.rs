@@ -1792,6 +1792,99 @@ async fn test_concurrent_requests_with_shared_client_request_id() {
     task.await.unwrap().unwrap();
 }
 
+/// List and retrieve must report the same context, the smallest limit of the
+/// model's cards, for the model and its alias, with the Anthropic API on and
+/// off.
+#[tokio::test]
+async fn test_model_context_metadata_matches_list_and_retrieve() {
+    let primary = "context-metadata";
+    let alias = "context-metadata-alias";
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    for anthropic_enabled in [false, true] {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .enable_anthropic_endpoints(anthropic_enabled)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let manager = state.manager();
+        let mut first = ModelDeploymentCard::with_name_only(primary);
+        first.runtime_config.context_length = Some(2048);
+        let mut second = first.clone();
+        second.runtime_config.context_length = Some(4096);
+        manager
+            .add_chat_completions_model(primary, first.mdcsum(), Arc::new(CounterEngine {}))
+            .unwrap();
+        let model = manager.get_model(primary).unwrap();
+        let namespace = model.first_ready_workers().unwrap();
+        let workers = model.get_worker_set(&namespace).unwrap();
+        assert!(manager.register_alias(alias, primary));
+        assert!(manager.add_worker_set_arc(alias, &namespace, workers));
+        manager.save_model_card("context-a", first).unwrap();
+        manager.save_model_card("context-b", second).unwrap();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+        wait_for_service_ready(port).await;
+        let base = format!("http://127.0.0.1:{port}/v1/models");
+
+        for anthropic_format in [false, true] {
+            if anthropic_format && !anthropic_enabled {
+                continue;
+            }
+            let field = if anthropic_format {
+                "max_input_tokens"
+            } else {
+                "context_window"
+            };
+            let mut request = client.get(&base);
+            if anthropic_format {
+                request = request.header("anthropic-version", "2023-06-01");
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let listed: serde_json::Value = response.json().await.unwrap();
+            let rows = listed["data"].as_array().unwrap();
+            assert_eq!(rows.len(), 2);
+            let primary_context = rows.iter().find(|row| row["id"] == primary).unwrap()[field]
+                .as_u64()
+                .unwrap();
+            assert_eq!(primary_context, 2048);
+
+            for id in [primary, alias] {
+                let listed_context = rows.iter().find(|row| row["id"] == id).unwrap()[field]
+                    .as_u64()
+                    .unwrap();
+                assert_eq!(listed_context, primary_context);
+                let mut request = client.get(format!("{base}/{id}"));
+                if anthropic_format {
+                    request = request.header("anthropic-version", "2023-06-01");
+                }
+                let response = request.send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let retrieved: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(retrieved["id"], id);
+                assert_eq!(retrieved[field].as_u64(), Some(listed_context));
+            }
+        }
+
+        cancel_token.cancel();
+        timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("HTTP service must stop")
+            .unwrap()
+            .unwrap();
+    }
+}
+
 /// Exercises the per-model readiness sub-resource `GET /v1/models/{model}/ready`
 /// (Mechanism 4) end-to-end through the real router, including:
 ///   - the endpoint returns the structured readiness body (not the OpenAI
