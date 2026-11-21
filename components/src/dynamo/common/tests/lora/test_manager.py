@@ -72,6 +72,19 @@ class TestGetLoraManagerSingleton:
         monkeypatch.setenv("DYN_LORA_ENABLED", "false")
         assert get_lora_manager() is None
 
+    @pytest.mark.parametrize("value", ["on", "ON", " true "])
+    def test_accepts_the_runtime_truthy_spellings(
+        self, fresh_singleton, monkeypatch, value
+    ):
+        # The Rust runtime reads DYN_LORA_ENABLED through lib/truthy, which
+        # accepts these spellings and registers /v1/loras. The Python manager
+        # in the same worker process must agree.
+        monkeypatch.setattr(
+            manager_module, "LoRAManager", lambda cache_path=None: object()
+        )
+        monkeypatch.setenv("DYN_LORA_ENABLED", value)
+        assert get_lora_manager() is not None
+
     def test_returns_same_instance_on_subsequent_calls(
         self, fresh_singleton, monkeypatch
     ):
