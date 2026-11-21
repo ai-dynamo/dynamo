@@ -200,8 +200,9 @@ pub enum KvPathReason {
     /// hosted path does not on the prefill hop, with session affinity, or for a picker that
     /// reads active requests.
     Lora,
-    /// Workers that advertise routing taints. Only the scheduler filters workers by the
-    /// taints a request requires, as topology-aware KV transfer does.
+    /// Workers that advertise routing taints. Only the scheduler weighs the taints a request
+    /// prefers. The hosted path honors the taints a request requires, as topology-aware KV
+    /// transfer sets them, and ignores preferred ones.
     WorkerTaints,
     /// Router replica sync under a picker that reads active requests. Only the scheduler's
     /// counts include the requests other frontends sent.
@@ -360,8 +361,8 @@ fn role_policy_in(
     })
 }
 
-/// The hosted policy of a role whose policy is only a picker. The KV path would have
-/// filtered workers by the taints a request requires, so this one fails such a request.
+/// The hosted policy of a role whose policy is only a picker. The KV path filters workers
+/// by the taints a request requires, so this one does too.
 fn hosted_policy(
     policy_type: &str,
     picker: HostedWorkerPicker,
@@ -375,7 +376,7 @@ fn hosted_policy(
         .into_iter()
         .find(|&mode| routing_mode_policy_type(mode) == Some(policy_type))
     {
-        return HostedPolicy::for_mode(mode).map(HostedPolicy::rejecting_required_taints);
+        return HostedPolicy::for_mode(mode).map(HostedPolicy::honoring_required_taints);
     }
     let fresh_picker = {
         let policy_type = policy_type.to_owned();
@@ -388,7 +389,7 @@ fn hosted_policy(
                 .map_err(|_| anyhow::anyhow!("{policy_type} policy cannot run without KV routing"))
         }
     };
-    Ok(HostedPolicy::for_type(policy_type, picker, fresh_picker).rejecting_required_taints())
+    Ok(HostedPolicy::for_type(policy_type, picker, fresh_picker).honoring_required_taints())
 }
 
 /// The factory of the policy type the router mode names. A value that is not a registered
@@ -620,7 +621,7 @@ mod tests {
                 (_, RoutingPolicy::Hosted(hosted)) => {
                     assert_eq!(Some(hosted.picker().inputs()), picker_inputs, "{mode:?}");
                     // A router mode never filtered workers by taint.
-                    assert!(!hosted.rejects_required_taints(), "{mode:?}");
+                    assert!(!hosted.honors_required_taints(), "{mode:?}");
                 }
                 _ => panic!("{mode:?} resolved to the wrong policy"),
             }
@@ -779,11 +780,8 @@ mod tests {
             panic!("random must run hosted");
         };
         assert_eq!(policy.transport_mode(), RouterMode::Random);
-        // On the KV path the role filtered workers by required taints. Hosted, it fails a
-        // request that requires any.
-        assert!(
-            matches!(&policy, RoutingPolicy::Hosted(hosted) if hosted.rejects_required_taints())
-        );
+        // A KV router filters workers by required taints. Hosted, the role does too.
+        assert!(policy.honors_required_taints());
 
         // Any other picker runs under its own name, built once, and its second picker (LoRA
         // filtering) is its own too.
@@ -793,7 +791,7 @@ mod tests {
             panic!("{HOSTED_TYPE} must run hosted");
         };
         assert_eq!(hosted.label(), HOSTED_TYPE);
-        assert!(hosted.rejects_required_taints());
+        assert!(hosted.honors_required_taints());
         assert_eq!(pick_of_three(hosted.picker()), 3);
         assert_eq!(built.load(Ordering::SeqCst), 1);
         assert_eq!(pick_of_three(&hosted.fresh_picker().unwrap()), 3);

@@ -308,8 +308,9 @@ impl PrefillRouter {
         let client = target.client(context.parent_token.clone()).await?;
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
-        // This must be done before creating the router so bootstrap info is available
-        context
+        // This must be done before creating the router so bootstrap info is available.
+        // A hop hosted by its policy also reads each worker's taints from it.
+        let worker_configs = context
             .model_manager
             .get_or_create_runtime_config_watcher(endpoint)
             .await?;
@@ -435,6 +436,7 @@ impl PrefillRouter {
             RoutingHost::builder(client, policy)
                 .load_context(load_context.clone())
                 .affinity_coordinator(affinity)
+                .worker_configs(worker_configs)
                 .build()
                 .await?,
         );
@@ -705,7 +707,7 @@ mod tests {
         },
         storage::kv,
     };
-    use dynamo_scheduler::host::RoutingConstraints;
+    use dynamo_scheduler::host::{KvSchedulerError, RoutingConstraints};
     use futures::StreamExt;
     use std::collections::HashSet;
 
@@ -894,6 +896,12 @@ mod tests {
                 KvRouterConfig::default(),
             )));
             advertised.kv_cache_block_size = if marker == 2 { 32 } else { 64 };
+            // Taints are each worker's own and are not part of the set's identity.
+            advertised.runtime_config.taints = match marker {
+                0 => HashSet::from(["zone-b".to_string()]),
+                1 => HashSet::from(["zone-a".to_string()]),
+                _ => HashSet::new(),
+            };
             drt.discovery()
                 .register(
                     DiscoverySpec::from_model(
@@ -1124,7 +1132,7 @@ mod tests {
             let hop = if reserves_workers {
                 PrefillRouter::new(
                     oneshot::channel().1,
-                    manager,
+                    manager.clone(),
                     RouterMode::RoundRobin,
                     16,
                     None,
@@ -1139,7 +1147,7 @@ mod tests {
             } else {
                 PrefillRouter::new_with_selection_policy(
                     None,
-                    manager,
+                    manager.clone(),
                     RouterMode::RoundRobin,
                     false,
                     16,
@@ -1156,7 +1164,7 @@ mod tests {
                     None,
                 )
             };
-            let (_admissions, admitted_ids) = watch::channel(vec![ids[2]]);
+            let (admissions, admitted_ids) = watch::channel(vec![ids[2]]);
             hop.set_target(Some(WorkerSetTarget::Committed(CommittedWorkerSetTarget {
                 endpoint: endpoint.clone(),
                 group: endpoint.id().to_string(),
@@ -1169,6 +1177,53 @@ mod tests {
             assert_eq!(
                 binding.router.kv_router_if_enabled().is_some(),
                 reserves_workers
+            );
+
+            // With or without a KV router, the hop sends a request that requires taints
+            // only to an admitted worker that advertises them. The selected card, worker
+            // 2's, advertises none, and worker 0 has `zone-b` but is not admitted.
+            admissions.send_replace(vec![ids[1], ids[2]]);
+            let mut configs = manager
+                .get_or_create_runtime_config_watcher(&endpoint)
+                .await
+                .unwrap();
+            let requiring = |taint: &str| {
+                let mut request = request();
+                request.routing_mut().routing_constraints = Some(RoutingConstraints {
+                    required_taints: HashSet::from([taint.to_string()]),
+                    ..Default::default()
+                });
+                binding.router.generate(SingleIn::new(request))
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                configs
+                    .wait_for(|configs| configs.len() == 3)
+                    .await
+                    .unwrap();
+                while requiring("zone-a").await.is_err() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the admitted worker with the taint must become routable");
+            for _ in 0..4 {
+                let mut response = requiring("zone-a").await.unwrap();
+                assert_eq!(
+                    response.next().await.unwrap().data.unwrap().token_ids,
+                    vec![1],
+                    "reserves_workers={reserves_workers}"
+                );
+                while response.next().await.is_some() {}
+            }
+            let Err(error) = requiring("zone-b").await else {
+                panic!("a worker that is not admitted must not be routed to");
+            };
+            assert!(
+                error.chain().any(|cause| matches!(
+                    cause.downcast_ref::<KvSchedulerError>(),
+                    Some(KvSchedulerError::NoEndpoints)
+                )),
+                "reserves_workers={reserves_workers}: {error:#}"
             );
         }
 

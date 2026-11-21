@@ -62,7 +62,8 @@ and the booking lifecycle these rules protect.
 - A role whose policy is only a picker runs without a `KvRouter`. When you add something that
   works only on the KV path, add it to `KvPathReason` in `role_routing.rs`, or such a role
   drops it silently. A reason is decided when the pipeline is built. For something a request
-  asks for, fail the request in `routing_host/hosted.rs`, as required taints do.
+  asks for, honor it in `routing_host/hosted.rs`, as required taints are, or fail the request
+  there. Never route such a request as if it had not asked.
 - Fail closed while the prefill target is `Pending`. Pass through only when `Untargeted`.
 - Do not let clients request a conditional bypass.
 - When you add a selection input, add it to the inputs table in `README.md` and decide whether

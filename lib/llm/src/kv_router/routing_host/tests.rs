@@ -10,10 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::kv_router::SelectionPolicySource;
 use crate::kv_router::role_routing::{
     check_hint_policies_route_on_kv_path, hosted_picker, non_kv_policy,
 };
+use crate::kv_router::{RoleInputs, RolePolicy, SelectionPolicySource, role_policy};
+use crate::worker_type::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
@@ -181,7 +182,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(&host.inner, picker, &request(), Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1), None)
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
@@ -295,10 +296,10 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     let picker = hosted.picker();
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(&host.inner, picker, &request(), Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1), None)
         .unwrap();
     let second = occupancy
-        .select_and_reserve(&host.inner, picker, &request(), None)
+        .select_and_reserve(&host.inner, picker, &request(), None, None)
         .unwrap();
 
     assert_eq!(first.worker_id, 1);
@@ -1128,10 +1129,20 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     let request = Context::new(request());
 
     let hard = host
-        .select_hosted_worker(&request, Some(AffinityTarget::worker(worker_id)), None)
+        .select_hosted_worker(
+            &request,
+            Some(AffinityTarget::worker(worker_id)),
+            None,
+            None,
+        )
         .unwrap();
     let soft = host
-        .select_hosted_worker(&request, None, Some(AffinityTarget::worker(worker_id)))
+        .select_hosted_worker(
+            &request,
+            None,
+            Some(AffinityTarget::worker(worker_id)),
+            None,
+        )
         .unwrap();
 
     assert_eq!(hard.initial_worker, worker_id);
@@ -5251,61 +5262,424 @@ async fn host_with_recorded_dispatch(
     (host, dispatch, worker_id, runtime)
 }
 
-/// A role that runs hosted because of its policy would have had a KV router filter workers
-/// by the taints a request requires. It fails such a request; the router modes, which never
-/// filtered, still dispatch it.
+/// The hosted policy `role_policy` resolves for a decode role whose selected policy is
+/// `policy_type`, a picker: what `--router-decode-policy <policy_type>` builds.
+fn role_hosted_policy(policy_type: &str) -> RoutingPolicy {
+    let config = KvRouterConfig {
+        router_decode_policy: Some(policy_type.to_string()),
+        ..Default::default()
+    };
+    let role = RoleInputs {
+        role: WorkerType::Decode,
+        config: &config,
+        model_name: Some("test"),
+        selection: SelectionPolicySource::Registry,
+        has_request_classifier: false,
+        lora_enabled: false,
+        reserves_workers: false,
+        busy_thresholds: false,
+        workers_have_taints: false,
+        fronts_conditional_disagg: false,
+    };
+    let RolePolicy::Ready(policy) = role_policy(&RouterMode::KV.into(), &role).unwrap() else {
+        panic!("{policy_type} must run hosted");
+    };
+    policy
+}
+
+/// A candidate policy that names one worker for every request.
+struct FixedCandidate(u64);
+
+impl HostedCandidatePolicy for FixedCandidate {
+    fn select(
+        &self,
+        _request: &PreprocessedRequest,
+        _pin: Option<u64>,
+        _live: &dyn Fn() -> Vec<u64>,
+        _free: &dyn Fn() -> Vec<u64>,
+    ) -> Result<Option<crate::routing_policy::CandidateSelection>, Error> {
+        Ok(Some(crate::routing_policy::CandidateSelection {
+            worker: self.0,
+            fallback: HashSet::from([UNTAINTED, ZONE_A]),
+            lease: None,
+        }))
+    }
+
+    fn check_selected(
+        &self,
+        _request: &PreprocessedRequest,
+        _worker: u64,
+        _pin: Option<u64>,
+        _live: &dyn Fn() -> Vec<u64>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// The two workers of a [`TaintHost`]: one that advertises no taints and one in `zone-a`.
+const UNTAINTED: u64 = 101;
+const ZONE_A: u64 = 202;
+
+/// A host over [`UNTAINTED`] and [`ZONE_A`] whose dispatch records the worker each request
+/// reached. `configs` is the endpoint's runtime-config watch and `source` its live instances.
+struct TaintHost {
+    host: RoutingHost,
+    dispatch: Arc<CompletedBuiltinDispatch>,
+    configs: watch::Sender<HashMap<u64, ModelRuntimeConfig>>,
+    source: watch::Sender<Vec<Instance>>,
+    affinity: Option<AffinityCoordinator>,
+}
+
+impl TaintHost {
+    async fn new(
+        endpoint: dynamo_runtime::component::Endpoint,
+        policy: RoutingPolicy,
+        affinity: Option<crate::session_affinity::SessionAffinityMode>,
+        candidate: Option<u64>,
+    ) -> Self {
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [UNTAINTED, ZONE_A]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "{}.{instance_id}",
+                    id.name
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source, source_rx) = watch::channel(instances);
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![UNTAINTED, ZONE_A]);
+        client.override_instance_avail(vec![UNTAINTED, ZONE_A]);
+        let (configs, worker_configs) = watch::channel(HashMap::from([
+            (UNTAINTED, with_taints(&[])),
+            (ZONE_A, with_taints(&["zone-a"])),
+        ]));
+        let affinity =
+            affinity.map(|mode| AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap());
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let host =
+            RoutingHost::builder(client.clone(), policy)
+                .load_context(test_load_context(&client).await)
+                .affinity_coordinator(affinity.clone())
+                .candidate_policy(candidate.map(|worker| {
+                    Arc::new(FixedCandidate(worker)) as Arc<dyn HostedCandidatePolicy>
+                }))
+                .worker_configs(worker_configs)
+                .dispatch(dispatch.clone() as LlmDispatch)
+                .build()
+                .await
+                .unwrap();
+        Self {
+            host,
+            dispatch,
+            configs,
+            source,
+            affinity,
+        }
+    }
+
+    /// Send `request` and take the workers dispatched to. A failed request leaves them.
+    async fn send(&self, request: SingleIn<PreprocessedRequest>) -> Result<Vec<u64>, Error> {
+        let mut stream = self.host.generate(request).await?;
+        while stream.next().await.is_some() {}
+        Ok(std::mem::take(
+            &mut *self.dispatch.worker_ids.lock().unwrap(),
+        ))
+    }
+
+    /// Send `request`, which no worker may serve: it fails as on a KV router, undispatched.
+    async fn assert_no_endpoints(&self, request: SingleIn<PreprocessedRequest>, case: &str) {
+        let error = self.send(request).await.expect_err(case);
+        assert!(
+            matches!(
+                error.downcast_ref::<KvSchedulerError>(),
+                Some(KvSchedulerError::NoEndpoints)
+            ),
+            "{case}: {error:#}"
+        );
+        assert!(
+            self.dispatch.worker_ids.lock().unwrap().is_empty(),
+            "{case}"
+        );
+    }
+}
+
+fn with_taints(taints: &[&str]) -> ModelRuntimeConfig {
+    ModelRuntimeConfig {
+        taints: taints.iter().map(|taint| taint.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn requiring(taint: &str) -> SingleIn<PreprocessedRequest> {
+    let mut input = request();
+    input.routing_mut().routing_constraints = Some(RoutingConstraints {
+        required_taints: HashSet::from([taint.to_string()]),
+        ..Default::default()
+    });
+    Context::new(input)
+}
+
+async fn taint_test_component(namespace: &str) -> (Runtime, dynamo_runtime::component::Component) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace(namespace.to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+    (runtime, component)
+}
+
+/// A role that runs hosted because of its policy sends a request that requires taints only
+/// to a worker that advertises them, read per worker at request time, as a KV router does.
+/// The router modes ignore required taints.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_role_hosted_by_its_policy_fails_a_request_that_requires_taints() {
-    let round_robin = || HostedPolicy::for_mode(RouterMode::RoundRobin).unwrap();
-    for (index, (policy, rejects)) in [
-        (round_robin(), false),
-        (round_robin().rejecting_required_taints(), true),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (host, dispatch, worker_id, runtime) = host_with_recorded_dispatch(
-            &format!("hosted-required-taints-{index}"),
-            RoutingPolicy::Hosted(policy),
+async fn a_role_hosted_by_its_policy_honors_required_taints() {
+    let (runtime, component) = taint_test_component("hosted-required-taints").await;
+
+    for policy_type in ["round-robin", "least-loaded"] {
+        let fixture = TaintHost::new(
+            component.endpoint(policy_type),
+            role_hosted_policy(policy_type),
+            None,
+            None,
         )
         .await;
-        let mut input = request();
-        input.routing_mut().routing_constraints = Some(RoutingConstraints {
-            required_taints: HashSet::from(["dynamo.topology/zone=a".to_string()]),
-            ..Default::default()
+
+        // One worker of the set has the taint and one does not.
+        for _ in 0..4 {
+            assert_eq!(
+                fixture.send(requiring("zone-a")).await.unwrap(),
+                [ZONE_A],
+                "{policy_type}"
+            );
+        }
+        fixture
+            .assert_no_endpoints(requiring("zone-b"), "no worker has the taint")
+            .await;
+
+        // A worker that gets the taint after the host is built becomes eligible, and one
+        // that loses it stops being so.
+        fixture.configs.send_modify(|configs| {
+            configs.insert(UNTAINTED, with_taints(&["zone-b"]));
         });
-        let dispatched = match host.generate(Context::new(input)).await {
-            Ok(mut stream) => {
-                while stream.next().await.is_some() {}
-                vec![worker_id]
-            }
-            Err(error) => {
-                assert!(
-                    matches!(
-                        error.downcast_ref::<KvSchedulerError>(),
-                        Some(KvSchedulerError::NoEndpoints)
-                    ),
-                    "{error:#}"
-                );
-                Vec::new()
-            }
+        assert_eq!(
+            fixture.send(requiring("zone-b")).await.unwrap(),
+            [UNTAINTED],
+            "{policy_type}"
+        );
+        fixture.configs.send_modify(|configs| {
+            configs.insert(UNTAINTED, with_taints(&[]));
+        });
+        fixture
+            .assert_no_endpoints(requiring("zone-b"), "the worker lost the taint")
+            .await;
+
+        // A worker absent from the watch has no known taints.
+        fixture.configs.send_modify(|configs| {
+            configs.remove(&ZONE_A);
+        });
+        fixture
+            .assert_no_endpoints(requiring("zone-a"), "the worker has no runtime config")
+            .await;
+        fixture.configs.send_modify(|configs| {
+            configs.insert(ZONE_A, with_taints(&["zone-a"]));
+        });
+
+        // An explicit worker is honored only when it has the taints.
+        let pinned = |worker_id| {
+            let mut request = requiring("zone-a");
+            request.routing_mut().backend_instance_id = Some(worker_id);
+            request
         };
-        assert_eq!(dispatched.is_empty(), rejects);
-        assert_eq!(*dispatch.worker_ids.lock().unwrap(), dispatched);
+        fixture
+            .assert_no_endpoints(pinned(UNTAINTED), "the pinned worker lacks the taint")
+            .await;
+        assert_eq!(fixture.send(pinned(ZONE_A)).await.unwrap(), [ZONE_A]);
 
-        // Preferred taints only bias a KV router's scores, so they are no reason to fail.
-        let mut input = request();
-        input.routing_mut().routing_constraints = Some(RoutingConstraints {
-            preferred_taints: HashMap::from([("dynamo.topology/zone=a".to_string(), 0.5)]),
-            ..Default::default()
-        });
-        let mut stream = host.generate(Context::new(input)).await.unwrap();
-        while stream.next().await.is_some() {}
+        // The worker with the taint is busy and the other is free. The request is refused
+        // as overloaded, as on a KV router, and the free worker does not get it.
+        let client = &fixture.host.inner.client;
+        client.set_overloaded_instances(&[ZONE_A]);
+        let error = fixture.send(requiring("zone-a")).await.unwrap_err();
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]),
+            "{policy_type}: {error:#}"
+        );
+        assert!(fixture.dispatch.worker_ids.lock().unwrap().is_empty());
+        client.set_overloaded_instances(&[]);
 
-        drop(host);
-        runtime.shutdown();
+        if policy_type == "least-loaded" {
+            // The chosen worker is counted, so the next request goes to the other one.
+            fixture.dispatch.unfinished.store(true, Ordering::SeqCst);
+            let held = fixture.host.generate(requiring("zone-a")).await.unwrap();
+            assert_eq!(fixture.host.occupancy_for_test(ZONE_A), 1);
+            let other = fixture
+                .host
+                .generate(Context::new(request()))
+                .await
+                .unwrap();
+            assert_eq!(
+                *fixture.dispatch.worker_ids.lock().unwrap(),
+                [ZONE_A, UNTAINTED]
+            );
+            drop((held, other));
+            fixture.dispatch.worker_ids.lock().unwrap().clear();
+            fixture.dispatch.unfinished.store(false, Ordering::SeqCst);
+        } else {
+            // A request that requires no taints rotates over every worker, and so does one
+            // that only prefers a taint.
+            let preferring = || {
+                let mut input = request();
+                input.routing_mut().routing_constraints = Some(RoutingConstraints {
+                    preferred_taints: HashMap::from([("zone-a".to_string(), 0.5)]),
+                    ..Default::default()
+                });
+                input
+            };
+            let mut rotation = Vec::new();
+            for input in [request(), request(), preferring(), preferring()] {
+                rotation.extend(fixture.send(Context::new(input)).await.unwrap());
+            }
+            for pair in rotation.chunks(2) {
+                assert_ne!(pair[0], pair[1], "{rotation:?}");
+            }
+        }
+
+        // The chosen worker left after selection. The request fails: transport fallback
+        // would have sent it to the worker without the taint.
+        let instances = fixture.source.borrow().clone();
+        fixture.source.send(instances[..1].to_vec()).unwrap();
+        assert!(fixture.send(requiring("zone-a")).await.is_err());
+        assert!(fixture.dispatch.worker_ids.lock().unwrap().is_empty());
+        drop(fixture);
     }
+
+    // A router mode ignores required taints, with the same worker configs at hand.
+    let fixture = TaintHost::new(
+        component.endpoint("router-mode"),
+        non_kv_policy(RouterMode::RoundRobin),
+        None,
+        None,
+    )
+    .await;
+    let mut dispatched = Vec::new();
+    for _ in 0..4 {
+        dispatched.extend(fixture.send(requiring("zone-b")).await.unwrap());
+    }
+    dispatched.sort_unstable();
+    assert_eq!(dispatched, [UNTAINTED, UNTAINTED, ZONE_A, ZONE_A]);
+    drop(fixture);
+
+    // A role hosted by its policy cannot be built without the workers' configs.
+    let endpoint = component.endpoint("no-configs");
+    let client = endpoint.client().await.unwrap();
+    let error = RoutingHost::builder(client.clone(), role_hosted_policy("round-robin"))
+        .load_context(test_load_context(&client).await)
+        .build()
+        .await
+        .err()
+        .expect("the builder must require worker configs");
+    assert!(
+        error.to_string().contains("requires worker configs"),
+        "{error}"
+    );
+
+    runtime.shutdown();
+}
+
+/// Where the KV path fails a request that requires taints, the hosted path does too: a hard
+/// session binding to a worker without them, and a candidate policy's choice of one. A soft
+/// binding to such a worker is passed over.
+#[tokio::test]
+#[serial_test::serial]
+async fn required_taints_bound_session_affinity_and_candidate_policies() {
+    use crate::session_affinity::SessionAffinityMode;
+    let (runtime, component) = taint_test_component("hosted-required-taints-bindings").await;
+    let session_id = SessionAffinityId::new("session");
+    let bound_request = || {
+        let mut request = requiring("zone-a");
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("session"),
+        );
+        request
+    };
+
+    for mode in [SessionAffinityMode::Hard, SessionAffinityMode::Soft] {
+        let fixture = TaintHost::new(
+            component.endpoint(format!("{mode:?}").to_lowercase()),
+            role_hosted_policy("round-robin"),
+            Some(mode),
+            None,
+        )
+        .await;
+        bind_affinity_target(
+            &fixture.host,
+            &session_id,
+            AffinityTarget::worker(UNTAINTED),
+        )
+        .await;
+        match mode {
+            SessionAffinityMode::Hard => {
+                fixture
+                    .assert_no_endpoints(bound_request(), "hard binding lacks the taint")
+                    .await;
+                assert_eq!(
+                    fixture
+                        .affinity
+                        .as_ref()
+                        .unwrap()
+                        .query_target(&session_id, None)
+                        .unwrap(),
+                    Some(AffinityTarget::worker(UNTAINTED))
+                );
+            }
+            SessionAffinityMode::Soft => {
+                assert_eq!(fixture.send(bound_request()).await.unwrap(), [ZONE_A]);
+            }
+        }
+        drop(fixture);
+    }
+
+    for (candidate, expected) in [(UNTAINTED, None), (ZONE_A, Some(ZONE_A))] {
+        let fixture = TaintHost::new(
+            component.endpoint(format!("candidate-{candidate}")),
+            role_hosted_policy("round-robin"),
+            None,
+            Some(candidate),
+        )
+        .await;
+        match expected {
+            Some(worker_id) => {
+                assert_eq!(
+                    fixture.send(requiring("zone-a")).await.unwrap(),
+                    [worker_id]
+                );
+            }
+            None => {
+                fixture
+                    .assert_no_endpoints(requiring("zone-a"), "candidate lacks the taint")
+                    .await;
+            }
+        }
+        drop(fixture);
+    }
+
+    runtime.shutdown();
 }
 
 /// A request in `phase` whose client has already gone away, ready to be handed
