@@ -3,29 +3,23 @@
 
 //! Construction of a [`RoutingHost`].
 //!
-//! One builder serves every routing mode and every host. The frontend, the
+//! One builder serves every routing policy and every host. The frontend, the
 //! prefill binding, the Python bindings and tests all describe what they have
-//! (a discovery client, a routing mode, an optional [`KvRouter`], an optional
-//! load context, an affinity coordinator, LoRA, a dispatch override) and the
-//! builder derives the host's policy, its transport and its capability checks
-//! from that in one place.
+//! (a discovery client, the role's [`RoutingPolicy`], an optional load context,
+//! an affinity coordinator, LoRA, a dispatch override) and the builder derives
+//! the host's transport and its capability checks from that in one place.
 
 use std::sync::Arc;
 
-use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
-use dynamo_router_policies::router_modes;
-use dynamo_router_protocol::WorkerType;
-use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_runtime::{
     component::Client,
     pipeline::{
         MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, PushRouterOptions,
-        RouterMode, StreamingDispatch,
+        StreamingDispatch,
     },
     protocols::annotated::Annotated,
 };
-use dynamo_worker_selection::host::{HostedWorkerPicker, SelectionConfig};
 
 use super::{HostedOccupancy, RoutingHost, RoutingPolicy};
 use crate::{
@@ -43,7 +37,7 @@ type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>
 /// A caller-supplied final hop in place of the request plane.
 pub type LlmDispatch = Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>;
 
-/// Multimodal embedding-cache state for [`RouterMode::DeviceAwareWeighted`].
+/// Multimodal embedding-cache state for [`RoutingPolicy::DeviceAwareWeighted`].
 pub type MultimodalCache = (
     Arc<dyn MultimodalCacheIndex>,
     MultimodalCacheKeyExtractor<PreprocessedRequest>,
@@ -52,8 +46,7 @@ pub type MultimodalCache = (
 /// Builds a [`RoutingHost`]. Obtain one from [`RoutingHost::builder`].
 pub struct RoutingHostBuilder {
     client: Client,
-    router_mode: RouterMode,
-    kv_router: Option<Arc<KvRouter>>,
+    policy: RoutingPolicy,
     load_context: Option<Arc<RoutingLoadContext>>,
     affinity: Option<AffinityCoordinator>,
     lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
@@ -64,12 +57,11 @@ pub struct RoutingHostBuilder {
 
 impl RoutingHost {
     /// Start building a host that discovers workers through `client` and selects
-    /// them with `router_mode`. KV routing also needs [`RoutingHostBuilder::kv_router`].
-    pub fn builder(client: Client, router_mode: RouterMode) -> RoutingHostBuilder {
+    /// them with `policy`.
+    pub fn builder(client: Client, policy: RoutingPolicy) -> RoutingHostBuilder {
         RoutingHostBuilder {
             client,
-            router_mode,
-            kv_router: None,
+            policy,
             load_context: None,
             affinity: None,
             lora: None,
@@ -89,14 +81,8 @@ impl RoutingHostBuilder {
         self
     }
 
-    /// The KV-aware selection plane. Required for [`RouterMode::KV`], rejected otherwise.
-    pub fn kv_router(mut self, kv_router: impl Into<Option<Arc<KvRouter>>>) -> Self {
-        self.kv_router = kv_router.into();
-        self
-    }
-
     /// The shared client, overload state and cancellation subtree this host
-    /// belongs to. Required for every mode except KV.
+    /// belongs to. Required for every policy except [`RoutingPolicy::Kv`].
     pub fn load_context(
         mut self,
         load_context: impl Into<Option<Arc<RoutingLoadContext>>>,
@@ -114,7 +100,7 @@ impl RoutingHostBuilder {
         self
     }
 
-    /// LoRA-aware selection for the round-robin and random modes.
+    /// LoRA-aware selection for the round-robin and random policies.
     pub fn lora(mut self, lora: impl Into<Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>>) -> Self {
         self.lora = lora.into();
         self
@@ -128,19 +114,18 @@ impl RoutingHostBuilder {
         self
     }
 
-    /// Multimodal embedding-cache state for [`RouterMode::DeviceAwareWeighted`].
+    /// Multimodal embedding-cache state for [`RoutingPolicy::DeviceAwareWeighted`].
     pub fn multimodal_cache(mut self, cache: impl Into<Option<MultimodalCache>>) -> Self {
         self.multimodal_cache = cache.into();
         self
     }
 
-    /// Check the inputs against the routing mode, build the transport, and
+    /// Check the inputs against the policy, build the transport, and
     /// assemble the host.
     pub async fn build(self) -> anyhow::Result<RoutingHost> {
         let Self {
             client,
-            router_mode,
-            kv_router,
+            policy,
             load_context,
             affinity,
             lora,
@@ -150,30 +135,21 @@ impl RoutingHostBuilder {
         } = self;
         let candidate_policy = match (candidate_policy, lora) {
             (Some(policy), _) => Some(policy),
-            (None, Some((filter, estimator))) => {
-                Some(crate::lora_routing::LoraHostedPolicy::hosted(
-                    filter,
-                    estimator,
-                    router_mode,
-                    None,
-                )?)
-            }
+            (None, Some((filter, estimator))) => Some(
+                crate::lora_routing::LoraHostedPolicy::hosted(filter, estimator, &policy, None)?,
+            ),
             (None, None) => None,
         };
-        let inputs = PolicyInputs::check(
-            router_mode,
-            kv_router,
-            load_context,
-            affinity.is_some(),
-            candidate_policy,
-        )?;
+        let transport_mode = policy.transport_mode();
+        let inputs =
+            PolicyInputs::check(policy, load_context, affinity.is_some(), candidate_policy)?;
         let (multimodal_cache_indexer, multimodal_cache_key_extractor) = multimodal_cache
             .map_or((None, None), |(indexer, extractor)| {
                 (Some(indexer), Some(extractor))
             });
         let inner = LlmPushRouter::from_client_with_options(
             client,
-            router_mode,
+            transport_mode,
             PushRouterOptions {
                 multimodal_cache_indexer,
                 multimodal_cache_key_extractor,
@@ -186,8 +162,7 @@ impl RoutingHostBuilder {
     }
 }
 
-/// The policy a host runs and what it needs, checked against the routing mode
-/// before the transport exists.
+/// The policy a host runs and what it needs, checked before the transport exists.
 enum PolicyInputs {
     Kv {
         kv_router: Arc<KvRouter>,
@@ -202,130 +177,43 @@ enum PolicyInputs {
 
 impl PolicyInputs {
     fn check(
-        router_mode: RouterMode,
-        kv_router: Option<Arc<KvRouter>>,
+        policy: RoutingPolicy,
         load_context: Option<Arc<RoutingLoadContext>>,
         has_affinity: bool,
         candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
     ) -> anyhow::Result<Self> {
-        match (router_mode, kv_router) {
-            (RouterMode::KV, Some(kv_router)) => {
+        let policy = match policy {
+            RoutingPolicy::Kv(kv_router) => {
                 if candidate_policy.is_some() {
                     anyhow::bail!("KV candidate policy is supplied by its KvRouter");
                 }
-                Ok(Self::Kv {
+                return Ok(Self::Kv {
                     kv_router,
                     load_context,
-                })
+                });
             }
-            (RouterMode::KV, None) => anyhow::bail!("RouterMode::KV requires a KvRouter"),
-            (mode, Some(_)) => {
-                anyhow::bail!("a KvRouter is only used with RouterMode::KV, not {mode:?}")
-            }
-            (mode, None) => {
-                if candidate_policy.is_some()
-                    && !matches!(mode, RouterMode::RoundRobin | RouterMode::Random)
-                {
-                    anyhow::bail!("candidate policy is unsupported with {mode:?} routing");
-                }
-                let Some(load_context) = load_context else {
-                    anyhow::bail!("{mode:?} routing requires a RoutingLoadContext");
-                };
-                if has_affinity && candidate_policy.is_some() {
-                    anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
-                }
-                let policy = match mode {
-                    RouterMode::Direct => RoutingPolicy::Direct,
-                    RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
-                    mode => RoutingPolicy::Hosted(hosted_picker(mode)?),
-                };
-                Ok(Self::Builtin {
-                    policy,
-                    load_context,
-                    candidate_policy,
-                })
-            }
+            policy => policy,
+        };
+        let mode = policy.transport_mode();
+        if candidate_policy.is_some() && policy.hosted_without_occupancy().is_none() {
+            anyhow::bail!("candidate policy is unsupported with {mode:?} routing");
         }
+        let Some(load_context) = load_context else {
+            anyhow::bail!("{mode:?} routing requires a RoutingLoadContext");
+        };
+        if has_affinity && candidate_policy.is_some() {
+            anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
+        }
+        Ok(Self::Builtin {
+            policy,
+            load_context,
+            candidate_policy,
+        })
     }
-}
-
-/// The plugin type a routing mode runs as a hosted picker, if it runs as one.
-fn routing_mode_policy_type(mode: RouterMode) -> Option<&'static str> {
-    match mode {
-        RouterMode::RoundRobin => Some(router_modes::ROUND_ROBIN),
-        RouterMode::Random => Some(router_modes::RANDOM),
-        RouterMode::LeastLoaded => Some(router_modes::LEAST_LOADED),
-        _ => None,
-    }
-}
-
-/// Resolve a routing mode to its policy by type name in the linked plugin registry, the same way
-/// a policy file names a type, and take out its picker.
-pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPicker> {
-    let policy_type = match (mode, routing_mode_policy_type(mode)) {
-        (_, Some(policy_type)) => policy_type,
-        // TODO(v1.9): Remove with the `PowerOfTwoChoices` wire value.
-        (RouterMode::PowerOfTwoChoices, None) => anyhow::bail!(
-            "the power-of-two router mode was removed in Dynamo v1.7; use another router mode"
-        ),
-        (mode, None) => anyhow::bail!("{mode:?} routing is not a routing-mode policy"),
-    };
-    let factory = crate::kv_router::plugins::router_plugin_registry().resolve_type(policy_type)?;
-    // Routing-mode policies read neither the role nor the partition.
-    let policy = factory(
-        &SelectionConfig::default(),
-        WorkerType::Aggregated,
-        RoutingPartitionRef::new("", ""),
-    );
-    policy
-        .into_hosted_picker()
-        .map_err(|_| anyhow::anyhow!("{policy_type} policy cannot run without KV routing"))
-}
-
-/// Every worker role a frontend routes.
-pub(crate) const EVERY_ROLE: [WorkerType; 4] = [
-    WorkerType::Aggregated,
-    WorkerType::Prefill,
-    WorkerType::Decode,
-    WorkerType::Encode,
-];
-
-/// Reject a non-KV routing mode for `roles` when one of them lists `hints` in its `worker_selection`
-/// entry. Hints run at booking, which only the KV path does, so another mode would drop them
-/// silently. Default hints are passive and never require the KV path.
-pub(crate) fn check_hint_policies_route_on_kv_path(
-    router_mode: RouterMode,
-    config: &KvRouterConfig,
-    roles: &[WorkerType],
-) -> anyhow::Result<()> {
-    if router_mode.is_kv_routing() {
-        return Ok(());
-    }
-    let Some(worker_selection) = config.worker_selection_config()? else {
-        return Ok(());
-    };
-    let Some(role) = roles.iter().find(|&&role| {
-        worker_selection
-            .hints(role)
-            .is_some_and(|entries| !entries.is_empty())
-    }) else {
-        return Ok(());
-    };
-    let role = role.as_str();
-    let fix = match routing_mode_policy_type(router_mode) {
-        Some(policy_type) => format!(
-            "run --router-mode kv and name {policy_type:?} under worker_selection.{role} in the router policy file, or remove worker_selection.{role}.hints"
-        ),
-        None => format!("run --router-mode kv, or remove worker_selection.{role}.hints"),
-    };
-    anyhow::bail!(
-        "the hints in worker_selection.{role} run only on the KV path, but --router-mode {mode} routes {role} workers without it; {fix}",
-        mode = router_mode.telemetry_label(),
-    )
 }
 
 /// Wire a host over its transport. This is the one place that turns
-/// construction inputs into a [`RoutingPolicy`] and its capabilities.
+/// construction inputs into a host and its capabilities.
 fn assemble(
     inner: LlmPushRouter,
     inputs: PolicyInputs,
@@ -363,8 +251,8 @@ fn assemble(
         } => {
             let hosted_occupancy = matches!(
                 &policy,
-                RoutingPolicy::Hosted(picker)
-                    if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS)
+                RoutingPolicy::Hosted(hosted)
+                    if hosted.picker().inputs().contains(WorkerInputs::ACTIVE_REQUESTS)
             )
             .then(|| HostedOccupancy::new(&inner))
             .transpose()?;
@@ -386,7 +274,10 @@ fn assemble(
 
 #[cfg(test)]
 mod policy_input_tests {
+    use dynamo_runtime::pipeline::RouterMode;
+
     use super::*;
+    use crate::kv_router::role_routing::non_kv_policy;
     use crate::lora::{LoraRoutingTable, LoraStateTracker};
 
     #[test]
@@ -402,11 +293,12 @@ mod policy_input_tests {
                     LoraStateTracker::new(),
                 )),
                 Arc::new(LoadEstimator::new()),
-                RouterMode::RoundRobin,
+                &non_kv_policy(RouterMode::RoundRobin),
                 None,
             )
             .unwrap();
-            let Err(error) = PolicyInputs::check(mode, None, None, false, Some(policy)) else {
+            let Err(error) = PolicyInputs::check(non_kv_policy(mode), None, false, Some(policy))
+            else {
                 panic!("{mode:?} should reject candidate policies");
             };
             assert!(
@@ -423,11 +315,12 @@ mod policy_input_tests {
                     LoraStateTracker::new(),
                 )),
                 Arc::new(LoadEstimator::new()),
-                RouterMode::RoundRobin,
+                &non_kv_policy(RouterMode::RoundRobin),
                 None,
             )
             .unwrap();
-            let Err(error) = PolicyInputs::check(mode, None, None, false, Some(policy)) else {
+            let Err(error) = PolicyInputs::check(non_kv_policy(mode), None, false, Some(policy))
+            else {
                 panic!("{mode:?} requires a load context");
             };
             assert!(
