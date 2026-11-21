@@ -37,6 +37,9 @@ Nsight Systems, see [Profile with Nsight Operator](nsight-operator-profiling.mdx
 Application metrics are enabled by default. The operator creates a `PodMonitor` and labels managed
 pods for discovery, so a normal DynamoGraphDeployment (DGD) requires no metrics configuration.
 Operator metrics use a separate `ServiceMonitor` created by the Helm chart.
+By default, the chart creates this `ServiceMonitor` only when Helm detects the Prometheus Operator
+at install or upgrade time. If you render the chart with `helm template` or GitOps, set
+[`dynamo-operator.metricsService.enabled=true`](../../reference/observability/operator-metrics.mdx#kubernetes-enablement-knobs).
 
 <Steps toc={true}>
 <Step title="Verify Prometheus discovery" id="verify-prometheus-discovery">

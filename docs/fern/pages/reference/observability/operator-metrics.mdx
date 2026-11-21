@@ -97,8 +97,12 @@ Metrics collection on Kubernetes is controlled by CRD annotations and Helm value
   Annotation on a `DynamoGraphDeployment` to opt a deployment **out** of metrics collection. Set to `false` to disable scraping for that deployment.
 </ParamField>
 
-<ParamField path="dynamo-operator.metricsService.enabled" type="boolean (Helm value)" default="true">
-  Helm value controlling whether the operator's metrics Service and ServiceMonitor are created. Set to `false` to disable operator metrics collection.
+<ParamField path="dynamo-operator.metricsService.enabled" type="boolean or null (Helm value)" default="null">
+  Helm value controlling whether the operator's metrics Service and ServiceMonitor are created.
+
+  - Unset (`null`, the default): the chart always creates the metrics Service. It creates the ServiceMonitor only when Helm detects the `monitoring.coreos.com/v1` API (the Prometheus Operator CRDs) at install or upgrade time. `helm template` and most GitOps tools do not see the cluster's APIs, so they render no ServiceMonitor.
+  - `true`: always create both. Use this with `helm template` or GitOps when the target cluster runs the Prometheus Operator.
+  - `false`: create neither. This disables operator metrics collection.
 </ParamField>
 
 <ParamField path="dynamo-operator.dynamo.metrics.prometheusEndpoint" type="string (Helm value)">
