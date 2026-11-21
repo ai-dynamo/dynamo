@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="236" viewBox="0 0 1100 236" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Workloads that fit GPU fractions</title>
+  <desc id="desc">Five workloads that fit: a long tail of lightly used models; supporting models beside a main model; several model families behind one product; development, staging, and evaluation; a large tensor-parallel model plus small ones.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1100.0" height="236.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Workloads that fit GPU fractions</text>
+  <rect x="24.0" y="60.0" width="199.2" height="160.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="1.8"/>
+  <rect x="73.6" y="74.0" width="100.0" height="72.0" fill="#EAF5D3" rx="8"/>
+  <rect x="87.6" y="88.0" width="7.0" height="46.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="96.8" y="104.0" width="7.0" height="30.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="106.0" y="112.0" width="7.0" height="22.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="115.2" y="118.0" width="7.0" height="16.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="124.4" y="122.0" width="7.0" height="12.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="133.6" y="124.0" width="7.0" height="10.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="142.8" y="126.0" width="7.0" height="8.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="152.0" y="127.0" width="7.0" height="7.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <line x1="85.6" y1="135.0" x2="161.6" y2="135.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="123.6" y="174.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Long tail of</text>
+  <text x="123.6" y="194.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">light models</text>
+  <rect x="237.2" y="60.0" width="199.2" height="160.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="1.8"/>
+  <rect x="286.8" y="74.0" width="100.0" height="72.0" fill="#EAF5D3" rx="8"/>
+  <rect x="300.8" y="88.0" width="72.0" height="44.0" fill="#FFFFFF" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="305.8" y="93.0" width="34.0" height="34.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="322.8" y="113.5" font-size="10" font-weight="700" fill="#1A1A1A" text-anchor="middle">main</text>
+  <rect x="344.8" y="93.0" width="23.0" height="10.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="344.8" y="105.0" width="23.0" height="10.0" fill="#FDEBD3" rx="2" stroke="#D97706" stroke-width="1.2"/>
+  <rect x="344.8" y="117.0" width="23.0" height="10.0" fill="#ECE6FB" rx="2" stroke="#7C5CD6" stroke-width="1.2"/>
+  <text x="336.8" y="174.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Helpers beside</text>
+  <text x="336.8" y="194.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">a main model</text>
+  <rect x="450.4" y="60.0" width="199.2" height="160.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="1.8"/>
+  <rect x="500.0" y="74.0" width="100.0" height="72.0" fill="#EAF5D3" rx="8"/>
+  <rect x="514.0" y="88.0" width="72.0" height="44.0" fill="#FFFFFF" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="519.0" y="93.0" width="30.0" height="16.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <text x="534.0" y="104.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat</text>
+  <rect x="551.0" y="93.0" width="30.0" height="16.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="566.0" y="104.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">code</text>
+  <rect x="519.0" y="111.0" width="30.0" height="16.0" fill="#FDEBD3" rx="2" stroke="#D97706" stroke-width="1.2"/>
+  <text x="534.0" y="122.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">SQL</text>
+  <rect x="551.0" y="111.0" width="30.0" height="16.0" fill="#ECE6FB" rx="2" stroke="#7C5CD6" stroke-width="1.2"/>
+  <text x="566.0" y="122.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">sum</text>
+  <text x="550.0" y="174.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Model families</text>
+  <text x="550.0" y="194.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">in one product</text>
+  <rect x="663.6" y="60.0" width="199.2" height="160.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="1.8"/>
+  <rect x="713.2" y="74.0" width="100.0" height="72.0" fill="#EAF5D3" rx="8"/>
+  <line x1="725.2" y1="135.0" x2="801.2" y2="135.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M727.1999999999999,132 L739.1999999999999,132 L743.1999999999999,96 L747.1999999999999,132 L765.1999999999999,132 L769.1999999999999,108 L773.1999999999999,132 L787.1999999999999,132 L791.1999999999999,116 L795.1999999999999,132 L801.1999999999999,132" stroke="#76B900" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <text x="763.2" y="174.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Dev, staging,</text>
+  <text x="763.2" y="194.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">and evaluation</text>
+  <rect x="876.8" y="60.0" width="199.2" height="160.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="1.8"/>
+  <rect x="926.4" y="74.0" width="100.0" height="72.0" fill="#EAF5D3" rx="8"/>
+  <rect x="940.4" y="88.0" width="34.0" height="46.0" fill="#FFFFFF" rx="4" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="944.4" y="92.0" width="26.0" height="24.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <rect x="944.4" y="119.0" width="26.0" height="11.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="978.4" y="88.0" width="34.0" height="46.0" fill="#FFFFFF" rx="4" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="982.4" y="92.0" width="26.0" height="24.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <rect x="982.4" y="119.0" width="26.0" height="11.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <line x1="970.4" y1="104.0" x2="984.4" y2="104.0" stroke="#2F80ED" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 2"/>
+  <text x="976.4" y="174.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Large TP model</text>
+  <text x="976.4" y="194.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">plus small ones</text>
+</svg>

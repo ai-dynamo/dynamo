@@ -1,0 +1,86 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Decide Whether to Share a GPU
+subtitle: Work through four questions to choose between GPU fractions, MIG, dedicated GPUs, and one engine per model
+---
+
+GPU fractions pays off for one kind of fleet: several **distinct** models that each leave a GPU mostly idle. For other fleets, a dedicated GPU, or a single engine serving many requests is the better choice. This page walks through four questions, in order. Each one either rules GPU fractions out, with the alternative to use, or moves you to the next.
+
+![Four questions in order. Keeps a whole GPU busy: dedicated GPUs. Copies or LoRA adapters of one model: one engine per base model. Needs hard isolation: MIG. Needs per-model caps while running concurrently: MPS v3 GPU fractions. Otherwise: time-slicing or HAMi.](../../../assets/img/gpu-sharing-decision.svg)
+
+<Steps toc={true}>
+<Step title="Check that the models are distinct" id="check-that-the-models-are-distinct">
+
+![Two replicas of model X on one GPU: avoid. One engine holding one copy of model X and batching both requests: use this for replicas. Two distinct models, A and B, on one GPU: a good fit for MPS.](../../../assets/img/gpu-sharing-replicas-vs-distinct.svg)
+
+On every decode step, an engine reads its model's full weights from GPU memory, so at low and moderate load decode time is set mostly by memory bandwidth. Whether sharing helps depends on whether the models on the GPU have the same weights:
+
+- **Replicas of one model.** Two replicas on one GPU store the same weights twice and read them twice on every step. Choose serving one replica with batching to have better bandwidth and compute efficiency.
+- **Distinct models.** Two models with different weights can't share a batch, so no single engine can serve both. If each model alone uses a small part of a GPU, this is an ideal use of GPU fractions.
+
+Fine-tuned variants trained as LoRA adapters of one base model count as replicas here: they share the base weights.
+
+**If the models are replicas or LoRA adapters,** serve them from one engine per base model, with batching or [LoRA adapters](../../kubernetes/operations/lora-adapters.md).
+
+</Step>
+<Step title="Check how much isolation you need" id="check-how-much-isolation-you-need">
+
+GPU fractions caps each model's compute and memory, but the models on a GPU still share four things:
+
+- **Memory bandwidth.** Each model reads its own weights on every step, and MPS does not divide the bandwidth between them.
+- **The L2 cache.** One model's working set can evict another's.
+- **Power.** When multiple models are executing simulateously, the device can reach its power cap and limit the compute.
+- **The fault domain.** A fatal fault in one model, such as an illegal memory access, can force every model on its GPU to restart. [MPS Fault Isolation](../../developer-guide/knowledge-base/concepts/gpu-sharing/mps-fault-isolation.md) shows which faults spread.
+
+**If one tenant must not affect another,** because the tenants don't trust each other or a neighbor's crash or latency spike is unacceptable, use MPS static SM paritions. MPS static SM partitions isolate faults and compute explicitly per application.
+
+</Step>
+<Step title="Match your workload" id="match-your-workload">
+
+The models that are left are distinct, lightly loaded, and can tolerate a shared GPU. These workloads fit that description:
+
+- **Models with lienent latencies**: Lightly used models which are not latency sensitive are able to use a fraction of the compute.
+- **Offline inference**: Batch processing which can happen when the GPU is idle and not tied to an SLA.
+
+
+These workloads are better served another way:
+
+![Four workloads that don't fit, each with a better choice. Keeps a whole GPU busy: dedicated GPUs. Replicas or LoRA adapters of one model: one engine per base model. Needs most of the GPU's memory: dedicated GPUs. Strict tail-latency targets: dedicated GPUs or MIG.](../../../assets/img/gpu-sharing-workloads-no-fit.svg)
+
+</Step>
+<Step title="Compare the approaches" id="compare-the-approaches">
+
+Each row asks one question of every approach:
+
+| | Dedicated GPUs | MIG | GPU fractions (MPS) | KAI + HAMi | Time-slicing |
+|---|---|---|---|---|---|
+| Size of a model's share | Whole GPU | Fixed profile, up to 7 per GPU | Any fraction of the SMs and memory | Any amount of memory | Whole GPU, in turns |
+| Compute capped per model | Yes | Yes | Yes | No | No |
+| Memory capped per model | Yes | Yes | Yes | Yes | No |
+| Models run at the same time | Yes | Yes | Yes | No, they take turns | No, they take turns |
+| Memory bandwidth and L2 cache isolated | Yes | Yes | No | No | No |
+| Faults isolated | Yes | Yes | No | Yes | Yes |
+| Resizing one model | Reschedule its pod | Drain and repartition the GPU | Restart its pod | Restart its pod | Not applicable |
+| Kubernetes support | GPU Operator | GPU Operator | KAI-Scheduler and node agents built from pull requests, with driver r615+, NRI, and GPU Operator v26.7.1+ | KAI-Scheduler and HAMi releases | GPU Operator device plugin |
+
+GPU fractions is the only approach that caps each model's compute at any size while the models run at the same time, so it packs distinct, lightly loaded models onto the fewest GPUs.
+
+If the models don't need compute caps or to run at the same time, such as a development cluster with bursty, latency-tolerant traffic, time-slicing or HAMi is enough.
+
+</Step>
+</Steps>
+
+## Make the Case
+
+When you propose GPU fractions, or argue against it, frame it around how many GPUs your models need, and what the shared GPUs cost in latency and isolation. In your own numbers:
+
+> We serve N distinct models. Each uses a small part of a GPU, so one GPU per model leaves most of N GPUs idle. GPU fractions packs them onto M GPUs, each model capped at the share of compute and memory it needs, and each still meets its latency targets in our measurements. Unlike MIG, each model gets exactly its share, so fewer GPUs are needed, and one model can be resized without disturbing the others. In the published A100 benchmark, sixteen models ran on eight GPUs instead of sixteen, at 22.9% lower cost per output token than one model per GPU at one request per model.
+
+Back each claim with a measurement from your own models: the share each needs to meet its targets, measured next to a busy neighbor, and the GPU count before and after. The next two guides produce those numbers.
+
+
+## Next Steps
+
+- [Size Each Model's Share](size-each-models-share.mdx): turn questions 3 and 4 into numbers.
+- [How GPU Sharing Works](../../developer-guide/knowledge-base/concepts/gpu-sharing/how-gpu-sharing-works.md): how MPS, MIG, HAMi, and time-slicing differ.

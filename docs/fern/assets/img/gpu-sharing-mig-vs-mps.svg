@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="400" viewBox="0 0 1180 400" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">The same three models on one H100 80GB, with MPS and with MIG</title>
+  <desc id="desc">chat-8b needs 50% of the SMs and 32 GB, code-7b 30% and 24 GB, guard-1b 20% and 8 GB. With MPS, all three fit. With MIG, chat-8b gets a 4g.40gb instance and code-7b a 3g.40gb instance, which fills the GPU, so guard-1b needs another GPU.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1180.0" height="400.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Three models on one H100 80GB</text>
+  <rect x="24.0" y="60.0" width="236.0" height="324.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="40.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Needs</text>
+  <rect x="40.0" y="108.0" width="204.0" height="66.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="56.0" y="135.0" font-size="16" font-weight="700" fill="#76B900" text-anchor="start">chat-8b</text>
+  <text x="56.0" y="158.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">50% SMs · 32 GB</text>
+  <rect x="40.0" y="192.0" width="204.0" height="66.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="56.0" y="219.0" font-size="16" font-weight="700" fill="#2F80ED" text-anchor="start">code-7b</text>
+  <text x="56.0" y="242.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">30% SMs · 24 GB</text>
+  <rect x="40.0" y="276.0" width="204.0" height="66.0" fill="#FDEBD3" rx="8" stroke="#D97706" stroke-width="1.5"/>
+  <text x="56.0" y="303.0" font-size="16" font-weight="700" fill="#D97706" text-anchor="start">guard-1b</text>
+  <text x="56.0" y="326.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">20% SMs · 8 GB</text>
+  <rect x="276.0" y="60.0" width="444.0" height="324.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="292.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS</text>
+  <line x1="316.0" y1="302.0" x2="700.0" y2="302.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="316.0" y1="302.0" x2="316.0" y2="116.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="316.0" y1="122.0" x2="700.0" y2="122.0" stroke="#9CA3AF" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="700.0" y="116.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">80 GB</text>
+  <text x="508.0" y="322.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">SMs →</text>
+  <text x="304" y="212.0" font-size="13" fill="#5A6270" text-anchor="middle" transform="rotate(-90 304 212.0)">memory →</text>
+  <rect x="317.0" y="230.0" width="190.0" height="72.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="412.0" y="222.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">chat-8b</text>
+  <rect x="509.0" y="248.0" width="113.2" height="54.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="565.6" y="240.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">code-7b</text>
+  <rect x="624.2" y="284.0" width="74.8" height="18.0" fill="#FDEBD3" rx="3" stroke="#D97706" stroke-width="1.5"/>
+  <text x="661.6" y="276.0" font-size="13" font-weight="700" fill="#D97706" text-anchor="middle">guard-1b</text>
+  <rect x="292.0" y="336.0" width="412.0" height="34.0" fill="#EAF5D3" rx="6"/>
+  <text x="498.0" y="358.0" font-size="15" font-weight="700" fill="#3B6B00" text-anchor="middle">All three fit</text>
+  <rect x="736.0" y="60.0" width="444.0" height="324.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="752.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MIG</text>
+  <line x1="776.0" y1="302.0" x2="1160.0" y2="302.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="776.0" y1="302.0" x2="776.0" y2="116.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="776.0" y1="122.0" x2="1160.0" y2="122.0" stroke="#9CA3AF" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="1160.0" y="116.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">80 GB</text>
+  <text x="968.0" y="322.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">SMs →</text>
+  <text x="764" y="212.0" font-size="13" fill="#5A6270" text-anchor="middle" transform="rotate(-90 764 212.0)">memory →</text>
+  <rect x="777.0" y="212.0" width="217.4" height="90.0" fill="#FFFFFF" rx="3" stroke="#76B900" stroke-width="2" stroke-dasharray="6 4"/>
+  <rect x="777.0" y="230.0" width="190.0" height="72.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="885.7" y="204.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">4g.40gb: chat-8b</text>
+  <rect x="996.4" y="212.0" width="162.6" height="90.0" fill="#FFFFFF" rx="3" stroke="#2F80ED" stroke-width="2" stroke-dasharray="6 4"/>
+  <rect x="996.4" y="248.0" width="113.2" height="54.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1077.7" y="204.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">3g.40gb: code-7b</text>
+  <line x1="995.4" y1="118.0" x2="995.4" y2="302.0" stroke="#1A1A1A" stroke-width="4" stroke-linecap="round"/>
+  <rect x="752.0" y="336.0" width="412.0" height="34.0" fill="#FBE3E3" rx="6"/>
+  <text x="958.0" y="358.0" font-size="15" font-weight="700" fill="#C62828" text-anchor="middle">guard-1b needs another GPU</text>
+</svg>

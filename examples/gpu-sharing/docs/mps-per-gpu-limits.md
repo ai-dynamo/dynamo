@@ -44,7 +44,7 @@ cgroup v2 dmem              per container, per GPU:   nvidia/<pci>/vidmem <bytes
 - **Memory** is capped in one of two ways:
   - The namespace's `pinned_memory_limit` is one value for every GPU.
   - A cgroup `dmem` limit is set separately for each GPU, and is the only way to give one container a different budget on each GPU.
-- **Memory bandwidth is not partitioned.** Neither MPS nor `dmem` splits DRAM bandwidth. A memory-bound tenant slows its neighbors no matter how SMs are divided. [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) shows the effect on decode throughput.
+- **Memory bandwidth is not partitioned.** Neither MPS nor `dmem` splits DRAM bandwidth. A memory-bound tenant slows its neighbors no matter how SMs are divided. [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx) shows the effect on decode throughput.
 
 ## Same Limits on Every GPU
 

@@ -9,7 +9,7 @@ _Run 16 Qwen3-4B models on 8 A100 GPUs, two per GPU, each capped at 50% of the S
 
 This guide deploys 16 Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), packed two per A100 40GB GPU. Unlike the [KAI + HAMi experiment](deploy-kai-hami.md), each model gets a hard share of the GPU's compute as well as its memory. The fork-built KAI-Scheduler and kai-gpu-fractioning place each worker in its own CUDA Multi-Process Service (MPS) namespace capped at 50% of the active threads, with a 19,968 MiB memory cap. The two models on a GPU run concurrently instead of taking turns.
 
-This is the third configuration in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx):
+This is the third configuration in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx):
 
 | Experiment | DGDs | Placement | Isolation | Guide |
 |---|---:|---|---|---|
@@ -207,7 +207,7 @@ The published run (8x A100 40GB, driver 615.71.09) completed all 10,880 measured
 | 16 | 786 | 28.9 | 8,027 | 1,003.4 | 87.9% |
 | 32 | 2,159 | 39.2 | 9,059 | 1,132.4 | not compared |
 
-The last column compares each row with the baseline at the same requests per GPU, as in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx), where this configuration at `c` is matched with the baseline at `2c`. The `c=32` row has no counterpart there, because the baseline would need `c=64`. The same table gives the HAMi comparison: at equal per-GPU load, fractions keeps 15 to 20 points more throughput than time-slicing.
+The last column compares each row with the baseline at the same requests per GPU, as in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx), where this configuration at `c` is matched with the baseline at `2c`. The `c=32` row has no counterpart there, because the baseline would need `c=64`. The same table gives the HAMi comparison: at equal per-GPU load, fractions keeps 15 to 20 points more throughput than time-slicing.
 
 Throughput grows about 7.8x from `c=1` to `c=32`, with only a 13% gain from `c=16` to `c=32`, so the knee is near `c=16`. TTFT is the main cost at saturation: the mean TTFT p90 at `c=32` is about 8.5 s. Throughput varied by less than 0.6% across the 16 models at every point.
 
@@ -239,4 +239,4 @@ To remove the forks, follow the [uninstall steps](build-gpu-fractioning-forks.md
 
 - [Deploy the Baseline Experiment](deploy-baseline.md) and [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) produce the other two sweeps that the percentages compare against.
 - [Per-GPU Compute and Memory Limits with MPS](mps-per-gpu-limits.md) explains the MPS v3 mechanism that the forks drive.
-- [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) explains how to read the three sweeps together.
+- [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx) explains how to read the three sweeps together.

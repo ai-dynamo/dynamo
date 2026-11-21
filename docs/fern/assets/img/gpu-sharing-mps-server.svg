@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="262" viewBox="0 0 1020 262" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">What MPS changes</title>
+  <desc id="desc">Without MPS, process A and process B each have their own context and take turns on the GPU. With MPS, both connect to one MPS server, and their kernels run on the GPU at the same time.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1020.0" height="262.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">What MPS changes</text>
+  <rect x="24.0" y="60.0" width="478.0" height="186.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="42.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Without MPS</text>
+  <rect x="42.0" y="108.0" width="120.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="102.0" y="135.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process A</text>
+  <rect x="42.0" y="178.0" width="120.0" height="44.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.8"/>
+  <text x="102.0" y="205.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process B</text>
+  <line x1="164.0" y1="132.0" x2="210.0" y2="150.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="164.0" y1="198.0" x2="210.0" y2="180.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="214.0" y="104.0" width="270.0" height="124.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="224.0" y="122.0" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU</text>
+  <text x="474.0" y="122.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="224.0" y="132.0" width="36.7" height="86.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="242.3" y="180.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="265.7" y="132.0" width="36.7" height="86.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="284.0" y="180.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="307.3" y="132.0" width="36.7" height="86.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="325.7" y="180.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="349.0" y="132.0" width="36.7" height="86.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="367.3" y="180.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="390.7" y="132.0" width="36.7" height="86.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="409.0" y="180.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="432.3" y="132.0" width="36.7" height="86.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="450.7" y="180.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="518.0" y="60.0" width="478.0" height="186.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="536.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">With MPS</text>
+  <rect x="536.0" y="108.0" width="120.0" height="44.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="596.0" y="135.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process A</text>
+  <rect x="536.0" y="178.0" width="120.0" height="44.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.8"/>
+  <text x="596.0" y="205.2" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process B</text>
+  <rect x="678.0" y="144.0" width="96.0" height="42.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.8"/>
+  <text x="726.0" y="169.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">MPS server</text>
+  <line x1="658.0" y1="132.0" x2="675.0" y2="152.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="658.0" y1="198.0" x2="675.0" y2="178.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="776.0" y1="165.0" x2="794.0" y2="165.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="798.0" y="104.0" width="180.0" height="124.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="808.0" y="122.0" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU</text>
+  <text x="968.0" y="122.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="808.0" y="132.0" width="160.0" height="40.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="808.0" y="178.0" width="160.0" height="40.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="888.0" y="157.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <text x="888.0" y="203.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+</svg>

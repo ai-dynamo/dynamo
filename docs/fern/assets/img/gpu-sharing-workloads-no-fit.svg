@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="412" viewBox="0 0 1000 412" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Workloads that don't fit GPU fractions</title>
+  <desc id="desc">Four workloads that don't fit, each with a better choice. Keeps a whole GPU busy: dedicated GPUs. Replicas or LoRA adapters of one model: one engine per base model. Needs most of the GPU's memory: dedicated GPUs. Strict tail-latency targets: dedicated GPUs or MIG.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1000.0" height="412.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Workloads that don't fit GPU fractions</text>
+  <rect x="24.0" y="60.0" width="560.0" height="76.0" fill="#FFFFFF" rx="10" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="34.0" y="68.0" width="88.0" height="60.0" fill="#FBE3E3" rx="8"/>
+  <rect x="42.0" y="76.0" width="72.0" height="44.0" fill="#FFFFFF" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="47.0" y="81.0" width="62.0" height="34.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="78.0" y="103.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">100%</text>
+  <text x="140.0" y="104.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Keeps a whole GPU busy</text>
+  <line x1="594.0" y1="98.0" x2="666.0" y2="98.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <rect x="676.0" y="60.0" width="300.0" height="76.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="826.0" y="103.6" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="middle">Dedicated GPUs</text>
+  <rect x="24.0" y="146.0" width="560.0" height="76.0" fill="#FFFFFF" rx="10" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="34.0" y="154.0" width="88.0" height="60.0" fill="#FBE3E3" rx="8"/>
+  <rect x="42.0" y="160.0" width="50.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="67.0" y="179.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle"></text>
+  <rect x="50.0" y="168.0" width="50.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="75.0" y="187.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle"></text>
+  <rect x="58.0" y="176.0" width="50.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="83.0" y="195.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">X</text>
+  <text x="140.0" y="190.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Replicas or LoRA adapters of one model</text>
+  <line x1="594.0" y1="184.0" x2="666.0" y2="184.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <rect x="676.0" y="146.0" width="300.0" height="76.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="826.0" y="189.6" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="middle">One engine per base model</text>
+  <rect x="24.0" y="232.0" width="560.0" height="76.0" fill="#FFFFFF" rx="10" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="34.0" y="240.0" width="88.0" height="60.0" fill="#FBE3E3" rx="8"/>
+  <rect x="42.0" y="260.0" width="72.0" height="22.0" fill="#FFFFFF" rx="4" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="45.0" y="263.0" width="64.0" height="16.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="78.0" y="254.0" font-size="11" font-weight="700" fill="#5A6270" text-anchor="middle">memory</text>
+  <text x="110.0" y="294.0" font-size="11" font-weight="700" fill="#C62828" text-anchor="end">full</text>
+  <text x="140.0" y="276.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Needs most of the GPU's memory</text>
+  <line x1="594.0" y1="270.0" x2="666.0" y2="270.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <rect x="676.0" y="232.0" width="300.0" height="76.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="826.0" y="275.6" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="middle">Dedicated GPUs</text>
+  <rect x="24.0" y="318.0" width="560.0" height="76.0" fill="#FFFFFF" rx="10" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="34.0" y="326.0" width="88.0" height="60.0" fill="#FBE3E3" rx="8"/>
+  <line x1="40.0" y1="381.0" x2="116.0" y2="381.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="42.0" y1="348.0" x2="114.0" y2="348.0" stroke="#C62828" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="4 3"/>
+  <path d="M42,372.0 L66,370.0 L74,338.0 L82,370.0 L114,372.0" stroke="#2F80ED" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <text x="140.0" y="362.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Strict tail-latency targets</text>
+  <line x1="594.0" y1="356.0" x2="666.0" y2="356.0" stroke="#76B900" stroke-width="3" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <rect x="676.0" y="318.0" width="300.0" height="76.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.8"/>
+  <text x="826.0" y="361.6" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="middle">Dedicated GPUs or MIG</text>
+</svg>

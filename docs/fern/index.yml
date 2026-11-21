@@ -351,6 +351,15 @@ navigation:
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/kv-aware-routing.md
               - page: Observability Architecture
                 path: pages/developer-guide/knowledge-base/concepts/observability-architecture.md
+              - section: GPU Sharing
+                collapsed: true
+                contents:
+                  - page: How GPU Sharing Works
+                    path: pages/developer-guide/knowledge-base/concepts/gpu-sharing/how-gpu-sharing-works.md
+                  - page: MPS v2 and v3
+                    path: pages/developer-guide/knowledge-base/concepts/gpu-sharing/mps-v2-and-v3.md
+                  - page: MPS Fault Isolation
+                    path: pages/developer-guide/knowledge-base/concepts/gpu-sharing/mps-fault-isolation.md
               - section: Simulation
                 collapsed: true
                 contents:
@@ -889,7 +898,24 @@ navigation:
         icon: layer-group
         slug: gpu-sharing
         path: pages/use-cases/gpu-sharing/overview.mdx
-        contents: []
+        contents:
+          - page: Decide Whether to Share a GPU
+            path: pages/use-cases/gpu-sharing/decide-whether-to-share.mdx
+          - page: Size Each Model's Share
+            path: pages/use-cases/gpu-sharing/size-each-models-share.mdx
+          - page: Try MPS on One GPU
+            path: pages/use-cases/gpu-sharing/try-mps-on-one-gpu.mdx
+          - page: Install GPU Fractions on Kubernetes
+            path: pages/use-cases/gpu-sharing/install-gpu-fractions.mdx
+          - page: Deploy Models on GPU Fractions
+            path: pages/use-cases/gpu-sharing/deploy-models-on-gpu-fractions.mdx
+          - page: Benchmark GPU Fractions
+            path: pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx
+          - page: Benchmark Sized Shares
+            path: pages/use-cases/gpu-sharing/benchmark-sized-shares.mdx
+          - page: Operate Shared GPUs
+            slug: operate-shared-gpus
+            path: pages/use-cases/gpu-sharing/operate-shared-gpus.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1070" height="326" viewBox="0 0 1070 326" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Replicas compared with distinct models</title>
+  <desc id="desc">Two replicas of model X on one GPU: avoid. One engine holding one copy of model X and batching both requests: use this for replicas. Two distinct models, A and B, on one GPU: a good fit for MPS.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1070.0" height="326.0" fill="#FFFFFF"/>
+  <text x="24.0" y="40.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Replicas compared with distinct models</text>
+  <rect x="24.0" y="60.0" width="330.0" height="250.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="40.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Two replicas</text>
+  <rect x="40.0" y="102.0" width="60.0" height="26.0" fill="#FBE3E3" rx="13"/>
+  <text x="70.0" y="120.0" font-size="13" font-weight="700" fill="#C62828" text-anchor="middle">Avoid</text>
+  <rect x="40.0" y="140.0" width="298.0" height="154.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="50.0" y="160.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">GPU</text>
+  <rect x="50.0" y="170.0" width="134.0" height="66.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="117.0" y="200.0" font-size="18" font-weight="700" fill="#76B900" text-anchor="middle">X</text>
+  <text x="117.0" y="220.0" font-size="12" font-weight="400" fill="#76B900" text-anchor="middle">weights</text>
+  <rect x="50.0" y="244.0" width="134.0" height="40.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="117.0" y="269.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <rect x="194.0" y="170.0" width="134.0" height="66.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="261.0" y="200.0" font-size="18" font-weight="700" fill="#76B900" text-anchor="middle">X</text>
+  <text x="261.0" y="220.0" font-size="12" font-weight="400" fill="#76B900" text-anchor="middle">weights</text>
+  <rect x="194.0" y="244.0" width="134.0" height="40.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="261.0" y="269.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <rect x="370.0" y="60.0" width="330.0" height="250.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="386.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">One engine</text>
+  <rect x="386.0" y="102.0" width="148.0" height="26.0" fill="#EAF5D3" rx="13"/>
+  <text x="460.0" y="120.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="middle">Use for replicas</text>
+  <rect x="386.0" y="140.0" width="298.0" height="154.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="396.0" y="160.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">GPU</text>
+  <rect x="396.0" y="170.0" width="278.0" height="66.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="535.0" y="200.0" font-size="18" font-weight="700" fill="#76B900" text-anchor="middle">X</text>
+  <text x="535.0" y="220.0" font-size="12" font-weight="400" fill="#76B900" text-anchor="middle">weights</text>
+  <rect x="396.0" y="244.0" width="278.0" height="40.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="535.0" y="269.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">2 requests, 1 batch</text>
+  <rect x="716.0" y="60.0" width="330.0" height="250.0" fill="#F5FAEC" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="732.0" y="90.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Two distinct models</text>
+  <rect x="732.0" y="102.0" width="148.0" height="26.0" fill="#EAF5D3" rx="13"/>
+  <text x="806.0" y="120.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="middle">Good fit for MPS</text>
+  <rect x="732.0" y="140.0" width="298.0" height="154.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="742.0" y="160.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">GPU</text>
+  <rect x="742.0" y="170.0" width="134.0" height="66.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="809.0" y="200.0" font-size="18" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <text x="809.0" y="220.0" font-size="12" font-weight="400" fill="#76B900" text-anchor="middle">weights</text>
+  <rect x="742.0" y="244.0" width="134.0" height="40.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="809.0" y="269.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <rect x="886.0" y="170.0" width="134.0" height="66.0" fill="#DDEBFD" rx="6" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="953.0" y="200.0" font-size="18" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="953.0" y="220.0" font-size="12" font-weight="400" fill="#2F80ED" text-anchor="middle">weights</text>
+  <rect x="886.0" y="244.0" width="134.0" height="40.0" fill="#FFFFFF" rx="6" stroke="#2F80ED" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="953.0" y="269.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+</svg>
