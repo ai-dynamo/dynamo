@@ -1337,6 +1337,83 @@ def test_external_trace_copy_stays_outside_artifact_tree_and_report(
     assert report["provenance"]["artifact_root"] == "<artifact-session>"
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_evaluation_metadata_marks_aliased_trace_as_transformed(tmp_path: Path):
+    source = tmp_path / "aliased.jsonl"
+    source.write_text(
+        '{"created_time": 0, "input_tokens": 8, "output_tokens": 2, "hash_ids": [1]}\n'
+    )
+    materialized = tmp_path / "materialized.jsonl"
+    materialized.write_text(
+        '{"timestamp": 0, "input_length": 8, "output_length": 2, "hash_ids": [1]}\n'
+    )
+    item = MatchRun(
+        index=0,
+        run_id="0000-sim-static-aliased-interactive-r0-s0",
+        backend="sim",
+        autoscaler="static",
+        workload="aliased",
+        sla="interactive",
+        slo_profile=SLAProfileConfig(
+            name="interactive", source_name="interactive", ttft_ms=300.0
+        ),
+        repetition=0,
+        seed=0,
+        max_requests=None,
+        arrival_speedup=1.0,
+        trace_path=source,
+        trace_block_size=64,
+        trace_presorted=True,
+    )
+    context = match_runner._ExecutionContext(
+        session_id="test-session",
+        session_root=tmp_path / "session",
+        external_trace_root=tmp_path / "external",
+    )
+    metadata = match_runner._evaluation_metadata(
+        item,
+        block_size=64,
+        trace_path=materialized,
+        context=context,
+    )
+    assert metadata["trace"]["staged"] is True
+    assert metadata["trace"]["transformed"] is True
+    assert metadata["trace"]["source_sha256"] != metadata["trace"]["sha256"]
+
+    identical_item = MatchRun(
+        index=1,
+        run_id="0001-sim-static-canonical-interactive-r0-s0",
+        backend="sim",
+        autoscaler="static",
+        workload="canonical",
+        sla="interactive",
+        slo_profile=SLAProfileConfig(
+            name="interactive", source_name="interactive", ttft_ms=300.0
+        ),
+        repetition=0,
+        seed=0,
+        max_requests=None,
+        arrival_speedup=1.0,
+        trace_path=materialized,
+        trace_block_size=64,
+        trace_presorted=True,
+    )
+    canonical_metadata = match_runner._evaluation_metadata(
+        identical_item,
+        block_size=64,
+        trace_path=materialized,
+        context=context,
+    )
+    assert canonical_metadata["trace"]["staged"] is True
+    assert canonical_metadata["trace"]["transformed"] is False
+    assert (
+        canonical_metadata["trace"]["source_sha256"]
+        == canonical_metadata["trace"]["sha256"]
+    )
+
+
 def test_publish_preflight_protects_user_supplied_trace(tmp_path: Path):
     source = tmp_path / "traffic.jsonl"
     source.write_text(

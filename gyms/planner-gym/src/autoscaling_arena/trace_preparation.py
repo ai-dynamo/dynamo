@@ -12,14 +12,17 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from autoscaling_arena.workloads.generator import validate_mooncake_trace
+from autoscaling_arena.workloads.generator import (
+    _normalize_mooncake_record,
+    validate_mooncake_trace,
+)
 
 
 @dataclass(frozen=True)
@@ -86,8 +89,11 @@ class TracePreparationConfig:
             )
         if self.session_id_field in {
             "timestamp",
+            "created_time",
             "input_length",
+            "input_tokens",
             "output_length",
+            "output_tokens",
             "hash_ids",
         }:
             raise ValueError("session_id_field cannot name a replay metric")
@@ -142,11 +148,18 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def _rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+def _rows(
+    path: Path, *, on_alias: Callable[[], None] | None = None
+) -> Iterator[tuple[int, dict[str, Any]]]:
     with path.open("rb") as handle:
         for ordinal, line in enumerate(handle):
             if line.strip():
-                yield ordinal, json.loads(line)
+                record, had_alias = _normalize_mooncake_record(
+                    json.loads(line), line_number=ordinal + 1
+                )
+                if had_alias and on_alias is not None:
+                    on_alias()
+                yield ordinal, record
 
 
 def _shifted_timestamp(
@@ -295,7 +308,13 @@ def prepare_trace(
     )
     first_ms = last_ms = None
     selected_count = 0
-    for _, record in _rows(source):
+    had_aliases = False
+
+    def on_alias() -> None:
+        nonlocal had_aliases
+        had_aliases = True
+
+    for _, record in _rows(source, on_alias=on_alias):
         timestamp = record["timestamp"]
         if first_ms is None:
             first_ms = timestamp
@@ -318,10 +337,19 @@ def prepare_trace(
         staging = Path(temp)
         staged_output = staging / "trace.jsonl"
         output_first_ms = output_last_ms = None
-        if config.is_identity:
+        if config.is_identity and not had_aliases:
             shutil.copyfile(source, staged_output)
             output_count = source_count
             output_first_ms, output_last_ms = first_ms, last_ms
+        elif config.is_identity:
+            output_count = 0
+            with staged_output.open("wb") as handle:
+                for _, record in _rows(source):
+                    if output_first_ms is None:
+                        output_first_ms = record["timestamp"]
+                    output_last_ms = record["timestamp"]
+                    output_count += 1
+                    handle.write(_canonical(record) + b"\n")
         else:
             output_count = 0
             with closing(sqlite3.connect(staging / "sort.sqlite3")) as connection:
@@ -368,7 +396,7 @@ def prepare_trace(
         if _sha256(source) != source_sha:
             raise ValueError("source changed during trace preparation")
         output_sha = _sha256(staged_output)
-        if config.is_identity and output_sha != source_sha:
+        if config.is_identity and not had_aliases and output_sha != source_sha:
             raise ValueError("source changed during trace preparation")
         preparation = asdict(config)
         manifest = {

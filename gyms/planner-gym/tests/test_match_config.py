@@ -441,6 +441,36 @@ def test_exact_dynamo_trace_allows_explicit_expected_block_size(tmp_path: Path):
     assert evaluation.trace_block_size == 64
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_match_config_accepts_aliased_mooncake_trace(tmp_path: Path):
+    trace = tmp_path / "aliased.jsonl"
+    record = {
+        "created_time": 0,
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "hash_ids": [1],
+    }
+    trace.write_text(json.dumps(record) + "\n")
+    path = _write_yaml(
+        tmp_path,
+        _sim_yaml(
+            evaluations="""
+              traces:
+                - name: aliased-mooncake
+                  format: mooncake
+                  path: aliased.jsonl
+                  block_size: 512
+            """
+        ),
+    )
+
+    config = load_match_config(path)
+    assert len(config.evaluations) == 1
+    assert config.evaluations[0].trace_format == "mooncake"
+
+
 def test_exact_dynamo_trace_is_rejected_for_real_backend(tmp_path: Path):
     trace = tmp_path / "recorded.jsonl.gz"
     trace.write_bytes(b"native-dynamo-trace")

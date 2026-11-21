@@ -1258,6 +1258,7 @@ def _evaluation_metadata(
                     or item.max_requests is not None
                     or item.prepare is not None
                     or (item.backend == "real" and item.arrival_speedup != 1.0)
+                    or source["sha256"] != materialized["sha256"]
                 ),
             )
         resolved_paths = (resolved_trace,)
