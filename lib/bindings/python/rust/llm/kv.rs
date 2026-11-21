@@ -2284,7 +2284,7 @@ impl KvRouter {
                             .unwrap_or(false);
                         if has_tokens {
                             if let Some(ref tracker) = tracker {
-                                tracker.observe_first_token_gauges();
+                                dynamo_llm::http::service::worker_metrics::observe_first_token_gauges(tracker);
                             }
                             first_token_gauges_observed = true;
                         }
@@ -2316,7 +2316,7 @@ impl KvRouter {
                 }
 
                 if let Some(ref tracker) = tracker {
-                    tracker.observe_finish_gauges();
+                    dynamo_llm::http::service::worker_metrics::observe_finish_gauges(tracker);
                 }
             });
 
