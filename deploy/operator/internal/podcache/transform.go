@@ -165,7 +165,8 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// lifecycle phase.
 		Phase: in.Phase,
 		// Model endpoint classification requires Ready; Snapshot-aware GMS
-		// replacement requires the public restore outcome.
+		// replacement requires the public restore outcome; DGDR failure
+		// diagnostics skip pods a disruption ended.
 		Conditions: projectConditions(in.Conditions),
 		// DGDR diagnostics inspect container failures; GMS Pod replacement and
 		// DCD crash-loop detection inspect restarts.
@@ -178,6 +179,7 @@ func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	out := make([]corev1.PodCondition, 0, len(in))
 	for i := range in {
 		if in[i].Type != corev1.PodReady &&
+			in[i].Type != corev1.DisruptionTarget &&
 			in[i].Type != corev1.PodConditionType(podcontract.RestoredCondition) {
 			continue
 		}
