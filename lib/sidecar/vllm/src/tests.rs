@@ -2810,6 +2810,100 @@ async fn check_decode_cancellation(is_cancelled_before_submission: bool) {
     .expect("server stream dropped after first token");
 }
 
+/// A silent vLLM gets `Control.Abort` once a cancelled decode request's drain
+/// deadline passes, before the dispatch or stream is released.
+#[tokio::test]
+async fn decode_cancellation_aborts_a_silent_peer_after_the_drain_deadline() {
+    for withholds_headers in [true, false] {
+        check_decode_drain_deadline(withholds_headers).await;
+    }
+}
+
+async fn check_decode_drain_deadline(withholds_headers: bool) {
+    const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+    let service = FakeVllm::default();
+    service
+        .hang_before_headers
+        .store(withholds_headers, Ordering::SeqCst);
+    service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Decode,
+        1,
+        model_info(),
+    )
+    .with_decode_cancel_drain_timeout(DRAIN_TIMEOUT);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let generate = engine.generate(
+        decode_request(),
+        GenerateContext::new(context.clone(), None),
+    );
+    tokio::pin!(generate);
+    let cancelled_at;
+    let mut stream = if withholds_headers {
+        tokio::select! {
+            _ = &mut generate => panic!("decode returned before response headers"),
+            _ = async {
+                while !server.service.headers_pending.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        cancelled_at = tokio::time::Instant::now();
+        context.stop_generating();
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut generate)
+            .await
+            .expect("drain deadline released the pending dispatch")
+            .expect("decode stream")
+    } else {
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(2), &mut generate)
+            .await
+            .expect("decode response headers")
+            .expect("decode stream");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !server.service.first_token_pending.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fake vLLM holds the first token");
+        cancelled_at = tokio::time::Instant::now();
+        context.stop_generating();
+        stream
+    };
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("drain deadline released the decode stream")
+        .expect("cancelled terminal")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(
+        cancelled_at.elapsed() >= DRAIN_TIMEOUT,
+        "decode cancellation ended before the drain deadline"
+    );
+    // The abort is sent before the terminal, so the engine hears it before the
+    // stream goes away.
+    assert_eq!(
+        *server.service.control_calls.lock().await,
+        vec![("abort".to_string(), json!({"request_ids": [context.id()]}))]
+    );
+    drop(stream);
+    if !withholds_headers {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !server.service.server_stream_dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server stream dropped after the drain deadline");
+    }
+}
+
 #[tokio::test]
 async fn decode_cancellation_maps_premature_eof_to_cancelled() {
     let service = FakeVllm::default();

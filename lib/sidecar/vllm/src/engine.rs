@@ -5,6 +5,7 @@ use tonic_v14 as tonic;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -51,11 +52,51 @@ pub struct VllmSidecarEngine {
     /// vLLM's reasoning parser decides when Dynamo's tool grammars apply, so
     /// they exclude the reasoning phase; set by `from_discovered`.
     engine_gates_reasoning: bool,
+    /// How long a cancelled decode request waits for headers and its first
+    /// token before the sidecar aborts it.
+    decode_cancel_drain_timeout: Duration,
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     LLMEngineOutput::cancelled()
         .with_usage(state.completion_usage(state.reported_completion_tokens(), None))
+}
+
+async fn drain_expired(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Abort a cancelled decode request vLLM never answered. The adapter sends no
+/// abort before a first token, so this is the only one vLLM gets. Shutdown
+/// interrupts the abort.
+async fn abort_undrained_decode(
+    client: &VllmClient,
+    request_id: &str,
+    timeout: Duration,
+    shutdown: impl std::future::Future<Output = ()>,
+) {
+    tracing::warn!(
+        request_id,
+        ?timeout,
+        "Cancelled vLLM decode request produced no first token before the drain deadline; forcing abort"
+    );
+    tokio::select! {
+        biased;
+        _ = shutdown => {}
+        result = client.abort(request_id.to_string()) => {
+            if let Err(error) = result {
+                // Escaped: the message embeds the engine's gRPC status text.
+                tracing::warn!(
+                    request_id,
+                    error = %error.to_string().escape_debug(),
+                    "vLLM Control.Abort failed"
+                );
+            }
+        }
+    }
 }
 
 impl VllmSidecarEngine {
@@ -81,7 +122,16 @@ impl VllmSidecarEngine {
             lost: CancellationToken::new(),
             lost_reason: Arc::default(),
             engine_gates_reasoning: false,
+            decode_cancel_drain_timeout: Duration::from_secs(
+                crate::args::DEFAULT_DECODE_CANCEL_DRAIN_TIMEOUT_SECS,
+            ),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_decode_cancel_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.decode_cancel_drain_timeout = timeout;
+        self
     }
 
     /// Parse arguments and synchronously discover the vLLM model.
@@ -246,6 +296,8 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
+        engine.decode_cancel_drain_timeout =
+            Duration::from_secs(args.decode_cancel_drain_timeout_secs);
         // TODO: Remove this version check and default to `true` once the sidecar drops vLLM < 0.33.
         let structural_tag = args
             .sidecar
@@ -916,30 +968,65 @@ impl LLMEngine for VllmSidecarEngine {
                 .await
         };
         let defer_request_cancellation = self.mode.is_decode();
+        let drain_timeout = self.decode_cancel_drain_timeout;
         let stopped_ctx = ctx.inner_arc();
         let shutdown = self.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
-        let stream = tokio::select! {
-            biased;
-            _ = shutdown_cancellation.as_mut() => None,
-            // Decode must reach vLLM so NIXL can release transferred KV.
-            _ = request_cancellation.as_mut(), if !defer_request_cancellation => None,
-            result = submit => Some(result?),
+        // Set once, when a deferred cancellation is first seen, and carried
+        // into the stream so the header and first-token waits share one bound.
+        let mut drain_deadline: Option<Instant> = None;
+        tokio::pin!(submit);
+        let stream = loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_cancellation.as_mut() => break None,
+                // Decode must reach vLLM so NIXL can release transferred KV.
+                _ = request_cancellation.as_mut(), if drain_deadline.is_none() => {
+                    if !defer_request_cancellation {
+                        break None;
+                    }
+                    drain_deadline = Some(Instant::now() + drain_timeout);
+                }
+                _ = drain_expired(drain_deadline) => {
+                    abort_undrained_decode(
+                        client,
+                        ctx.id(),
+                        drain_timeout,
+                        shutdown_cancellation.as_mut(),
+                    )
+                    .await;
+                    break None;
+                }
+                result = &mut submit => break Some(result?),
+            }
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
             return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
         };
+        let abort_client = defer_request_cancellation.then(|| client.clone());
 
         Ok(Box::pin(async_stream::stream! {
-            let mut request_cancelled = false;
+            let mut request_cancelled = drain_deadline.is_some();
             let mut first_token_observed = false;
             loop {
                 let message = if request_cancelled {
                     tokio::select! {
                         biased;
                         _ = shutdown_cancellation.as_mut() => None,
+                        _ = drain_expired(drain_deadline) => {
+                            if let Some(client) = &abort_client {
+                                abort_undrained_decode(
+                        client,
+                        ctx.id(),
+                        drain_timeout,
+                        shutdown_cancellation.as_mut(),
+                    )
+                    .await;
+                            }
+                            None
+                        }
                         message = stream.message() => Some(message),
                     }
                 } else {
@@ -949,6 +1036,7 @@ impl LLMEngine for VllmSidecarEngine {
                         _ = request_cancellation.as_mut() => {
                             if defer_request_cancellation && !first_token_observed {
                                 request_cancelled = true;
+                                drain_deadline = Some(Instant::now() + drain_timeout);
                                 continue;
                             }
                             None
