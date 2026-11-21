@@ -4,7 +4,7 @@
 use super::*;
 use axum::http::{Method, Uri};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tracing::instrument::WithSubscriber;
@@ -211,9 +211,11 @@ impl std::io::Write for CapturedLogs {
 #[tokio::test]
 async fn failed_requests_log_bounded_classification_without_client_values() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let unavailable = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        // Bound but never listening: connects are refused, and holding the port
+        // until the test ends stops another listener from taking it.
+        let unreachable = TcpSocket::new_v4().unwrap();
+        unreachable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let unavailable = format!("http://{}", unreachable.local_addr().unwrap());
         let state = ProxyState {
             client: client(),
             gateway: Url::parse(&unavailable).unwrap(),
@@ -579,9 +581,11 @@ async fn streams_output_and_preserves_redirects_failures_and_cancellation() {
         proxy.stop().await;
         upstream.stop().await;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let unavailable = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        // Bound but never listening: connects are refused, and holding the port
+        // until the test ends stops another listener from taking it.
+        let unreachable = TcpSocket::new_v4().unwrap();
+        unreachable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let unavailable = format!("http://{}", unreachable.local_addr().unwrap());
         let (_, proxy) = router(
             &unavailable,
             None,
