@@ -251,20 +251,36 @@ class AISCoreEnginePerfModel:
     def get_queued_prefill_time(
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        """Estimate queued-prefill drain time in seconds."""
+        """Estimate queued-prefill drain time, or None when decode leaves no room."""
         if self._worker_type == "decode":
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
 
-        plans = [
-            _PrefillChunkPlan.build(
-                metrics.queued_requests.sum_prefill_tokens,
-                self._limits.max_num_batched_tokens,
+        if all(
+            metrics.queued_requests.sum_prefill_tokens == 0
+            for metrics in metrics_by_rank
+        ):
+            return 0.0
+
+        chunk_limits = [
+            self._limits.max_num_batched_tokens
+            - (
+                metrics.scheduled_requests.num_decode_requests
+                if self._worker_type == "aggregated"
+                else 0
             )
             for metrics in metrics_by_rank
         ]
-        if all(plan.full_chunks == 0 and plan.tail_tokens == 0 for plan in plans):
-            return 0.0
+        plans: list[_PrefillChunkPlan] = []
+        for metrics, max_chunk in zip(metrics_by_rank, chunk_limits, strict=True):
+            queued_tokens = metrics.queued_requests.sum_prefill_tokens
+            if max_chunk < 0 or (max_chunk == 0 and queued_tokens > 0):
+                return None
+            plans.append(
+                _PrefillChunkPlan.build(queued_tokens, max_chunk)
+                if max_chunk > 0
+                else _PrefillChunkPlan(full_chunks=0, tail_tokens=0)
+            )
 
         breakpoints = {0}
         for plan in plans:
@@ -277,8 +293,10 @@ class AISCoreEnginePerfModel:
         for start, end in pairwise(sorted(breakpoints)):
             repeat_count = end - start
             chunk_metrics: list[ForwardPassMetrics] = []
-            for snapshot, plan in zip(metrics_by_rank, plans, strict=True):
-                chunk = plan.chunk_at(start, self._limits.max_num_batched_tokens)
+            for snapshot, plan, max_chunk in zip(
+                metrics_by_rank, plans, chunk_limits, strict=True
+            ):
+                chunk = plan.chunk_at(start, max_chunk)
                 scheduled = ScheduledRequestMetrics(
                     num_prefill_requests=_estimate_prefill_request_count(
                         snapshot.queued_requests.num_prefill_requests, chunk
@@ -538,22 +556,41 @@ class AISCoreEnginePerfModel:
         current_decode_requests: int,
         current_decode_kv: int,
     ) -> Optional[float]:
+        # Synthetic work is split evenly across DP ranks. The busiest decode
+        # rank bounds the total prefill chunk under that same distribution.
+        decode_per_rank = _split_total(
+            current_decode_requests, self._attention_dp_size, 0
+        )
+        max_chunk = min(
+            self._limits.max_num_batched_tokens,
+            (self._limits.max_num_batched_tokens - decode_per_rank)
+            * self._attention_dp_size,
+        )
         return self._prefill_chunk_time(
             queued_prefill_tokens,
             lambda chunk: self._mixed_time(
                 chunk, current_decode_requests, current_decode_kv
             ),
+            max_chunk=max_chunk,
         )
 
     def _prefill_chunk_time(
         self,
         tokens: int,
         estimate_chunk: Callable[[int], Optional[float]],
+        *,
+        max_chunk: Optional[int] = None,
     ) -> Optional[float]:
-        plan = _PrefillChunkPlan.build(tokens, self._limits.max_num_batched_tokens)
+        if tokens == 0:
+            return 0.0
+        if max_chunk is None:
+            max_chunk = self._limits.max_num_batched_tokens
+        if max_chunk <= 0:
+            return None
+        plan = _PrefillChunkPlan.build(tokens, max_chunk)
         total_s = 0.0
         if plan.full_chunks > 0:
-            duration_s = estimate_chunk(self._limits.max_num_batched_tokens)
+            duration_s = estimate_chunk(max_chunk)
             if duration_s is None:
                 return None
             total_s = _checked_duration_add(
