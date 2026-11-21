@@ -96,6 +96,46 @@ tests:
       global.kai-scheduler.install: true
     asserts:
       - notFailedTemplate: {}
+
+  - it: should reject a custom KAI scheduler name with the bundled scheduler
+    set:
+      global.kai-scheduler.install: true
+      global.kai-scheduler.schedulerName: runai-scheduler
+    asserts:
+      - failedTemplate:
+          errorPattern: "schedulerName \"runai-scheduler\" requires an externally managed KAI-compatible scheduler"
+
+  - it: should treat an empty KAI scheduler name as the default with the bundled scheduler
+    set:
+      global.kai-scheduler.install: true
+      global.kai-scheduler.schedulerName: ""
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should reject a boolean false KAI scheduler name with the bundled scheduler
+    set:
+      global.kai-scheduler.install: true
+      global.kai-scheduler.schedulerName: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "schedulerName \"false\" requires an externally managed KAI-compatible scheduler"
+
+  - it: should reject a numeric zero KAI scheduler name with the bundled scheduler
+    set:
+      global.kai-scheduler.install: true
+      global.kai-scheduler.schedulerName: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "schedulerName \"0\" requires an externally managed KAI-compatible scheduler"
+
+  - it: should allow a custom KAI scheduler name with an externally managed scheduler
+    set:
+      global.kai-scheduler.install: false
+      global.kai-scheduler.enabled: true
+      global.kai-scheduler.schedulerName: runai-scheduler
+    asserts:
+      - notFailedTemplate: {}
+
   # --- Default values should render cleanly ---
 
   - it: should render successfully with default values
