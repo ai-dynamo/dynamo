@@ -6407,3 +6407,132 @@ worker_selection:
     )
     .unwrap();
 }
+
+/// A decode leg that carries staged KV, when its prefill worker's required KV-transfer domain has
+/// no decode worker, is unavailable and migratable, excludes that prefill worker from the retry,
+/// and parks its classifier lifecycle for the retry rather than aborting it.
+#[tokio::test]
+#[serial_test::serial]
+async fn decode_leg_without_a_worker_in_the_prefill_domain_is_migratable() {
+    use crate::local_model::runtime_config::topology_taint;
+    use crate::protocols::common::preprocessor::MigrationState;
+
+    let (observations_tx, _observations) = mpsc::unbounded_channel();
+    let mut in_zone_a = ModelRuntimeConfig::default();
+    in_zone_a.taints.insert(topology_taint("zone", "a"));
+    let (decode, runtime) = Box::pin(router_with_worker_configs_and_classifier(
+        None,
+        HashMap::from([(7, in_zone_a)]),
+        Some(RecordingClassifier {
+            calls: Arc::new(AtomicUsize::new(0)),
+            observations: observations_tx,
+        }),
+    ))
+    .await;
+    let decode_leg = |required_taint: String, staged_kv: bool, state: &MigrationState, prefill| {
+        let mut content = request();
+        content.staged_kv_cleanup = staged_kv;
+        content.migration_state = Some(state.clone());
+        content.routing_mut().prefill_worker_id = Some(prefill);
+        content.routing_mut().routing_constraints = Some(RoutingConstraints {
+            required_taints: HashSet::from([required_taint]),
+            ..Default::default()
+        });
+        Context::new(content)
+    };
+    let select = async |request: &SingleIn<PreprocessedRequest>| {
+        decode
+            .select_with_affinity(
+                request,
+                RequestPhase::Decode,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .err()
+            .expect("no decode worker carries the required taint")
+    };
+
+    // Zone b has no decode worker. The retry runs prefill on another zone-b worker and must
+    // be reported the same way, although its own exclusions now empty the candidate set.
+    let state = MigrationState::default();
+    for (prefill, excluded) in [(3, vec![3]), (4, vec![3, 4])] {
+        let request = decode_leg(topology_taint("zone", "b"), true, &state, prefill);
+        let error = select(&request).await;
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+            "{error:#}"
+        );
+        assert!(crate::migration::is_migratable(error.as_ref()));
+        assert_eq!(
+            state.excluded_worker_ids(),
+            excluded,
+            "the retry must not pick the same prefill worker"
+        );
+        assert!(
+            state.take_request_lifecycle().is_some(),
+            "the decode lifecycle is parked for the retry"
+        );
+    }
+
+    // Nothing staged, or a required taint that is not a KV-transfer domain: the selection
+    // error keeps its classification.
+    for (taint, staged_kv) in [
+        (topology_taint("zone", "b"), false),
+        ("pool-x".to_string(), true),
+    ] {
+        let state = MigrationState::default();
+        let error = select(&decode_leg(taint, staged_kv, &state, 3)).await;
+        assert!(
+            !crate::migration::is_migratable(error.as_ref()),
+            "{error:#}"
+        );
+        assert!(state.excluded_worker_ids().is_empty());
+    }
+    // Only a failure to find a candidate is reclassified, and only for an empty domain.
+    let state = MigrationState::default();
+    let cancelled = || {
+        anyhow::Error::from(
+            DynamoError::builder()
+                .error_type(ErrorType::Cancelled)
+                .message("client disconnected")
+                .build(),
+        )
+    };
+    for (zone, error) in [
+        ("b", cancelled()),
+        // A classifier shedding load with an unavailable error keeps its own response.
+        (
+            "b",
+            anyhow::Error::from(KvSchedulerError::RequestClassifierFailed(Arc::new(
+                DynamoError::builder()
+                    .error_type(ErrorType::Unavailable)
+                    .message("classifier shed load")
+                    .build(),
+            ))),
+        ),
+        ("a", anyhow::Error::from(KvSchedulerError::NoEndpoints)),
+    ] {
+        let other = decode.decode_domain_unreachable(
+            &decode_leg(topology_taint("zone", zone), true, &state, 3),
+            error,
+        );
+        assert!(
+            !crate::migration::is_migratable(other.as_ref()),
+            "zone {zone}: {other:#}"
+        );
+    }
+    assert!(state.excluded_worker_ids().is_empty());
+    // ...until its only decode worker is no longer available.
+    decode
+        .inner
+        .client
+        .override_discovered_instances(Vec::new());
+    let error = select(&decode_leg(topology_taint("zone", "a"), true, &state, 3)).await;
+    assert!(
+        match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+        "{error:#}"
+    );
+    drop(decode);
+    runtime.shutdown();
+}
