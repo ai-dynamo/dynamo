@@ -1044,6 +1044,9 @@ pub mod discovery {
     /// Discovery backend: "kubernetes" or "etcd" (default)
     pub const DYN_DISCOVERY_BACKEND: &str = "DYN_DISCOVERY_BACKEND";
 
+    /// Use only model identity records for conflict checks after all legacy workers have drained.
+    pub const DYN_MODEL_IDENTITY_INDEX: &str = "DYN_MODEL_IDENTITY_INDEX";
+
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 }
@@ -1313,6 +1316,7 @@ mod tests {
             zmq_broker::ZMQ_BROKER_NAMESPACE,
             // Discovery
             discovery::DYN_DISCOVERY_BACKEND,
+            discovery::DYN_MODEL_IDENTITY_INDEX,
             discovery::DYN_KUBE_DISCOVERY_MODE,
             // CUDA
             cuda::DYN_FATBIN_PATH,

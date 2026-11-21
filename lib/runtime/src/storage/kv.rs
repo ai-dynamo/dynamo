@@ -556,6 +556,20 @@ pub trait Bucket: Send + Sync {
         self.entries().await
     }
 
+    /// The entry under `sub` with the lowest key at or after `start`, a key under `sub` in the
+    /// form [`Bucket::get`] takes.
+    ///
+    /// Like [`Bucket::entries_under`], it may return more entries, so callers still filter; any
+    /// entry under `sub` between `start` and a returned key is returned too. The default reads
+    /// the whole bucket. A backend that can range keys in order (etcd) reads one entry.
+    async fn first_entry_under(
+        &self,
+        sub: &str,
+        _start: &str,
+    ) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        self.entries_under(sub).await
+    }
+
     /// [`Bucket::watch`] for the keys under `sub`, scoped as [`Bucket::entries_under`] is.
     async fn watch_under(
         &self,

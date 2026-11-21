@@ -1212,8 +1212,11 @@ pub struct ModelTaintsUpdate {
 /// Stream type for discovery events
 pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + Send>>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ModelRegistrationIdentity {
+/// The fields of a model card that decide whether it may share an endpoint with another card.
+/// [`Discovery::register`] rejects a card whose identity is incompatible with any identity
+/// already registered on the endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRegistrationIdentity {
     display_name: String,
     aliases: Vec<String>,
     source_path: Option<String>,
@@ -1288,10 +1291,11 @@ fn extract_model_registration_identity(
     })
 }
 
-fn find_conflicting_model_name(
+/// The model identities of `instances`, each once, in first-seen order.
+fn distinct_model_identities(
     instances: &[DiscoveryInstance],
-    requested_identity: &ModelRegistrationIdentity,
-) -> Result<Option<String>> {
+) -> Result<Vec<ModelRegistrationIdentity>> {
+    let mut identities = Vec::new();
     for instance in instances {
         if let DiscoveryInstance::Model {
             card_json,
@@ -1299,15 +1303,25 @@ fn find_conflicting_model_name(
             ..
         } = instance
         {
-            let existing_identity =
-                extract_model_registration_identity(card_json, model_suffix.as_deref())?;
-            if !requested_identity.is_compatible_with(&existing_identity) {
-                return Ok(Some(existing_identity.display_name));
+            let identity = extract_model_registration_identity(card_json, model_suffix.as_deref())?;
+            if !identities.contains(&identity) {
+                identities.push(identity);
             }
         }
     }
+    Ok(identities)
+}
 
-    Ok(None)
+/// Compatibility is not transitive, so `requested_identity` is checked against every existing
+/// identity, not one representative.
+fn find_conflicting_model_name<'a>(
+    existing_identities: &'a [ModelRegistrationIdentity],
+    requested_identity: &ModelRegistrationIdentity,
+) -> Option<&'a str> {
+    existing_identities
+        .iter()
+        .find(|existing| !requested_identity.is_compatible_with(existing))
+        .map(|existing| existing.display_name.as_str())
 }
 
 const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
@@ -1597,15 +1611,12 @@ pub trait Discovery: Send + Sync {
             _ => return self.register_internal(spec).await,
         };
 
-        let query = DiscoveryQuery::EndpointModels {
-            namespace: namespace.clone(),
-            component: component.clone(),
-            endpoint: endpoint.clone(),
-        };
-
-        if let Some(conflicting_name) =
-            find_conflicting_model_name(&self.list(query.clone()).await?, &requested_identity)?
-        {
+        if let Some(conflicting_name) = find_conflicting_model_name(
+            &self
+                .endpoint_model_identities(&namespace, &component, &endpoint)
+                .await?,
+            &requested_identity,
+        ) {
             let requested_name = &requested_identity.display_name;
             anyhow::bail!(
                 "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
@@ -1614,9 +1625,14 @@ pub trait Discovery: Send + Sync {
 
         let instance = self.register_internal(spec).await?;
 
-        if let Some(conflicting_name) =
-            find_conflicting_model_name(&self.list(query).await?, &requested_identity)?
-        {
+        // A concurrent incompatible registration that passed its first check before ours was
+        // written is visible now; roll ours back.
+        if let Some(conflicting_name) = find_conflicting_model_name(
+            &self
+                .endpoint_model_identities(&namespace, &component, &endpoint)
+                .await?,
+            &requested_identity,
+        ) {
             let requested_name = &requested_identity.display_name;
             if let Err(unregister_err) = self.unregister(instance.clone()).await {
                 return Err(anyhow::anyhow!(
@@ -1638,6 +1654,26 @@ pub trait Discovery: Send + Sync {
 
     /// Backend-specific raw registration implementation.
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
+
+    /// The distinct model identities registered on an endpoint, which the conflict checks in
+    /// [`Discovery::register`] compare a new card with. The default lists every card on the
+    /// endpoint. A backend with a remote store overrides it with a read whose cost depends on
+    /// the number of distinct identities, not on the number of workers.
+    async fn endpoint_model_identities(
+        &self,
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+    ) -> Result<Vec<ModelRegistrationIdentity>> {
+        let instances = self
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: namespace.to_string(),
+                component: component.to_string(),
+                endpoint: endpoint.to_string(),
+            })
+            .await?;
+        distinct_model_identities(&instances)
+    }
 
     /// Replace the caller-managed taints of this worker's existing base model card.
     async fn update_model_taints(
