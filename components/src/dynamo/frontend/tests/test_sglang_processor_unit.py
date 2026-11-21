@@ -5028,7 +5028,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         positional_history[0]["content"][1]["image_url"][
             "url"
         ] = "https://example.com/replayed.png"
-        request["responses_positional_tool_history"] = positional_history
+        request["positional_tool_history"] = positional_history
 
         result = preprocess_chat_request(
             request,
@@ -5420,7 +5420,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": model,
             "messages": [{"role": "developer", "content": "Hello"}],
-            "responses_positional_tool_history": [
+            "positional_tool_history": [
                 {"role": "developer", "content": "Positional view"}
             ],
             "reasoning_effort": "high",
@@ -5450,7 +5450,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": "moonshotai/Kimi-K3",
             "messages": [{"role": "developer", "content": "Hello"}],
-            "responses_positional_tool_history": [
+            "positional_tool_history": [
                 {"role": "developer", "content": "Positional view"}
             ],
             "tools": [

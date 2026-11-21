@@ -11,9 +11,10 @@ pub(crate) mod request_compat;
 pub mod stream_converter;
 mod template_tools;
 mod tool_names;
+use crate::preprocessor::prompt::PromptToolHistory;
 pub use template_tools::ResponsesToolContext;
+pub(crate) use template_tools::effective_response_tools;
 use template_tools::*;
-pub(crate) use template_tools::{ResponsesToolHistory, effective_response_tools};
 
 pub(crate) use reasoning_replay::estimate_input_tokens;
 pub use tool_names::ToolNameMap;
@@ -4955,7 +4956,7 @@ mod tests {
             .unwrap();
             let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
             chat.normalize_responses_history_phases(false);
-            chat.normalize_responses_tools_for_renderer(true, ResponsesToolHistory::Positional)
+            chat.normalize_responses_tools_for_renderer(true, PromptToolHistory::Positional)
                 .unwrap();
             let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
                 panic!("missing assistant");
@@ -5003,7 +5004,7 @@ mod tests {
             let OutputItem::FunctionCall(call) = &item else {
                 panic!("missing function call");
             };
-            assert_eq!(call.call_id, format!("dynamo_kimi_bare_v2_{item_id}"));
+            assert_eq!(call.call_id, format!("dynamo_bare_tool_v2_{item_id}"));
             assert_eq!(call.namespace.as_deref(), Some("functions"));
             let mut body = serde_json::to_value(&request).unwrap();
             let call_id = call.call_id.clone();
@@ -5030,7 +5031,7 @@ mod tests {
                 assistant.tool_calls.as_ref().unwrap()[0].function.name,
                 "functions.exec"
             );
-            chat.normalize_responses_tools_for_renderer(true, ResponsesToolHistory::Positional)
+            chat.normalize_responses_tools_for_renderer(true, PromptToolHistory::Positional)
                 .unwrap();
             let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
                 panic!("missing assistant");

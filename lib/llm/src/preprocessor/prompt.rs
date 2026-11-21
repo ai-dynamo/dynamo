@@ -28,8 +28,10 @@ use crate::model_card::{
 };
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
-    responses::ResponsesToolHistory,
 };
+
+mod tool_history;
+pub(crate) use tool_history::PromptToolHistory;
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
 /// [`OAIChatLikeRequest`] so `dynamo_renderer` stays free of the media module;
@@ -426,7 +428,7 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
 
 pub(super) fn prompt_formatter_with_history_from_mdc(
     mdc: &ModelDeploymentCard,
-) -> Result<(PromptFormatter, ResponsesToolHistory)> {
+) -> Result<(PromptFormatter, PromptToolHistory)> {
     // Mistral checkpoints with a tekken.json tokenizer get Mistral's own renderer.
     // It builds each prompt exactly the way the mistral-common library does, which
     // is also what stock vLLM uses for these checkpoints by default.
@@ -454,7 +456,10 @@ pub(super) fn prompt_formatter_with_history_from_mdc(
             version,
             metadata.model_settings_builder(),
         )?;
-        return Ok((PromptFormatter::OAI(std::sync::Arc::new(formatter)), ResponsesToolHistory::AsProvided));
+        return Ok((
+            PromptFormatter::OAI(std::sync::Arc::new(formatter)),
+            PromptToolHistory::AsProvided,
+        ));
     }
     // Prefer the authoritative `model_type` from config.json — it's set by the
     // model author and survives any `--served-model-name` rename. An empty
@@ -473,11 +478,11 @@ pub(super) fn prompt_formatter_with_history_from_mdc(
         &display_name_lower,
         mdc.runtime_config.exclude_tools_when_tool_choice_none,
     ) {
-        return Ok((formatter, ResponsesToolHistory::Positional));
+        return Ok((formatter, PromptToolHistory::Positional));
     }
 
     if let Some(formatter) = native_formatter_for(&model_type_lower, &display_name_lower) {
-        return Ok((formatter, ResponsesToolHistory::AsProvided));
+        return Ok((formatter, PromptToolHistory::AsProvided));
     }
 
     let formatter = match mdc
@@ -561,7 +566,7 @@ pub(super) fn prompt_formatter_with_history_from_mdc(
             "prompt_formatter should not have type HfChatTemplate*"
         )),
     }?;
-    Ok((formatter, ResponsesToolHistory::AsProvided))
+    Ok((formatter, PromptToolHistory::AsProvided))
 }
 
 const CONTINUE_FINAL_MESSAGE_NOT_FOUND: &str =
