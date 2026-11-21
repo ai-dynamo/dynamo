@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 
 #[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
-use super::{SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
+use super::{SessionAffinityMode, SessionAffinitySpec, replica_sync::ReplicaSyncRuntime};
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -58,9 +58,16 @@ pub struct AffinityCoordinator {
 
 impl AffinityCoordinator {
     pub fn new(ttl: Duration, mode: SessionAffinityMode) -> Result<Self, Error> {
+        Self::with_spec(SessionAffinitySpec {
+            ttl,
+            mode,
+            max_entries: None,
+        })
+    }
+
+    pub(crate) fn with_spec(spec: SessionAffinitySpec) -> Result<Self, Error> {
         Ok(Self::wrap(
-            SessionAffinity::with_config(super::affinity_config(ttl, mode)?)
-                .map_err(affinity_error)?,
+            SessionAffinity::with_config(super::affinity_config(spec)?).map_err(affinity_error)?,
         ))
     }
 

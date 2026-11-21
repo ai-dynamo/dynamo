@@ -552,12 +552,19 @@ impl ModelWatcher {
             return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
+        let worker_type = effective_worker_type(card.worker_type, card.model_type);
+        let session_affinity = role_routing::serving_set_session_affinity(
+            card.router_config.as_ref(),
+            &self.router_config,
+            worker_type,
+        )?;
         role_routing::log_serving_set_routing(
             card.name(),
             &spec.key.id(),
-            effective_worker_type(card.worker_type, card.model_type),
+            worker_type,
             card.router_config.is_some(),
             &router_config,
+            &session_affinity,
         );
 
         if card.model_input == ModelInput::Tokens
@@ -689,6 +696,8 @@ impl ModelWatcher {
 
                 // Fallback only: a prefill worker that declares its own
                 // `router_config` overrides this at activation time.
+                let (inherited_affinity_ttl_secs, inherited_affinity_mode) =
+                    role_routing::inherited_prefill_session_affinity(&router_config);
                 Some(PrefillRouter::new_with_selection_policy(
                     None,
                     self.manager.clone(),
@@ -699,8 +708,12 @@ impl ModelWatcher {
                     Some(prefill_config),
                     self.plugins.selection_policy(),
                     self.prefill_load_estimator.clone(),
-                    router_config.session_affinity_ttl_secs,
-                    router_config.session_affinity_mode,
+                    inherited_affinity_ttl_secs,
+                    inherited_affinity_mode,
+                    role_routing::policy_file_session_affinity(
+                        &self.router_config,
+                        WorkerType::Prefill,
+                    )?,
                     model_name.clone(),
                     namespace.clone(),
                     prefill_load_thresholds,
@@ -766,8 +779,7 @@ impl ModelWatcher {
                         prefill_chooser.clone(),
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
-                        router_config.session_affinity_ttl_secs,
-                        router_config.session_affinity_mode,
+                        session_affinity.spec,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

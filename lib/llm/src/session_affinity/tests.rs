@@ -761,12 +761,21 @@ fn session_affinity_max_entries_comes_from_the_environment() {
     use std::env::VarError;
 
     assert_eq!(
-        super::max_entries_from(Err(VarError::NotPresent)).unwrap(),
+        super::max_entries_from(None, Err(VarError::NotPresent)).unwrap(),
         65_536
     );
-    assert_eq!(super::max_entries_from(Ok("2".into())).unwrap(), 2);
+    assert_eq!(super::max_entries_from(None, Ok("2".into())).unwrap(), 2);
+    // A role's `max_entries` in the policy file wins over the environment, and reaches
+    // the config every affinity table is built from.
+    let role = std::num::NonZeroUsize::new(8);
+    assert_eq!(super::max_entries_from(role, Ok("2".into())).unwrap(), 8);
+    let spec = super::SessionAffinitySpec {
+        max_entries: role,
+        ..Default::default()
+    };
+    assert_eq!(super::affinity_config(spec).unwrap().max_entries, 8);
     for value in ["0", "-1", "abc"] {
-        let error = super::max_entries_from(Ok(value.into())).unwrap_err();
+        let error = super::max_entries_from(None, Ok(value.into())).unwrap_err();
         assert!(
             error
                 .to_string()

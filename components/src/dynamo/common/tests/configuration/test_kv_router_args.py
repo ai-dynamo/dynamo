@@ -1001,6 +1001,13 @@ def test_rejection_threshold_validation_rejects_invalid_values(
         config.validate()
 
 
+# The warning names the YAML that replaces a frontend session-affinity flag.
+_SESSION_AFFINITY_YAML = (
+    r"use session_affinity: \{.+\} on a role under worker_selection in "
+    r"--router-policy-config"
+)
+
+
 def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
     parser = argparse.ArgumentParser()
@@ -1012,17 +1019,19 @@ def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
     parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
+    with pytest.warns(FutureWarning, match="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS"):
+        FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
     assert config.session_affinity_ttl_secs == 600
     assert config.router_kwargs()["session_affinity_ttl_secs"] == 600
 
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
-    config = FrontendConfig.from_cli_args(
-        parser.parse_args(["--router-session-affinity-ttl-secs", "900"])
-    )
+    with pytest.warns(FutureWarning, match=_SESSION_AFFINITY_YAML):
+        args = parser.parse_args(["--router-session-affinity-ttl-secs", "900"])
+    config = FrontendConfig.from_cli_args(args)
     config.validate()
     assert config.session_affinity_ttl_secs == 900
 
@@ -1037,16 +1046,17 @@ def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MODE", "soft")
     parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
+    with pytest.warns(FutureWarning, match="DYN_ROUTER_SESSION_AFFINITY_MODE"):
+        FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     assert config.session_affinity_mode == "soft"
 
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MODE")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
-    config = FrontendConfig.from_cli_args(
-        parser.parse_args(["--router-session-affinity-mode", "hard"])
-    )
-    assert config.session_affinity_mode == "hard"
+    with pytest.warns(FutureWarning, match=_SESSION_AFFINITY_YAML):
+        args = parser.parse_args(["--router-session-affinity-mode", "hard"])
+    assert FrontendConfig.from_cli_args(args).session_affinity_mode == "hard"
 
 
 def test_session_affinity_max_entries_cli_and_environment(
@@ -1055,25 +1065,26 @@ def test_session_affinity_max_entries_cli_and_environment(
     def parse(argv: list[str]) -> FrontendConfig:
         parser = argparse.ArgumentParser()
         FrontendArgGroup().add_arguments(parser)
-        config = FrontendConfig.from_cli_args(parser.parse_args(argv))
-        config.validate()
-        return config
+        return FrontendConfig.from_cli_args(parser.parse_args(argv))
 
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", raising=False)
-    assert parse([]).session_affinity_max_entries == 65_536
+    config = parse([])
+    config.validate()
+    assert config.session_affinity_max_entries == 65_536
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", "1000000")
-    assert parse([]).session_affinity_max_entries == 1_000_000
+    with pytest.warns(FutureWarning, match="DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"):
+        assert parse([]).session_affinity_max_entries == 1_000_000
 
-    config = parse(["--router-session-affinity-max-entries", "2000000"])
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES")
+    with pytest.warns(FutureWarning, match=_SESSION_AFFINITY_YAML):
+        config = parse(["--router-session-affinity-max-entries", "2000000"])
+    config.validate()
     assert config.session_affinity_max_entries == 2_000_000
     assert "session_affinity_max_entries" not in config.router_kwargs()
 
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-    config = FrontendConfig.from_cli_args(
-        parser.parse_args(["--router-session-affinity-max-entries", "0"])
-    )
+    with pytest.warns(FutureWarning, match="deprecated"):
+        config = parse(["--router-session-affinity-max-entries", "0"])
     with pytest.raises(ValueError, match="router-session-affinity-max-entries"):
         config.validate()
 
@@ -1082,9 +1093,9 @@ def test_session_affinity_max_entries_cli_and_environment(
 def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
-    config = FrontendConfig.from_cli_args(
-        parser.parse_args(["--router-session-affinity-ttl-secs", str(ttl)])
-    )
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--router-session-affinity-ttl-secs", str(ttl)])
+    config = FrontendConfig.from_cli_args(args)
     with pytest.raises(ValueError, match="router-session-affinity-ttl-secs"):
         config.validate()
 

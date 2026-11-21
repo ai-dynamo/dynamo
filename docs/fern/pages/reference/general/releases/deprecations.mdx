@@ -25,6 +25,16 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.
 
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the frontend's session-affinity flags** in favor of a `session_affinity` key on each role of `worker_selection` in the `--router-policy-config` file. Each role (`aggregated`, `prefill`, `decode`) now sets its own session affinity: `session_affinity: true` is a 300-second idle TTL in `hard` mode, a mapping tunes it, and `false` turns it off for that role. A role without the key still uses the TTL its workers advertise, then the frontend flags. The flags and variables still work on the frontend, print one warning, and are scheduled for removal in v1.9.0. The worker-side `--router-session-affinity-ttl-secs` and `--router-session-affinity-mode` are unchanged. A policy file cannot select `--router-mode direct` or `--router-mode device-aware-weighted` yet, so keep the flags with those two modes; the flags are not removed for them until a policy file can select them.
+
+| Old (frontend) | New (per role, in the policy file) |
+| :---- | :---- |
+| `--router-session-affinity-ttl-secs N`, `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | `session_affinity: {ttl_secs: N}`, or `session_affinity: true` for 300 seconds |
+| `--router-session-affinity-mode hard\|soft`, `DYN_ROUTER_SESSION_AFFINITY_MODE` | `session_affinity: {mode: hard}` or `{mode: soft}` |
+| `--router-session-affinity-max-entries N`, `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES` | `session_affinity: {max_entries: N}` |
+
+  > **Migrate:** Add `session_affinity` to every role that should keep sessions on one worker, then remove the flags. `--router-mode kv --router-session-affinity-ttl-secs 300` becomes `--router-policy-config router.yaml` with `worker_selection: {aggregated: {type: default, session_affinity: true}}`; a disaggregated deployment sets the key on `prefill` and `decode` separately. See [Session Affinity](../../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
 
 | Old | New |

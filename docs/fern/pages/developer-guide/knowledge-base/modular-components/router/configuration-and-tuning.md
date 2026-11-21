@@ -497,24 +497,65 @@ message with `router_mode="kv"` and `selection="session_affinity"`, replacing
 `Selected worker` and the `selection` field. Explicit pins use `selection="pinned"`;
 other KV selections use `selection="kv"`.
 
-Session affinity is disabled by default. On the frontend, set
-`--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
-a value from `1` through `31536000` to enable it, then send
-`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
-without the TTL option provides session identity but does not enable router affinity.
+Session affinity is disabled by default. Enable it for a worker role with `session_affinity` in
+that role's entry of the `--router-policy-config` file, then send `X-Dynamo-Session-ID` to keep
+related requests on one worker. Supplying the header without enabling affinity provides session
+identity but does not enable router affinity.
+
+```yaml
+worker_selection:
+  prefill:
+    type: dynamo-default-cost-fn
+    session_affinity: true        # 300 s idle TTL, hard mode
+  decode:
+    type: round-robin
+    session_affinity:
+      ttl_secs: 600
+      max_entries: 1000000
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ttl_secs` | `300` | Idle TTL in seconds, from `1` through `31536000` |
+| `mode` | `hard` | `hard` or `soft`; see the table below |
+| `max_entries` | `65536` | Most sessions the role's affinity table holds at once; at least `1`. The deprecated `--router-session-affinity-max-entries` changes this default |
+
+`session_affinity: true` takes every default, and `session_affinity: false` turns affinity off
+for the role. The `aggregated`, `prefill`, and `decode` roles accept the key on any policy type,
+including `{type: default, session_affinity: true}`; `encode` rejects it. The router applies the
+setting before it asks the role's policy for a worker, and the policy does not receive it. Each
+role's setting is its own: a role does not use another role's entry. Only the frontend reads the
+key. The standalone router and the inference-gateway endpoint picker accept it in a policy file
+and ignore it.
+
+A role whose entry has no `session_affinity` keeps the earlier rules for now. A worker set that
+advertises router settings uses its own `--router-session-affinity-ttl-secs`, and has no affinity
+when it sets none. A worker set that advertises nothing uses the frontend's
+`--router-session-affinity-ttl-secs`. In both cases the mode and the entry limit are the
+frontend's `--router-session-affinity-mode` and `--router-session-affinity-max-entries`. A
+prefill pool that advertises nothing uses the decode set's advertised or flag TTL, not the
+`decode` entry of the policy file.
+
+The three frontend flags and their `DYN_ROUTER_SESSION_AFFINITY_*` environment variables are
+deprecated and scheduled for removal in v1.9; see
+[Deprecations](../../../../reference/general/releases/deprecations.mdx#v180). After that, a role
+without `session_affinity` has no session affinity. The frontend logs each role's resolved
+setting and where it came from on the `Activating router` and `Activating prefill router` lines.
+
+`--router-mode direct` and `--router-mode device-aware-weighted` cannot be combined with a policy
+file, and no policy type selects them yet. Keep the flags with those two modes.
 
 Each session holds one entry in an affinity table until it has been idle for the TTL. A
 frontend keeps one table per worker set it routes to, including the prefill set in
 disaggregated serving, and each table holds at most `65536` entries by default. A request that
 would start a new session past that limit fails as resource exhausted (HTTP 529 by default)
 until an idle session expires. To admit more concurrent sessions, such as one per
-reinforcement-learning rollout, set `--router-session-affinity-max-entries` or
-`DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`. Available since v1.7. Replica sync copies bindings
+reinforcement-learning rollout, set the role's `max_entries`. Replica sync copies bindings
 into the matching table on every frontend, so size the limit for the sessions live across all
 frontends, not per frontend. Sync is best effort, so treat this as a sizing guide rather than a
 hard fleet-wide cap.
 
-The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel rank. Choose how later requests use that binding with `--router-session-affinity-mode` or `DYN_ROUTER_SESSION_AFFINITY_MODE`:
+The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel rank. Choose how later requests use that binding with the role's `mode`:
 
 | Mode | Behavior |
 |---|---|
@@ -529,18 +570,17 @@ Dynamo resolves the parent session id from the agent headers it already recogniz
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 
-```bash
-python -m dynamo.frontend \
-  --router-mode kv \
-  --router-session-affinity-ttl-secs 300 \
-  --router-session-affinity-mode soft
+```yaml
+worker_selection:
+  aggregated:
+    type: default
+    session_affinity: {mode: soft}
 ```
 
 Concurrent requests can share a binding. Versioned updates prevent an older concurrent request from replacing a newer soft rebind. Active requests prevent expiry. When a request lease ends after EOF, early drop, error, or cancellation, the idle timer restarts. A missing hard-bound worker or a non-cancellation hard-mode selection, setup, dispatch, or target-validation failure invalidates the binding.
 
-The configured value is the idle timeout. It is independent of
-`--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
-option to keep affinity disabled.
+`ttl_secs` is the idle timeout. It is independent of
+`--router-ttl-secs` and `--router-predicted-ttl-secs`.
 
 With `DYN_LORA_ENABLED`, session affinity is supported in KV mode. It is rejected
 at startup with random or round-robin routing; the other router modes are not
