@@ -170,7 +170,10 @@ impl Drop for PromptMembershipTrie {
     fn drop(&mut self) {
         let children = {
             let mut root = self.root.write();
-            root.children.drain().map(|(_, child)| child).collect::<Vec<_>>()
+            root.children
+                .drain()
+                .map(|(_, child)| child)
+                .collect::<Vec<_>>()
         };
         release_owned_nodes(children);
     }
