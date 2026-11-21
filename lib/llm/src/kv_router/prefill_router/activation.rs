@@ -50,7 +50,8 @@ struct PrefillAdvertisement {
     /// keyed on. The decode set's value would index this pool at the wrong
     /// granularity if the two ever differ.
     kv_cache_block_size: u32,
-    /// Whether any of the prefill workers advertises routing taints.
+    /// Whether a card read here advertises routing taints: the selected card of a
+    /// discovery-managed target, or any card of an explicit endpoint.
     has_taints: bool,
 }
 

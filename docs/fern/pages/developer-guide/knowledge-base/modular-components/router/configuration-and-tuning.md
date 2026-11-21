@@ -211,7 +211,7 @@ router provides:
 | Hints | `hints` under the role in `worker_selection` |
 | Conditional disaggregation | `--router-conditional-disagg` |
 | LoRA serving | `DYN_LORA_ENABLED` |
-| Worker taints | Workers that advertise routing taints or topology domains (`DYN_TOPOLOGY_ENABLED`) when the role's pipeline is built |
+| Worker taints | The worker the role's pipeline is built from advertises routing taints or topology domains (`DYN_TOPOLOGY_ENABLED`) |
 | Active-sequence sync, when the policy reads active request counts | `--router-replica-sync` |
 | A prefill load model | `--router-prefill-load-model` |
 
@@ -220,6 +220,11 @@ whether it runs a KV router (`kv_router`), with `kv_router_needed_by` when one o
 keeps it. The router modes `round-robin`, `random`, and `least-loaded` never run a KV router and
 ignore these settings, as before. They also still ignore required taints instead of failing the
 request.
+
+The frontend reads worker taints from one worker of the set, when it builds the role's pipeline.
+If only some of a role's workers carry taints, or they get taints later, the role can run without
+a KV router and then fails every request that requires taints. Select a policy that scores
+workers, such as `dynamo-default-cost-fn`, for such a role.
 
 #### Configure the Default Policy
 
