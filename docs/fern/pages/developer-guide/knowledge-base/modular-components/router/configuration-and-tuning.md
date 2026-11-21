@@ -190,10 +190,17 @@ A role without a KV router has no router queue and no per-worker load tracking:
   has no `dp_rank` or score. The role picks a worker and leaves the data-parallel rank to it, so
   `nvext.worker_id` in the response has no `decode_dp_rank` or `prefill_dp_rank`.
 - `GET /router_policy` does not list it.
-- It does not filter workers by taint. A request that requires taints, through
+- It honors required taints and ignores preferred ones. A request that requires taints, through
   `nvext.routing_constraints.required_taints` or
-  [topology-aware KV transfer](topology-aware-kv-transfer.md), fails with no endpoint. Preferred
-  taints are ignored.
+  [topology-aware KV transfer](topology-aware-kv-transfer.md), goes only to a worker that
+  advertises them. As with a KV router, it fails with no endpoint when no worker advertises
+  them, and is rejected with HTTP 529 when every worker that does is busy. The role reads each
+  worker's current taints for every such request, so it does not matter which workers carry
+  taints or when they get them. A request that also names a worker without the taints fails, and
+  so does one whose [hard session affinity](#session-affinity) is bound to such a worker. The
+  request is sent to the chosen worker only: if that worker has just left, the request fails and
+  is not sent to another. Preferred taints have no effect, because a picker has no scores to
+  weigh them into.
 - A request annotated `query_instance_id` is executed. Only a KV router answers it with a worker
   selection.
 - Busy thresholds first set through [`POST /busy_threshold`](../../../../reference/components/frontend-configuration.mdx#admin)
@@ -211,20 +218,22 @@ router provides:
 | Hints | `hints` under the role in `worker_selection` |
 | Conditional disaggregation | `--router-conditional-disagg` |
 | LoRA serving | `DYN_LORA_ENABLED` |
-| Worker taints | The worker the role's pipeline is built from advertises routing taints or topology domains (`DYN_TOPOLOGY_ENABLED`) |
+| Worker taints, to weigh the taints a request prefers | The worker the role's pipeline is built from advertises routing taints or topology domains (`DYN_TOPOLOGY_ENABLED`) |
 | Active-sequence sync, when the policy reads active request counts | `--router-replica-sync` |
 | A prefill load model | `--router-prefill-load-model` |
 
 The `Activating router` and `Activating prefill router` log lines show each role's `policy` and
 whether it runs a KV router (`kv_router`), with `kv_router_needed_by` when one of these settings
 keeps it. The router modes `round-robin`, `random`, and `least-loaded` never run a KV router and
-ignore these settings, as before. They also still ignore required taints instead of failing the
-request.
+ignore these settings. They also ignore required taints: under a router mode a request that
+requires taints can reach any worker.
 
-The frontend reads worker taints from one worker of the set, when it builds the role's pipeline.
-If only some of a role's workers carry taints, or they get taints later, the role can run without
-a KV router and then fails every request that requires taints. Select a policy that scores
-workers, such as `dynamo-default-cost-fn`, for such a role.
+The frontend reads worker taints for that row from one worker of the set, when it builds the
+role's pipeline. A role whose other workers carry taints, or whose workers get taints later, runs
+without a KV router. It honors required taints all the same, as described above, and ignores
+preferred ones. Select a policy that scores workers, such as `dynamo-default-cost-fn`, for a role
+whose requests carry preferred taints, from the client or from
+[topology-aware KV transfer](topology-aware-kv-transfer.md) with `preferred` enforcement.
 
 #### Configure the Default Policy
 
