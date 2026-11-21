@@ -151,6 +151,7 @@ fn turn(request_id: &str, session_id: &str, isl_tokens: usize, last: bool) -> Sc
         kv_transfer_candidates: None,
         retain_kv_transfer_chain: false,
         shared_cache_hits: None,
+        admitted_upstream: false,
     }
 }
 
