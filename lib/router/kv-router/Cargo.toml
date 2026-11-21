@@ -109,6 +109,11 @@ harness = false
 required-features = ["bench"]
 
 [[bench]]
+name = "admission_core"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
 name = "selection_core"
 harness = false
 required-features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"]
