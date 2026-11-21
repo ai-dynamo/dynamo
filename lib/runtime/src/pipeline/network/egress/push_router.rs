@@ -644,6 +644,102 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
     AddressedPushRouter::from_runtime_provider(endpoint).await
 }
 
+/// The default final hop: the request plane, except for instances that
+/// advertise `TransportType::Direct`, which go to the dispatch registered with
+/// [`DistributedRuntime::register_direct_dispatch`](crate::DistributedRuntime::register_direct_dispatch).
+struct TransportDispatch<T, U> {
+    request_plane: Arc<AddressedPushRouter>,
+    drt: crate::DistributedRuntime,
+    /// The registered direct dispatch, cached on first use so the request path
+    /// does not take the registry lock. A miss is not cached, so a dispatch
+    /// registered after this router is built is still found.
+    direct: std::sync::OnceLock<Arc<dyn StreamingDispatch<T, U>>>,
+}
+
+impl<T, U> TransportDispatch<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    fn registered_direct(&self) -> Option<&Arc<dyn StreamingDispatch<T, U>>> {
+        if let Some(dispatch) = self.direct.get() {
+            return Some(dispatch);
+        }
+        let dispatch = self.drt.direct_dispatch::<T, U>()?;
+        Some(self.direct.get_or_init(|| dispatch))
+    }
+
+    /// A missing registration is a process misconfiguration, not a worker
+    /// fault: `Internal` fails the request without reporting the worker down.
+    fn direct(&self, instance_id: u64) -> Result<&Arc<dyn StreamingDispatch<T, U>>, Error> {
+        self.registered_direct().ok_or_else(|| {
+            DynamoError::builder()
+                .error_type(ErrorType::Internal)
+                .message(format!(
+                    "instance {instance_id} is reached directly, but no direct dispatch is registered"
+                ))
+                .build()
+                .into()
+        })
+    }
+}
+
+fn is_direct(instance: &Instance) -> bool {
+    matches!(
+        instance.transport,
+        crate::component::TransportType::Direct(_)
+    )
+}
+
+#[async_trait]
+impl<T, U> StreamingDispatch<T, U> for TransportDispatch<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        match request.instance().filter(|instance| is_direct(instance)) {
+            Some(instance) => self.direct(instance.id())?.generate(request).await,
+            None => StreamingDispatch::<T, U>::generate(self.request_plane.as_ref(), request).await,
+        }
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error> {
+        if is_direct(&instance) {
+            self.direct(instance.id())?
+                .generate_bidirectional(instance, address, input)
+                .await
+        } else {
+            StreamingDispatch::<T, U>::generate_bidirectional(
+                self.request_plane.as_ref(),
+                instance,
+                address,
+                input,
+            )
+            .await
+        }
+    }
+
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        StreamingDispatch::<T, U>::on_instance_removed(self.request_plane.as_ref(), id).await;
+        if let Some(direct) = self.registered_direct() {
+            direct.on_instance_removed(id).await;
+        }
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        StreamingDispatch::<T, U>::on_instance_added(self.request_plane.as_ref(), id).await;
+        if let Some(direct) = self.registered_direct() {
+            direct.on_instance_added(id).await;
+        }
+    }
+}
+
 /// Optional capabilities of a [`PushRouter`], for [`PushRouter::from_client_with_options`].
 ///
 /// Every named constructor on [`PushRouter`] is a shorthand for one of these.
@@ -653,7 +749,9 @@ pub struct PushRouterOptions<T, U> {
     /// Multimodal embedding-cache state for `RouterMode::DeviceAwareWeighted`.
     pub multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
     pub multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
-    /// A caller-supplied final hop in place of the request plane. Its `ErrorType`
+    /// A caller-supplied final hop for every instance. Without one, the router
+    /// reaches `TransportType::Direct` instances through the runtime's registered
+    /// direct dispatch and all others over the request plane. Its `ErrorType`
     /// mapping drives report-down, overload and migration as usual.
     pub dispatch: Option<Arc<dyn StreamingDispatch<T, U>>>,
     /// Report transient worker errors to discovery (`report_instance_down`) and
@@ -757,7 +855,11 @@ where
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = match dispatch {
             Some(dispatch) => dispatch,
-            None => addressed_router(&client.endpoint).await?,
+            None => Arc::new(TransportDispatch {
+                request_plane: addressed_router(&client.endpoint).await?,
+                drt: client.endpoint.drt().clone(),
+                direct: std::sync::OnceLock::new(),
+            }),
         };
 
         // Start worker monitor if provided and in dynamic mode
@@ -1800,6 +1902,9 @@ where
                         (tcp_endpoint.clone(), "transport.tcp.request")
                     }
                     TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                    TransportType::Direct(endpoint) => {
+                        (endpoint.clone(), "transport.direct.request")
+                    }
                 };
                 (addr, kind, instance)
             })
@@ -3828,6 +3933,145 @@ mod tests {
         assert!(
             poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
             "on_instance_added (re-registration) not delivered to the supplied dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Register this runtime's own instance of `endpoint` as one reached directly.
+    async fn register_direct_instance(drt: &DistributedRuntime, endpoint: &Endpoint) {
+        let id = endpoint.id();
+        drt.discovery()
+            .register(crate::discovery::DiscoverySpec::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+                transport: crate::component::TransportType::Direct(
+                    "http://engine:30001".to_string(),
+                ),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A router built without a dispatch reaches direct instances through the
+    /// runtime's registered direct dispatch, with its lifecycle hooks.
+    #[tokio::test]
+    async fn direct_instances_use_the_registered_direct_dispatch() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_direct_dispatch".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        register_direct_instance(&drt, &endpoint).await;
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        drt.register_direct_dispatch::<u64, TestResponse>(dispatch.clone())
+            .unwrap();
+        assert!(
+            drt.register_direct_dispatch::<u64, TestResponse>(dispatch.clone())
+                .is_err(),
+            "a second direct dispatch for the same types must be refused"
+        );
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut stream = router.generate(SingleIn::new(7u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let unary = dispatch.unary.lock().unwrap();
+            assert_eq!(unary.len(), 1, "one unary dispatch expected");
+            assert_eq!(unary[0].0, 7);
+            assert_eq!(unary[0].1, "http://engine:30001");
+            assert_eq!(unary[0].2, Some(instance_id));
+        }
+
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+                1u64, 2u64,
+            ]))));
+        let mut stream = router.generate(input).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.bidi.lock().unwrap()[..],
+            [("http://engine:30001".to_string(), instance_id)]
+        );
+
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added not delivered to the direct dispatch"
+        );
+        drt.discovery()
+            .unregister(crate::discovery::DiscoveryInstance::Endpoint(
+                client.wait_for_instances().await.unwrap()[0].clone(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_removed not delivered to the direct dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    /// A direct instance with no registered direct dispatch fails the request
+    /// as `Internal` and is not reported down.
+    #[tokio::test]
+    async fn direct_instances_without_a_registered_dispatch_fail_internal() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_direct_dispatch_missing".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        register_direct_instance(&drt, &endpoint).await;
+        client.wait_for_instances().await.unwrap();
+
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let Err(error) = router.generate(SingleIn::new(1u64)).await else {
+            panic!("no dispatch is registered for direct instances");
+        };
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::Internal], &[]),
+            "{error}"
+        );
+        assert!(!is_inhibited(error.as_ref()), "{error}");
+        assert_eq!(
+            client.instance_ids_avail().len(),
+            1,
+            "a missing registration must not report the worker down"
         );
 
         rt.shutdown();
