@@ -251,7 +251,7 @@ impl HealthCheckManager {
 
         // Spawn task to send health check and wait for response
         let canary = tokio::spawn(async move {
-            let result = timeout_unless_progress(timeout, max_wait, &progress, async {
+            let probe = async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -302,16 +302,15 @@ impl HealthCheckManager {
                         );
                     }
                 }
-            })
+            };
+            let _ = timeout_unless_progress(
+                timeout,
+                max_wait,
+                &progress,
+                probe,
+                Some((&system_health, &endpoint_subject_owned)),
+            )
             .await;
-
-            // Handle timeout
-            if result.is_none() {
-                warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
-                    .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
-            }
 
             debug!("Health check completed for {}", endpoint_subject_owned);
         });
@@ -325,24 +324,76 @@ impl HealthCheckManager {
 ///
 /// A canary sent during a long prefill is not answered until the prefill ends,
 /// so it keeps waiting while the engine completes forward passes. It still
-/// fails `timeout` after the passes stop.
+/// fails `timeout` after the passes stop. An endpoint maintenance lease can
+/// extend that deadline to its absolute expiry.
 async fn timeout_unless_progress<T>(
     timeout: Duration,
     max_wait: Duration,
     progress: &tokio::sync::Notify,
     check: impl std::future::Future<Output = T>,
+    maintenance: Option<(&Mutex<crate::SystemHealth>, &str)>,
 ) -> Option<T> {
     tokio::pin!(check);
-    let deadline = tokio::time::sleep(max_wait);
-    tokio::pin!(deadline);
+    let now = tokio::time::Instant::now();
+    let (Some(mut idle_deadline), Some(hard_deadline)) =
+        (now.checked_add(timeout), now.checked_add(max_wait))
+    else {
+        if let Some((health, endpoint)) = maintenance {
+            error!(
+                endpoint,
+                ?timeout,
+                ?max_wait,
+                "Health check timeout exceeds the supported deadline range"
+            );
+            health
+                .lock()
+                .set_endpoint_health_status(endpoint, HealthStatus::NotReady);
+        }
+        return None;
+    };
     loop {
-        tokio::select! {
+        let (deadline, cap) = match maintenance {
+            Some((health, endpoint)) => {
+                let mut health = health.lock();
+                (
+                    health
+                        .canary_request_deadline(endpoint, idle_deadline.into_std())
+                        .into(),
+                    health
+                        .canary_request_deadline(endpoint, hard_deadline.into_std())
+                        .into(),
+                )
+            }
+            None => (idle_deadline, hard_deadline),
+        };
+        let timed_out = tokio::select! {
             biased;
             output = &mut check => return Some(output),
-            _ = &mut deadline => return None,
-            _ = progress.notified() => {}
-            _ = tokio::time::sleep(timeout) => return None,
+            _ = tokio::time::sleep_until(cap) => true,
+            _ = progress.notified() => false,
+            _ = tokio::time::sleep_until(deadline) => true,
+        };
+        if !timed_out {
+            idle_deadline = tokio::time::Instant::now()
+                .checked_add(timeout)
+                .unwrap_or(hard_deadline);
+            continue;
         }
+        if let Some((health, endpoint)) = maintenance {
+            // An RL operation can start while this same probe is waiting.
+            // Recheck and publish the timeout under one lock.
+            let mut health = health.lock();
+            if tokio::time::Instant::from_std(
+                health
+                    .canary_request_deadline(endpoint, idle_deadline.min(hard_deadline).into_std()),
+            ) > tokio::time::Instant::now()
+            {
+                continue;
+            }
+            warn!(endpoint, "Health check timeout");
+            health.set_endpoint_health_status(endpoint, HealthStatus::NotReady);
+        }
+        return None;
     }
 }
 
@@ -404,8 +455,109 @@ pub async fn get_health_check_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::AsyncEngine;
+    use crate::pipeline::{ManyOut, SingleIn};
+    use crate::protocols::annotated::Annotated;
+    use async_trait::async_trait;
     use tokio::sync::Notify;
-    use tokio::time::Instant;
+
+    type TestRequest = serde_json::Value;
+    type TestResponse = Annotated<serde_json::Value>;
+
+    struct BlockingCanaryEngine {
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for BlockingCanaryEngine
+    {
+        async fn generate(
+            &self,
+            _input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_canary_timeout_honors_in_flight_maintenance() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let drt = DistributedRuntime::new(
+                crate::Runtime::from_current().unwrap(),
+                crate::distributed::DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            let control = "test.canary_timeout_control";
+            let maintained = "test.canary_timeout_maintained";
+            let manager = HealthCheckManager::new(
+                drt.clone(),
+                HealthCheckConfig {
+                    canary_wait_time: Duration::from_millis(50),
+                    request_timeout: Duration::from_millis(300),
+                },
+            );
+
+            for endpoint in [control, maintained] {
+                let engine = Arc::new(BlockingCanaryEngine {
+                    started: tokio::sync::Notify::new(),
+                });
+                drt.local_endpoint_registry()
+                    .register(endpoint.to_string(), engine.clone());
+                // Start healthy so a missing timeout update cannot pass the test.
+                drt.system_health()
+                    .lock()
+                    .set_endpoint_health_status(endpoint, HealthStatus::Ready);
+                manager
+                    .send_health_check_request(
+                        endpoint,
+                        &serde_json::json!({}),
+                        Arc::new(tokio::sync::Notify::new()),
+                    )
+                    .unwrap();
+                engine.started.notified().await;
+            }
+
+            // Both probes are already waiting on their original deadlines.
+            drt.system_health()
+                .lock()
+                .begin_canary_maintenance(maintained, Duration::from_secs(3))
+                .unwrap();
+
+            // Cross both original deadlines before checking that the lease held.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            for endpoint in [control, maintained] {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if drt
+                            .system_health()
+                            .lock()
+                            .get_endpoint_health_status(endpoint)
+                            == Some(HealthStatus::NotReady)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("blocked probe must eventually publish NotReady");
+                if endpoint == control {
+                    assert_eq!(
+                        drt.system_health()
+                            .lock()
+                            .get_endpoint_health_status(maintained),
+                        Some(HealthStatus::Ready),
+                        "an in-flight lease must defer the normal probe timeout",
+                    );
+                }
+            }
+        })
+        .await
+        .expect("canary timeout regression test must finish");
+    }
 
     const TIMEOUT: Duration = Duration::from_secs(3);
     const MAX_WAIT: Duration = Duration::from_secs(60);
@@ -424,10 +576,10 @@ mod tests {
     }
 
     async fn unanswered(progress: &Notify) -> Duration {
-        let start = Instant::now();
+        let start = tokio::time::Instant::now();
         let check = std::future::pending::<()>();
         assert_eq!(
-            timeout_unless_progress(TIMEOUT, MAX_WAIT, progress, check).await,
+            timeout_unless_progress(TIMEOUT, MAX_WAIT, progress, check, None).await,
             None
         );
         start.elapsed()
@@ -448,9 +600,70 @@ mod tests {
             "answered"
         };
 
-        let result = timeout_unless_progress(TIMEOUT, MAX_WAIT, &progress, check).await;
+        let result = timeout_unless_progress(TIMEOUT, MAX_WAIT, &progress, check, None).await;
 
         assert_eq!(result, Some("answered"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_at_the_idle_deadline_keeps_the_check_waiting() {
+        let progress = Notify::new();
+        let check = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            progress.notify_one();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            "answered"
+        };
+        assert_eq!(
+            timeout_unless_progress(Duration::from_secs(2), MAX_WAIT, &progress, check, None).await,
+            Some("answered"),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_does_not_renew_a_maintenance_deadline() {
+        let endpoint = "maintained";
+        let health = Mutex::new(crate::SystemHealth::new(
+            HealthStatus::Ready,
+            vec![endpoint.to_string()],
+            true,
+            "/health".to_string(),
+            "/live".to_string(),
+        ));
+        health
+            .lock()
+            .set_endpoint_health_status(endpoint, HealthStatus::Ready);
+        health
+            .lock()
+            .begin_canary_maintenance(endpoint, Duration::from_secs(30))
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let lease_deadline = tokio::time::Instant::from_std(
+            health
+                .lock()
+                .canary_request_deadline(endpoint, start.into_std()),
+        );
+        let progress = engine_progress(u32::MAX);
+        let result = tokio::time::timeout(
+            Duration::from_secs(40),
+            timeout_unless_progress(
+                TIMEOUT,
+                Duration::from_secs(10),
+                &progress,
+                std::future::pending::<()>(),
+                Some((&health, endpoint)),
+            ),
+        )
+        .await
+        .expect("progress must not keep the lease alive");
+        assert_eq!(result, None);
+        let finished = tokio::time::Instant::now();
+        assert!(finished >= lease_deadline);
+        assert!(finished < lease_deadline + Duration::from_millis(10));
+        assert_eq!(
+            health.lock().get_endpoint_health_status(endpoint),
+            Some(HealthStatus::NotReady)
+        );
     }
 
     /// A stalled engine is detected `timeout` after its last forward pass.
