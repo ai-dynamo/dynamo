@@ -976,7 +976,7 @@ mod tests {
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
         HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
-        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID, HEADER_SESSION_AFFINITY,
     };
 
     #[derive(Default)]
@@ -1600,6 +1600,7 @@ mod tests {
                 Some("parent-run-1"),
             ),
             (HEADER_DYNAMO_SESSION_ID, "generic-run-1", None, None),
+            (HEADER_SESSION_AFFINITY, "affinity-run-1", None, None),
         ];
 
         for (header_name, header_value, parent_header_value, expected_parent_session_id) in cases {
@@ -1746,6 +1747,34 @@ mod tests {
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "claude-session"
+        );
+    }
+
+    #[test]
+    fn session_affinity_header_is_lowest_precedence_root_session() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SESSION_AFFINITY, "affinity-run".parse().unwrap());
+        headers.insert(
+            HEADER_OPENCODE_PARENT_SESSION_ID,
+            "opencode-parent".parse().unwrap(),
+        );
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "affinity-run"
+        );
+        // x-session-affinity has no parent header; other mappings' parents do not apply.
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id.as_str(), "affinity-run");
+        assert_eq!(agent_context.parent_session_id, None);
+
+        // Any native agent session header wins over x-session-affinity.
+        headers.insert(
+            HEADER_OPENCODE_SESSION_ID,
+            "opencode-session".parse().unwrap(),
+        );
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "opencode-session"
         );
     }
 
