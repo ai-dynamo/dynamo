@@ -37,6 +37,18 @@ impl MediaDecoder {
         self.inner.video = Some(decoder_options);
         Ok(())
     }
+
+    /// Rotate images by their EXIF orientation tag. Off by default; turn it on only for
+    /// backends whose own image loader applies EXIF, so both paths see the same pixels.
+    #[getter]
+    fn apply_exif_orientation(&self) -> bool {
+        self.inner.apply_exif_orientation
+    }
+
+    #[setter]
+    fn set_apply_exif_orientation(&mut self, enabled: bool) {
+        self.inner.apply_exif_orientation = enabled;
+    }
 }
 
 #[pyclass]
