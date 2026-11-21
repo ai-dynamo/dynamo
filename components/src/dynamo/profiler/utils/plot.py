@@ -14,17 +14,12 @@
 # limitations under the License.
 
 import logging
-from collections import defaultdict
-from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 from scipy.spatial import QhullError
-
-from dynamo.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
-from dynamo.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,108 +30,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-
-def plot_prefill_performance(
-    prefill_data: Any, target_ttft: float, output_dir: str
-) -> None:
-    """
-    Plot prefill performance as a 2D scatter plot with GPU count and mapping annotations.
-
-    Args:
-        prefill_data: PrefillProfileData instance containing profiling results
-        target_ttft: target TTFT value for the vertical line
-        output_dir: directory to save the plot
-    """
-    plt.figure(figsize=(10, 6))
-    plt.scatter(prefill_data.ttft, prefill_data.thpt_per_gpu, s=100)
-    for i, num_gpu in enumerate(prefill_data.num_gpus):
-        label_suffix = (
-            f" [{prefill_data.parallel_mapping_labels[i]}]"
-            if prefill_data.parallel_mapping_labels
-            and i < len(prefill_data.parallel_mapping_labels)
-            else ""
-        )
-        plt.annotate(
-            f"{num_gpu} GPU(s){label_suffix}",
-            (prefill_data.ttft[i], prefill_data.thpt_per_gpu[i]),
-            xytext=(10, 0),
-            textcoords="offset points",
-            fontsize=10,
-        )
-
-    plt.axvline(
-        x=target_ttft, color="r", linestyle="--", label=f"Target TTFT: {target_ttft} ms"
-    )
-    plt.legend()
-
-    plt.title("Prefill Performance")
-    plt.xlabel("Time to First Token (ms)")
-    plt.ylabel("Prefill throughput per GPU (tokens/s/GPU)")
-    plt.grid(True)
-
-    plot_path = f"{output_dir}/prefill_performance.png"
-    plt.savefig(plot_path, dpi=300)
-    logger.info(f"Performance plot saved to {plot_path}")
-    plt.close()
-
-
-def plot_decode_performance(
-    decode_data: Any, target_itl: float, output_dir: str
-) -> None:
-    """
-    Plot decode performance with multiple GPU count lines.
-
-    Args:
-        decode_data: DecodeProfileData instance containing profiling results
-        target_itl: target ITL value for the vertical line
-        output_dir: directory to save the plot
-    """
-    plt.figure(figsize=(10, 6))
-
-    # Group data by (num_gpus, parallel_mapping_label) combination
-    grouped_data: defaultdict[tuple[int, str], dict[str, list[float]]] = defaultdict(
-        lambda: {"itl": [], "thpt": []}
-    )
-
-    for i in range(len(decode_data.num_gpus)):
-        num_gpu = decode_data.num_gpus[i]
-        label = (
-            decode_data.parallel_mapping_labels[i]
-            if decode_data.parallel_mapping_labels
-            else ""
-        )
-        key = (num_gpu, label)
-        grouped_data[key]["itl"].append(decode_data.itl[i])
-        grouped_data[key]["thpt"].append(decode_data.thpt_per_gpu[i])
-
-    # Plot each group as a line
-    for (num_gpu, parallel_mapping_label), data in sorted(grouped_data.items()):
-        if parallel_mapping_label:
-            label = f"{num_gpu} GPU(s) [{parallel_mapping_label}]"
-        else:
-            label = f"{num_gpu} GPU(s)"
-
-        # Sort by ITL for proper line plotting
-        sorted_pairs = sorted(zip(data["itl"], data["thpt"]))
-        itl_sorted = [x[0] for x in sorted_pairs]
-        thpt_sorted = [x[1] for x in sorted_pairs]
-
-        plt.plot(itl_sorted, thpt_sorted, label=label, marker="o")
-
-    plt.axvline(
-        x=target_itl, color="r", linestyle="--", label=f"Target ITL: {target_itl} ms"
-    )
-    plt.legend()
-    plt.title("Decode Performance")
-    plt.xlabel("Inter Token Latency (ms)")
-    plt.ylabel("Decode throughput per GPU (tokens/s/GPU)")
-    plt.grid(True)
-
-    plot_path = f"{output_dir}/decode_performance.png"
-    plt.savefig(plot_path, dpi=300)
-    logger.info(f"Performance plot saved to {plot_path}")
-    plt.close()
 
 
 def plot_prefill_interpolation(
@@ -314,56 +207,4 @@ def plot_decode_3d_surface(
     thpt_plot_path = f"{work_dir}/decode_throughput_interpolation.png"
     logger.info(f"Saving throughput surface plot to {thpt_plot_path}")
     _save_3d_surface_plot(thpt_plot_path)
-    plt.close()
-
-
-def plot_pd_joint_results(
-    isl: int, osl: int, prefill_data: Any, decode_data: Any, output_dir: str
-) -> None:
-    """
-    Plot joint prefill and decode results showing cost per 1000 requests under different SLA.
-
-    Args:
-        isl: input sequence length
-        osl: output sequence length
-        prefill_data: PrefillProfileData instance containing profiling results
-        decode_data: DecodeProfileData instance containing profiling results
-        output_dir: directory to save the plot
-    """
-    # compute pareto front for prefill
-    p_ttft, p_thpt, _ = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
-
-    # compute pareto front for decode
-    d_itl, d_thpt, _ = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
-
-    # convert to cost per thousand requests
-    p_ttft = np.array(p_ttft)
-    p_thpt = np.array(p_thpt)
-    d_itl = np.array(d_itl)
-    d_thpt = np.array(d_thpt)
-
-    tokens_per_user = []
-    cost = []
-    ttft = []
-    for _p_ttft, _p_thpt in zip(p_ttft, p_thpt):
-        ttft.append(_p_ttft)
-        prefill_cost = isl * 1000 / _p_thpt * DEFAULT_GPU_COST_PER_HOUR / 3600
-        tokens_per_user.append(1000 / d_itl)
-        cost.append(
-            osl * 1000 / d_thpt * DEFAULT_GPU_COST_PER_HOUR / 3600 + prefill_cost
-        )
-
-    # plot
-    plt.figure(figsize=(12, 10))
-    plt.title(
-        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${DEFAULT_GPU_COST_PER_HOUR}) Under Different SLA"
-    )
-    for _tokens_per_user, _cost, _ttft in zip(tokens_per_user, cost, ttft):
-        line = plt.plot(_tokens_per_user, _cost, label=f"TTFT: {_ttft:.2f}ms")[0]
-        plt.scatter(_tokens_per_user, _cost, marker="x", s=100, color=line.get_color())
-    plt.xlabel("Tokens per User")
-    plt.ylabel("Cost ($)")
-    plt.grid(True)
-    plt.legend()
-    plt.savefig(f"{output_dir}/cost_sla.png", dpi=300)
     plt.close()
