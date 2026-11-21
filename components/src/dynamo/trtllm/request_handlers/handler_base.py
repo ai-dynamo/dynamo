@@ -114,6 +114,33 @@ def _trtllm_accepts_token_id_arrays() -> bool:
     return probe.__dict__.get("_prompt_token_ids_i32") is not None
 
 
+MAX_SEQ_LEN_RESERVE_ENV = "DYN_TRTLLM_MAX_SEQ_LEN_RESERVE"
+MAX_SEQ_LEN_RESERVE_DEFAULT = 64
+
+
+def _max_seq_len_reserve() -> int:
+    """Tokens kept free below max_seq_len when sizing max_tokens.
+
+    A request sized to end exactly at max_seq_len can overrun it: a speculative
+    decoding step appends up to max_draft_len + 1 tokens at once, and buffers
+    sized to max_seq_len are then written past their end (CUDA illegal memory
+    access). Set DYN_TRTLLM_MAX_SEQ_LEN_RESERVE=0 to size up to max_seq_len.
+    """
+    raw = os.environ.get(MAX_SEQ_LEN_RESERVE_ENV)
+    if raw is None or raw == "":
+        return MAX_SEQ_LEN_RESERVE_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; using %d",
+            MAX_SEQ_LEN_RESERVE_ENV,
+            raw,
+            MAX_SEQ_LEN_RESERVE_DEFAULT,
+        )
+        return MAX_SEQ_LEN_RESERVE_DEFAULT
+
+
 class TRTLLMEnginePauseController:
     """Adapts TRT-LLM sleep/wake to the standard pause controller interface.
 
@@ -1201,25 +1228,30 @@ class HandlerBase(BaseGenerativeHandler):
         )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
+        prompt_token_ids = (
+            processed_input.get("prompt_token_ids")
+            if isinstance(processed_input, dict)
+            else None
+        )
+        # The most output tokens that fit below max_seq_len minus the reserve; also
+        # the default for an omitted max_tokens. None when the prompt length is unknown.
+        max_tokens_limit = self._default_max_tokens(
+            self.max_seq_len,
+            prompt_token_ids
+            if prompt_token_ids is not None
+            else request.get("token_ids", []),
+            self._request_has_images(processed_input),
+            expanded_prompt_len,
+            reserve=_max_seq_len_reserve(),
+        )
         if max_tokens is not None:
-            sampling_params.max_tokens = max_tokens
-        else:
-            has_images = self._request_has_images(processed_input)
-            prompt_token_ids = (
-                processed_input.get("prompt_token_ids")
-                if isinstance(processed_input, dict)
-                else None
+            sampling_params.max_tokens = (
+                max_tokens
+                if max_tokens_limit is None
+                else min(max_tokens, max_tokens_limit)
             )
-            default_max_tokens = self._default_max_tokens(
-                self.max_seq_len,
-                prompt_token_ids
-                if prompt_token_ids is not None
-                else request.get("token_ids", []),
-                has_images,
-                expanded_prompt_len,
-            )
-            if default_max_tokens is not None:
-                sampling_params.max_tokens = default_max_tokens
+        elif max_tokens_limit is not None:
+            sampling_params.max_tokens = max_tokens_limit
 
         # PREFILL forces max_tokens=1 above but must still apply the rest of
         # the stop conditions (native TRT-LLM context_only overrides only
@@ -1719,8 +1751,11 @@ class HandlerBase(BaseGenerativeHandler):
         token_ids: list,
         has_images: bool,
         expanded_prompt_len: Optional[int],
+        reserve: int = 0,
     ) -> Optional[int]:
         """Default for an omitted max_tokens: fill the model's remaining context.
+
+        ``reserve`` tokens below max_seq_len are left free (see _max_seq_len_reserve).
 
         For image requests, token_ids hold unexpanded placeholders, so sizing uses
         expanded_prompt_len (placeholders replaced by their per-image token counts);
@@ -1734,8 +1769,8 @@ class HandlerBase(BaseGenerativeHandler):
         if has_images:
             if expanded_prompt_len is None:
                 return None
-            return max(1, max_seq_len - expanded_prompt_len)
-        return max(1, max_seq_len - len(token_ids))
+            return max(1, max_seq_len - expanded_prompt_len - reserve)
+        return max(1, max_seq_len - len(token_ids) - reserve)
 
     @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
