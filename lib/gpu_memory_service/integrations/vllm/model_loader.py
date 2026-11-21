@@ -10,18 +10,23 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Iterator
 
 import torch
 from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
+    raise_if_gms_allocator_failed,
+    release_gms_mem_pool,
 )
 from gpu_memory_service.client.torch.module import (
+    _iter_module_tensors,
     materialize_module_from_gms,
-    rebind_nonparameter_tensors,
+    register_module_tensors,
 )
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
@@ -29,11 +34,13 @@ from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common.utils import (
     GMSCommittedMemoryStats,
     get_gms_lock_mode,
-    prepare_gms_write,
     publish_gms_write,
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
     torch_device,
+)
+from gpu_memory_service.v1.client.parameter_storage import (
+    copy_non_parameter_tensors_to_default_allocator,
 )
 
 if os.environ.get("MX_ENABLED", "0") == "1":
@@ -60,10 +67,19 @@ _last_imported_weights_bytes: int = 0
 _last_model_memory_usage_offset_bytes: int = 0
 
 # First writer's GMS client awaiting publication after vLLM memory profiling.
-# The retained tensors keep rebound-away GMS pool allocations alive until
-# commit; see rebind_nonparameter_tensors.
+# Storage owners preserve the immutable initial values used by reader metadata.
+# They must outlive publication independently of the mutable TensorImpls.
 _pending_gms_client: "GMSClientMemoryManager | None" = None
-_pending_retained_gms_tensors: list[torch.Tensor] = []
+_pending_retained_gms_tensors: list[torch.UntypedStorage] = []
+_published_gms_tensor_owners: list[torch.UntypedStorage] = []
+
+
+@dataclass(frozen=True)
+class _StorageSpan:
+    """GMS allocation bounds in the shape the shared copy-out helper reads."""
+
+    base: int
+    aligned_size: int
 
 
 def get_imported_weights_bytes() -> int:
@@ -85,7 +101,7 @@ def _store_pending_gms_write(
     gms_client: "GMSClientMemoryManager",
     stats: GMSCommittedMemoryStats,
     rebound_bytes: int,
-    retained_gms_tensors: list[torch.Tensor],
+    retained_gms_tensors: list[torch.UntypedStorage],
 ) -> None:
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
     global _pending_gms_client, _pending_retained_gms_tensors
@@ -114,12 +130,16 @@ def publish_pending_gms_write() -> bool:
     original error propagates; the engine cannot serve without published
     weights, and process teardown lets GMS clear the aborted layout.
     """
+    retained = list(_pending_retained_gms_tensors)
     gms_client = _take_pending_gms_write()
     if gms_client is None:
         return False
 
     try:
+        # Profiling can release live pool storage after preparation's check.
+        raise_if_gms_allocator_failed(gms_client)
         publish_gms_write(gms_client)
+        _published_gms_tensor_owners.extend(retained)
     except BaseException:
         try:
             gms_client.close(best_effort=True)
@@ -301,6 +321,29 @@ def _load_write_mode(
     detection (RDMA P2P -> ModelStreamer -> GDS -> disk) with fallback.
     The chain also handles NIXL registration and metadata publishing.
     """
+    try:
+        return _prepare_write(
+            gms_client, vllm_config, model_config, default_loader, target_device
+        )
+    except BaseException:
+        # Release the RW lease of a write that never became pending, without
+        # CUDA cleanup (as abort_pending_gms_write); a pending write belongs
+        # to publish/abort.
+        if _pending_gms_client is None:
+            try:
+                gms_client.close(best_effort=True)
+            except BaseException:
+                logger.exception("[GMS] Failed to release a failed write")
+        raise
+
+
+def _prepare_write(
+    gms_client: "GMSClientMemoryManager",
+    vllm_config,
+    model_config,
+    default_loader,
+    target_device: torch.device,
+) -> torch.nn.Module:
     if _pending_gms_client is not None:
         raise RuntimeError("A GMS write is already awaiting publication")
 
@@ -329,14 +372,11 @@ def _load_write_mode(
 
             torch_device().empty_cache()
 
-    stats = prepare_gms_write(gms_client, model)
-    # The private clones must exist before vLLM profiles memory so the
-    # profiled peak covers them. The retained GMS originals stay alive until
-    # commit, for readers to materialize from.
-    retained_gms_tensors: list[torch.Tensor] = []
-    rebound_bytes = rebind_nonparameter_tensors(
-        gms_client, model, retain_gms_tensors=retained_gms_tensors
+    referenced = register_module_tensors(gms_client, model)
+    stats, rebound_bytes, retained_gms_tensors = _copy_out_and_release_pool(
+        gms_client, model
     )
+    _raise_if_unreferenced_allocations(gms_client, referenced)
     _store_pending_gms_write(gms_client, stats, rebound_bytes, retained_gms_tensors)
 
     logger.info(
@@ -346,6 +386,150 @@ def _load_write_mode(
         _last_model_memory_usage_offset_bytes / (1 << 30),
     )
     return model.eval()
+
+
+def _registered_non_parameters(
+    gms_client: "GMSClientMemoryManager", model: torch.nn.Module
+) -> tuple[list[torch.UntypedStorage], set[int]]:
+    """GMS storages behind registered non-Parameter metadata, and tensor ids.
+
+    The metadata references the initial values, so one owner per storage must
+    outlive the rebinding of the live tensors, including after commit.
+    Returning also drops tensors that properties created during the walk,
+    before the heap scan could mistake them for live ones.
+    """
+    retained: list[torch.UntypedStorage] = []
+    seen: set[int] = set()
+    in_tree: set[int] = set()
+    for _, tensor, kind in _iter_module_tensors(model):
+        if kind == "parameter":
+            continue
+        in_tree.add(int(tensor._cdata))
+        storage = tensor.untyped_storage()
+        if int(storage._cdata) in seen:
+            continue
+        if not any(
+            va <= tensor.data_ptr() < va + m.aligned_size
+            for va, m in gms_client.mappings.items()
+        ):
+            continue
+        seen.add(int(storage._cdata))
+        retained.append(storage)
+    return retained, in_tree
+
+
+def _held_non_parameters(model: torch.nn.Module) -> Iterator[torch.Tensor]:
+    """Non-Parameter tensors that modules hold directly."""
+    for module in model.modules():
+        for value in (*module._buffers.values(), *vars(module).values()):
+            for item in value if isinstance(value, (list, tuple)) else (value,):
+                if torch.is_tensor(item) and not isinstance(item, torch.nn.Parameter):
+                    yield item
+
+
+def _copy_out_and_release_pool(
+    gms_client: "GMSClientMemoryManager", model: torch.nn.Module
+) -> tuple[GMSCommittedMemoryStats, int, list[torch.UntypedStorage]]:
+    """Move live non-Parameters to private memory, then drop the weight pool.
+
+    Runs after registration. Returns the committed/pruned stats, the bytes
+    copied out, and the GMS storages that back registered non-Parameter
+    metadata (they must outlive publication).
+    """
+    before_bytes = gms_client.total_bytes
+    before_count = len(gms_client.mappings)
+    retained_gms_tensors, in_tree = _registered_non_parameters(gms_client, model)
+    torch_device().synchronize(gms_client.device)
+    # One full collection serves both steps: the heap scan must not find dead
+    # cyclic tensors, and their blocks must be free when the pool is dropped.
+    gc.collect()
+    copied: list[tuple[int, tuple[torch.Tensor, ...]]] = []
+    _, rebound_bytes = copy_non_parameter_tensors_to_default_allocator(
+        (model,),
+        tuple(
+            _StorageSpan(base=m.va, aligned_size=m.aligned_size)
+            for m in gms_client.mappings.values()
+        ),
+        collect_garbage=False,
+        copied=copied,
+        # The heap scan cannot see tensors frozen by gc.freeze(). Frozen
+        # tensors held outside the module tree stay in GMS memory.
+        known_tensors=_held_non_parameters(model),
+    )
+    torch_device().synchronize(gms_client.device)
+    # Dropping the pool after the copy makes Torch release the blocks the copy
+    # freed together with the ones that were never used, so every allocation
+    # left holds live storage. empty_cache() cannot do this: GMS workers patch
+    # it to do nothing while mappings are live. An allocation that stayed
+    # committed with no tensor referencing it would fail a reader's remap.
+    release_gms_mem_pool(gms_client, collect_garbage=False)
+    stats = GMSCommittedMemoryStats(
+        committed_bytes=gms_client.total_bytes,
+        pruned_bytes=before_bytes - gms_client.total_bytes,
+        pruned_count=before_count - len(gms_client.mappings),
+    )
+    _log_copy_out(copied, in_tree, stats)
+    return stats, rebound_bytes, retained_gms_tensors
+
+
+def _raise_if_unreferenced_allocations(
+    gms_client: "GMSClientMemoryManager", referenced: set[str]
+) -> None:
+    """Fail the write if an allocation is left that no registered tensor is in.
+
+    A reader maps only the allocations its tensor metadata references, and
+    its remap fails if the committed layout has more. Storage that stays in
+    GMS unregistered keeps its allocation: a Parameter held outside the
+    module tree (only non-Parameters are copied out), or a tensor the
+    copy-out could not find.
+    """
+    unreferenced = [
+        mapping
+        for mapping in gms_client.mappings.values()
+        if mapping.allocation_id not in referenced
+    ]
+    if unreferenced:
+        size = sum(mapping.aligned_size for mapping in unreferenced)
+        raise RuntimeError(
+            f"[GMS] Unregistered storage keeps {len(unreferenced)} allocation(s) "
+            f"({size / (1 << 20):.2f} MiB) alive, for example a Parameter held "
+            "outside the module tree. No tensor metadata references them, so a "
+            "reader could not remap this layout; it is not published"
+        )
+
+
+def _log_copy_out(
+    copied: list[tuple[int, tuple[torch.Tensor, ...]]],
+    in_tree: set[int],
+    stats: GMSCommittedMemoryStats,
+) -> None:
+    """Log what the writer copied out of GMS, split by module-tree membership.
+
+    In-tree tensors are the module tree's buffers and tensor attributes;
+    out-of-tree tensors are held elsewhere (kernel workspaces, caches). A copy
+    that contains any in-tree tensor counts as in-tree bytes.
+    """
+    counts = [0, 0]
+    copied_bytes = [0, 0]
+    for nbytes, tensors in copied:
+        tree = [int(tensor._cdata) in in_tree for tensor in tensors]
+        counts[0] += sum(tree)
+        counts[1] += len(tree) - sum(tree)
+        copied_bytes[0 if any(tree) else 1] += nbytes
+    mib = 1 << 20
+    logger.info(
+        "[GMS] Write mode: copied %d non-Parameter tensors (%.2f MiB) out of "
+        "GMS: in-tree %d (%.2f MiB), out-of-tree %d (%.2f MiB); pruned %d "
+        "unused allocations (%.2f GiB)",
+        sum(counts),
+        sum(copied_bytes) / mib,
+        counts[0],
+        copied_bytes[0] / mib,
+        counts[1],
+        copied_bytes[1] / mib,
+        stats.pruned_count,
+        stats.pruned_bytes / (1 << 30),
+    )
 
 
 def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:

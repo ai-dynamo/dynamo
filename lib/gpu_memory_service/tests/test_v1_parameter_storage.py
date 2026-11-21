@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import gc
+
 import pytest
 from _deps import HAS_GMS, HAS_TORCH
 
@@ -16,10 +18,14 @@ if not HAS_TORCH:
     pytest.skip("PyTorch is required", allow_module_level=True)
 
 import torch
+from gpu_memory_service.v1.client import parameter_storage
 from gpu_memory_service.v1.client.mapping import LocalMapping
 from gpu_memory_service.v1.client.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,
 )
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._subclasses.functional_tensor import FunctionalTensor, FunctionalTensorMode
+from torch.func import grad
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -198,3 +204,51 @@ def test_storage_across_an_unmapped_gap_is_not_gms_owned() -> None:
 
     assert int(model.buffer.untyped_storage()._cdata) == original_storage
     assert accounting == (0, 0)
+
+
+def test_copy_out_skips_tensors_without_device_storage() -> None:
+    """The process-wide scan can see torch.compile FakeTensors, meta tensors and
+    wrapper subclasses; none of them can be GMS-backed."""
+    everything = (_mapping("all", 0, 1 << 62),)
+    bases = (0,)
+
+    def not_owned(tensor: torch.Tensor) -> bool:
+        return parameter_storage._containing_mapping(tensor, everything, bases) is None
+
+    with FakeTensorMode():
+        fake = torch.empty(4)
+    assert not_owned(fake)
+    assert not_owned(torch.empty(4, device="meta"))
+    with FunctionalTensorMode():
+        functional = FunctionalTensor.to_functional(torch.empty(4))
+    assert not_owned(functional)
+
+    wrapped = []
+
+    def record(x: torch.Tensor) -> torch.Tensor:
+        wrapped.append(not_owned(x))
+        return x.sum()
+
+    grad(record)(torch.ones(3))
+    assert wrapped == [True]
+
+
+def test_copy_out_reports_each_copy_without_collecting(monkeypatch) -> None:
+    model, storage = _model_over_one_storage()
+    workspace = torch.empty(0, dtype=torch.float32).set_(storage, 12, (4,), (1,))
+    collections = []
+    monkeypatch.setattr(gc, "collect", lambda *args: collections.append(args))
+    copied: list = []
+
+    accounting = copy_non_parameter_tensors_to_default_allocator(
+        (model,),
+        (_mapping("all", storage.data_ptr(), storage.nbytes()),),
+        collect_garbage=False,
+        copied=copied,
+    )
+
+    assert collections == []
+    assert accounting == (8 * 4, 8 * 4)
+    assert [
+        (nbytes, {int(t._cdata) for t in tensors}) for nbytes, tensors in copied
+    ] == [(8 * 4, {int(model.buffer._cdata), int(workspace._cdata)})]
