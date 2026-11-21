@@ -14,6 +14,7 @@ runtime.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -23,8 +24,16 @@ import subprocess
 from collections.abc import Iterable, MutableMapping, Sequence
 from typing import Any, Optional
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.deepinfer.rank import RankSpec
 
+ENGINE_TYPES = {
+    DisaggregationMode.AGGREGATED: "NORMAL",
+    DisaggregationMode.PREFILL: "PROMPT",
+    DisaggregationMode.DECODE: "COMPLETION",
+}
+# DeepInfer's own boolean env parsing (deepinfer/environ.py: _bool).
+_DEEPINFER_FALSE = ("0", "", "false", "False")
 DEFAULT_MASTER_PORT = 23333
 DEFAULT_CONTROL_PORT = 23400
 # DeepInfer's gloo store listens on MASTER_PORT - 50 + engine_group_rank
@@ -37,6 +46,7 @@ logger = logging.getLogger(__name__)
 class DeepInferOptions:
     """DeepInfer settings of one engine, the same on every node."""
 
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
     model: str
     served_model_name: Optional[str] = None
     # DP ranks over all nodes.
@@ -48,6 +58,14 @@ class DeepInferOptions:
     gpu_memory_utilization: float = 0.9
     lookahead_tokens: int = 1
     prefill_attempt_interval: int = 8
+    kv_cache_manager: str = "none"
+    kv_transfer: str = "none"
+    kv_events_port_base: int = 5557
+    kv_lease_s: float = 120.0
+    prefix_snapshot_interval: int = 32768
+    prefix_snapshot_slots: int = 256
+    prefix_snapshot_device: str = "gpu"
+    prefix_free_watermark: float = 0.05
     rank0_in_process: bool = True
     startup_timeout_s: float = 3600.0
     engine_overrides: dict[str, Any]
@@ -58,6 +76,7 @@ class DeepInferOptions:
     master_port: int = DEFAULT_MASTER_PORT
     control_port: int = DEFAULT_CONTROL_PORT
     node_timeout_s: float = 30.0
+    advertise_addr: Optional[str] = None
 
     @classmethod
     def from_namespace(cls, ns: argparse.Namespace) -> DeepInferOptions:
@@ -75,8 +94,7 @@ class DeepInferOptions:
 
     @property
     def engine_type(self) -> str:
-        """DeepInfer's engine type: aggregated prefill and decode."""
-        return "NORMAL"
+        return ENGINE_TYPES[self.disaggregation_mode]
 
     @property
     def ranks_per_node(self) -> int:
@@ -112,13 +130,27 @@ class DeepInferOptions:
             args["max_model_len"] = self.max_model_len
         if self.max_num_batched_tokens is not None:
             args["max_num_batched_tokens"] = self.max_num_batched_tokens
+        if self.engine_type == "COMPLETION":
+            # DeepInfer refuses a decode-only engine that recomputes preemptions.
+            args["stop_preempted_request"] = True
         args.update(self.engine_overrides)
         return args
 
     def rank_specs(
         self, engine_id: str, ranks: Optional[Iterable[int]] = None
     ) -> list[RankSpec]:
-        """Specs of ``ranks`` (default: every rank of the engine)."""
+        """Specs of ``ranks`` (default: every rank of the engine). A rank's KV
+        events go to ``--kv-events-port-base`` plus its index on its node."""
+        cache_options: dict[str, Any] = {}
+        if self.kv_cache_manager == "prefix":
+            cache_options = {
+                "snapshot_interval": self.prefix_snapshot_interval,
+                "snapshot_slots": self.prefix_snapshot_slots,
+                "snapshot_device": self.prefix_snapshot_device,
+                "free_watermark": self.prefix_free_watermark,
+            }
+        events = self.kv_cache_manager != "none"
+        per_node = self.ranks_per_node
         return [
             RankSpec(
                 rank=rank,
@@ -127,15 +159,34 @@ class DeepInferOptions:
                 engine_type=self.engine_type,
                 backend=self.deepinfer_backend,
                 engine_id=engine_id,
+                cache_manager=self.kv_cache_manager,
+                cache_options=cache_options,
+                kv_transfer=self.kv_transfer,
+                kv_events_endpoint=(
+                    f"tcp://*:{self.kv_events_port_base + rank % per_node}"
+                    if events
+                    else None
+                ),
+                kv_lease_s=self.kv_lease_s,
             )
             for rank in (range(self.dp_size) if ranks is None else ranks)
         ]
+
+    def kv_event_endpoint(self, rank: int) -> str:
+        """Where the head subscribes to a rank on its own node."""
+        port = self.kv_events_port_base + rank % self.ranks_per_node
+        return f"tcp://127.0.0.1:{port}"
 
 
 def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("DeepInfer")
     g.add_argument("--model", required=True, help="Checkpoint directory.")
     g.add_argument("--served-model-name", default=None)
+    g.add_argument(
+        "--disaggregation-mode",
+        choices=[m.value for m in ENGINE_TYPES],
+        default=DisaggregationMode.AGGREGATED.value,
+    )
     g.add_argument(
         "--dp-size",
         type=int,
@@ -152,8 +203,26 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
         "--prefill-attempt-interval",
         type=int,
         default=8,
-        help="DEEPINFER_PREFILL_ATTEMPT_INTERVAL default.",
+        help="DEEPINFER_PREFILL_ATTEMPT_INTERVAL default for aggregated workers.",
     )
+    g.add_argument("--kv-cache-manager", choices=["none", "prefix"], default="none")
+    g.add_argument(
+        "--kv-transfer",
+        choices=["none", "nixl", "local"],
+        default=None,
+        help="Default: nixl for prefill/decode workers, none otherwise.",
+    )
+    g.add_argument(
+        "--kv-events-port-base",
+        type=int,
+        default=5557,
+        help="This node's ranks publish KV events on this port plus their index on the node.",
+    )
+    g.add_argument("--kv-lease-s", type=float, default=120.0)
+    g.add_argument("--prefix-snapshot-interval", type=int, default=32768)
+    g.add_argument("--prefix-snapshot-slots", type=int, default=256)
+    g.add_argument("--prefix-snapshot-device", choices=["gpu", "host"], default="gpu")
+    g.add_argument("--prefix-free-watermark", type=float, default=0.05)
     g.add_argument(
         "--rank0-in-process",
         action=argparse.BooleanOptionalAction,
@@ -212,11 +281,24 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
         default=30.0,
         help="A node whose connection stays silent this long is lost (ZMTP heartbeats).",
     )
+    m.add_argument(
+        "--advertise-addr",
+        default=None,
+        help="Non-head nodes: address the head uses for this node's KV event "
+        "publishers (default: the local address on the route to --master-addr).",
+    )
 
 
 def finalize_options(opts: Any, ns: argparse.Namespace) -> None:
     """Derived defaults and validation, after the namespace was copied onto ``opts``."""
+    opts.disaggregation_mode = DisaggregationMode(ns.disaggregation_mode)
     opts.engine_overrides = parse_engine_overrides(ns.engine_arg)
+    if ns.kv_transfer is None:
+        opts.kv_transfer = (
+            "none"
+            if opts.disaggregation_mode == DisaggregationMode.AGGREGATED
+            else "nixl"
+        )
     opts.served_model_name = ns.served_model_name or ns.model
     # Resolved once here: every rank on every node must use the same values.
     master_addr = ns.master_addr or os.environ.get("MASTER_ADDR")
@@ -243,27 +325,54 @@ def validate_options(opts: Any) -> None:
         raise ValueError(
             f"--dp-size {opts.dp_size} is not a multiple of --nnodes {opts.nnodes}"
         )
+    disagg = opts.disaggregation_mode != DisaggregationMode.AGGREGATED
+    if disagg and opts.kv_transfer == "none":
+        raise ValueError("prefill/decode workers need --kv-transfer nixl or local")
+    if not disagg and opts.kv_transfer != "none":
+        raise ValueError("--kv-transfer applies to prefill/decode workers only")
     if opts.nnodes > 1:
         ports = {
             "MASTER_PORT-50 (DeepInfer's store)": opts.master_port + STORE_PORT_OFFSET,
             "--control-port": opts.control_port,
         }
+        if opts.kv_cache_manager != "none":
+            base = opts.kv_events_port_base
+            ports.update(
+                {
+                    f"KV events port {p}": p
+                    for p in range(base, base + opts.ranks_per_node)
+                }
+            )
         if len(set(ports.values())) != len(ports):
             raise ValueError(f"DeepInfer ports collide: {ports}")
 
 
 def deepinfer_env(opts: Any) -> dict[str, str]:
-    """``DEEPINFER_*`` defaults the launcher applies with ``setdefault`` (the
-    pod's own environment wins) before anything imports DeepInfer, plus the
-    resolved ``MASTER_ADDR``/``MASTER_PORT``."""
-    return {
+    """``DEEPINFER_*``/UCX defaults the launcher applies with ``setdefault``
+    (the pod's own environment wins) before anything imports DeepInfer, plus
+    the resolved ``MASTER_ADDR``/``MASTER_PORT``."""
+    env = {
         "DEEPINFER_GLOO_TIMEOUT": "600",
         "DEEPINFER_USE_MULTIMODAL_POOL": "0",
-        # Lets newly arrived prompts join sooner between decode steps.
-        "DEEPINFER_PREFILL_ATTEMPT_INTERVAL": str(opts.prefill_attempt_interval),
         "MASTER_ADDR": opts.master_addr,
         "MASTER_PORT": str(opts.master_port),
     }
+    if opts.engine_type == "NORMAL":
+        # Lets newly arrived prompts join sooner between decode steps.
+        env["DEEPINFER_PREFILL_ATTEMPT_INTERVAL"] = str(opts.prefill_attempt_interval)
+    if opts.kv_cache_manager == "prefix":
+        env["DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE"] = "compact"
+        env["DEEPINFER_YOCO_PREFILL_KEEP_TOKENS"] = "140"
+    if opts.kv_transfer == "nixl":
+        env.update(
+            {
+                "UCX_TLS": "cuda_copy,cuda_ipc,tcp,rc",
+                "UCX_CUDA_IPC_ENABLE_MNNVL": "y",
+                "UCX_MEMTYPE_CACHE": "n",
+                "UCX_RCACHE_MAX_UNRELEASED": "1024",
+            }
+        )
+    return env
 
 
 def apply_env_defaults(
@@ -276,6 +385,33 @@ def apply_env_defaults(
             environ[key] = value
         else:
             environ.setdefault(key, value)
+    if opts.kv_cache_manager == "prefix":
+        if environ["DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE"] != "compact":
+            raise ValueError(
+                "--kv-cache-manager prefix needs DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE=compact"
+            )
+        extra_state = environ.get("DEEPINFER_PREFILL_STORE_EXTRA_STATE", "0")
+        if extra_state not in _DEEPINFER_FALSE:
+            raise ValueError(
+                "--kv-cache-manager prefix is incompatible with "
+                f"DEEPINFER_PREFILL_STORE_EXTRA_STATE={extra_state!r}"
+            )
+    if opts.kv_transfer == "nixl" and "UCX_NET_DEVICES" not in environ:
+        _pin_ucx_rail(environ)
+
+
+def _pin_ucx_rail(environ: MutableMapping[str, str]) -> None:
+    """Put UCX on the rail the pod pinned NCCL to. GKE's rdma-0..3 are
+    isolated rails (mlx5_0 cannot reach mlx5_1), and a decode rank may read
+    from any prefill rank, so every rank must use the same NIC."""
+    hca = environ.get("NCCL_IB_HCA", "").lstrip("=")
+    if hca and not hca.startswith("^") and "," not in hca:
+        environ["UCX_NET_DEVICES"] = hca if ":" in hca else f"{hca}:1"
+    elif len(glob.glob("/dev/infiniband/uverbs*")) > 1:
+        logger.warning(
+            "Several RDMA devices and no UCX_NET_DEVICES: on isolated rails "
+            "(GKE rdma-0..3) set UCX_NET_DEVICES=mlx5_0:1 or NCCL_IB_HCA==mlx5_0"
+        )
 
 
 def local_gpu_count() -> int:
@@ -316,6 +452,19 @@ def visible_devices(n: int) -> list[str]:
             f"CUDA_VISIBLE_DEVICES={visible}"
         )
     return ids[:n]
+
+
+def route_address(peer: str, port: int) -> str:
+    """This host's address on the route to ``peer`` (no packet is sent)."""
+    try:
+        family, _, _, _, addr = socket.getaddrinfo(peer, port, type=socket.SOCK_DGRAM)[
+            0
+        ]
+        with socket.socket(family, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            return s.getsockname()[0]
+    except OSError:
+        return socket.gethostname()
 
 
 def parse_engine_overrides(items: Sequence[str]) -> dict[str, Any]:

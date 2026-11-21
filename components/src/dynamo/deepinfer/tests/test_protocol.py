@@ -39,7 +39,7 @@ META = EngineMeta(
 )
 
 
-def test_cmd_roundtrip_keeps_prompt_and_sampling():
+def test_cmd_roundtrip_keeps_prompt_sampling_and_handoff():
     cmd = Cmd(
         seq=7,
         adds=[
@@ -47,8 +47,9 @@ def test_cmd_roundtrip_keeps_prompt_and_sampling():
                 request_id="a",
                 token_ids=prompt_bytes([5, 6, 70000]),
                 sampling={"max_tokens": 3, "temperature": 0.5},
+                handoff={"block_ids": [1, 2]},
             ),
-            AddReq(request_id="b", token_ids=prompt_bytes([1])),
+            AddReq(request_id="b", token_ids=prompt_bytes([1]), hold_kv=True),
         ],
         aborts=["c"],
         sync=Sync(unfinished=True, new_prompts=True),
@@ -56,7 +57,7 @@ def test_cmd_roundtrip_keeps_prompt_and_sampling():
     back = decode_cmd(encode(cmd))
     assert back == cmd
     assert prompt_array(back.adds[0].token_ids).tolist() == [5, 6, 70000]
-    assert back.adds[1].sampling == {}
+    assert back.adds[1].hold_kv and back.adds[1].handoff is None
     assert back.op == Op.STEP
 
 
