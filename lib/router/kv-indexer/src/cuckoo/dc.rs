@@ -1584,6 +1584,7 @@ mod tests {
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(1),
             alignment_blocks: Some(1),
+            eagle_margin_blocks: None,
         };
 
         // vLLM publishes a recurrent group at the attention block's positional hash.

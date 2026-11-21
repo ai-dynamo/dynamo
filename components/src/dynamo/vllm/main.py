@@ -654,6 +654,11 @@ def setup_kv_event_publisher(
             recurrent_alignment_blocks=(
                 recurrent_layout.alignment_blocks if recurrent_layout is not None else 1
             ),
+            recurrent_eagle_margin_blocks=(
+                recurrent_layout.eagle_margin_blocks
+                if recurrent_layout is not None
+                else 0
+            ),
         )
         kv_publishers.append(kv_publisher)
 

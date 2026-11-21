@@ -32,6 +32,10 @@ class RecurrentKvLayout:
     hash_block_size: int
     scheduler_block_size: int
     cache_hit_alignment_tokens: int
+    # Indexer blocks the attention match must extend past a recurrent
+    # checkpoint for the engine to resume there. Non-zero only when vLLM
+    # drops the trailing prefix-cache block for EAGLE/MTP.
+    eagle_margin_blocks: int = 0
 
     @property
     def alignment_blocks(self) -> int:
@@ -43,6 +47,7 @@ class RecurrentKvLayout:
             "geometry_source": "validated_common_unit",
             "recurrent_groups": self.recurrent_groups,
             "alignment_blocks": self.alignment_blocks,
+            "eagle_margin_blocks": self.eagle_margin_blocks,
             "indexer_block_size": self.indexer_block_size,
             "hash_block_size": self.hash_block_size,
             "scheduler_block_size": self.scheduler_block_size,
@@ -184,10 +189,9 @@ def recurrent_kv_layout(
         )
     if dcp_size != 1 or pcp_size != 1:
         raise ValueError("Recurrent KV events do not yet support context parallelism")
+    eagle_margin_blocks = 0
     if speculative is not None:
-        raise ValueError(
-            "Recurrent KV events do not yet support EAGLE or speculative decoding"
-        )
+        eagle_margin_blocks = _speculative_eagle_margin_blocks(vllm_config, speculative)
     if transfer is not None:
         extra = transfer.kv_connector_extra_config
         if (
@@ -204,9 +208,10 @@ def recurrent_kv_layout(
                 "default CPU offloading spec"
             )
 
-    # With no CP, no speculative tail, equal physical group sizes and no finer
-    # prefix-match override, vLLM's scheduler LCM, hash GCD and hit alignment
-    # are all this same unit. This is intentionally narrower than general HMA.
+    # With no CP, equal physical group sizes and no finer prefix-match
+    # override, vLLM's scheduler LCM, hash GCD and hit alignment are all this
+    # same unit, so the EAGLE/MTP trailing-block drop is one indexer block.
+    # This is intentionally narrower than general HMA.
     return RecurrentKvLayout(
         recurrent_groups=recurrent_groups,
         cache_groups=metadata,
@@ -214,4 +219,32 @@ def recurrent_kv_layout(
         hash_block_size=unit,
         scheduler_block_size=unit,
         cache_hit_alignment_tokens=unit,
+        eagle_margin_blocks=eagle_margin_blocks,
     )
+
+
+def _speculative_eagle_margin_blocks(vllm_config: VllmConfig, speculative: Any) -> int:
+    """Indexer blocks the attention match must exceed a checkpoint by.
+
+    EAGLE/MTP drafters need the tokens right before the generation point
+    recomputed. vLLM satisfies that in one of two ways. With lookahead block
+    hashes (the default when prefix caching is on), every block hash already
+    covers the drafter's lookahead tokens, no prefix-cache block is dropped
+    and the recurrent checkpoint hash stays the engine's resume position:
+    margin 0. With the trailing-block drop (``disable_lookahead_block_hashes``
+    or a KV connector without lookahead support), the engine matches the
+    attention prefix and then drops one scheduler block, so a checkpoint is
+    the resume position only when the attention match extends one block past
+    it: margin 1 under this fixed-common-unit contract. Methods that never
+    drop a block (ngram, draft_model, dflash, dspark) get margin 0.
+    """
+    use_block_drop = getattr(speculative, "use_eagle_block_drop", None)
+    lookahead_tokens = getattr(vllm_config, "num_hash_lookahead_tokens", None)
+    if not callable(use_block_drop) or type(lookahead_tokens) is not int:
+        raise ValueError(
+            "Recurrent KV events with speculative decoding require vLLM's "
+            "use_eagle_block_drop and num_hash_lookahead_tokens capability fields"
+        )
+    if use_block_drop() and lookahead_tokens <= 0:
+        return 1
+    return 0

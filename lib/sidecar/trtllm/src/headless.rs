@@ -140,6 +140,7 @@ pub(crate) async fn relay(
                     idempotent_stores,
                     recurrent_groups: None,
                     recurrent_alignment_blocks: 1,
+                    recurrent_eagle_margin_blocks: 0,
                     recovery: None,
                 }),
                 leader_config.enable_local_indexer,

@@ -366,6 +366,7 @@ mod tests {
                 kind: KvCacheGroupKind::Mamba,
                 expected_group_count: Some(1),
                 alignment_blocks: Some(1),
+                eagle_margin_blocks: None,
             });
             let mut wire = serde_json::to_value(vec![tagged, dense]).unwrap();
             wire[0]["kv_cache_group"]["kind"] = serde_json::json!("future_recurrent_kind");
@@ -390,6 +391,7 @@ mod tests {
                     kind: KvCacheGroupKind::Mamba,
                     expected_group_count: Some(1),
                     alignment_blocks: Some(1),
+                    eagle_margin_blocks: None,
                 });
             let bytes = rmp_serde::to_vec_named(&tagged).unwrap();
 

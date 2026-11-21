@@ -395,5 +395,6 @@ pub fn recurrent_store(
         kind: KvCacheGroupKind::Mamba,
         expected_group_count: Some(count),
         alignment_blocks: Some(1),
+        eagle_margin_blocks: None,
     })
 }

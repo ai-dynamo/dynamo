@@ -16,8 +16,15 @@ This mode requires engine cache-group metadata and an enabled local indexer
 (`enable_local_indexer=True`, the default for Dynamo vLLM workers).
 The supported resume contract is deliberately limited to full-attention and
 Mamba groups that all use the same positive block size as the indexer, with
-prefix caching in `align` mode, no context parallelism, and no speculative
-decoding. `prefix_match_unit` must be unset or equal that common block size.
+prefix caching in `align` mode, and no context parallelism. Speculative
+decoding is supported. With vLLM's lookahead block hashes (its default with
+prefix caching) the engine drops no prefix-cache block and the recurrent
+checkpoint hash is the resume position. With the EAGLE/MTP trailing-block
+drop (`disable_lookahead_block_hashes`, or a KV connector without
+lookahead-hash support) the worker publishes `eagle_margin_blocks: 1` and the
+indexer credits a checkpoint only when the attention match extends one
+block past it, which is where the engine resumes.
+`prefix_match_unit` must be unset or equal that common block size.
 Sliding-window, chunked-local, mixed-size, and finer-than-indexer layouts fail
 at startup when recurrent publication is enabled. Dense workers and publication
 with the option disabled keep the existing attention-only behavior.

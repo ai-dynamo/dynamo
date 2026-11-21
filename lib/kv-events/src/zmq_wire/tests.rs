@@ -920,6 +920,7 @@ fn test_normalizer_keeps_map_serialized_mamba_kind() {
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(3),
             alignment_blocks: Some(1),
+            eagle_margin_blocks: Some(0),
         })
     );
 }
@@ -1274,6 +1275,7 @@ fn test_normalizer_tags_mamba_group_store_and_learned_removal() {
         kind: KvCacheGroupKind::Mamba,
         expected_group_count: Some(3),
         alignment_blocks: Some(1),
+        eagle_margin_blocks: Some(0),
     });
 
     let stored = normalizer.preprocess(raw_event, worker).expect("kept");

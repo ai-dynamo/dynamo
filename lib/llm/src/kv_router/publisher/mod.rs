@@ -112,6 +112,10 @@ pub enum KvEventSourceConfig {
         idempotent_stores: bool,
         recurrent_groups: Option<Vec<u32>>,
         recurrent_alignment_blocks: u32,
+        /// Scheduler blocks the attention match must extend past a recurrent
+        /// checkpoint for the engine to resume there; 0 unless the engine
+        /// drops the trailing prefix-cache block for EAGLE/MTP.
+        recurrent_eagle_margin_blocks: u32,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -179,6 +183,7 @@ impl KvEventSource {
                 idempotent_stores: _,
                 recurrent_groups,
                 recurrent_alignment_blocks,
+                recurrent_eagle_margin_blocks,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -205,6 +210,7 @@ impl KvEventSource {
                             engine_owned_mm_identity,
                             recurrent_groups,
                             recurrent_alignment_blocks,
+                            recurrent_eagle_margin_blocks,
                             recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
@@ -439,15 +445,16 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
-        let recurrent_alignment_blocks = source_config
+        let (recurrent_alignment_blocks, recurrent_eagle_margin_blocks) = source_config
             .as_ref()
             .map(|config| match config {
                 KvEventSourceConfig::Zmq {
                     recurrent_alignment_blocks,
+                    recurrent_eagle_margin_blocks,
                     ..
-                } => *recurrent_alignment_blocks,
+                } => (*recurrent_alignment_blocks, *recurrent_eagle_margin_blocks),
             })
-            .unwrap_or(1);
+            .unwrap_or((1, 0));
         let recurrent_groups = source_config.as_ref().and_then(|config| match config {
             KvEventSourceConfig::Zmq {
                 recurrent_groups, ..
@@ -478,6 +485,7 @@ impl KvEventPublisher {
                         kind: KvCacheGroupKind::Mamba,
                         expected_group_count: Some(groups.len() as u32),
                         alignment_blocks: Some(recurrent_alignment_blocks),
+                        eagle_margin_blocks: Some(recurrent_eagle_margin_blocks),
                     });
                     event
                 })
@@ -534,6 +542,7 @@ impl KvEventPublisher {
                 WorkerWithDpRank::new(worker_id, dp_rank),
                 &groups,
                 recurrent_alignment_blocks,
+                recurrent_eagle_margin_blocks,
             );
         }
         let local_indexer_clone = local_indexer.clone();

@@ -93,6 +93,7 @@ pub struct ZmqEventNormalizer {
     full_block_workers: FxHashSet<WorkerWithDpRank>,
     recurrent_groups: Option<Vec<u32>>,
     recurrent_alignment_blocks: u32,
+    recurrent_eagle_margin_blocks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +154,7 @@ impl ZmqEventNormalizer {
             full_block_workers: FxHashSet::default(),
             recurrent_groups: None,
             recurrent_alignment_blocks: 1,
+            recurrent_eagle_margin_blocks: 0,
         }
     }
 
@@ -168,6 +170,7 @@ impl ZmqEventNormalizer {
             full_block_workers: FxHashSet::default(),
             recurrent_groups: None,
             recurrent_alignment_blocks: 1,
+            recurrent_eagle_margin_blocks: 0,
         }
     }
 
@@ -180,6 +183,11 @@ impl ZmqEventNormalizer {
 
     pub fn with_recurrent_alignment_blocks(mut self, blocks: u32) -> Self {
         self.recurrent_alignment_blocks = blocks.max(1);
+        self
+    }
+
+    pub fn with_recurrent_eagle_margin_blocks(mut self, blocks: u32) -> Self {
+        self.recurrent_eagle_margin_blocks = blocks;
         self
     }
 
@@ -647,6 +655,7 @@ impl ZmqEventNormalizer {
                 .as_ref()
                 .map(|groups| groups.len() as u32),
             alignment_blocks: Some(self.recurrent_alignment_blocks),
+            eagle_margin_blocks: Some(self.recurrent_eagle_margin_blocks),
         })
     }
 

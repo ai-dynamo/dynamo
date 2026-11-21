@@ -88,6 +88,7 @@ def test_supported_geometry_publishes_fixed_common_unit_contract(
         "geometry_source": "validated_common_unit",
         "recurrent_groups": [0, 1],
         "alignment_blocks": 1,
+        "eagle_margin_blocks": 0,
         "indexer_block_size": unit,
         "hash_block_size": unit,
         "scheduler_block_size": unit,
@@ -136,10 +137,60 @@ def test_context_parallel_geometry_requires_separate_support(field):
         recurrent_kv_layout(config, enabled=True)
 
 
-def test_speculative_checkpoint_rules_require_separate_support():
+@pytest.mark.parametrize(
+    ("method", "block_drop", "lookahead_tokens"),
+    [
+        ("mtp", True, 1),  # default: lookahead block hashes, no block drop
+        ("eagle3", True, 3),
+        ("ngram", False, 0),  # never drops a block
+        ("draft_model", False, 0),
+    ],
+)
+def test_speculative_decoding_without_block_drop_is_supported(
+    method, block_drop, lookahead_tokens
+):
     config = _config()
-    config.speculative_config = SimpleNamespace(method="eagle")
-    with pytest.raises(ValueError, match="EAGLE or speculative"):
+    config.speculative_config = SimpleNamespace(
+        method=method, use_eagle_block_drop=lambda: block_drop
+    )
+    config.num_hash_lookahead_tokens = lookahead_tokens
+    layout = recurrent_kv_layout(config, enabled=True)
+    assert layout is not None
+    assert layout.recurrent_groups == [0, 1]
+    assert layout.alignment_blocks == 1
+    assert layout.eagle_margin_blocks == 0
+    assert layout.runtime_metadata()["eagle_margin_blocks"] == 0
+
+
+def test_speculative_trailing_block_drop_publishes_one_block_margin():
+    # disable_lookahead_block_hashes=true (or a connector without lookahead
+    # support) makes vLLM drop the trailing block: the engine resumes at a
+    # checkpoint only when the attention match extends one block past it.
+    config = _config()
+    config.speculative_config = SimpleNamespace(
+        method="mtp", use_eagle_block_drop=lambda: True
+    )
+    config.num_hash_lookahead_tokens = 0
+    layout = recurrent_kv_layout(config, enabled=True)
+    assert layout is not None
+    assert layout.eagle_margin_blocks == 1
+    assert layout.runtime_metadata()["eagle_margin_blocks"] == 1
+
+
+@pytest.mark.parametrize(
+    "missing", ["use_eagle_block_drop", "num_hash_lookahead_tokens"]
+)
+def test_speculative_capability_fields_must_be_known(missing):
+    config = _config()
+    config.speculative_config = SimpleNamespace(
+        method="mtp", use_eagle_block_drop=lambda: True
+    )
+    config.num_hash_lookahead_tokens = 1
+    if missing == "use_eagle_block_drop":
+        del config.speculative_config.use_eagle_block_drop
+    else:
+        del config.num_hash_lookahead_tokens
+    with pytest.raises(ValueError, match="capability fields"):
         recurrent_kv_layout(config, enabled=True)
 
 
