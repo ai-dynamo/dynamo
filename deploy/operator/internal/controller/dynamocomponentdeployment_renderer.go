@@ -369,6 +369,9 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	)
 }
 
+// generateComponentPodTemplateSpec renders a component's Pod template with its
+// bounded workload selector. It updates podLabels and podAnnotations in place;
+// component and both maps must be non-nil.
 func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 	ctx context.Context,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -427,7 +430,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		return nil, errors.New("no containers found in base pod spec")
 	}
 
-	podLabels[commonconsts.KubeLabelDynamoSelector] = workloadName
+	podLabels[commonconsts.KubeLabelDynamoSelector] = dynamo.DCDSelectorLabelValue(workloadName)
 	if commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue

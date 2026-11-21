@@ -11,9 +11,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Render constructs the desired Deployment from a resolved Pod template and update strategy.
+// Render constructs the desired Deployment from a resolved Pod template, selector and update strategy.
 // dcd and template must be non-nil. Inputs are not modified.
-func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, template *corev1.PodTemplateSpec, strategy appsv1.DeploymentStrategy) *appsv1.Deployment {
+// selector must be the bounded DCD selector label value.
+func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, template *corev1.PodTemplateSpec, strategy appsv1.DeploymentStrategy, selector string) *appsv1.Deployment {
 	metadata = *metadata.DeepCopy()
 	metadata.Name = dcd.Name
 	metadata.Namespace = dcd.Namespace
@@ -21,7 +22,9 @@ func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, 
 	if template.Labels == nil {
 		template.Labels = make(map[string]string)
 	}
-	template.Labels[consts.KubeLabelDynamoSelector] = dcd.Name
+
+	// Keep the Pod label and immutable Deployment selector on the same bounded identity.
+	template.Labels[consts.KubeLabelDynamoSelector] = selector
 
 	// Own the replica value while preserving Kubernetes defaulting when unspecified.
 	replicas := dcd.Spec.Replicas
@@ -32,7 +35,7 @@ func Render(dcd *v1beta1.DynamoComponentDeployment, metadata metav1.ObjectMeta, 
 		ObjectMeta: metadata,
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicas,
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{consts.KubeLabelDynamoSelector: dcd.Name}},
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{consts.KubeLabelDynamoSelector: selector}},
 			Template: *template,
 			Strategy: *strategy.DeepCopy(),
 		},

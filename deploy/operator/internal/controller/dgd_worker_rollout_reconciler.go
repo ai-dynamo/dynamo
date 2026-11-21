@@ -987,7 +987,7 @@ func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 			continue
 		}
 		if dcd.Name != "" {
-			oldDCDNames[dcd.Name] = struct{}{}
+			oldDCDNames[dynamo.DCDSelectorLabelValue(dcd.Name)] = struct{}{}
 		}
 		if workerHash := dcd.Labels[consts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 			oldWorkerHashes[workerHash] = struct{}{}

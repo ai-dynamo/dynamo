@@ -10,13 +10,17 @@ import (
 	"testing"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+const testLongDCDName = "nemotron-3-5-super-vl-120b-a12b-vllm-disagg-b200-swebenchpro-decode"
 
 func TestOwnerNames(t *testing.T) {
 	tests := []struct {
@@ -26,25 +30,6 @@ func TestOwnerNames(t *testing.T) {
 		want      string
 		owned     bool
 	}{
-		{
-			name:      "DCD by selector label",
-			ownerName: DCDName,
-			labels:    map[string]string{commonconsts.KubeLabelDynamoSelector: "graph-frontend"},
-			want:      "graph-frontend",
-			owned:     true,
-		},
-		{
-			name:      "no selector label",
-			ownerName: DCDName,
-		},
-		{
-			name:      "Grove Pod with the selector label",
-			ownerName: DCDName,
-			labels: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: "graph-frontend",
-				grovecommon.LabelPodClique:           "graph-0-frontend",
-			},
-		},
 		{
 			name:      "DGD by graph and component labels",
 			ownerName: DGDName,
@@ -74,11 +59,23 @@ func TestOwnerNames(t *testing.T) {
 }
 
 func TestEnqueueOwners(t *testing.T) {
+	longDCD := testPod("inference", "worker-a", map[string]string{
+		commonconsts.KubeLabelDynamoSelector:   dynamo.DCDSelectorLabelValue(testLongDCDName),
+		appsv1.DefaultDeploymentUniqueLabelKey: "7d9c6b5f4",
+	}, 3)
+	longDCD.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: appsv1.SchemeGroupVersion.String(),
+		Kind:       "ReplicaSet",
+		Name:       testLongDCDName + "-7d9c6b5f4",
+		Controller: new(true),
+	}}
+
 	tests := []struct {
-		name   string
-		oldPod *corev1.Pod // nil delivers a create of newPod
-		newPod *corev1.Pod
-		want   []string
+		name      string
+		ownerName OwnerName   // nil uses DGDName
+		oldPod    *corev1.Pod // nil delivers a create of newPod
+		newPod    *corev1.Pod
+		want      []string
 	}{
 		{
 			name:   "update moving a Pod between graphs",
@@ -101,6 +98,12 @@ func TestEnqueueOwners(t *testing.T) {
 			name:   "create of an unowned Pod",
 			newPod: testPod("inference", "unlabeled", nil, 3),
 		},
+		{
+			name:      "create of a Pod of a long-named DCD",
+			ownerName: dynamo.DCDName,
+			newPod:    longDCD,
+			want:      []string{testLongDCDName},
+		},
 	}
 
 	for _, tt := range tests {
@@ -108,10 +111,14 @@ func TestEnqueueOwners(t *testing.T) {
 			t.Log("Deliver the event to the handler")
 			queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 			defer queue.ShutDown()
+			ownerName := tt.ownerName
+			if ownerName == nil {
+				ownerName = DGDName
+			}
 			if tt.oldPod == nil {
-				EnqueueOwners(DGDName).Create(t.Context(), event.CreateEvent{Object: tt.newPod}, queue)
+				EnqueueOwners(ownerName).Create(t.Context(), event.CreateEvent{Object: tt.newPod}, queue)
 			} else {
-				EnqueueOwners(DGDName).Update(t.Context(), event.UpdateEvent{ObjectOld: tt.oldPod, ObjectNew: tt.newPod}, queue)
+				EnqueueOwners(ownerName).Update(t.Context(), event.UpdateEvent{ObjectOld: tt.oldPod, ObjectNew: tt.newPod}, queue)
 			}
 
 			t.Log("Verify the enqueued graphs in the Pod's namespace")
