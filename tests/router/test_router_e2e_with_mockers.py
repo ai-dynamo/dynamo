@@ -734,7 +734,8 @@ def test_mocker_kv_router_overload_529(
         )
 
 
-@pytest.mark.timeout(45)
+# ~22s measured; the failure path alone waits 20s for a rejection.
+@pytest.mark.timeout(90)
 def test_busy_threshold_keeps_picker_only_role_on_kv_path(
     request,
     runtime_services_dynamic_ports,

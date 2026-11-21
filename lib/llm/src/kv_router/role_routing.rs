@@ -132,7 +132,8 @@ pub struct RoleInputs<'a> {
     pub reserves_workers: bool,
     /// A busy threshold is set for the role.
     pub busy_thresholds: bool,
-    /// The role's workers advertise routing taints, topology domains included.
+    /// The card the role is built from advertises routing taints, topology domains
+    /// included. Other workers of the set are not read.
     pub workers_have_taints: bool,
     /// The decode set this prefill hop fronts runs conditional disaggregation. A serving
     /// set's own setting is read from `config`.
