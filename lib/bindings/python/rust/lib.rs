@@ -90,6 +90,7 @@ mod planner;
 mod prometheus_metrics;
 mod push_egress;
 mod python_payload;
+mod shutdown;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
@@ -451,6 +452,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
+    shutdown::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 
@@ -1595,6 +1597,32 @@ impl DistributedRuntime {
         self.inner
             .system_status_server_info()
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
+    }
+
+    /// Close control admission now. An already admitted callback must finish
+    /// before engine cleanup, but need not delay discovery withdrawal.
+    fn close_engine_routes(&self) -> bool {
+        self.inner.runtime().mark_shutting_down();
+        let routes = self.inner.engine_routes();
+        routes.close();
+        !routes.is_idle()
+    }
+
+    /// Fence endpoint registration, stop controls, and join admitted callbacks.
+    fn shutdown_engine_routes<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let runtime = self.inner.runtime().clone();
+        runtime.mark_shutting_down();
+        let routes = self.inner.engine_routes().clone();
+        routes.close();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            runtime.close_endpoint_registration().await;
+            routes.wait_for_idle().await;
+            Ok(())
+        })
+    }
+
+    fn engine_routes_closed(&self) -> bool {
+        self.inner.engine_routes().is_closed()
     }
 
     /// Register a status-aware handler at `/engine/{name}` on the system listener.

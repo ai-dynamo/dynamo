@@ -372,6 +372,7 @@ async def test_close_joins_cancelled_http_resume_before_final_unregister(
 ):
     entered = asyncio.Event()
     cancelled = asyncio.Event()
+    terminal = asyncio.Event()
     order = []
 
     async def unregister():
@@ -392,7 +393,7 @@ async def test_close_joins_cancelled_http_resume_before_final_unregister(
         endpoint,
         lock=asyncio.Lock(),
         shutdown_event=asyncio.Event(),
-        terminal_event=asyncio.Event(),
+        terminal_event=terminal,
         ready_event=ready,
         is_paused=lambda: False,
         grace_period=0,
@@ -406,6 +407,7 @@ async def test_close_joins_cancelled_http_resume_before_final_unregister(
     operations = list(drain._operations)
     await asyncio.wait_for(drain.close(), 1)
     assert cancelled.is_set()
+    assert not terminal.is_set()
     assert all(task.done() for task in operations)
     assert order == ["unregister", "registration cancelled", "unregister"]
     assert (await drain.status({}))["admin_withdrawn"]
