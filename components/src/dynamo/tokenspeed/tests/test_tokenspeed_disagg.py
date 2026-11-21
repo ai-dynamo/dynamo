@@ -8,6 +8,7 @@ at the boundary by fakes that follow the wire's semantics."""
 import asyncio
 import itertools
 import json
+import re
 import signal
 import threading
 from pathlib import Path
@@ -250,8 +251,11 @@ def make_engine(
     return engine
 
 
-def context(rid):
-    return SimpleNamespace(id=lambda: rid)
+def context(rid, stopped=False):
+    """A request's Context. The adapter calls abort() only once it stopped."""
+    ctx = SimpleNamespace(id=lambda: rid, stopped=stopped, is_killed=lambda: False)
+    ctx.is_stopped = lambda: ctx.stopped
+    return ctx
 
 
 async def drain(stream):
@@ -617,7 +621,7 @@ async def test_generate_forwards_handoff_and_preserves_decode_budget(native, mod
         assert tokens == [[20, 21]]
         assert chunks[-1]["finish_reason"] == "length"
         [submitted] = native.submitted
-        assert submitted.rid == "request-1"
+        assert re.fullmatch(r"request-1-[0-9a-f]{8}", submitted.rid)
         assert submitted.input_ids == [10, 11]
         # The prompt goes to the encoder as it is, without a copy.
         assert submitted.input_ids is request["token_ids"]
@@ -1049,18 +1053,19 @@ async def test_prefill_cancellation_after_handoff_prevents_submission(
         assert first["disaggregated_params"]
         assert native.submitted == []
         if cancel:
+            ctx.stopped = True
             await engine.abort(ctx)
             await engine.abort(ctx)
         chunks = await drain(stream)
-        assert [r.rid for r in native.submitted] == (
-            [] if cancel else ["handoff-cancel"]
+        assert [r.rid.startswith("handoff-cancel-") for r in native.submitted] == (
+            [] if cancel else [True]
         )
         assert chunks[-1]["finish_reason"] == ("cancelled" if cancel else "length")
         assert engine._requests == {}
         # Reusing the context must not inherit cancellation from the old stream.
         chunks = await drain(engine.generate(request, ctx))
         assert chunks[-1]["finish_reason"] == "length"
-        assert native.submitted[-1].rid == "handoff-cancel"
+        assert native.submitted[-1].rid.startswith("handoff-cancel-")
     finally:
         await stream.aclose()
         await engine.cleanup()
@@ -1070,14 +1075,14 @@ async def test_abort_mid_stream_ends_with_cancelled(native):
     native.respond = lambda request: [wire_output([20])]
     engine = make_engine()
     await engine.start(worker_id=1)
-    ctx = context("stream-cancel")
+    ctx = context("stream-cancel", stopped=True)
     stream = engine.generate({"token_ids": [10]}, ctx)
     try:
         assert (await anext(stream))["token_ids"] == [20]
         await engine.abort(ctx)
         chunks = await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
-        assert native.aborted == ["stream-cancel"]
+        assert native.aborted == [native.submitted[0].rid]
         assert engine._requests == {}
     finally:
         await stream.aclose()
@@ -1089,14 +1094,14 @@ async def test_unanswered_abort_still_ends_the_stream(native):
     native.abort_answers = False
     engine = make_engine()
     await engine.start(worker_id=1)
-    ctx = context("queued-cancel")
+    ctx = context("queued-cancel", stopped=True)
     stream = engine.generate({"token_ids": [10]}, ctx)
     try:
         assert (await anext(stream))["token_ids"] == [20]
         await engine.abort(ctx)
         chunks = await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
-        assert native.aborted == ["queued-cancel"]
+        assert native.aborted == [native.submitted[0].rid]
         assert engine._requests == {}
     finally:
         await stream.aclose()
@@ -1110,7 +1115,7 @@ async def test_answered_abort_leaves_nothing_behind(native):
     engine = make_engine()
     engine._abort_grace_s = 0.05
     await engine.start(worker_id=1)
-    ctx = context("answered-cancel")
+    ctx = context("answered-cancel", stopped=True)
     stream = engine.generate({"token_ids": [10]}, ctx)
     try:
         assert (await anext(stream))["token_ids"] == [20]
@@ -1135,7 +1140,8 @@ async def test_output_stream_failure_ends_a_partly_read_batch(native):
     stream = engine.generate({"token_ids": [10]}, context("failing"))
     try:
         assert (await anext(stream))["token_ids"] == [20]
-        engine._requests["failing"].push(wire_output([21]))
+        [state] = engine._requests.values()
+        state.push(wire_output([21]))
         engine._engine_lost("boom")
         with pytest.raises(RuntimeError, match="boom"):
             await anext(stream)
@@ -1150,7 +1156,7 @@ async def test_abort_racing_submission_still_aborts_native_request(native):
     native.submit_gate = asyncio.Event()
     engine = make_engine()
     await engine.start(worker_id=1)
-    ctx = context("racing-cancel")
+    ctx = context("racing-cancel", stopped=True)
     stream = engine.generate({"token_ids": [10]}, ctx)
     first = asyncio.ensure_future(anext(stream))
     try:
@@ -1163,7 +1169,7 @@ async def test_abort_racing_submission_still_aborts_native_request(native):
         native.submit_gate.set()
         chunks = [await first] + await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
-        assert native.aborted == ["racing-cancel"]
+        assert native.aborted == [native.submitted[0].rid]
     finally:
         await stream.aclose()
         await engine.cleanup()
@@ -1179,7 +1185,7 @@ async def test_closing_stream_early_aborts_native_request(native):
         await stream.aclose()
         for _ in range(3):
             await asyncio.sleep(0)
-        assert native.aborted == ["abandoned"]
+        assert native.aborted == [native.submitted[0].rid]
         assert engine._requests == {}
     finally:
         await engine.cleanup()
@@ -1195,12 +1201,82 @@ async def test_abort_of_dropped_stream_is_safe_outside_the_event_loop(native):
     stream = engine.generate({"token_ids": [10]}, context("finalized"))
     try:
         assert (await anext(stream))["token_ids"] == [20]
-        await asyncio.to_thread(engine._schedule_abort, "finalized")
+        rid = native.submitted[0].rid
+        await asyncio.to_thread(engine._schedule_abort, rid)
         for _ in range(3):
             await asyncio.sleep(0)
-        assert native.aborted == ["finalized"]
+        assert native.aborted == [rid]
     finally:
         await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_overlapping_attempts_with_one_public_id_get_their_own_output(native):
+    """A migrated retry keeps its public id and may run beside the attempt it
+    replaces; each must get only its own engine output."""
+    native.respond = lambda request: []
+    engine = make_engine()
+    await engine.start(worker_id=1)
+    first = engine.generate({"token_ids": [10]}, context("same-id"))
+    second = engine.generate({"token_ids": [11]}, context("same-id"))
+    first_chunk = asyncio.ensure_future(anext(first))
+    second_chunk = asyncio.ensure_future(anext(second))
+    try:
+        while len(native.submitted) < 2:
+            await asyncio.sleep(0)
+        first_rid, second_rid = [r.rid for r in native.submitted]
+        assert first_rid != second_rid
+        assert first_rid.startswith("same-id-")
+        assert second_rid.startswith("same-id-")
+        native.frontend.deliver(first_rid, wire_output([20]))
+        assert (await first_chunk)["token_ids"] == [20]
+        assert not second_chunk.done()
+        native.frontend.deliver(second_rid, wire_output([30]))
+        assert (await second_chunk)["token_ids"] == [30]
+    finally:
+        for task in (first_chunk, second_chunk):
+            task.cancel()
+        await asyncio.gather(first_chunk, second_chunk, return_exceptions=True)
+        await first.aclose()
+        await second.aclose()
+        await engine.cleanup()
+
+
+async def test_aborting_a_failed_attempt_leaves_its_retry_running(native):
+    native.respond = lambda request: []
+    engine = make_engine()
+    await engine.start(worker_id=1)
+    failed = context("same-id")
+    first = asyncio.ensure_future(drain(engine.generate({"token_ids": [10]}, failed)))
+    second = asyncio.ensure_future(
+        drain(engine.generate({"token_ids": [11]}, context("same-id")))
+    )
+    try:
+        while len(native.submitted) < 2:
+            await asyncio.sleep(0)
+        first_rid, second_rid = [r.rid for r in native.submitted]
+        assert first_rid != second_rid
+        failed.stopped = True
+        # The bridge hands abort() a new wrapper around the stopped context.
+        await engine.abort(context("same-id", stopped=True))
+        assert native.aborted == [first_rid]
+        assert (await first)[-1]["finish_reason"] == "cancelled"
+        # Ending the first attempt removed only its own entries.
+        assert list(engine._requests) == [second_rid]
+        # A late abort for the ended attempt must not reach the live retry.
+        await engine.abort(context("same-id", stopped=True))
+        assert not second.done()
+        native.frontend.deliver(second_rid, finished([21]))
+        chunks = await second
+        assert [chunk["token_ids"] for chunk in chunks] == [[21]]
+        assert chunks[-1]["finish_reason"] == "length"
+        assert native.aborted == [first_rid]
+        assert engine._requests == {}
+        assert engine._dispatches == {}
+    finally:
+        for task in (first, second):
+            task.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
         await engine.cleanup()
 
 
@@ -1226,7 +1302,7 @@ async def test_prefill_is_quiescent_once_its_handoffs_resolve(monkeypatch, nativ
         await anext(stream)  # the handoff
         await anext(stream)  # submitted; its KV is still in flight
         assert await engine.is_quiescent() is False
-        native.frontend.deliver("transferring", finished([]))
+        native.frontend.deliver(native.submitted[0].rid, finished([]))
         await drain(stream)
         assert await engine.is_quiescent() is True
     finally:
