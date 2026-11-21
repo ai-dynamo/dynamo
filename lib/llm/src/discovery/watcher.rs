@@ -20,8 +20,6 @@ use dynamo_runtime::{
 };
 use dynamo_scheduler::host::PrefillLoadEstimator;
 
-use dynamo_renderer::PromptFormatter;
-
 use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
@@ -36,9 +34,7 @@ use crate::{
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
-    preprocessor::{
-        OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
-    },
+    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest},
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
@@ -435,6 +431,8 @@ impl ModelWatcher {
         let mcid = &spec.representative.mcid;
         let mut prepared_card = spec.representative.card.clone();
         let card = &mut prepared_card;
+        spec.generation_capabilities
+            .retain_on(&mut card.runtime_config);
 
         card.download_config(self.local_model_path.as_deref())
             .await?;
@@ -1641,16 +1639,9 @@ fn worker_set_chat_preprocessor(
     tokenizer: crate::tokenizers::Tokenizer,
     cancellation: &CancellationToken,
 ) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
-    let PromptFormatter::OAI(formatter) =
-        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
     // A retained pipeline must stop its warmups when its WorkerSet is retired.
-    OpenAIPreprocessor::new_with_parts_and_cancel(
-        card.clone(),
-        formatter,
-        tokenizer,
-        Some(cancellation.clone()),
-    )
-    .context("OpenAIPreprocessor.new_with_parts_and_cancel")
+    OpenAIPreprocessor::new_for_chat(card.clone(), tokenizer, Some(cancellation.clone()))
+        .context("OpenAIPreprocessor.new_for_chat")
 }
 
 #[cfg(test)]
@@ -2701,6 +2692,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                generation_capabilities: Default::default(),
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -2857,6 +2849,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            generation_capabilities: Default::default(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2952,6 +2945,7 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                generation_capabilities: Default::default(),
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -3177,6 +3171,7 @@ request_classifier:
             generation: 1,
             representative: desired,
             video_contract: None,
+            generation_capabilities: Default::default(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -3906,6 +3901,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                generation_capabilities: Default::default(),
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

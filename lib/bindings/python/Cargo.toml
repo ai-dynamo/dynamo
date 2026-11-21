@@ -69,7 +69,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 aisim-core = { version = "=0.15.0-dev.202611130000000104", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "=11.0.11" }
+dynamo-parsers = { version = "=11.0.12" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 # default-features = false: sidecar defaults (mm-routing, jemalloc) must not reach the wheel.

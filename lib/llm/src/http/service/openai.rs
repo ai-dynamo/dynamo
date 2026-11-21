@@ -247,6 +247,12 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ContextLengthError {
+    WithoutBounds,
+    WithBounds(ContextLengthDetails),
+}
+
 #[derive(Serialize, Deserialize, Debug, utoipa::ToSchema)]
 pub(crate) struct ErrorMessage {
     message: String,
@@ -255,11 +261,10 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
-    /// Typed context-length bounds for protocol re-rendering. Skipped on the
-    /// wire: `details` already carries the same bounds, and re-parsing it here
-    /// would silently fall back to the OpenAI wording if the shape ever drifts.
+    /// Typed context-length rejection for protocol re-rendering. The wire
+    /// representation lives in `details`.
     #[serde(skip)]
-    context_length: Option<ContextLengthDetails>,
+    context_length: Option<ContextLengthError>,
     #[serde(skip)]
     metric_error_type: Option<ErrorType>,
 }
@@ -270,7 +275,10 @@ impl ErrorMessage {
     }
 
     pub(crate) fn context_length_details(&self) -> Option<ContextLengthDetails> {
-        self.context_length
+        match self.context_length {
+            Some(ContextLengthError::WithBounds(bounds)) => Some(bounds),
+            _ => None,
+        }
     }
 
     pub(crate) fn is_overload(&self) -> bool {
@@ -539,8 +547,38 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
     }
 }
 
-fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
-    match status_code {
+fn is_context_length_error(response: &ErrorResponse) -> bool {
+    response.0 == StatusCode::BAD_REQUEST && response.1.context_length.is_some()
+}
+
+fn responses_overflow_stream(
+    model: String,
+    params: ResponseParams,
+    context: Option<crate::protocols::unified::ResponsesContext>,
+    message: String,
+) -> Response {
+    use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
+    let mut converter = match context {
+        Some(context) => ResponseStreamConverter::with_context(model, params, context),
+        None => ResponseStreamConverter::new(model, params),
+    };
+    let mut events = converter.emit_start_events();
+    events.extend(converter.emit_error_events(ResponseError {
+        misalignment: None,
+        code: ResponseErrorCode::Other("context_length_exceeded".into()),
+        message,
+    }));
+    Sse::new(stream::iter(events)).into_response()
+}
+
+fn responses_error_code(
+    response: &ErrorResponse,
+    context_overflow_events: bool,
+) -> ResponseErrorCode {
+    if context_overflow_events && is_context_length_error(response) {
+        return ResponseErrorCode::Other("context_length_exceeded".into());
+    }
+    match response.0 {
         StatusCode::TOO_MANY_REQUESTS => ResponseErrorCode::RateLimitExceeded,
         code if code.is_client_error() => ResponseErrorCode::InvalidPrompt,
         _ => ResponseErrorCode::ServerError,
@@ -571,7 +609,7 @@ fn is_invalid_argument(error: &dynamo_runtime::error::DynamoError) -> bool {
     matches!(
         error.reason().as_str(),
         "backend.invalid_argument" | "request.invalid_argument"
-    )
+    ) || error.is_context_length_exceeded()
 }
 
 pub(crate) fn find_invalid_argument_in_chain<'a>(
@@ -952,11 +990,27 @@ impl ErrorMessage {
             );
         }
 
+        let context_length = error.is_context_length_exceeded().then(|| {
+            error
+                .public_details()
+                .and_then(ContextLengthDetails::from_public_details)
+                .map_or(
+                    ContextLengthError::WithoutBounds,
+                    ContextLengthError::WithBounds,
+                )
+        });
+        let overflow_without_bounds =
+            matches!(context_length, Some(ContextLengthError::WithoutBounds));
         Some((
             status,
             Json(ErrorMessage {
-                message: public_message_for(error, Protocol::OpenAi)
-                    .unwrap_or_else(|| public_message.to_string()),
+                message: public_message_for(error, Protocol::OpenAi).unwrap_or_else(|| {
+                    if overflow_without_bounds {
+                        "Request exceeds the model context length".to_string()
+                    } else {
+                        public_message.to_string()
+                    }
+                }),
                 error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
                 details: error
@@ -968,10 +1022,12 @@ impl ErrorMessage {
                         )
                     })
                     .and_then(|details| serde_json::to_value(details).ok())
+                    .or_else(|| {
+                        overflow_without_bounds
+                            .then(|| serde_json::json!({"type": "context_length"}))
+                    })
                     .map(Box::new),
-                context_length: error
-                    .public_details()
-                    .and_then(ContextLengthDetails::from_public_details),
+                context_length,
                 metric_error_type: Some(metric_error_type_for_class(error.class())),
             }),
         ))
@@ -3284,10 +3340,13 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
-            // Keep the typed error when it carries a public message, so the
-            // unary response renders it. Other messages stay diagnostic.
-            let keep_semantic =
-                overloaded || semantic.is_some_and(|error| error.public_message().is_some());
+            // Keep the typed error when it carries a public rejection. Other
+            // messages stay diagnostic.
+            let keep_semantic = overloaded
+                || semantic.is_some_and(|error| {
+                    error.public_message().is_some()
+                        || (code == StatusCode::BAD_REQUEST && error.is_context_length_exceeded())
+                });
             return Some(BackendErrorInfo {
                 message,
                 status: code,
@@ -3605,14 +3664,13 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             if render_record_failure {
                 record_local_failure(backend_http_error_class(status));
             }
-            let message = status
-                .canonical_reason()
-                .unwrap_or("Client error")
-                .to_string();
             (
                 status,
                 Json(ErrorMessage {
-                    message,
+                    message: status
+                        .canonical_reason()
+                        .unwrap_or("Client error")
+                        .to_string(),
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
@@ -5262,19 +5320,32 @@ async fn responses(
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);
 
+    let context_overflow_events = parsing_options.responses_context_overflow_events;
+
     tracing::trace!("Issuing generate call for responses");
 
     // issue the generate call on the engine
-    let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+    let engine_stream = match engine.generate(request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            if super::metrics::request_was_rejected(error.as_ref()) {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::Responses);
+            }
+            let response = ErrorMessage::from_anyhow(error, "Failed to generate completions");
+            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            if streaming && context_overflow_events && is_context_length_error(&response) {
+                return Ok(responses_overflow_stream(
+                    model,
+                    response_params,
+                    responses_ctx,
+                    response.1.0.message,
+                ));
+            }
+            return Err(response);
         }
-        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        err_response
-    })?;
+    };
 
     // Capture the context to cancel the stream if the client disconnects
     let ctx = engine_stream.context();
@@ -5292,7 +5363,19 @@ async fn responses(
         .inspect_err(|err_response| {
             log_pre_commit_error(&request_id, err_response);
             inflight_guard.mark_error(extract_error_type_from_response(err_response));
-        })?;
+        });
+        let engine_stream = match engine_stream {
+            Ok(stream) => stream,
+            Err(error) if context_overflow_events && is_context_length_error(&error) => {
+                return Ok(responses_overflow_stream(
+                    model,
+                    response_params,
+                    responses_ctx,
+                    error.1.0.message,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
@@ -5342,7 +5425,7 @@ async fn responses(
                         }
                         backend_error = Some(ResponseError {
                             misalignment: None,
-                            code: responses_error_code(error_response.0),
+                            code: responses_error_code(&error_response, context_overflow_events),
                             message: error_response.1.message.clone(),
                         });
                     }
@@ -6937,6 +7020,7 @@ pub fn audios_router(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
 
     use super::*;
     use crate::discovery::ModelManagerError;
@@ -7018,6 +7102,134 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn context_overflow_is_a_typed_failed_sse_response() {
+        use dynamo_runtime::error::PublicDetails;
+
+        for bounds in [
+            None,
+            Some(PublicDetails::ContextLength {
+                limit: 64,
+                actual: Some(100),
+                prompt_tokens: Some(100),
+            }),
+        ] {
+            let mut builder = DynamoError::builder()
+                .error_type(ErrorClass::InvalidRequest)
+                .diagnostic("private backend diagnostic");
+            if let Some(details) = bounds.clone() {
+                builder = builder.public_details(details);
+            }
+            let error = builder.build();
+            let event: Annotated<NvCreateChatCompletionStreamResponse> =
+                Annotated::from_err(if bounds.is_none() {
+                    error.with_context_length_exceeded()
+                } else {
+                    error
+                });
+            let backend_error = extract_backend_error_if_present(&event).unwrap();
+            let error = backend_error_response(backend_error, false);
+            let details = error.1.details.as_ref().unwrap();
+            assert_eq!(details["type"], "context_length");
+            if bounds.is_some() {
+                assert_eq!(details["limit"], 64);
+                assert_eq!(details["actual"], 100);
+                assert!(
+                    error
+                        .1
+                        .message
+                        .contains("maximum context length is 64 tokens")
+                );
+            } else {
+                assert!(details.get("limit").is_none());
+                assert_eq!(error.1.message, "Request exceeds the model context length");
+            }
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(is_context_length_error(&error));
+            assert_eq!(
+                responses_error_code(&error, false),
+                ResponseErrorCode::InvalidPrompt
+            );
+            assert_eq!(
+                responses_error_code(&error, true),
+                ResponseErrorCode::Other("context_length_exceeded".into())
+            );
+            let response = responses_overflow_stream(
+                "m".into(),
+                ResponseParams::default(),
+                None,
+                error.1.0.message,
+            );
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&body).unwrap();
+            assert!(!text.contains("private backend diagnostic"));
+            let events: Vec<serde_json::Value> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| event["type"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "response.created",
+                    "response.in_progress",
+                    "response.failed"
+                ]
+            );
+            assert_eq!(
+                events[2]["response"]["error"]["code"],
+                "context_length_exceeded"
+            );
+            assert_eq!(events[0]["response"]["id"], events[2]["response"]["id"]);
+            for (index, event) in events.iter().enumerate() {
+                assert_eq!(event["sequence_number"], index);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_invalid_arguments_are_not_context_overflows() {
+        let error = ErrorMessage::from_anyhow(
+            crate::protocols::common::invalid_argument_error("temperature must be nonnegative"),
+            "validation failed",
+        );
+        assert!(!is_context_length_error(&error));
+        assert_eq!(
+            responses_error_code(&error, true),
+            ResponseErrorCode::InvalidPrompt
+        );
+        let invalid_argument = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::Backend(
+                dynamo_runtime::error::BackendError::InvalidArgument,
+            ))
+            .message("Input length (100) exceeds max_seq_len (64).")
+            .build();
+        let event: Annotated<NvCreateChatCompletionStreamResponse> =
+            Annotated::from_err(invalid_argument.clone());
+        let error =
+            backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(!is_context_length_error(&error));
+        assert!(!error.1.message.contains("max_seq_len"));
+
+        let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated::from_err(
+            DynamoError::builder()
+                .error_type(ErrorClass::Unavailable)
+                .message("worker unavailable")
+                .cause(invalid_argument.with_context_length_exceeded())
+                .build(),
+        );
+        let error =
+            backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!is_context_length_error(&error));
+    }
     #[tokio::test]
     async fn pooling_bytes_response_has_vllm_metadata_and_chunked_body() {
         let response = build_pooling_binary_response(

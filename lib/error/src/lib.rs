@@ -730,6 +730,7 @@ pub struct DynamoError {
     /// Optional explicitly client-safe data. The producer remains responsible for ensuring every contained value is safe to expose.
     pub public: Option<PublicDetails>,
     retry_hint: Option<RetryHint>,
+    context_length_exceeded: bool,
 }
 
 impl Serialize for DynamoError {
@@ -741,6 +742,8 @@ impl Serialize for DynamoError {
 
         let public = self.public_details();
         let retry_hint = self.retry_hint();
+        let context_length_exceeded =
+            self.context_length_exceeded && self.class() == ErrorClass::InvalidRequest;
         let dp_rank = match self.error_type() {
             ErrorClass::WorkerRankOverloaded(rank) => Some(rank),
             _ => None,
@@ -756,7 +759,8 @@ impl Serialize for DynamoError {
                 + usize::from(public.is_some())
                 + usize::from(dp_rank.is_some())
                 + usize::from(caused_by.is_some())
-                + usize::from(retry_hint.is_some()),
+                + usize::from(retry_hint.is_some())
+                + usize::from(context_length_exceeded),
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
         state.serialize_field("class", &self.class())?;
@@ -770,6 +774,9 @@ impl Serialize for DynamoError {
         }
         if let Some(retry_hint) = retry_hint {
             state.serialize_field("retry_hint", &retry_hint)?;
+        }
+        if context_length_exceeded {
+            state.serialize_field("context_length_exceeded", &true)?;
         }
         if let Some(dp_rank) = dp_rank {
             state.serialize_field("dp_rank", &dp_rank)?;
@@ -804,6 +811,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             dp_rank: Option<u32>,
             #[serde(default, deserialize_with = "deserialize_retry_hint")]
             retry_hint: Option<RetryHint>,
+            #[serde(default)]
+            context_length_exceeded: bool,
             #[serde(default)]
             caused_by: Option<Box<DynamoError>>,
         }
@@ -869,6 +878,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             diagnostic,
             public,
             retry_hint: representation.retry_hint,
+            context_length_exceeded: representation.context_length_exceeded
+                && class.normalized() == ErrorClass::InvalidRequest,
         })
     }
 }
@@ -985,6 +996,23 @@ impl DynamoError {
         self.public_details().and_then(PublicDetails::message)
     }
 
+    /// Returns true for a context-length rejection, even if token counts are unknown.
+    pub fn is_context_length_exceeded(&self) -> bool {
+        self.class() == ErrorClass::InvalidRequest
+            && (self.context_length_exceeded
+                || matches!(
+                    self.public_details(),
+                    Some(PublicDetails::ContextLength { .. })
+                ))
+    }
+
+    /// Identify a context-length rejection without requiring token counts.
+    /// The regular InvalidRequest identity remains usable by older readers.
+    pub fn with_context_length_exceeded(mut self) -> Self {
+        self.context_length_exceeded = self.class() == ErrorClass::InvalidRequest;
+        self
+    }
+
     /// Returns the legacy error message view.
     pub fn message(&self) -> &str {
         self.diagnostic
@@ -1026,6 +1054,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 diagnostic: Some(diagnostic),
                 public: None,
                 retry_hint: None,
+                context_length_exceeded: false,
             };
         };
 
@@ -1038,6 +1067,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 diagnostic: Some(diagnostic),
                 public: source.public_details().cloned(),
                 retry_hint: source.retry_hint(),
+                context_length_exceeded: source.context_length_exceeded,
             };
         }
 
@@ -1047,6 +1077,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
             diagnostic: Some(diagnostic),
             public: None,
             retry_hint: None,
+            context_length_exceeded: false,
         }
     }
 }
@@ -1170,6 +1201,7 @@ impl DynamoErrorBuilder {
                 diagnostic: self.diagnostic,
                 public: self.public,
                 retry_hint: self.retry_hint,
+                context_length_exceeded: false,
             }
         } else {
             DynamoError {
@@ -1178,6 +1210,7 @@ impl DynamoErrorBuilder {
                 diagnostic: self.diagnostic,
                 public: None,
                 retry_hint: None,
+                context_length_exceeded: false,
             }
         }
     }
@@ -1467,6 +1500,33 @@ mod tests {
     }
 
     #[test]
+    fn context_length_identity_without_bounds_preserves_the_legacy_error_identity() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::Backend(BackendError::InvalidArgument))
+            .diagnostic("private backend diagnostic")
+            .build()
+            .with_context_length_exceeded();
+        let mut encoded = serde_json::to_value(error).unwrap();
+        let decoded: DynamoError = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(decoded.is_context_length_exceeded());
+        assert!(decoded.public_details().is_none());
+        let wrapped = anyhow::Error::new(decoded).context("Generate failed");
+        assert!(DynamoError::from(wrapped.as_ref()).is_context_length_exceeded());
+
+        // A consumer that only understands the original fields still sees a
+        // normal invalid request, with its original reason and diagnostic.
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("context_length_exceeded");
+        let legacy: DynamoError = serde_json::from_value(encoded).unwrap();
+        assert_eq!(legacy.class(), ErrorClass::InvalidRequest);
+        assert_eq!(legacy.reason().as_str(), "backend.invalid_argument");
+        assert!(!legacy.is_context_length_exceeded());
+        assert_eq!(legacy.message(), "private backend diagnostic");
+    }
+
+    #[test]
     fn semantic_schema_includes_legacy_compatibility_fields() {
         let err = DynamoError::builder()
             .class(ErrorClass::RateLimited)
@@ -1537,6 +1597,7 @@ mod tests {
                 remaining: Some(0),
             }),
             retry_hint: None,
+            context_length_exceeded: false,
         };
 
         assert_eq!(err.class(), ErrorClass::Internal);
@@ -1657,6 +1718,7 @@ mod tests {
             diagnostic: None,
             public: None,
             retry_hint: None,
+            context_length_exceeded: false,
         };
         assert_eq!(mismatched.error_type(), ErrorClass::Internal);
         assert!(!match_error_chain(

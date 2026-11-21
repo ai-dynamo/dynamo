@@ -108,6 +108,7 @@ use crate::protocols::{
         chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             scrub_synthetic_chunk_metadata,
+            unified_parser::{GLM_THINKING_OFF_PREFILL_ERROR, glm_reasoning_prefill_is_closed},
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -116,7 +117,8 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+    DeveloperRolePolicy, MediaRequestExt, apply_continue_final_message,
+    chat_prompt_formatter_from_mdc, prompt_formatter_from_mdc,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -249,6 +251,8 @@ pub struct PromptReasoningPrefill {
     /// treats an unclosed prompt as open; GLM requires an explicit boundary.
     /// `None` leaves the request's thinking controls authoritative.
     reasoning_closed_by_prompt: Option<bool>,
+    /// A parser-specific diagnostic when this rendered prefill cannot honor thinking-off.
+    thinking_off_error: Option<&'static str>,
     /// The prompt left the model's final (visible) channel open — an assistant
     /// prefill with `continue_final_message` on a channel grammar (Beam) — so the
     /// unified parser starts in `Response` instead of waiting for a channel opener.
@@ -325,6 +329,7 @@ impl From<bool> for PromptReasoningPrefill {
             unified_starting_state: None,
             prefix: None,
             reasoning_closed_by_prompt: None,
+            thinking_off_error: None,
             response: false,
             beam_channel: None,
         }
@@ -960,9 +965,8 @@ struct ReasoningState {
     // An emitted response with choices, reused as the envelope to carry any
     // text the parsers are still buffering when the upstream stream ends. Only
     // retained when an end-of-stream flush may follow, to keep the per-token
-    // clone off the common reasoning hot path: under
-    // `defer_reasoning_for_nonempty_content` it is the latest such response;
-    // under `finalize_parser_at_finish` alone it is cloned once, while a parsed
+    // clone off the common reasoning hot path: with nonempty-content deferral
+    // it is the latest such response; otherwise it is cloned once while a
     // choice's parser is unfinished. Chunks with no choices (the trailing
     // usage-only chunk) are never retained — that envelope has no delta slot
     // to attach the flushed bytes to, so the flush would be dropped.
@@ -998,14 +1002,6 @@ struct ReasoningState {
     // into `content` in the first place. Scoped to the flag so no other parser
     // pays it.
     defer_reasoning_for_nonempty_content: bool,
-    // Finalize each choice's parser on its terminal chunk even without the
-    // deferral above, for parsers that retain undecided text until EOF
-    // (MiniMax M3), and at end of stream for a choice whose parser is still
-    // unfinished: it sent no `finish_reason`, or its terminal chunk carried
-    // content parts. Otherwise a turn whose output never shows a marker, such
-    // as grammar-constrained output under an adaptive prompt, is dropped
-    // whole with the parser state. See `is_minimax_m3_reasoning_parser`.
-    finalize_parser_at_finish: bool,
     // Set once the backend has sent an error annotation. The end-of-stream
     // flush must not run after that: an error is terminal, and emitting
     // recovered reasoning as ordinary `content` after it would put text on the
@@ -1886,6 +1882,7 @@ pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
+    normalize_developer_role: bool,
     continue_final_message: bool,
     named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
@@ -1901,6 +1898,15 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
+        if self.normalize_developer_role
+            && let Some(messages) = json.as_array_mut()
+        {
+            for message in messages {
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("developer") {
+                    message["role"] = serde_json::json!("system");
+                }
+            }
+        }
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -2122,6 +2128,7 @@ pub struct OpenAIPreprocessor {
     /// parser) and any model that sets `normalize_tool_call_args: true` in its
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
+    developer_role: DeveloperRolePolicy,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -2987,11 +2994,26 @@ impl OpenAIPreprocessor {
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
-        match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
-        }
+        Self::new_for_chat(mdc, tokenizer, None)
+    }
+
+    pub(crate) fn new_for_chat(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
+        let (PromptFormatter::OAI(formatter), developer_role) =
+            chat_prompt_formatter_from_mdc(&mdc)?;
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            developer_role,
+            tokenizer,
+            None,
+            speculative_prefill_cancel,
+            true,
+        )
     }
 
     /// Build the preprocessor used by token-input embedding pipelines.
@@ -3006,6 +3028,7 @@ impl OpenAIPreprocessor {
         Self::new_with_parts_inner(
             mdc,
             formatter,
+            DeveloperRolePolicy::Preserve,
             tokenizer,
             Some(embedding_tokenizers),
             None,
@@ -3018,7 +3041,15 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            DeveloperRolePolicy::Preserve,
+            tokenizer,
+            None,
+            None,
+            false,
+        )
     }
 
     pub fn new_with_parts(
@@ -3039,6 +3070,7 @@ impl OpenAIPreprocessor {
         Self::new_with_parts_inner(
             mdc,
             formatter,
+            DeveloperRolePolicy::Preserve,
             tokenizer,
             None,
             speculative_prefill_cancel,
@@ -3049,6 +3081,7 @@ impl OpenAIPreprocessor {
     fn new_with_parts_inner(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
+        developer_role: DeveloperRolePolicy,
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
@@ -3479,6 +3512,7 @@ impl OpenAIPreprocessor {
             beam_route,
             mistral_tool_call_grammar,
             normalize_tool_call_args,
+            developer_role,
             media_loader,
             token_budget,
             context_length,
@@ -3882,6 +3916,9 @@ impl OpenAIPreprocessor {
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
+        // Tool delimiters can also occur inside arguments. Keep generation alive
+        // through the backend terminal (including usage); single-call projection
+        // happens after parsing rather than through context-free string stops.
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
             builder.eos_token_ids(eos_token_ids);
@@ -4194,7 +4231,17 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
+        let normalize_developer_role = self.developer_role == DeveloperRolePolicy::RenderAsSystem
+            && request.typed_messages().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        dynamo_protocols::types::ChatCompletionRequestMessage::Developer(_)
+                    )
+                })
+            });
         let formatted_prompt = if self.normalize_tool_call_args
+            || normalize_developer_role
             || emulate_continuation
             || rendering.is_some()
             || named_tool.is_some()
@@ -4202,6 +4249,7 @@ impl OpenAIPreprocessor {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
+                normalize_developer_role,
                 continue_final_message: emulate_continuation,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
@@ -4239,6 +4287,23 @@ impl OpenAIPreprocessor {
             formatted_prompt.as_ref().map(RenderedPrompt::as_str),
             header_search_end,
         );
+        if request.should_add_generation_prompt()
+            && let Some(message) = prefill.thinking_off_error
+            && self
+                .runtime_config
+                .runtime_data
+                .get(
+                    crate::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+                )
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && Self::normalize_thinking_aliases(
+                request.chat_template_args(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            ) == Some(false)
+        {
+            return Err(crate::protocols::common::invalid_argument_error(message));
+        }
         // Without a generation prompt (`add_generation_prompt: false`, or a
         // continued final message, which ends inside the assistant's text) the
         // tail cannot establish the template's reasoning state: keep the
@@ -6150,12 +6215,16 @@ impl OpenAIPreprocessor {
                     Some(family),
                 ) && (prompt_prefill.reasoning_closed_by_prompt != Some(false) || is_guided_output)
                     && !is_minimax_m3_guided_reasoning;
+            let emit_tool_calls = Self::tool_call_parsing_enabled(request);
             // TODO: Replace family-specific guidance decisions with parser capabilities;
             // migrate equivalent batch/stream branches together while preserving legacy/v2 behavior.
             let policy = unified_parser::UnifiedRequestPolicy {
                 reasoning_disabled,
                 structured_response: Self::has_structured_response_format(request),
                 multiple_choices: request.inner.n.unwrap_or(1) > 1,
+                reject_incomplete_native_tool_calls: emit_tool_calls
+                    && self.runtime_config.reject_incomplete_native_tool_calls(),
+                single_tool_call: request.inner.parallel_tool_calls == Some(false),
             };
             let prefill = policy.resolve_stream_prefill(
                 family,
@@ -6203,7 +6272,7 @@ impl OpenAIPreprocessor {
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
-                Self::tool_call_parsing_enabled(request),
+                emit_tool_calls,
                 defer_reasoning_for_nonempty_content,
                 reasoning_disabled,
             ));
@@ -6279,13 +6348,7 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
-        // Only a force_nonempty_content request needs the deferral and the EOF
-        // flush of a truncated `<think>` prefix; gating on the request keeps the
-        // per-token clone and the finish_reasoning_stream() flush off every
-        // other request's path (a MiniMax M3 parser is still finalized on its
-        // terminal chunk, or at end of stream without one; see
-        // `finalize_parser_at_finish`). Same predicate the aggregator uses, so
-        // the streaming and non-streaming paths cannot disagree.
+        // Every active reasoning parser can hold undecided marker bytes at EOF.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
@@ -6302,16 +6365,13 @@ impl OpenAIPreprocessor {
         } else {
             stream
         };
-        // A MiniMax M3 parser can also release held text in an end-of-stream
-        // chunk (see `finalize_parser_at_finish`), so its usage is held too.
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
-            || should_strip_disabled_reasoning_start
-            || (should_parse_reasoning && Self::is_minimax_m3_reasoning_parser(reasoning_parser))
-        {
-            Box::pin(Self::hold_usage_until_stream_end(stream))
-        } else {
-            stream
-        };
+        // Usage follows any text recovered at EOF by the parser or prefix filter.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_parse_reasoning || should_strip_disabled_reasoning_start {
+                Box::pin(Self::hold_usage_until_stream_end(stream))
+            } else {
+                stream
+            };
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(annotate_reasoning_usage(stream))
         } else {
@@ -7719,10 +7779,10 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
         header_search_end: Option<usize>,
     ) -> PromptReasoningPrefill {
-        let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
-            tool_call_parser,
-            reasoning_parser,
-        );
+        use crate::protocols::openai::chat_completions::unified_parser::{
+            GLM47_UNIFIED_FAMILY, configured_family,
+        };
+        let family = configured_family(tool_call_parser, reasoning_parser);
         let assistant_prefill = (family == Some("gpt_oss"))
             .then(|| {
                 formatted_prompt
@@ -7765,14 +7825,19 @@ impl OpenAIPreprocessor {
         // the rendered prompt is what the model was told. A chat template that
         // does not render `thinking_mode` leaves a "disabled" prompt open, so
         // the model may still open with `<mm:think>` or `</mm:think>`.
-        let reasoning_closed_by_prompt = if matches!(reasoning_parser, Some("glm45" | "glm47")) {
-            formatted_prompt.and_then(|prompt| {
-                if unified {
-                    Some(false)
-                } else {
-                    prompt.trim_end().ends_with("</think>").then_some(true)
-                }
-            })
+        let glm_reasoning = matches!(reasoning_parser, Some("glm45" | "glm47"));
+        let glm_profile = family == Some(GLM47_UNIFIED_FAMILY);
+        let glm_prefill_closed = if glm_reasoning || glm_profile {
+            formatted_prompt.map(glm_reasoning_prefill_is_closed)
+        } else {
+            None
+        };
+        let reasoning_closed_by_prompt = if glm_reasoning {
+            if unified {
+                formatted_prompt.map(|_| false)
+            } else {
+                glm_prefill_closed.filter(|&closed| closed)
+            }
         } else {
             Self::is_minimax_m3_reasoning_parser(reasoning_parser)
                 .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
@@ -7800,6 +7865,8 @@ impl OpenAIPreprocessor {
             .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
             prefix,
             reasoning_closed_by_prompt,
+            thinking_off_error: (glm_profile && glm_prefill_closed == Some(false))
+                .then_some(GLM_THINKING_OFF_PREFILL_ERROR),
             response,
             beam_channel,
         }
@@ -8031,8 +8098,6 @@ impl OpenAIPreprocessor {
     {
         // Parsers and bypass decisions are created lazily per `choice.index`
         // inside the unfold loop, so `n > 1` choices never share state.
-        let finalize_parser_at_finish =
-            Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
         let state = ReasoningState {
             stream: Box::pin(stream),
             parser_name,
@@ -8041,7 +8106,6 @@ impl OpenAIPreprocessor {
             choices: HashMap::new(),
             last_response: None,
             defer_reasoning_for_nonempty_content,
-            finalize_parser_at_finish,
             saw_terminal_error: false,
         };
 
@@ -8065,14 +8129,12 @@ impl OpenAIPreprocessor {
                         bypass_bare_guided_json,
                         choices,
                         defer_reasoning_for_nonempty_content,
-                        finalize_parser_at_finish,
                         ..
                     } = &mut state;
                     let parser_name = &*parser_name;
                     let prompt_injected_reasoning = *prompt_injected_reasoning;
                     let bypass_bare_guided_json = *bypass_bare_guided_json;
                     let defer_reasoning = *defer_reasoning_for_nonempty_content;
-                    let finalize_parser_at_finish = *finalize_parser_at_finish;
 
                     response.map_data(|mut data| {
                         for choice in data.inner.choices.iter_mut() {
@@ -8080,8 +8142,7 @@ impl OpenAIPreprocessor {
                                 let mut parser =
                                     Box::new(ReasoningParserType::get_reasoning_parser_from_name(
                                         parser_name,
-                                    ))
-                                        as Box<dyn ReasoningParser>;
+                                    ));
                                 if prompt_injected_reasoning {
                                     parser.set_in_reasoning(true);
                                 }
@@ -8248,7 +8309,6 @@ impl OpenAIPreprocessor {
                             // the same terminal delta and under the same
                             // conditions; see `finish_reasoning_parser`.
                             if !defer_reasoning
-                                && finalize_parser_at_finish
                                 && choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
@@ -8289,8 +8349,7 @@ impl OpenAIPreprocessor {
                 // carry no delta slot, so using one as the flush envelope would
                 // drop the very bytes the flush exists to preserve.
                 let retain_envelope = state.defer_reasoning_for_nonempty_content
-                    || (state.finalize_parser_at_finish
-                        && state.last_response.is_none()
+                    || (state.last_response.is_none()
                         && state.choices.values().any(|choice_state| {
                             choice_state.guided_json_bypass_decision == Some(false)
                                 && !choice_state.parser_finished
@@ -8304,9 +8363,7 @@ impl OpenAIPreprocessor {
                     state.last_response = Some(processed_response.clone());
                 }
                 Some((processed_response, state))
-            } else if state.saw_terminal_error
-                || !(state.defer_reasoning_for_nonempty_content || state.finalize_parser_at_finish)
-            {
+            } else if state.saw_terminal_error || state.last_response.is_none() {
                 // After a backend error the buffered bytes are dropped rather
                 // than surfaced: the request failed, so there is no answer to
                 // complete. See `saw_terminal_error`.
@@ -8318,14 +8375,8 @@ impl OpenAIPreprocessor {
                 // fallback for a stream that ends without any `finish_reason` —
                 // an aborted or truncated generation. The synthetic chunk it
                 // builds is the only case where recovered bytes arrive after the
-                // last upstream chunk, which is unavoidable when there was no
-                // terminal chunk to attach them to. Only the
-                // force_nonempty_content path and a parser finalized at finish
-                // (MiniMax M3) reach this branch; every other parser took the
-                // `None` branch above and keeps its original no-flush EOF
-                // behavior. Taking the envelope below rather than cloning it
-                // makes this branch one-shot: once it is gone the next poll ends
-                // the stream.
+                // last upstream chunk when there was no terminal chunk to
+                // carry them. Taking the envelope makes this branch one-shot.
                 // Sorted so the emitted choice order is deterministic rather
                 // than following HashMap iteration order.
                 let defer_reasoning = state.defer_reasoning_for_nonempty_content;
@@ -8926,6 +8977,8 @@ impl
                     options.tool_choice = request.inner.tool_choice.clone();
                     options.guided_tool_constraint = guided_tool_constraint.clone();
                     options.parallel_tool_calls = request.inner.parallel_tool_calls;
+                    options.reject_incomplete_native_tool_calls =
+                        self.runtime_config.reject_incomplete_native_tool_calls();
                     options
                         .with_tool_call_parsing_enabled(Self::tool_call_parsing_enabled(&request))
                         .with_move_reasoning_to_content_when_empty(
@@ -10121,6 +10174,318 @@ mod tests {
         FinishReason, Role,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn developer_role_rendering_follows_the_selected_template() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "developer", "content": "DEV_ONE"},
+                {"role": "user", "content": "USER"},
+                {"role": "developer", "content": "DEV_TWO"}
+            ]
+        }))
+        .unwrap();
+        let original = serde_json::to_value(&request).unwrap();
+        const TEMPLATE: &str = concat!(
+            "{# <|system|> <|assistant|> <arg_key> <arg_value> #}",
+            "{% for m in messages %}{% if m.role == 'system' or m.role == 'user' %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}"
+        );
+        const DEVELOPER_TEMPLATE: &str = concat!(
+            "{# <|system|> <|assistant|> <arg_key> <arg_value> #}",
+            "{% for m in messages %}{% if m.role in ['system', 'developer', 'user'] %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}"
+        );
+        const CUSTOM_TEMPLATE: &str =
+            "{% for m in messages %}[{{ m.role }}:{{ m.content }}]{% endfor %}";
+        const AS_SYSTEM: &str = "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]";
+        const AS_DEVELOPER: &str =
+            "[system:SYSTEM][developer:DEV_ONE][user:USER][developer:DEV_TWO]";
+        let model_dir = PathBuf::from("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let metadata_dir = tempfile::tempdir().unwrap();
+        let config_path = metadata_dir.path().join("config.json");
+        let tokenizer_config = metadata_dir.path().join("tokenizer_config.json");
+        let custom_path = metadata_dir.path().join("override.jinja");
+        std::fs::write(&custom_path, CUSTOM_TEMPLATE).unwrap();
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(model_dir.join("config.json")).unwrap()).unwrap();
+        let stock = serde_json::json!(TEMPLATE);
+        for (model_type, custom, template, expected) in [
+            ("glm4_moe", false, stock.clone(), AS_SYSTEM),
+            ("glm4_moe_lite", false, stock.clone(), AS_SYSTEM),
+            ("glm_moe_dsa", false, stock.clone(), AS_SYSTEM),
+            ("", false, stock.clone(), AS_SYSTEM),
+            ("glm_moe_dsa", true, stock.clone(), AS_DEVELOPER),
+            (
+                "glm_moe_dsa",
+                false,
+                serde_json::json!(DEVELOPER_TEMPLATE),
+                AS_DEVELOPER,
+            ),
+            (
+                "glm_moe_dsa",
+                false,
+                serde_json::json!([{"default": DEVELOPER_TEMPLATE}, {"tool_use": TEMPLATE}]),
+                AS_DEVELOPER,
+            ),
+            ("qwen3", false, stock, "[system:SYSTEM][user:USER]"),
+        ] {
+            config["model_type"] = model_type.into();
+            std::fs::write(&config_path, config.to_string()).unwrap();
+            std::fs::write(
+                &tokenizer_config,
+                serde_json::json!({"chat_template":template}).to_string(),
+            )
+            .unwrap();
+            let mut card =
+                ModelDeploymentCard::load_from_disk(&model_dir, custom.then_some(&custom_path))
+                    .unwrap();
+            card.model_info =
+                Some(crate::model_card::ModelInfoType::from_disk(metadata_dir.path()).unwrap());
+            card.prompt_formatter =
+                PromptFormatterArtifact::from_disk(metadata_dir.path()).unwrap();
+            let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(
+                rendered.as_str(),
+                expected,
+                "model_type={model_type:?} custom={custom}"
+            );
+            assert_eq!(serde_json::to_value(&request).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_strict_stream_checks_only_calls_the_request_permits() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use dynamo_protocols::types::FinishReason;
+
+        let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+        preprocessor.tool_call_parser = Some("glm47".into());
+        preprocessor
+            .runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY,
+                true,
+            )
+            .unwrap();
+        for tool_choice in ["none", "auto"] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": [{"type": "function", "function": {
+                        "name": "get_weather", "parameters": {"type": "object"}
+                    }}],
+                    "tool_choice": tool_choice,
+                    "parallel_tool_calls": false
+                }))
+                .unwrap();
+            let text = if tool_choice == "none" {
+                "Text before <tool_call>get_weather"
+            } else {
+                "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather"
+            };
+            let mut chunk = chat_stream_chunk(0, None);
+            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = Some(ChatCompletionMessageContent::Text(text.into()));
+            choice.finish_reason = Some(FinishReason::Stop);
+            let output = preprocessor
+                .postprocessor_parsing_stream_with_constraint(
+                    stream::iter([chunk]),
+                    &request,
+                    false.into(),
+                    GuidedToolConstraint::None,
+                    ToolProcessingRoute::Unified("glm47"),
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                output.iter().all(|chunk| !chunk.is_error()),
+                "{tool_choice}"
+            );
+            let choices = output
+                .iter()
+                .filter_map(|chunk| chunk.data.as_ref())
+                .flat_map(|data| &data.inner.choices);
+            if tool_choice == "none" {
+                assert!(
+                    choices
+                        .clone()
+                        .all(|choice| choice.delta.tool_calls.is_none())
+                );
+            } else {
+                assert!(choices.clone().any(|choice| {
+                    choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| calls.iter().any(|call| call.index == 0))
+                }));
+                assert_eq!(
+                    choices
+                        .filter_map(|choice| choice.finish_reason)
+                        .next_back(),
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_thinking_off_requires_closed_prefill_and_preserves_output_channels() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_thinking_off_requires_closed_prefill_and_preserves_output_channels"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        const CLOSED: &str = "{% if thinking is defined and not thinking %}<|assistant|>\n<think></think>\n{% else %}<|assistant|>\n<think>{% endif %}";
+        for tool in [Some("glm47"), None] {
+            let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+            preprocessor.formatter = test_prompt_formatter(CLOSED);
+            preprocessor.tool_call_parser = tool.map(str::to_owned);
+            preprocessor
+                .runtime_config
+                .set_engine_specific(
+                    crate::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+                    true,
+                )
+                .unwrap();
+            preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
+            for controls in [
+                serde_json::json!({"chat_template_kwargs": {"thinking": false}}),
+                serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                serde_json::json!({"chat_template_kwargs": {"thinking_mode": "disabled"}}),
+                serde_json::json!({"thinking": {"type": "disabled"}}),
+                serde_json::json!({"reasoning_effort": "none"}),
+            ] {
+                let mut body = serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}]});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(controls.as_object().unwrap().clone());
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(body).unwrap();
+                request.normalize_reasoning_template_args().unwrap();
+                let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+                assert!(!prefill.unified, "{controls}");
+                for ignored_template in ["<|assistant|>\n<think>", "<|assistant|>\n"] {
+                    preprocessor.formatter = test_prompt_formatter(ignored_template);
+                    let error = preprocessor.apply_template(&request).unwrap_err();
+                    assert_eq!(
+                        error.downcast_ref::<DynamoError>().unwrap().error_type(),
+                        ErrorType::InvalidArgument
+                    );
+                    assert!(error.to_string().contains("closed reasoning prefill"));
+                    assert!(
+                        error
+                            .downcast_ref::<DynamoError>()
+                            .unwrap()
+                            .public_message()
+                            .is_some_and(|message| message.contains("closed reasoning prefill"))
+                    );
+                }
+                preprocessor.formatter = test_prompt_formatter(CLOSED);
+                let reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    tool,
+                    Some("glm45"),
+                    None,
+                    Some("glm47"),
+                );
+                assert!(!reasoning_disabled);
+                let batch = crate::protocols::openai::chat_completions::unified_parser::parse_complete_with_policy(
+                    "glm47", "<think>private thought</think>answer", &crate::protocols::openai::GuidedToolConstraint::None, &[],
+                    crate::protocols::openai::chat_completions::unified_parser::UnifiedRequestPolicy {
+                        reasoning_disabled, ..Default::default()
+                    },
+                ).unwrap();
+                assert_eq!(
+                    (batch.text.as_str(), batch.reasoning.as_str()),
+                    ("answer", "private thought")
+                );
+                let chunks = ["<think>private", " thought</think>answer"]
+                    .into_iter()
+                    .map(|text| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content =
+                            Some(ChatCompletionMessageContent::Text(text.into()));
+                        chunk
+                    });
+                let output = preprocessor
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter(chunks),
+                        &request,
+                        prefill,
+                        false,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                assert_eq!(
+                    gpt_oss_stream_text(&output),
+                    ("answer".into(), "private thought".into()),
+                    "{controls}"
+                );
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap();
+            let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+            assert!(prefill.unified);
+        }
+    }
+
+    #[test]
+    fn glm_thinking_off_admission_requires_capability_and_generation_prompt() {
+        let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+        preprocessor.formatter = test_prompt_formatter(
+            "{% for m in messages %}{{ m.content }}{% endfor %}<|assistant|>\n<think>",
+        );
+        for (glm_parser, capability, generation, continued, rejects) in [
+            (true, None, true, false, false),
+            (true, Some(serde_json::json!("true")), true, false, false),
+            (true, Some(serde_json::json!(true)), true, false, true),
+            (true, Some(serde_json::json!(true)), false, false, false),
+            (true, Some(serde_json::json!(true)), true, true, false),
+            (false, Some(serde_json::json!(true)), true, false, false),
+        ] {
+            let (tool_parser, reasoning_parser) = if glm_parser {
+                ("glm47", "glm45")
+            } else {
+                ("qwen3_coder", "qwen3")
+            };
+            preprocessor.tool_call_parser = Some(tool_parser.into());
+            preprocessor.runtime_config.reasoning_parser = Some(reasoning_parser.into());
+            let key =
+                crate::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY;
+            preprocessor.runtime_config.runtime_data.remove(key);
+            if let Some(value) = capability {
+                preprocessor
+                    .runtime_config
+                    .runtime_data
+                    .insert(key.into(), value);
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":[{"role":"assistant", "content":"prefill"}],
+                    "chat_template_kwargs":{"thinking":false},
+                    "add_generation_prompt":generation && !continued,
+                    "continue_final_message":continued
+                }))
+                .unwrap();
+            assert_eq!(
+                preprocessor.apply_template_and_prefill(&request).is_err(),
+                rejects
+            );
+        }
+    }
 
     #[test]
     fn video_routing_startup_does_not_claim_active_routing() {
@@ -16050,6 +16415,13 @@ mod tests {
     async fn glm_generation_reasoning_follows_rendered_prompt() {
         for parser in ["glm45", "glm47"] {
             let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+            preprocessor
+                .runtime_config
+                .set_engine_specific(
+                    crate::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+                    true,
+                )
+                .unwrap();
             preprocessor.runtime_config.reasoning_parser = Some(parser.into());
             preprocessor.tool_call_parser = Some("glm47".into());
             for (tail, reasoning_open) in [
@@ -16094,11 +16466,27 @@ mod tests {
                                 Some(parser),
                                 Some("glm47"),
                             );
-                            let (common, _, prefill) = preprocessor
-                                .preprocess_request(&request, None)
-                                .await
-                                .unwrap();
+                            let result = preprocessor.preprocess_request(&request, None).await;
                             let case = format!("{parser} {tail:?} {control}={requested} {fields}");
+                            if !requested && reasoning_open {
+                                let error =
+                                    result.expect_err("open thinking-off prefill must fail");
+                                let error = error.downcast_ref::<DynamoError>().unwrap();
+                                assert_eq!(
+                                    error.error_type(),
+                                    ErrorType::InvalidArgument,
+                                    "{case}"
+                                );
+                                assert!(
+                                    error
+                                        .public_message()
+                                        .unwrap()
+                                        .contains("closed reasoning prefill"),
+                                    "{case}"
+                                );
+                                continue;
+                            }
+                            let (common, _, prefill) = result.unwrap();
                             assert_eq!(
                                 common.require_reasoning,
                                 reasoning_open && needs_gate,
@@ -16121,6 +16509,13 @@ mod tests {
     #[tokio::test]
     async fn glm_unknown_prompt_reasoning_preserves_request_controls() {
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor
+            .runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY,
+                true,
+            )
+            .unwrap();
         preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
         preprocessor.tool_call_parser = Some("glm47".into());
         for (tail, add_generation_prompt) in [
@@ -16139,10 +16534,20 @@ mod tests {
                         "add_generation_prompt": add_generation_prompt,
                     }))
                     .unwrap();
-                let (common, _, _) = preprocessor
-                    .preprocess_request(&request, None)
-                    .await
-                    .unwrap();
+                let result = preprocessor.preprocess_request(&request, None).await;
+                if add_generation_prompt && !requested && !tail.trim_end().ends_with("</think>") {
+                    let error = result.expect_err("unknown thinking-off prefill must fail");
+                    let error = error.downcast_ref::<DynamoError>().unwrap();
+                    assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                    assert!(
+                        error
+                            .public_message()
+                            .unwrap()
+                            .contains("closed reasoning prefill")
+                    );
+                    continue;
+                }
+                let (common, _, _) = result.unwrap();
                 assert_eq!(common.require_reasoning, requested, "{tail:?} {requested}");
                 let extra = common.extra_args.as_ref().unwrap();
                 assert!(
@@ -17527,6 +17932,7 @@ mod tests {
             named_tool: None,
             inner: &request,
             normalize_tool_call_args: true,
+            normalize_developer_role: false,
             continue_final_message: true,
             final_message_start_tag: None,
             rendering: None,
@@ -17572,6 +17978,7 @@ mod tests {
                     named_tool: None,
                     inner: request,
                     normalize_tool_call_args: false,
+                    normalize_developer_role: false,
                     continue_final_message: true,
                     final_message_start_tag: None,
                     rendering: None,

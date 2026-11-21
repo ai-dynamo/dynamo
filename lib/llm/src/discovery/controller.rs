@@ -20,7 +20,10 @@ use futures::{FutureExt, StreamExt};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
+use crate::{
+    local_model::runtime_config::GenerationCapabilities, model_card::ModelDeploymentCard,
+    namespace::NamespaceFilter,
+};
 
 use super::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 
@@ -57,6 +60,10 @@ impl DesiredInstance {
     fn materializes_worker_set(&self) -> bool {
         self.mcid.model_suffix.is_none()
     }
+
+    fn generation_capabilities(&self) -> GenerationCapabilities {
+        GenerationCapabilities::advertised(&self.card.runtime_config)
+    }
 }
 
 /// Returns the cohort's shared contract, if every member publishes one.
@@ -71,20 +78,47 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Identifies a cohort's active video contract without changing its MDC checksum.
-fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
-    match video_contract {
-        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
-        None => mdc_checksum.to_string(),
-    }
+fn cohort_generation_capabilities(members: &[DesiredInstance]) -> GenerationCapabilities {
+    let mut members = members.iter().map(DesiredInstance::generation_capabilities);
+    let first = members.next().unwrap_or_default();
+    members.fold(first, |agreed, advertised| agreed & advertised)
 }
 
-/// Splits a fingerprint back into the MDC checksum and video contract it carries.
-fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
-    match fingerprint.split_once("\0video_contract\0") {
-        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
-        None => (fingerprint, None),
+/// Identify pipeline configuration without changing WorkerSet compatibility.
+fn cohort_fingerprint(
+    mdc_checksum: &str,
+    video_contract: Option<&str>,
+    generation_capabilities: GenerationCapabilities,
+) -> String {
+    let mut fingerprint = match video_contract {
+        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
+        None => mdc_checksum.to_string(),
+    };
+    if !generation_capabilities.is_empty() {
+        fingerprint.push_str("\0generation_capabilities\0");
+        fingerprint.push_str(&generation_capabilities.bits().to_string());
     }
+    fingerprint
+}
+
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>, GenerationCapabilities) {
+    let (fingerprint, capabilities) = fingerprint
+        .split_once("\0generation_capabilities\0")
+        .map_or(
+            (fingerprint, GenerationCapabilities::empty()),
+            |(prefix, bits)| {
+                let bits = bits
+                    .parse()
+                    .expect("generation capabilities contain numeric bits");
+                (prefix, GenerationCapabilities::from_bits_retain(bits))
+            },
+        );
+    let (checksum, video_contract) = fingerprint
+        .split_once("\0video_contract\0")
+        .map_or((fingerprint, None), |(checksum, contract)| {
+            (checksum, Some(contract))
+        });
+    (checksum, video_contract, capabilities)
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +130,7 @@ pub(crate) struct GroupSpec {
     pub(crate) representative: DesiredInstance,
     /// Contract shared by the cohort, if any.
     pub(crate) video_contract: Option<String>,
+    pub(crate) generation_capabilities: GenerationCapabilities,
 }
 
 #[async_trait]
@@ -198,6 +233,7 @@ struct RetainedPipeline {
     /// pending, so it is the only record of what the retained workers must publish.
     /// `None` means it was built without exact video routing.
     contract: Option<String>,
+    generation_capabilities: GenerationCapabilities,
 }
 
 struct DesiredGroup {
@@ -432,6 +468,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && existing.generation_capabilities() == instance.generation_capabilities()
                 && super::image_edits::advertised_limit(&existing.card)
                     == super::image_edits::advertised_limit(&instance.card)
             {
@@ -607,27 +644,34 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint =
-            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint = cohort_fingerprint(
+            &mdc_checksum,
+            cohort_video_contract(&members).as_deref(),
+            cohort_generation_capabilities(&members),
+        );
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
         // The contract the currently committed pipeline serves with. While a rebuild
         // is pending, `old_status` names the replacement, so the retained pipeline is
         // the authority on what its own workers must publish.
-        let committed_contract = match &group.retained {
-            Some(retained) => retained.contract.clone(),
-            None => fingerprint_parts(status_checksum(&old_status).unwrap_or_default())
-                .1
-                .map(str::to_string),
+        let (previous_checksum, previous_contract, previous_capabilities) =
+            fingerprint_parts(status_checksum(&old_status).unwrap_or_default());
+        let (committed_contract, committed_capabilities) = match &group.retained {
+            Some(retained) => (retained.contract.clone(), retained.generation_capabilities),
+            None => (previous_contract.map(str::to_string), previous_capabilities),
         };
         if fingerprint_changed {
             retained_commit = retained_commit.and_then(|committed_members| {
-                let (previous_checksum, _) = fingerprint_parts(status_checksum(&old_status)?);
                 if previous_checksum != mdc_checksum {
                     return None;
                 }
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_capabilities,
+                )
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
@@ -640,6 +684,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.retained.get_or_insert_with(|| RetainedPipeline {
                     admission_tx: previous_tx,
                     contract: committed_contract,
+                    generation_capabilities: committed_capabilities,
                 });
             } else {
                 group.admission_tx.send_replace(Vec::new());
@@ -662,7 +707,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // one keeps receiving requests expanded with the contract it dropped.
             let had_commit = retained_commit.is_some();
             retained_commit = retained_commit.and_then(|committed_members| {
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_capabilities,
+                )
             });
             if had_commit && retained_commit.is_none() {
                 self.host.remove_group(key);
@@ -906,7 +956,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let video_contract = cohort_video_contract(&members);
-            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
+            let generation_capabilities = cohort_generation_capabilities(&members);
+            let fingerprint = cohort_fingerprint(
+                &mdc_checksum,
+                video_contract.as_deref(),
+                generation_capabilities,
+            );
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -918,6 +973,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 representative,
                 video_contract,
+                generation_capabilities,
             };
             group.status = GroupStatus::Building {
                 mdc_checksum: fingerprint,
@@ -988,9 +1044,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .cohorts
                 .get(&result.spec.mdc_checksum)
                 .is_some_and(|member_keys| {
+                    let members = self.members(member_keys);
                     cohort_fingerprint(
                         &result.spec.mdc_checksum,
-                        cohort_video_contract(&self.members(member_keys)).as_deref(),
+                        cohort_video_contract(&members).as_deref(),
+                        cohort_generation_capabilities(&members),
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
@@ -1254,6 +1312,7 @@ fn surviving_commit(
     members: &[DesiredInstance],
     committed_members: &BTreeSet<String>,
     contract: Option<&str>,
+    generation_capabilities: GenerationCapabilities,
 ) -> Option<BTreeSet<String>> {
     // Keep serving the committed workers that are still here rather than demanding
     // the whole membership, so dropping the last worker of a rolling upgrade does
@@ -1261,6 +1320,11 @@ fn surviving_commit(
     let surviving = members
         .iter()
         .filter(|member| committed_members.contains(&member.key))
+        .filter(|member| {
+            member
+                .generation_capabilities()
+                .contains(generation_capabilities)
+        })
         .collect::<Vec<_>>();
     if surviving.is_empty() {
         return None;
@@ -1704,6 +1768,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_capabilities_follow_agreement_without_splitting_the_cohort() {
+        use crate::local_model::runtime_config::RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY;
+
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let legacy = instance(1, "same");
+        let mut upgraded = instance(2, "same");
+        upgraded.card.runtime_config.runtime_data.insert(
+            RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let upgraded_wire_card: ModelDeploymentCard =
+            serde_json::from_str(&upgraded.card.to_json().unwrap()).unwrap();
+        assert_eq!(legacy.card.mdcsum(), upgraded_wire_card.mdcsum());
+
+        controller.apply_added(legacy.clone());
+        controller.apply_added(upgraded.clone());
+        controller.start_queued_builds();
+        let mixed = starts.recv().await.unwrap();
+        assert!(mixed.generation_capabilities.is_empty());
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let old_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*old_admissions.borrow(), vec![1, 2]);
+
+        controller.apply_removed(&legacy.key);
+        assert_eq!(*old_admissions.borrow(), vec![2]);
+        controller.start_queued_builds();
+        let new = starts.recv().await.unwrap();
+        assert_eq!(new.mdc_checksum, mixed.mdc_checksum);
+        assert_ne!(new.fingerprint, mixed.fingerprint);
+        assert_eq!(
+            new.generation_capabilities,
+            GenerationCapabilities::RESPONSES_OVERFLOW_EVENTS,
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 1);
+
+        let admissions = host.admissions.lock().unwrap()[1].clone();
+        upgraded.card.runtime_config.runtime_data.insert(
+            RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY.to_string(),
+            serde_json::Value::String("true".to_string()),
+        );
+        assert!(controller.apply_added(upgraded));
+        assert!(admissions.borrow().is_empty());
+        controller.start_queued_builds();
+        let removed_capability = starts.recv().await.unwrap();
+        assert!(removed_capability.generation_capabilities.is_empty());
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+    }
+
+    #[tokio::test]
     async fn contract_agreement_drives_the_fingerprint_and_survives_a_rolling_upgrade() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
@@ -1757,7 +1875,8 @@ mod tests {
             upgraded_spec.fingerprint,
             cohort_fingerprint(
                 &upgraded_spec.mdc_checksum,
-                Some(&contract_digest("round_ties_even"))
+                Some(&contract_digest("round_ties_even")),
+                GenerationCapabilities::empty(),
             )
         );
         host.release.add_permits(1);

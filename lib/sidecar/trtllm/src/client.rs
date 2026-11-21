@@ -21,9 +21,9 @@ use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
+use dynamo_sidecar_common::stream_status_to_dynamo;
 pub(crate) use dynamo_sidecar_common::{
     cancelled, engine_shutdown, invalid_argument, status_to_dynamo, stream_incomplete,
-    stream_status_to_dynamo,
 };
 
 use crate::proto as pb;
@@ -201,7 +201,7 @@ impl TrtllmClient {
             .generate(rpc)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| stream_status_to_dynamo("Generate", status))
+            .map_err(generate_status_to_dynamo)
     }
 
     pub(crate) async fn supports_subagent_affinity(&self) -> Result<bool, DynamoError> {
@@ -434,6 +434,26 @@ fn metadata_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     }
 }
 
+pub(crate) fn generate_status_to_dynamo(status: tonic::Status) -> DynamoError {
+    let error = stream_status_to_dynamo("Generate", status);
+    if error.class() != ErrorType::InvalidRequest {
+        return error;
+    }
+    // OpenEngine v1 reports context overflow in its rejection diagnostic.
+    // Drop this fallback when the minimum supported API reports it as a typed status.
+    let diagnostic = error.message().to_ascii_lowercase();
+    if diagnostic.contains("maximum context length is ")
+        || diagnostic.contains("exceeds maximum input length")
+        || (diagnostic.contains("input length")
+            && diagnostic.contains("max_seq_len")
+            && diagnostic.contains("exceed"))
+    {
+        error.with_context_length_exceeded()
+    } else {
+        error
+    }
+}
+
 /// These model/configuration/authentication errors cannot recover by waiting.
 fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
@@ -497,4 +517,30 @@ pub(crate) fn engine_error(message: impl Into<String>) -> DynamoError {
         .error_type(ErrorType::Backend(BackendError::Unknown))
         .message(message)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_context_overflow_is_an_invalid_request_without_invented_bounds() {
+        for diagnostic in [
+            "Input length (100) exceeds max_seq_len (64).",
+            "This model's maximum context length is 64 tokens.",
+            "Prompt length (100) exceeds maximum input length (64).",
+        ] {
+            let error = generate_status_to_dynamo(tonic::Status::invalid_argument(diagnostic));
+            assert_eq!(error.class(), ErrorType::InvalidRequest);
+            assert_eq!(error.reason().as_str(), "backend.invalid_argument");
+            assert!(error.is_context_length_exceeded());
+            assert!(error.public_details().is_none());
+            assert!(error.message().contains(diagnostic));
+            let disconnected = generate_status_to_dynamo(tonic::Status::unavailable(diagnostic));
+            assert!(!disconnected.is_context_length_exceeded());
+        }
+        let other =
+            generate_status_to_dynamo(tonic::Status::invalid_argument("invalid temperature"));
+        assert!(!other.is_context_length_exceeded());
+    }
 }

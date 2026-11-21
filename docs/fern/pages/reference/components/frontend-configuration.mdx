@@ -996,6 +996,28 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
 
+### Responses Streaming Errors
+
+For streaming `/v1/responses` requests on a deployment advertising
+`responses_context_overflow_events=true`, context overflow returns HTTP 200
+with a terminal `response.failed` event whose
+`response.error.code` is `context_length_exceeded`. The TensorRT-LLM sidecar
+advertises this capability and converts legacy OpenEngine context-limit errors
+to typed rejections before forwarding them. During a rolling upgrade, the frontend enables each
+generation capability once every worker in its serving group advertises it.
+Clients must inspect terminal SSE events. HTTP 200
+alone does not mean generation succeeded. An overflow detected before streaming
+begins still produces `response.created`, `response.in_progress`, and
+`response.failed` events with the same response ID.
+
+Without this capability, synchronous context-overflow errors remain HTTP 400.
+A first-event error can also return HTTP 400 when the optional
+`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` window is nonzero. With the default zero
+window, HTTP 200 is already committed before stream events are read, so clients
+receive the existing streaming error events. Non-streaming Responses, Chat
+Completions, Anthropic Messages, and unrelated invalid arguments retain their
+HTTP error behavior.
+
 ### Image API Compatibility
 
 **Experimental.** Image editing requires a backend and model that support

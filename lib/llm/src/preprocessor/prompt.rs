@@ -397,6 +397,72 @@ impl MediaRequestExt for NvCreateCompletionRequest {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DeveloperRolePolicy {
+    #[default]
+    Preserve,
+    RenderAsSystem,
+}
+
+fn hf_developer_role_policy(
+    config: &ChatTemplate,
+    model_type: Option<&str>,
+    custom_template: bool,
+) -> DeveloperRolePolicy {
+    if custom_template {
+        return DeveloperRolePolicy::Preserve;
+    }
+    let known_glm_type = match model_type {
+        Some(model_type) => matches!(
+            model_type,
+            "glm4"
+                | "glm4_moe"
+                | "glm4_moe_lite"
+                | "glm4v"
+                | "glm4v_moe"
+                | "glm_moe_dsa"
+                | "glm5_next"
+        ),
+        None => false,
+    };
+    // A stock GLM template branches on the system role and emits GLM's
+    // role sentinels. Without model metadata, also require its XML tags.
+    let needs_fallback = |source: &str| {
+        (known_glm_type
+            || (model_type.is_none()
+                && source.contains("<arg_key>")
+                && source.contains("<arg_value>")))
+            && source.contains("<|system|>")
+            && source.contains("<|assistant|>")
+            && (source.contains("'system'") || source.contains("\"system\""))
+            && !source.contains("developer")
+    };
+    let fallback = config
+        .chat_template
+        .as_ref()
+        .is_some_and(|template| match &template.0 {
+            either::Left(source) => needs_fallback(source),
+            either::Right(named) => {
+                // The renderer chooses a named variant per request. Preserve
+                // original roles if a selectable variant can handle them.
+                let mut selected =
+                    named
+                        .iter()
+                        .flat_map(|entry| entry.iter())
+                        .filter_map(|(name, source)| {
+                            matches!(name.as_str(), "default" | "tool_use").then_some(source)
+                        });
+                selected.next().is_some_and(|source| needs_fallback(source))
+                    && selected.all(|source| needs_fallback(source))
+            }
+        });
+    if fallback {
+        DeveloperRolePolicy::RenderAsSystem
+    } else {
+        DeveloperRolePolicy::Preserve
+    }
+}
+
 /// Build a [`PromptFormatter`] from a [`ModelDeploymentCard`].
 ///
 /// Mistral checkpoints with a `tekken.json` tokenizer, and model families whose
@@ -405,6 +471,12 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    chat_prompt_formatter_from_mdc(mdc).map(|(formatter, _)| formatter)
+}
+
+pub(super) fn chat_prompt_formatter_from_mdc(
+    mdc: &ModelDeploymentCard,
+) -> Result<(PromptFormatter, DeveloperRolePolicy)> {
     // Mistral checkpoints with a tekken.json tokenizer get Mistral's own renderer.
     // It builds each prompt exactly the way the mistral-common library does, which
     // is also what stock vLLM uses for these checkpoints by default.
@@ -432,7 +504,10 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
             version,
             metadata.model_settings_builder(),
         )?;
-        return Ok(PromptFormatter::OAI(std::sync::Arc::new(formatter)));
+        return Ok((
+            PromptFormatter::OAI(std::sync::Arc::new(formatter)),
+            DeveloperRolePolicy::Preserve,
+        ));
     }
 
     // Prefer the authoritative `model_type` from config.json — it's set by the
@@ -452,11 +527,11 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         &display_name_lower,
         mdc.runtime_config.exclude_tools_when_tool_choice_none,
     ) {
-        return Ok(formatter);
+        return Ok((formatter, DeveloperRolePolicy::Preserve));
     }
 
     if let Some(formatter) = native_formatter_for(&model_type_lower, &display_name_lower) {
-        return Ok(formatter);
+        return Ok((formatter, DeveloperRolePolicy::Preserve));
     }
 
     match mdc
@@ -527,13 +602,21 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
                 }
                 _ => {}
             }
-            PromptFormatter::from_parts(
+            let developer_role = hf_developer_role_policy(
+                &config,
+                model_type_lower.as_deref(),
+                mdc.chat_template_file
+                    .as_ref()
+                    .is_some_and(PromptFormatterArtifact::is_custom),
+            );
+            let formatter = PromptFormatter::from_parts(
                 config,
                 mdc.prompt_context
                     .clone()
                     .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
                 mdc.runtime_config.exclude_tools_when_tool_choice_none,
-            )
+            )?;
+            Ok((formatter, developer_role))
         }
         PromptFormatterArtifact::HfChatTemplateJinja { .. }
         | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
