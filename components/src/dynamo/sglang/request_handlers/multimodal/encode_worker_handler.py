@@ -386,6 +386,29 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     def cleanup(self) -> None:
         pass
 
+    def _store_cached_embedding(self, key: str, entry: CachedEmbedding) -> None:
+        cache = self._embedding_cache
+        if cache is None:
+            return
+        size_bytes = entry.tensor.element_size() * entry.tensor.numel()
+        reservation = cache.make_room_for(key, size_bytes)
+        if not reservation.admitted:
+            return
+        try:
+            # A contiguous split view still retains the whole encoder batch.
+            # Admit and evict before allocating storage owned by this entry.
+            owned_entry = entry._replace(
+                tensor=entry.tensor.clone(memory_format=torch.contiguous_format)
+            )
+            mutation = cache.set_with_delta(key, owned_entry)
+        except Exception:
+            # Admission also removes any previous value under this key.
+            self._publish_cache_delta([], [*reservation.removed_keys, key])
+            raise
+        self._publish_cache_delta(
+            mutation.added_keys, [*reservation.removed_keys, *mutation.removed_keys]
+        )
+
     @staticmethod
     def _url_hash(url: str) -> str:
         """Stable blake3 hash of a media URL, used as embedding cache key."""
@@ -860,10 +883,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 entry = CachedEmbedding(**entry_kwargs)
                 cache_key = cache_keys[orig_idx]
                 if cache_key is not None:
-                    mutation = cache.set_with_delta(cache_key, entry)
-                    self._publish_cache_delta(
-                        mutation.added_keys, mutation.removed_keys
-                    )
+                    self._store_cached_embedding(cache_key, entry)
                 new_entries[orig_idx] = entry
 
         # Reassemble results in original input order.
