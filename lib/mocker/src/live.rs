@@ -974,6 +974,13 @@ impl LiveRequest {
         self.lifecycle_rx.borrow().is_aborted
     }
 
+    /// Resolves to `true` once the scheduler admits this request, or `false` if it closes
+    /// first. A disaggregated handoff request is admitted when its bootstrap session submits
+    /// it, not when it is prepared.
+    pub fn admission(&self) -> impl Future<Output = bool> + Send + 'static {
+        request::admitted(self.lifecycle_rx.clone())
+    }
+
     pub async fn recv(&mut self) -> Option<OutputSignal> {
         self.recv_observed().await.map(|output| output.event)
     }

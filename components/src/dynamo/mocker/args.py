@@ -388,6 +388,24 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
+        "--dp-load-balance-method",
+        type=str,
+        choices=[
+            "auto",
+            "round_robin",
+            "follow_bootstrap_room",
+            "total_requests",
+            "total_tokens",
+        ],
+        default=None,
+        help="How a worker with --data-parallel-size > 1 places requests that carry no "
+        "explicit DP rank, mirroring SGLang's --load-balance-method. 'auto' (default) "
+        "uses follow_bootstrap_room on SGLang prefill workers and round_robin elsewhere. "
+        "follow_bootstrap_room rejects requests without a bootstrap room, as SGLang does; "
+        "the router only adds one when the prefill worker has --bootstrap-ports. "
+        "Use round_robin to send requests directly to a prefill worker.",
+    )
+    parser.add_argument(
         "--startup-time",
         type=float,
         default=None,

@@ -234,6 +234,22 @@ impl RequestRoute {
     }
 }
 
+/// Resolves to `true` once the scheduler has admitted the request, or `false` if the request
+/// closes first.
+pub(super) async fn admitted(mut lifecycle_rx: watch::Receiver<RequestLifecycle>) -> bool {
+    loop {
+        match lifecycle_rx.borrow_and_update().state {
+            RequestState::Submitting => {}
+            // Only an admitted request can be cancelling.
+            RequestState::Active | RequestState::Cancelling => return true,
+            RequestState::Closed => return false,
+        }
+        if lifecycle_rx.changed().await.is_err() {
+            return false;
+        }
+    }
+}
+
 pub(super) enum OutputDelivery {
     Delivered,
     Full,

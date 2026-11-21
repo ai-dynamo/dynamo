@@ -28,11 +28,12 @@ use dynamo_kv_events::event::KvCacheEvent;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
-    RawKvEventSink, ReplayRequestContext,
+    DirectRequest, DpLoadBalanceMethod, EngineType, KvCacheEventSink, KvEventPublishers,
+    MockerConfig, RawKvEvent, RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
+use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::bootstrap::{
     BootstrapIdentity, BootstrapParticipantRole, BootstrapServer, BootstrapServerConfig,
     ParticipantRegistration, connect_to_prefill,
@@ -279,6 +280,7 @@ struct MockerExecutionContext {
     engine_args: MockerConfig,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
+    dp_budget: Arc<parking_lot::Mutex<DpBudget>>,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     source_handoff_manager: OnceCell<SourceHandoffManager>,
@@ -291,6 +293,164 @@ struct MockerExecutionContext {
     _relay_publishers: OnceCell<Vec<Option<KvEventPublisher>>>,
     /// Forward pass metrics publisher (kept alive for the engine lifetime).
     _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
+}
+
+/// Per-rank load for the `total_requests` and `total_tokens` policies. Like SGLang's `DPBudget`,
+/// each scheduler snapshot replaces a rank's load, and every dispatch adds to the chosen rank
+/// until the next snapshot arrives.
+#[derive(Default)]
+struct DpBudget {
+    metrics_rxs: Vec<watch::Receiver<MockerMetrics>>,
+    total_requests: Vec<u64>,
+    total_tokens: Vec<u64>,
+    /// Dispatched requests the scheduler has not admitted yet. SGLang counts its bootstrap and
+    /// prealloc queues as waiting, but a mocker request only reaches the scheduler's counts
+    /// once it is admitted, which for a handoff waits on the bootstrap session. A refresh adds
+    /// these back instead of erasing them.
+    pending_requests: Vec<u64>,
+    /// Prompt tokens of dispatched requests that have not produced output yet. SGLang's token
+    /// load includes its waiting queue, but the scheduler snapshot only reports allocated KV
+    /// blocks, so a refresh adds these back instead of erasing queued demand.
+    queued_tokens: Vec<u64>,
+}
+
+impl DpBudget {
+    /// Refreshes per-rank load from any new scheduler snapshots, picks the least-loaded rank
+    /// (or `forced_rank` when the request carries an explicit hint), and charges the request
+    /// to that rank so later dispatches see it before the next snapshot.
+    fn dispatch(
+        &mut self,
+        method: DpLoadBalanceMethod,
+        engines: Option<&[LiveEngine]>,
+        dp_size: u32,
+        block_size: usize,
+        estimated_tokens: usize,
+        forced_rank: Option<u32>,
+    ) -> u32 {
+        let ranks = dp_size as usize;
+        self.total_requests.resize(ranks, 0);
+        self.total_tokens.resize(ranks, 0);
+        self.pending_requests.resize(ranks, 0);
+        self.queued_tokens.resize(ranks, 0);
+        if self.metrics_rxs.is_empty()
+            && let Some(engines) = engines
+        {
+            self.metrics_rxs = engines.iter().map(LiveEngine::metrics_receiver).collect();
+        }
+        for metrics_rx in &mut self.metrics_rxs {
+            if !metrics_rx.has_changed().unwrap_or(false) {
+                continue;
+            }
+            let metrics = metrics_rx.borrow_and_update();
+            let rank = metrics.dp_rank as usize;
+            if rank < ranks {
+                self.total_requests[rank] = metrics.running_requests
+                    + metrics.waiting_requests
+                    + self.pending_requests[rank];
+                self.total_tokens[rank] =
+                    metrics.active_decode_blocks * block_size as u64 + self.queued_tokens[rank];
+            }
+        }
+
+        let target = if let Some(rank) = forced_rank {
+            rank as usize
+        } else if method == DpLoadBalanceMethod::TotalTokens {
+            (0..ranks)
+                .min_by_key(|&rank| (self.total_tokens[rank], self.total_requests[rank]))
+                .unwrap_or(0)
+        } else {
+            (0..ranks)
+                .min_by_key(|&rank| self.total_requests[rank])
+                .unwrap_or(0)
+        };
+        self.total_requests[target] += 1;
+        self.total_tokens[target] += estimated_tokens as u64;
+        self.pending_requests[target] += 1;
+        self.queued_tokens[target] += estimated_tokens as u64;
+        target as u32
+    }
+
+    /// Undoes a dispatch whose request never reached the scheduler.
+    fn release(&mut self, rank: usize, estimated_tokens: u64) {
+        for (load, amount) in [
+            (&mut self.total_requests, 1),
+            (&mut self.total_tokens, estimated_tokens),
+            (&mut self.pending_requests, 1),
+            (&mut self.queued_tokens, estimated_tokens),
+        ] {
+            if let Some(load) = load.get_mut(rank) {
+                *load = load.saturating_sub(amount);
+            }
+        }
+    }
+
+    /// The scheduler admitted a pending request, so its snapshots count it from now on.
+    fn admit(&mut self, rank: usize) {
+        if let Some(requests) = self.pending_requests.get_mut(rank) {
+            *requests = requests.saturating_sub(1);
+        }
+    }
+
+    fn release_queued(&mut self, rank: usize, estimated_tokens: u64) {
+        if let Some(tokens) = self.queued_tokens.get_mut(rank) {
+            *tokens = tokens.saturating_sub(estimated_tokens);
+        }
+    }
+}
+
+/// A `DpBudget` charge for one dispatched request. The request stays pending until the
+/// scheduler admits it, and its prompt stays queued until its first output. Dropping the
+/// charge before admission undoes it, so a request that never reaches the scheduler leaves no
+/// phantom load that no later snapshot would clear.
+#[must_use]
+struct DpCharge {
+    budget: Arc<parking_lot::Mutex<DpBudget>>,
+    rank: usize,
+    estimated_tokens: u64,
+    admitted: bool,
+    prefilled: bool,
+}
+
+impl DpCharge {
+    fn new(budget: &Arc<parking_lot::Mutex<DpBudget>>, rank: u32, estimated_tokens: usize) -> Self {
+        Self {
+            budget: Arc::clone(budget),
+            rank: rank as usize,
+            estimated_tokens: estimated_tokens as u64,
+            admitted: false,
+            prefilled: false,
+        }
+    }
+
+    fn admit(&mut self) {
+        if !self.admitted {
+            self.admitted = true;
+            self.budget.lock().admit(self.rank);
+        }
+    }
+
+    /// The request produced output, so the rank's KV snapshot now carries its prompt.
+    fn prefilled(&mut self) {
+        self.admit();
+        if !self.prefilled {
+            self.prefilled = true;
+            self.budget
+                .lock()
+                .release_queued(self.rank, self.estimated_tokens);
+        }
+    }
+}
+
+impl Drop for DpCharge {
+    fn drop(&mut self) {
+        if !self.admitted {
+            self.budget.lock().release(self.rank, self.estimated_tokens);
+        } else if !self.prefilled {
+            self.budget
+                .lock()
+                .release_queued(self.rank, self.estimated_tokens);
+        }
+    }
 }
 
 struct PreparedBootstrap {
@@ -362,6 +522,7 @@ impl MockerExecutionContext {
             engine_args,
             response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
+            dp_budget: Arc::new(parking_lot::Mutex::new(DpBudget::default())),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
             handoff_shutdown: CancellationToken::new(),
@@ -374,20 +535,104 @@ impl MockerExecutionContext {
         }
     }
 
-    fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
-        if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
-            return dp_rank;
+    fn dp_load_balance_method(&self) -> DpLoadBalanceMethod {
+        match self.engine_args.runtime.dp_load_balance_method {
+            DpLoadBalanceMethod::Auto
+                if self.engine_args.backend == EngineType::Sglang
+                    && self.engine_args.is_prefill() =>
+            {
+                DpLoadBalanceMethod::FollowBootstrapRoom
+            }
+            DpLoadBalanceMethod::Auto => DpLoadBalanceMethod::RoundRobin,
+            method => method,
         }
+    }
 
-        // SGLang's default auto policy follows the bootstrap room on prefill workers.
-        if self.engine_args.backend == EngineType::Sglang
+    /// Whether this prefill worker follows bootstrap rooms that it is never sent. The prefill
+    /// router only adds a room when the worker advertises a bootstrap host and port, so
+    /// without `--bootstrap-ports` only requests with an explicit `dp_rank`, such as those
+    /// placed by the KV router, can be served.
+    fn bootstrap_rooms_unavailable(&self) -> bool {
+        self.engine_args.dp_size > 1
             && self.engine_args.is_prefill()
-            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
-        {
-            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
+            && self.engine_args.runtime.bootstrap_port.is_none()
+            && self.dp_load_balance_method() == DpLoadBalanceMethod::FollowBootstrapRoom
+    }
+
+    /// Charges a request to `DpBudget` and returns the chosen rank with its charge.
+    fn charge_dp_budget(
+        &self,
+        method: DpLoadBalanceMethod,
+        request: &PreprocessedRequest,
+        forced_rank: Option<u32>,
+    ) -> (u32, DpCharge) {
+        let estimated_tokens = request.token_ids.len();
+        let rank = self.dp_budget.lock().dispatch(
+            method,
+            self.engines.get().map(Vec::as_slice),
+            self.engine_args.dp_size,
+            self.engine_args.block_size,
+            estimated_tokens,
+            forced_rank,
+        );
+        (rank, DpCharge::new(&self.dp_budget, rank, estimated_tokens))
+    }
+
+    /// Picks the data-parallel rank for a request. An explicit `dp_rank` hint wins; otherwise
+    /// the configured load-balance method decides. The load-based methods also return the
+    /// request's `DpCharge`, which the caller keeps for the life of the request.
+    fn resolve_dp_rank(
+        &self,
+        request: &PreprocessedRequest,
+    ) -> Result<(u32, Option<DpCharge>), String> {
+        let dp_size = self.engine_args.dp_size;
+        let method = self.dp_load_balance_method();
+        let load_based = matches!(
+            method,
+            DpLoadBalanceMethod::TotalRequests | DpLoadBalanceMethod::TotalTokens
+        );
+        if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
+            // Charge hinted requests to the budget too, so the load-based policies do not
+            // pick the same rank again before its next scheduler snapshot.
+            if load_based && dp_rank < dp_size {
+                let (rank, charge) = self.charge_dp_budget(method, request, Some(dp_rank));
+                return Ok((rank, Some(charge)));
+            }
+            return Ok((dp_rank, None));
+        }
+        // SGLang only starts its data-parallel controller, and so its load-balance policy, for
+        // more than one rank.
+        if dp_size <= 1 {
+            return Ok((0, None));
         }
 
-        self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
+        match method {
+            DpLoadBalanceMethod::FollowBootstrapRoom => {
+                // SGLang asserts here rather than falling back to another rank.
+                let Some(bootstrap_info) = request.bootstrap_info.as_ref() else {
+                    return Err(
+                        "request has no bootstrap room, which the follow_bootstrap_room \
+                        load-balance method requires; the router only adds one when the prefill \
+                        worker serves a bootstrap port (--bootstrap-ports). Send requests through \
+                        the router to a worker started with --bootstrap-ports, or set \
+                        --dp-load-balance-method round_robin to accept requests without a room"
+                            .to_string(),
+                    );
+                };
+                Ok((
+                    (bootstrap_info.bootstrap_room % u64::from(dp_size)) as u32,
+                    None,
+                ))
+            }
+            DpLoadBalanceMethod::TotalRequests | DpLoadBalanceMethod::TotalTokens => {
+                let (rank, charge) = self.charge_dp_budget(method, request, None);
+                Ok((rank, Some(charge)))
+            }
+            DpLoadBalanceMethod::Auto | DpLoadBalanceMethod::RoundRobin => Ok((
+                self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % dp_size,
+                None,
+            )),
+        }
     }
 
     async fn prepare_bootstrap(&self) -> Result<Option<PreparedBootstrap>> {
@@ -469,6 +714,15 @@ impl MockerExecutionContext {
         endpoint: dynamo_runtime::component::Endpoint,
         model_name: String,
     ) -> Result<()> {
+        if self.bootstrap_rooms_unavailable() {
+            tracing::warn!(
+                dp_size = self.engine_args.dp_size,
+                "prefill worker places requests by bootstrap room (follow_bootstrap_room) but \
+                has no bootstrap port, so the router sends it no rooms and it rejects every \
+                request without an explicit dp_rank, including all requests from a non-KV \
+                router; set --bootstrap-ports, or --dp-load-balance-method round_robin"
+            );
+        }
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
@@ -889,7 +1143,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         let native_sglang_terminal = native_sglang.is_some();
 
-        let dp_rank = self.resolve_dp_rank(&request);
+        let (dp_rank, mut dp_charge) = match self.resolve_dp_rank(&request) {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                return Ok(error_stream(
+                    &ctx,
+                    invalid_argument(message.clone(), message),
+                ));
+            }
+        };
 
         // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
@@ -1146,6 +1408,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .await
                 .map_err(|error| Error::msg(error.to_string()))?;
         }
+        // The request stays pending in `DpBudget` until the scheduler admits it, which for a
+        // handoff happens only once its bootstrap session submits it.
+        let dp_admission = live_request.admission();
 
         let async_context = ctx.context();
         let reasoning = self.engine_args.runtime.reasoning.clone();
@@ -1171,9 +1436,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut context_stopped = async_context.stopped();
             let stream_closed = stream_tx.closed();
             tokio::pin!(stream_closed);
+            tokio::pin!(dp_admission);
+            let mut awaiting_dp_admission = dp_charge.is_some();
 
             loop {
                 tokio::select! {
+                    admitted = &mut dp_admission, if awaiting_dp_admission => {
+                        awaiting_dp_admission = false;
+                        if admitted && let Some(charge) = dp_charge.as_mut() {
+                            charge.admit();
+                        }
+                    }
                     source_completion = async {
                         source_completion_rx
                             .as_mut()
@@ -1245,6 +1518,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 &async_context,
                             );
                             break;
+                        }
+
+                        if let Some(mut charge) = dp_charge.take() {
+                            charge.prefilled();
+                            awaiting_dp_admission = false;
                         }
 
                         if let Some(cached) = signal.cached_tokens {
@@ -1573,12 +1851,35 @@ mod tests {
         worker_type: WorkerType,
         dp_size: u32,
     ) -> MockerExecutionContext {
+        dp_rank_engine_with_method(backend, worker_type, dp_size, DpLoadBalanceMethod::Auto)
+    }
+
+    fn dp_rank_engine_with_method(
+        backend: EngineType,
+        worker_type: WorkerType,
+        dp_size: u32,
+        method: DpLoadBalanceMethod,
+    ) -> MockerExecutionContext {
         let args = MockerConfig::from_value(serde_json::json!({
             "dp_size": dp_size,
-            "engine": { "backend": backend, "worker_type": worker_type }
+            "engine": { "backend": backend, "worker_type": worker_type },
+            "dynamo": { "dp_load_balance_method": method }
         }))
         .unwrap();
         MockerExecutionContext::new(args)
+    }
+
+    impl MockerExecutionContext {
+        fn resolve_admitted_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32, String> {
+            let (rank, charge) = self.resolve_dp_rank(request)?;
+            // Tests model admitted requests still waiting for prefill, so keep their tokens
+            // queued.
+            if let Some(mut charge) = charge {
+                charge.admit();
+                std::mem::forget(charge);
+            }
+            Ok(rank)
+        }
     }
 
     fn dp_rank_request(room: Option<u64>, rank: Option<u32>) -> PreprocessedRequest {
@@ -1604,21 +1905,253 @@ mod tests {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
         for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
             assert_eq!(
-                engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
-                expected,
+                engine.resolve_admitted_dp_rank(&dp_rank_request(Some(room), None)),
+                Ok(expected),
                 "room={room}"
             );
         }
     }
 
     #[test]
+    fn follow_bootstrap_room_rejects_requests_without_a_room() {
+        let auto = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        let explicit = dp_rank_engine_with_method(
+            EngineType::Vllm,
+            WorkerType::Decode,
+            4,
+            DpLoadBalanceMethod::FollowBootstrapRoom,
+        );
+        for engine in [auto, explicit] {
+            let error = engine
+                .resolve_admitted_dp_rank(&dp_rank_request(None, None))
+                .unwrap_err();
+            assert!(error.contains("bootstrap room"), "{error}");
+            assert!(error.contains("--bootstrap-ports"), "{error}");
+            assert_eq!(
+                engine.resolve_admitted_dp_rank(&dp_rank_request(Some(6), None)),
+                Ok(2)
+            );
+        }
+    }
+
+    #[test]
+    fn single_rank_ignores_load_balance_method() {
+        // SGLang only runs its data-parallel controller for dp_size > 1.
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 1);
+        assert_eq!(
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, None)),
+            Ok(0)
+        );
+    }
+
+    #[test]
     fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
         assert_eq!(
-            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
-            3
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, Some(3))),
+            Ok(3)
         );
-        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Decode, 4);
+        assert_eq!(
+            engine.resolve_admitted_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            Ok(3)
+        );
+        assert_eq!(
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, None)),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn sglang_prefill_round_robin_ignores_bootstrap_room() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Prefill,
+            4,
+            DpLoadBalanceMethod::RoundRobin,
+        );
+        let ranks: Vec<_> = [Some(6), None, Some(15), Some(19), None]
+            .into_iter()
+            .map(|room| {
+                engine
+                    .resolve_admitted_dp_rank(&dp_rank_request(room, None))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn total_requests_places_on_least_loaded_rank() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Prefill,
+            3,
+            DpLoadBalanceMethod::TotalRequests,
+        );
+        let ranks: Vec<_> = (0..5)
+            .map(|_| {
+                engine
+                    .resolve_admitted_dp_rank(&dp_rank_request(None, None))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn total_requests_counts_explicit_rank_hints() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Decode,
+            3,
+            DpLoadBalanceMethod::TotalRequests,
+        );
+        let ranks: Vec<_> = [Some(0), Some(1), None, None]
+            .into_iter()
+            .map(|rank| {
+                engine
+                    .resolve_admitted_dp_rank(&dp_rank_request(None, rank))
+                    .unwrap()
+            })
+            .collect();
+        // The hinted requests load ranks 0 and 1, so the first unhinted one goes to rank 2.
+        assert_eq!(ranks, [0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn dropped_dp_charge_releases_its_load() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Decode,
+            3,
+            DpLoadBalanceMethod::TotalRequests,
+        );
+        // A request rejected after rank selection drops its charge, so rank 0 stays free.
+        let (rank, charge) = engine
+            .resolve_dp_rank(&dp_rank_request(None, None))
+            .unwrap();
+        assert_eq!(rank, 0);
+        drop(charge);
+        assert_eq!(
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, None)),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn total_tokens_places_on_rank_with_fewest_tokens() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Decode,
+            3,
+            DpLoadBalanceMethod::TotalTokens,
+        );
+        let ranks: Vec<_> = [8, 2, 4, 1, 1]
+            .into_iter()
+            .map(|len| {
+                let mut request = dp_rank_request(None, None);
+                request.token_ids = vec![1; len].into();
+                engine.resolve_admitted_dp_rank(&request).unwrap()
+            })
+            .collect();
+        // Loads after each step: [8,0,0] [8,2,0] [8,2,4] [8,3,4] then rank 1 again.
+        assert_eq!(ranks, [0, 1, 2, 1, 1]);
+    }
+
+    #[test]
+    fn total_tokens_snapshot_keeps_queued_prompt_tokens() {
+        let budget = Arc::new(parking_lot::Mutex::new(DpBudget::default()));
+        let (rank0_tx, rank0_rx) = watch::channel(MockerMetrics::new(0, 0, 128));
+        let (rank1_tx, rank1_rx) = watch::channel(MockerMetrics::new(1, 0, 128));
+        budget.lock().metrics_rxs = vec![rank0_rx, rank1_rx];
+        rank1_tx.send_replace(MockerMetrics::from_parts(1, 10, 128, 1, 0, 0, 0, 0));
+        let dispatch = |estimated_tokens| {
+            budget.lock().dispatch(
+                DpLoadBalanceMethod::TotalTokens,
+                None,
+                2,
+                4,
+                estimated_tokens,
+                None,
+            )
+        };
+        let mut queued = DpCharge::new(&budget, dispatch(100), 100);
+        queued.admit();
+        assert_eq!(queued.rank, 0);
+        // Rank 0 reports the request as waiting with no KV yet; its 100 queued tokens still
+        // outweigh rank 1's 40 KV tokens.
+        rank0_tx.send_replace(MockerMetrics::from_parts(0, 0, 128, 0, 1, 0, 0, 0));
+        assert_eq!(dispatch(10), 1);
+
+        // After prefill, the KV snapshot carries the load and the queued charge is gone.
+        queued.prefilled();
+        rank0_tx.send_replace(MockerMetrics::from_parts(0, 25, 128, 1, 0, 0, 0, 0));
+        assert_eq!(dispatch(0), 1);
+        assert_eq!(budget.lock().total_tokens, [100, 50]);
+    }
+
+    #[test]
+    fn total_requests_snapshot_keeps_pending_requests() {
+        let budget = Arc::new(parking_lot::Mutex::new(DpBudget::default()));
+        let (rank0_tx, rank0_rx) = watch::channel(MockerMetrics::new(0, 0, 128));
+        let (rank1_tx, rank1_rx) = watch::channel(MockerMetrics::new(1, 0, 128));
+        budget.lock().metrics_rxs = vec![rank0_rx, rank1_rx];
+        let running =
+            |rank, requests| MockerMetrics::from_parts(rank, 0, 128, requests, 0, 0, 0, 0);
+        let charge = || {
+            let rank =
+                budget
+                    .lock()
+                    .dispatch(DpLoadBalanceMethod::TotalRequests, None, 2, 4, 0, None);
+            DpCharge::new(&budget, rank, 0)
+        };
+
+        rank1_tx.send_replace(running(1, 1));
+        let waiting_on_bootstrap = charge();
+        assert_eq!(waiting_on_bootstrap.rank, 0);
+        // A rank 0 snapshot taken before the scheduler admits the first request must not erase
+        // it, or the next request would tie with rank 1 and land on rank 0 as well.
+        rank0_tx.send_replace(running(0, 1));
+        let mut admitted = charge();
+        assert_eq!(admitted.rank, 1);
+
+        // Rejecting the pending request removes only its own charge from the snapshot load.
+        drop(waiting_on_bootstrap);
+        assert_eq!(budget.lock().total_requests, [1, 2]);
+
+        // Once admitted, the request is counted by rank 1's snapshot alone.
+        admitted.admit();
+        rank1_tx.send_replace(running(1, 2));
+        let next = charge();
+        assert_eq!(next.rank, 0);
+        assert_eq!(budget.lock().total_requests, [2, 2]);
+    }
+
+    #[test]
+    fn bootstrap_rooms_unavailable_without_a_prefill_bootstrap_port() {
+        let prefill = |dp_size, method| {
+            dp_rank_engine_with_method(EngineType::Sglang, WorkerType::Prefill, dp_size, method)
+        };
+        for method in [
+            DpLoadBalanceMethod::Auto,
+            DpLoadBalanceMethod::FollowBootstrapRoom,
+        ] {
+            assert!(
+                prefill(2, method).bootstrap_rooms_unavailable(),
+                "{method:?}"
+            );
+        }
+        assert!(!prefill(1, DpLoadBalanceMethod::Auto).bootstrap_rooms_unavailable());
+        assert!(!prefill(2, DpLoadBalanceMethod::RoundRobin).bootstrap_rooms_unavailable());
+        let mut with_port = prefill(2, DpLoadBalanceMethod::Auto);
+        with_port.engine_args.runtime.bootstrap_port = Some(9001);
+        assert!(!with_port.bootstrap_rooms_unavailable());
+        // A decode worker gets rooms whenever its prefill workers serve a bootstrap port.
+        assert!(
+            !dp_rank_engine(EngineType::Sglang, WorkerType::Decode, 2)
+                .bootstrap_rooms_unavailable()
+        );
     }
 
     #[test]
@@ -1630,7 +2163,11 @@ mod tests {
             let engine = dp_rank_engine(backend, worker_type, 4);
             let ranks: Vec<_> = [6, 10, 15, 19, 6]
                 .into_iter()
-                .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+                .map(|room| {
+                    engine
+                        .resolve_admitted_dp_rank(&dp_rank_request(Some(room), None))
+                        .unwrap()
+                })
                 .collect();
             assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
         }
