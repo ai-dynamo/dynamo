@@ -6,6 +6,7 @@ use crate::config::HealthStatus;
 use crate::engine::AsyncEngine;
 use crate::pipeline::SingleIn;
 use crate::protocols::maybe_error::MaybeError;
+use crate::system_health::{CanaryHandles, ProbedRegistration};
 use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -87,20 +88,24 @@ impl HealthCheckManager {
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
 
-        // Get the endpoint-specific notifier
-        let notifier = self
+        let Some(CanaryHandles {
+            notifier,
+            registration: watched,
+            ..
+        }) = self
             .drt
             .system_health()
             .lock()
-            .get_endpoint_health_check_notifier(&endpoint_subject)
-            .expect("Notifier should exist for registered endpoint");
-        let progress = self
-            .drt
-            .system_health()
-            .lock()
-            .get_endpoint_progress_notifier(&endpoint_subject)
-            .expect("Notifier should exist for registered endpoint");
+            .get_canary_handles(&endpoint_subject)
+        else {
+            debug!(
+                "Endpoint '{}' was deregistered before its health check task started; skipping",
+                endpoint_subject
+            );
+            return;
+        };
 
+        let mut endpoint_tasks = self.endpoint_tasks.lock();
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
@@ -121,18 +126,16 @@ impl HealthCheckManager {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
-                        // Get the health check payload for this endpoint
-                        let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
+                        let handles = manager.drt.system_health().lock().get_canary_handles(&endpoint_subject);
 
-                        if let Some(target) = target {
-                            match manager.send_health_check_request(&endpoint_subject, &target.payload, progress.clone()) {
+                        if let Some(handles) = handles {
+                            match manager.send_health_check_request(&endpoint_subject, handles.registration, &handles.target.payload, handles.progress) {
                                 Ok(sent) => canary = Some(sent),
                                 Err(e) => error!("Failed to send health check for {}: {}", endpoint_subject, e),
                             }
                         } else {
-                            // This should never happen - targets are registered at startup and never removed
-                            error!(
-                                "CRITICAL: Health check target for {} disappeared unexpectedly! This indicates a bug. Stopping health check task.",
+                            debug!(
+                                "Health check target for {} is gone; endpoint is no longer registered, stopping health check task",
                                 endpoint_subject
                             );
                             break;
@@ -145,21 +148,22 @@ impl HealthCheckManager {
                         // stream completion, even for an empty stream. Neither path
                         // requires a successful publish.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
-                        manager.drt.system_health().lock().set_endpoint_health_status(
+                        manager.drt.system_health().lock().set_endpoint_health_status_for(
                             &endpoint_subject,
+                            watched,
                             crate::config::HealthStatus::Ready,
                         );
                     }
                 }
             }
 
+            manager.forget_endpoint_task(&endpoint_subject, tokio::task::id());
+
             info!("Health check task for {} exiting", endpoint_subject);
         });
 
         // Store the task handle
-        self.endpoint_tasks
-            .lock()
-            .insert(endpoint_subject.clone(), task);
+        endpoint_tasks.insert(endpoint_subject.clone(), task);
 
         info!(
             "Spawned health check task for endpoint: {}",
@@ -167,8 +171,18 @@ impl HealthCheckManager {
         );
     }
 
-    /// Spawn a task to monitor for newly registered endpoints
-    /// Returns an error if duplicate endpoints are detected, indicating a bug in the system
+    /// Remove this task without deleting a newer replacement.
+    fn forget_endpoint_task(&self, endpoint_subject: &str, task_id: tokio::task::Id) {
+        let mut tasks = self.endpoint_tasks.lock();
+        if tasks
+            .get(endpoint_subject)
+            .is_some_and(|handle| handle.id() == task_id)
+        {
+            tasks.remove(endpoint_subject);
+        }
+    }
+
+    /// Spawn the sole monitor for newly registered endpoints.
     async fn spawn_new_endpoint_monitor(self: &Arc<Self>) -> anyhow::Result<()> {
         let manager = self.clone();
 
@@ -191,21 +205,18 @@ impl HealthCheckManager {
                     endpoint_subject
                 );
 
-                let already_exists = {
-                    let tasks = manager.endpoint_tasks.lock();
-                    tasks.contains_key(&endpoint_subject)
-                };
-
-                if already_exists {
-                    error!(
-                        "CRITICAL: Received registration for endpoint '{}' that already has a health check task!",
+                // Re-registration replaces the task for the previous registration.
+                let previous = manager.endpoint_tasks.lock().remove(&endpoint_subject);
+                if let Some(previous) = previous {
+                    debug!(
+                        "Re-arming health check for endpoint '{}': retiring the previous task",
                         endpoint_subject
                     );
-                    break;
+                    previous.abort();
                 }
 
                 info!(
-                    "Spawning health check task for new endpoint: {}",
+                    "Spawning health check task for endpoint: {}",
                     endpoint_subject
                 );
                 manager.spawn_endpoint_health_check_task(endpoint_subject);
@@ -218,11 +229,11 @@ impl HealthCheckManager {
         Ok(())
     }
 
-    /// Send a health check request via the local endpoint registry (in-process).
-    /// Returns the task that waits for the response and records the result.
+    /// Send a health check and attribute its result to the probed registration.
     fn send_health_check_request(
         &self,
         endpoint_subject: &str,
+        probed: ProbedRegistration,
         payload: &serde_json::Value,
         progress: Arc<tokio::sync::Notify>,
     ) -> anyhow::Result<JoinHandle<()>> {
@@ -282,8 +293,9 @@ impl HealthCheckManager {
                         });
 
                         // Update health status based on response
-                        system_health.lock().set_endpoint_health_status(
+                        system_health.lock().set_endpoint_health_status_for(
                             &endpoint_subject_owned,
+                            probed,
                             if is_healthy {
                                 HealthStatus::Ready
                             } else {
@@ -296,8 +308,9 @@ impl HealthCheckManager {
                             "Health check request failed for {}: {}",
                             endpoint_subject_owned, e
                         );
-                        system_health.lock().set_endpoint_health_status(
+                        system_health.lock().set_endpoint_health_status_for(
                             &endpoint_subject_owned,
+                            probed,
                             HealthStatus::NotReady,
                         );
                     }
@@ -308,9 +321,11 @@ impl HealthCheckManager {
             // Handle timeout
             if result.is_none() {
                 warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
-                    .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                system_health.lock().set_endpoint_health_status_for(
+                    &endpoint_subject_owned,
+                    probed,
+                    HealthStatus::NotReady,
+                );
             }
 
             debug!("Health check completed for {}", endpoint_subject_owned);
@@ -610,7 +625,7 @@ mod push_handler_notify_tests {
             "prompt": "health",
             "_health_check": true
         });
-        drt.system_health().lock().register_health_check_target(
+        let _ = drt.system_health().lock().register_health_check_target(
             endpoint_name,
             Instance {
                 component: "test_component".to_string(),
@@ -862,7 +877,7 @@ mod integration_tests {
             "_health_check": true
         });
 
-        drt.system_health().lock().register_health_check_target(
+        let _ = drt.system_health().lock().register_health_check_target(
             endpoint,
             crate::component::Instance {
                 component: "test_component".to_string(),
@@ -899,7 +914,7 @@ mod integration_tests {
                 "prompt": format!("test{}", i),
                 "_health_check": true
             });
-            drt.system_health().lock().register_health_check_target(
+            let _ = drt.system_health().lock().register_health_check_target(
                 &endpoint,
                 crate::component::Instance {
                     component: "test_component".to_string(),
@@ -944,7 +959,7 @@ mod integration_tests {
         });
 
         // Register the endpoint
-        drt.system_health().lock().register_health_check_target(
+        let _ = drt.system_health().lock().register_health_check_target(
             endpoint,
             crate::component::Instance {
                 component: "test_component".to_string(),
