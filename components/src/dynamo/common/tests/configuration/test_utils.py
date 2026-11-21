@@ -222,6 +222,91 @@ class TestAddArgument:
         args = parser.parse_args([])
         assert args.threshold is None
 
+    @staticmethod
+    def _mode_parser(default=None, **kwargs):
+        parser = argparse.ArgumentParser(prog="test")
+        add_argument(
+            parser,
+            flag_name="--mode",
+            env_var="TEST_MODE",
+            default=default,
+            help="Mode",
+            choices=["enabled", "disabled"],
+            **kwargs,
+        )
+        return parser
+
+    def test_env_value_outside_choices_is_rejected(self, monkeypatch, capsys):
+        """An env value gets the same `choices` check as the CLI flag."""
+        monkeypatch.setenv("TEST_MODE", "on")
+
+        with pytest.raises(SystemExit) as exc_info:
+            self._mode_parser().parse_args([])
+
+        assert exc_info.value.code == 2
+        assert "TEST_MODE: invalid choice: 'on'" in capsys.readouterr().err
+
+    def test_env_list_value_outside_choices_is_rejected(self, monkeypatch, capsys):
+        monkeypatch.setenv("TEST_MODE", "enabled on")
+
+        with pytest.raises(SystemExit):
+            self._mode_parser(default=[], nargs="*").parse_args([])
+
+        assert "TEST_MODE: invalid choice: 'on'" in capsys.readouterr().err
+
+    def test_cli_flag_overrides_invalid_env_value(self, monkeypatch):
+        monkeypatch.setenv("TEST_MODE", "on")
+        parser = self._mode_parser()
+
+        assert parser.parse_args(["--mode", "enabled"]).mode == "enabled"
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["--help"])
+        assert exc_info.value.code == 0
+
+    def test_cli_value_outside_choices_keeps_argparse_message(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("TEST_MODE", "on")
+
+        with pytest.raises(SystemExit):
+            self._mode_parser().parse_args(["--mode", "on"])
+
+        err = capsys.readouterr().err
+        assert "argument --mode: invalid choice: 'on'" in err
+        assert "TEST_MODE" not in err
+
+    def test_typed_env_value_outside_choices_is_rejected(self, monkeypatch, capsys):
+        monkeypatch.setenv("TEST_SIZE", "7")
+        parser = argparse.ArgumentParser(prog="test")
+        add_argument(
+            parser,
+            flag_name="--size",
+            env_var="TEST_SIZE",
+            default=8,
+            help="Size",
+            arg_type=int,
+            choices=[8, 16],
+        )
+
+        assert parser.parse_args(["--size", "16"]).size == 16
+        with pytest.raises(SystemExit):
+            parser.parse_args([])
+        assert "TEST_SIZE: invalid choice: 7" in capsys.readouterr().err
+
+    def test_arg_env_value_outside_choices_is_not_checked(self, monkeypatch):
+        """Another process's env is validated by that process, as for `deprecated`."""
+        monkeypatch.delenv("TEST_MODE", raising=False)
+        parser = self._mode_parser(env=ArgEnv(environ={"TEST_MODE": "on"}))
+
+        assert parser.parse_args([]).mode == "on"
+
+    def test_env_value_inside_choices_is_used(self, monkeypatch):
+        monkeypatch.setenv("TEST_MODE", "disabled")
+        parser = self._mode_parser(default="enabled")
+
+        assert parser.parse_args([]).mode == "disabled"
+        assert parser.parse_args(["--mode", "enabled"]).mode == "enabled"
+
 
 class TestAddNegatableBool:
     """Test add_negatable_bool function."""
