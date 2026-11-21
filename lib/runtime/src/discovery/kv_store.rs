@@ -678,10 +678,11 @@ impl Discovery for KVStoreDiscovery {
 
         let key = kv::Key::new(key_path.clone());
 
-        // Delete the entry from the bucket
-        bucket.delete(&key).await?;
-
-        Ok(())
+        // Admin drain or an earlier teardown may already have withdrawn it.
+        match bucket.delete(&key).await {
+            Ok(()) | Err(kv::StoreError::MissingKey(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
@@ -1080,6 +1081,8 @@ mod tests {
         let second = client.register(spec(205, 7)).await.unwrap();
         assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
 
+        // Admin withdrawal and runtime teardown can delete the same instance.
+        client.unregister(first.clone()).await.unwrap();
         client.unregister(first).await.unwrap();
         assert_eq!(client.list(query).await.unwrap(), vec![second]);
     }

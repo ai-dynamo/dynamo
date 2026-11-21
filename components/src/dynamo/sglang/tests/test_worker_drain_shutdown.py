@@ -43,7 +43,7 @@ async def test_sigterm_without_system_listener_preserves_grace_and_rejects_late_
     runtime = SimpleNamespace(
         system_status_server_url=Mock(return_value=None),
         register_engine_http_handler=Mock(),
-        shutdown=completed.set,
+        shutdown_and_wait=AsyncMock(side_effect=completed.set),
     )
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0.05")
     monkeypatch.setattr(graceful_shutdown, "_shutdown_started", asyncio.Event())

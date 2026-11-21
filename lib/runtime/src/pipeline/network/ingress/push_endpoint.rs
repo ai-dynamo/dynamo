@@ -23,6 +23,13 @@ pub struct PushEndpoint {
     pub cancellation_token: CancellationToken,
     #[builder(default = "true")]
     pub graceful_shutdown: bool,
+    /// Bound for the in-flight drain below, published by the server when it
+    /// unregisters this endpoint. Shared rather than a plain `Duration` because
+    /// the value is only known at shutdown, long after this is constructed —
+    /// and it must be the same one the caller waiting on this task is using, or
+    /// the transports are torn down while this drain is still running.
+    #[builder(default)]
+    pub drain_timeout: Arc<std::sync::OnceLock<std::time::Duration>>,
 }
 
 /// version of crate
@@ -150,13 +157,19 @@ impl PushEndpoint {
             .lock()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
-        // await for all inflight requests to complete if graceful shutdown
+        // Read here, after the serve loop has exited on cancellation, so it is
+        // the bound the unregister published rather than the default.
+        let drain_timeout = self
+            .drain_timeout
+            .get()
+            .copied()
+            .unwrap_or_else(crate::runtime::graceful_shutdown_timeout);
         if self.graceful_shutdown {
             super::drain_inflight(
                 inflight,
                 notify,
                 endpoint_name_local.as_str(),
-                crate::runtime::graceful_shutdown_timeout(),
+                drain_timeout,
             )
             .await;
         } else {
