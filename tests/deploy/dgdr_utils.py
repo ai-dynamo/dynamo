@@ -407,21 +407,46 @@ class ManagedDGDR:
         name = manifest["metadata"]["name"]
         await self.ensure_absent(name)
         assert self.custom is not None
-        result = await self.custom.create_namespaced_custom_object(
-            group=DGDR_GROUP,
-            version=DGDR_VERSION,
-            namespace=self.config.namespace,
-            plural=DGDR_PLURAL,
-            body=manifest,
-        )
+        custom = self.custom
+        # Track the name before the POST: a dropped request may still have
+        # created the object, and teardown must delete it.
         self._created_names.append(name)
+        attempts = 0
+
+        async def post() -> dict[str, Any]:
+            nonlocal attempts
+            attempts += 1
+            try:
+                return await custom.create_namespaced_custom_object(
+                    group=DGDR_GROUP,
+                    version=DGDR_VERSION,
+                    namespace=self.config.namespace,
+                    plural=DGDR_PLURAL,
+                    body=manifest,
+                )
+            except exceptions.ApiException as error:
+                # Retries follow only connection errors and the name was absent,
+                # so a 409 on a retry means the dropped POST was committed.
+                if error.status != 409 or attempts == 1:
+                    raise
+                existing = await self.get(name)
+                if existing is None:
+                    raise
+                return existing
+
+        result = await self._retry_vcluster_api(
+            f"creating DGDR {self.config.namespace}/{name}", post
+        )
         logger.info("Created DGDR %s/%s", self.config.namespace, name)
         return result
 
     async def dry_run(self, manifest: dict[str, Any]) -> dict[str, Any]:
         self._require_clients()
         assert self.custom is not None
-        return await self.custom.create_namespaced_custom_object(
+        # A dry run stores nothing, so it is safe to send again.
+        return await self._retry_vcluster_api(
+            f"dry-run creating a DGDR in {self.config.namespace}",
+            self.custom.create_namespaced_custom_object,
             group=DGDR_GROUP,
             version=DGDR_VERSION,
             namespace=self.config.namespace,
@@ -619,7 +644,11 @@ class ManagedDGDR:
         )
 
     async def ensure_absent(self, name: str) -> None:
-        current = await self.get(name)
+        current = await self._retry_vcluster_api(
+            f"reading DGDR {self.config.namespace}/{name} before create",
+            self.get,
+            name,
+        )
         if current is None:
             return
         await self._cleanup_name(name, failed=False)
