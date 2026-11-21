@@ -128,6 +128,11 @@ pub struct RequestTracker {
     /// Number of cached tokens derived from the effective cache hit - set once via OnceLock
     cached_tokens: OnceLock<usize>,
 
+    /// Prompt tokens the engine reported it reused (`engine_data.kv_cache_hit`, or the
+    /// final usage `cached_tokens` when the engine sends no `kv_cache_hit`).
+    /// First report wins, so a later decode leg or retry does not overwrite it.
+    engine_reused_tokens: OnceLock<u64>,
+
     /// Output sequence length in tokens - updated atomically as tokens stream back
     osl_tokens: AtomicU64,
 
@@ -252,6 +257,7 @@ impl RequestTracker {
             isl_blocks: OnceLock::new(),
             isl_tokens: OnceLock::new(),
             cached_tokens: OnceLock::new(),
+            engine_reused_tokens: OnceLock::new(),
             osl_tokens: AtomicU64::new(0),
             prefill_worker_id: OnceLock::new(),
             prefill_dp_rank: OnceLock::new(),
@@ -334,6 +340,14 @@ impl RequestTracker {
 
     pub fn cached_tokens(&self) -> Option<usize> {
         self.cached_tokens.get().copied()
+    }
+
+    pub fn record_engine_reused_tokens(&self, tokens: u64) {
+        let _ = self.engine_reused_tokens.set(tokens);
+    }
+
+    pub fn engine_reused_tokens(&self) -> Option<u64> {
+        self.engine_reused_tokens.get().copied()
     }
 
     /// Record current output sequence length in tokens. Updated at each output block boundary.
