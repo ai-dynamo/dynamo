@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Slime tutorial's setup Job ("Prepare the model and dataset"): downloads
+# Qwen3-0.6B and GSM8K to the shared volume and converts the checkpoint to
+# Megatron-LM's torch_dist format.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: slime-setup
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: slimerl/slime:nightly-dev-20261027a-cu130
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              hf download Qwen/Qwen3-0.6B --local-dir /data/models/Qwen3-0.6B
+              hf download --repo-type dataset zhuzilin/gsm8k --local-dir /data/datasets/gsm8k
+              cd /root/slime
+              source scripts/models/qwen3-0.6B.sh
+              PYTHONPATH=/root/Megatron-LM:/root/slime torchrun --standalone --nproc-per-node 1 \
+                tools/convert_hf_to_torch_dist.py "${MODEL_ARGS[@]}" \
+                --hf-checkpoint /data/models/Qwen3-0.6B \
+                --save /data/models/Qwen3-0.6B_torch_dist
+              mkdir -p /data/weight-updates
+              ls /data/datasets /data/models
+          resources:
+            requests:
+              cpu: "8"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: slime-data
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: slime-data
+          persistentVolumeClaim:
+            claimName: slime-data
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

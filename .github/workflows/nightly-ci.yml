@@ -794,6 +794,93 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  # The Slime RL tutorial end to end (tests/deploy/test_slime_kuberay.py): a
+  # setup Job stages a model on shared storage, a DGD serves rollouts from two
+  # SGLang engines, and a KubeRay RayJob trains against them. It runs this
+  # commit's SGLang and frontend images, with the KubeRay version that
+  # setup-kuberay pins. It cannot reuse shared-deploy-test.yml, which hardcodes
+  # `-m framework_only` and a 25-minute timeout.
+  #
+  # The trainer outgrows a MIG slice, so every GPU Pod selects whole-GPU nodes
+  # and tolerates their taints, as tests/deploy/test_dynamocheckpoint.py does.
+  # The test holds three of those GPUs at once (two engines and the trainer),
+  # and the trainer's node needs 16 CPUs and 200 GiB of memory free.
+  deploy-test-slime:
+    name: Slime RL Nightly Deploy Test
+    needs: [compute-release-mode, resolve-source-sha, deploy-operator, sglang-copy-to-acr, frontend-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    runs-on: prod-deploy-tester-v1
+    # Longer than the test's own 127-minute limit (TEST_TIMEOUT), so that a
+    # stuck run fails with the test's diagnostics before the job is cancelled.
+    timeout-minutes: 160
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: $/.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+      # setup-dynamo-operator lets the namespace reaper delete the vCluster two
+      # hours after creating it, and this test can still be running then, as in
+      # cross-version-compatibility.yml. deploy-cleanup deletes it either way.
+      - name: Keep the vCluster for the test's time limit
+        env:
+          HOST_NAMESPACE: ${{ needs.deploy-operator.outputs.namespace }}
+        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=21600 --overwrite
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install KubeRay
+        timeout-minutes: 15
+        uses: $/.github/actions/setup-kuberay
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+      - name: Run Slime RL Deploy Test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: nightly
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          # The test creates this namespace and deletes it at the end.
+          namespace: slime-e2e
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+          frontend_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+          test_name: slime_kuberay
+          test_file: tests/deploy/test_slime_kuberay.py
+          # The test deletes every object that it creates, its DGD included.
+          cleanup_deployment: 'false'
+          extra_pytest_args: >-
+            --slime-storage-class=azurefile-csi
+            --slime-gpu-node-selector=nvidia.com/gpu.present=true
+            --slime-gpu-node-selector=nvidia.com/mig.config=all-disabled
+            --slime-gpu-toleration=nvidia.com/gpu
+            --slime-gpu-toleration=dedicated
+
   cross-version-compatibility:
     name: SGLang nightly N-2 compatibility
     needs: [compute-release-mode, resolve-source-sha, deploy-operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
@@ -810,7 +897,7 @@ jobs:
   deploy-cleanup:
     name: Nightly Deploy Cleanup
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-slime]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

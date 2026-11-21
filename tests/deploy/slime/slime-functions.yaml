@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Slime tutorial's custom functions ("Add the Slime custom functions"),
+# mounted into the Ray head at /opt/slime-functions by rayjob.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slime-functions
+data:
+  dynamo_generate.py: |
+    import copy
+    import os
+    from urllib.parse import urlsplit
+
+    from slime.rollout.sglang_streaming_rollout import generate_streaming as slime_generate_streaming
+
+
+    async def generate_streaming(args, sample, sampling_params):
+        frontend = urlsplit(os.environ["DYNAMO_ROLLOUT_URL"])
+        frontend_args = copy.copy(args)
+        frontend_args.sglang_router_ip = frontend.hostname
+        frontend_args.sglang_router_port = frontend.port
+        return await slime_generate_streaming(frontend_args, sample, sampling_params)
+
+
+    generate_streaming.abort_mode = "request"
+  weight_permissions.py: |
+    import os
+
+
+    def make_weights_readable(args, version_dir, rollout_engines):
+        for root, dirs, files in os.walk(version_dir):
+            for name in dirs:
+                os.chmod(os.path.join(root, name), 0o755)
+            for name in files:
+                os.chmod(os.path.join(root, name), 0o644)
+        os.chmod(version_dir, 0o755)

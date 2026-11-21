@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Slime tutorial's shared volume ("Create the namespace and shared volume").
+# tests/deploy/test_slime_kuberay.py sets storageClassName from
+# --slime-storage-class, as the tutorial's shell does from $STORAGE_CLASS, and
+# skips this file when --slime-pvc names an existing claim.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slime-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 100Gi
