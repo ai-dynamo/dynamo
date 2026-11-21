@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -142,6 +143,7 @@ func (v *sharedValidation) validateLPXConfig(config *nvidiacomv1beta1.LPXConfig,
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
+	discoveryBackend                   configv1alpha1.DiscoveryBackend
 	ctx                                context.Context
 	mgr                                ctrl.Manager
 	warnings                           admission.Warnings

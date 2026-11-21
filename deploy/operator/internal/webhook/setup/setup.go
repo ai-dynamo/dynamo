@@ -27,7 +27,9 @@ type Options struct {
 	// DGDRV1beta1 configures the defaults of v1beta1 Requests.
 	DGDRV1beta1 webhookdefaulting.DGDRV1beta1Options
 	// DGDRV1beta2 configures cluster-derived defaults of v1beta2 Requests.
-	DGDRV1beta2       webhookdefaulting.DGDRV1beta2Options
+	DGDRV1beta2 webhookdefaulting.DGDRV1beta2Options
+	// OperatorPrincipal is the full Kubernetes ServiceAccount username used by this operator.
+	// An empty value disables exemptions for operator-authenticated child writes.
 	OperatorPrincipal string
 	Gate              features.Gate
 }
@@ -59,12 +61,12 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
-	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler(cfg.Discovery.Backend, opts.OperatorPrincipal)
 	if err := dcdHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, opts.OperatorPrincipal)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, opts.OperatorPrincipal, cfg.Discovery.Backend)
 	if err := dgdHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}

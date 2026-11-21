@@ -94,3 +94,8 @@ func RenderService(params ServiceParams) (*corev1.Service, error) {
 func ServiceEnabled(componentType string, kubernetesDiscovery bool) bool {
 	return kubernetesDiscovery || componentType == commonconsts.ComponentTypeFrontend
 }
+
+// IngressEnabled reports whether a legacy component config creates a Kubernetes Ingress.
+func IngressEnabled(enabled bool, ingressClassName *string) bool {
+	return enabled && ingressClassName != nil
+}
