@@ -9,7 +9,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Rust sidecar for vLLM's native gRPC server"
+description = "Rust sidecar for vLLM gRPC and realtime media services"
 
 [[bin]]
 name = "dynamo-vllm-sidecar"
@@ -28,6 +28,7 @@ jemalloc = ["dynamo-sidecar-common/jemalloc"]
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-realtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 
 anyhow = { workspace = true }
@@ -36,9 +37,16 @@ async-trait = { workspace = true }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+# The separately locked Python bindings can retain a newer compatible matcher.
+hyper-util = { version = "0.1.17", features = ["client-proxy"] }
 pep440_rs = "0.7"
+percent-encoding = "2.3.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -49,8 +57,10 @@ tonic-health-v14 = { workspace = true }
 vllm-proto = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 dynamo-vllm-generate = { workspace = true }
-reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-tempfile = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
