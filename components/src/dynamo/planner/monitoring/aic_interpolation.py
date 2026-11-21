@@ -22,7 +22,7 @@ are interchangeable from the regression models' perspective:
   ``wall_time = per-step ITL``. Matches thorough's aggregate semantics. We
   convert aggregate → per-rank before calling AIC (AIC's
   ``RuntimeConfig.batch_size`` is per-attention-DP-rank, per the
-  ``TrtllmWideEPDeepSeekModel`` comment in aisimulate_core/sdk/models/).
+  ``TrtllmWideEPDeepSeekModel`` comment in aisim_core/sdk/models/).
 
 The 7 MoE-DEP bugs that silently corrupted the old profiler path are fixed
 here: every AIC call uses :func:`picked_to_aic_model_config_kwargs` so
@@ -62,7 +62,7 @@ def run_aic_interpolation(
 ) -> list[ForwardPassMetrics]:
     """Run the AIC interpolation sweep and return synthetic FPMs.
 
-    Lazy-imports ``aisimulate_core`` — callers should catch ``ImportError``
+    Lazy-imports ``aisim_core`` — callers should catch ``ImportError``
     and fall back to the file-based loader if the dependency is missing.
     """
     from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator

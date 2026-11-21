@@ -684,7 +684,8 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     telemetry_interval: float | None,
     expected_telemetry: bool,
 ) -> None:
-    config = types.SimpleNamespace(mode="agg", advisory=False)
+    # An advisory rival config: the arena must still apply its decisions.
+    config = types.SimpleNamespace(mode="agg", advisory=True)
     engine_args = _canonical_engine_args(
         {"backend": "vllm", "backend_version": "current"}
     )
@@ -697,6 +698,7 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     class FakeAdapter:
         def __init__(self, **kwargs: Any) -> None:
             assert kwargs["planner_config"] is config
+            assert config.advisory is False
             assert kwargs["warmup_observations"] is None
             assert kwargs["benchmark_granularity"] == 8
 

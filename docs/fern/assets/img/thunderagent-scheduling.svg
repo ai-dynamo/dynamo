@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1012" height="321" viewBox="22 29 1012 321" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Pause sessions that wait on tools to protect KV cache</title>
+  <desc id="desc">Agent sessions feed the ThunderAgent scheduler in the frontend. A session in an LLM turn keeps running. A session waiting on a tool is paused while KV cache is under pressure, and it resumes when there is room.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-blue-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="29" width="1012" height="321" fill="#FFFFFF"/>
+  <text x="36" y="66" font-size="25.0" font-weight="700" fill="#1A1A1A">Pause sessions that wait on tools to protect KV cache</text>
+  <rect x="36" y="100" width="290" height="68" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="56" y="128" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Session A</text>
+  <text x="56" y="152" font-size="15" font-weight="400" fill="#3F6600" text-anchor="start">running</text>
+  <line x1="328" y1="134" x2="364" y2="134" stroke="#76B900" stroke-width="2.5"/>
+  <rect x="36" y="184" width="290" height="68" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="2"/>
+  <text x="56" y="212" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Session B</text>
+  <text x="56" y="236" font-size="15" font-weight="400" fill="#92400E" text-anchor="start">waiting on a tool: paused</text>
+  <line x1="328" y1="218" x2="364" y2="218" stroke="#76B900" stroke-width="2.5"/>
+  <rect x="36" y="268" width="290" height="68" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="56" y="296" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Session C</text>
+  <text x="56" y="320" font-size="15" font-weight="400" fill="#3F6600" text-anchor="start">tool done: resumed</text>
+  <line x1="328" y1="302" x2="364" y2="302" stroke="#76B900" stroke-width="2.5"/>
+  <line x1="364" y1="134" x2="364" y2="302" stroke="#76B900" stroke-width="2.5"/>
+  <line x1="364" y1="218" x2="398" y2="218" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="400" y="158" width="180" height="120" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <line x1="477.0" y1="193.2" x2="503.0" y2="193.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><circle cx="485.0" cy="193.2" r="3.4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><line x1="477.0" y1="201.2" x2="503.0" y2="201.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><circle cx="496.0" cy="201.2" r="3.4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><line x1="477.0" y1="209.2" x2="503.0" y2="209.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><circle cx="488.0" cy="209.2" r="3.4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="490.0" y="262" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">ThunderAgent</text>
+  <line x1="582" y1="218" x2="708" y2="218" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="710" y="96" width="310" height="236" rx="12" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <g transform="translate(740 126) scale(0.9)"><rect x="-13" y="-9" width="7" height="8" rx="1.5" fill="#76B900" fill-opacity="1" stroke="#76B900" stroke-width="1.2"/><rect x="-13" y="1" width="7" height="8" rx="1.5" fill="#76B900" fill-opacity="0.35" stroke="#76B900" stroke-width="1.2"/><rect x="-4" y="-9" width="7" height="8" rx="1.5" fill="#76B900" fill-opacity="0.35" stroke="#76B900" stroke-width="1.2"/><rect x="-4" y="1" width="7" height="8" rx="1.5" fill="#76B900" fill-opacity="1" stroke="#76B900" stroke-width="1.2"/><rect x="5" y="-9" width="7" height="8" rx="1.5" fill="#76B900" fill-opacity="1" stroke="#76B900" stroke-width="1.2"/><rect x="5" y="1" width="7" height="8" rx="1.5" fill="#76B900" fill-opacity="0.35" stroke="#76B900" stroke-width="1.2"/></g>
+  <text x="768" y="132" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">KV cache</text>
+  <rect x="730" y="162" width="270" height="32" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="865" y="184" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">A</text>
+  <rect x="730" y="206" width="270" height="32" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="2"/>
+  <text x="865" y="228" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
+  <rect x="730" y="250" width="270" height="32" rx="8" fill="#FFFFFF" stroke="#76B900" stroke-width="1.5" stroke-dasharray="6 5"/>
+</svg>

@@ -129,7 +129,7 @@ runs:
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
           operator)
-            BASELINE_STEM="go@63303112"
+            BASELINE_STEM="go@f68eec2e"
             [[ -z "${{ inputs.target }}" ]] && RUN_COMPLIANCE="true" ;;
         esac
         echo "baseline_stem=${BASELINE_STEM}" >> $GITHUB_OUTPUT
@@ -286,9 +286,14 @@ runs:
         # The build checkout is shallow with no tags. Make the refs each baseline
         # rule needs reachable (all best-effort; a miss just yields an empty
         # base_sha and a baseline_unavailable diff). Depth 30 gives the
-        # first-parent baseline walks enough history to find an artifact:
-        git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
-        git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
+        # first-parent baseline walks enough history to find an artifact. Fetch
+        # HEAD by SHA with an explicit depth; `--deepen` is far slower here.
+        git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true # HEAD~N (main post-merge walk)
+        # Only the release rule reads tags. With no refspec, this fetch also
+        # downloads every branch on origin, so run it only for release builds.
+        if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
+          git fetch --tags --quiet || true                                        # vX.Y.Z tags (release branch)
+        fi
         if [ "${DIFF_BASE_BRANCH}" = "main" ] && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
           git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
         fi
@@ -468,6 +473,7 @@ runs:
         # images' compliance-<git-sha>-<container> naming. artifact_tag lets a
         # suffixed image tag (nightly) keep this canonical artifact name.
         name: compliance-${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}
+        overwrite: true
         path: /tmp/compliance/
         retention-days: 90
 
@@ -476,5 +482,6 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}-sources
+        overwrite: true
         path: /tmp/sources/
         retention-days: 90

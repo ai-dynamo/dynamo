@@ -38,14 +38,12 @@ const (
 
 func baseJob() *batchv1.Job {
 	return &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "profile-test",
-			Namespace: "default",
-			Labels: map[string]string{
-				nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
-				nvidiacomv1beta1.LabelDGDR:      "my-dgdr",
-				nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
-			},
+		Name:      "profile-test",
+		Namespace: "default",
+		Labels: map[string]string{
+			nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
+			nvidiacomv1beta1.LabelDGDR:      "my-dgdr",
+			nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: ptr.To[int32](3),
@@ -78,7 +76,7 @@ func baseJob() *batchv1.Job {
 						},
 					},
 					Volumes: []corev1.Volume{
-						{Name: "profiling-output", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: "profiling-output", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 					},
 					ImagePullSecrets: []corev1.LocalObjectReference{
 						{Name: "nvcr-imagepullsecret"},
@@ -151,7 +149,7 @@ func TestApplyProfilingJobOverrides_Parallelism(t *testing.T) {
 func TestApplyProfilingJobOverrides_Suspend(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
-		Suspend: ptr.To(true),
+		Suspend: new(true),
 	})
 	if job.Spec.Suspend == nil || !*job.Spec.Suspend {
 		t.Error("expected Suspend=true")
@@ -332,7 +330,7 @@ func TestApplyProfilingJobOverrides_RuntimeClassName(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{RuntimeClassName: ptr.To("nvidia")},
+			Spec: corev1.PodSpec{RuntimeClassName: new("nvidia")},
 		},
 	})
 	if job.Spec.Template.Spec.RuntimeClassName == nil || *job.Spec.Template.Spec.RuntimeClassName != "nvidia" {
@@ -400,7 +398,7 @@ func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 			},
 		},
 	})
@@ -414,7 +412,7 @@ func TestEnsureOutputCopierKubeAPIAccess_AutomountServiceAccountTokenFalse(t *te
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 			},
 		},
 	})
@@ -467,10 +465,10 @@ func TestEnsureOutputCopierKubeAPIAccess_ProtectsTokenVolumeFromOverrides(t *tes
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				Volumes: []corev1.Volume{{
-					Name:         VolumeNameOutputCopierKubeAPIAccess,
-					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+					Name:     VolumeNameOutputCopierKubeAPIAccess,
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				}},
 				Containers: []corev1.Container{{
 					VolumeMounts: []corev1.VolumeMount{{
@@ -512,10 +510,8 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{{
-					Name: VolumeNameDGDOverrideTool,
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "unexpected"},
-					},
+					Name:                  VolumeNameDGDOverrideTool,
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "unexpected"},
 				}},
 				InitContainers: []corev1.Container{
 					{
@@ -675,10 +671,9 @@ func TestApplyProfilingJobOverrides_VolumesDedup(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{
-					{Name: "profiling-output", VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "user-pvc"},
-					}},
-					{Name: "extra-config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "profiling-output",
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "user-pvc"}},
+					{Name: "extra-config", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 				},
 			},
 		},
@@ -850,7 +845,7 @@ func TestApplyProfilingJobOverrides_ContainerEnvFrom(t *testing.T) {
 					{
 						EnvFrom: []corev1.EnvFromSource{
 							{ConfigMapRef: &corev1.ConfigMapEnvSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: "profiler-env"},
+								Name: "profiler-env",
 							}},
 						},
 					},
@@ -866,7 +861,7 @@ func TestApplyProfilingJobOverrides_ContainerEnvFrom(t *testing.T) {
 func TestApplyProfilingJobOverrides_ContainerSecurityContext(t *testing.T) {
 	job := baseJob()
 	sc := &corev1.SecurityContext{
-		Privileged: ptr.To(false),
+		Privileged: new(false),
 		RunAsUser:  ptr.To[int64](2000),
 	}
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -887,13 +882,13 @@ func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
 	job := baseJob()
 	// Seed a default pod-level security context (mimics what the controller sets).
 	job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(true),
+		RunAsNonRoot: new(true),
 		RunAsUser:    ptr.To[int64](1000),
 		RunAsGroup:   ptr.To[int64](1000),
 		FSGroup:      ptr.To[int64](1000),
 	}
 	override := &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(false),
+		RunAsNonRoot: new(false),
 	}
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
@@ -1022,7 +1017,7 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 		ReadOnly:  true,
 	}}
 	job.Spec.Template.Spec.Containers[1].SecurityContext = &corev1.SecurityContext{
-		RunAsNonRoot: ptr.To(true),
+		RunAsNonRoot: new(true),
 	}
 
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -1038,7 +1033,7 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 						}},
 						EnvFrom: []corev1.EnvFromSource{{
 							ConfigMapRef: &corev1.ConfigMapEnvSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: "sidecar-env"},
+								Name: "sidecar-env",
 							},
 						}},
 						VolumeMounts: []corev1.VolumeMount{
@@ -1055,7 +1050,7 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 						},
 						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot: ptr.To(false),
+							RunAsNonRoot: new(false),
 						},
 						Command: []string{"/bin/bash"},
 						Args:    []string{"-c", "echo overridden"},
@@ -1302,7 +1297,7 @@ func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 				PriorityClassName:  "batch",
 				ServiceAccountName: "custom-sa",
 				Volumes: []corev1.Volume{
-					{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "scratch", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 				},
 				Containers: []corev1.Container{
 					{

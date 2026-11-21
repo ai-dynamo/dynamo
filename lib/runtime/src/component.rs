@@ -284,6 +284,8 @@ impl Component {
             name: endpoint.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
+            inflight_requests: Arc::new(OnceLock::new()),
+            track_response_completion: false,
             lifecycle_operation_role: Arc::new(OnceLock::new()),
         };
         // Attach endpoint registry so scrapes traverse separate registries (avoids collisions).
@@ -374,6 +376,9 @@ pub struct Endpoint {
     /// This hierarchy's own metrics registry
     metrics_registry: crate::MetricsRegistry,
 
+    pub(crate) inflight_requests: Arc<OnceLock<prometheus::IntGauge>>,
+    pub(crate) track_response_completion: bool,
+
     /// Topology role shared by all clones of this endpoint.
     lifecycle_operation_role: Arc<OnceLock<crate::telemetry::LifecycleOperationRole>>,
 }
@@ -462,7 +467,9 @@ impl Endpoint {
         Ok(())
     }
 
-    pub(crate) fn lifecycle_operation_role(
+    /// The cell holding this endpoint's topology role, shared by every clone of
+    /// it: empty until a role is recorded, then fixed.
+    pub fn lifecycle_operation_role(
         &self,
     ) -> Arc<OnceLock<crate::telemetry::LifecycleOperationRole>> {
         self.lifecycle_operation_role.clone()
@@ -470,6 +477,16 @@ impl Endpoint {
 
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
+    }
+
+    /// Like [`Self::client`], but a worker reported down stays out of routing for
+    /// `inhibited_duration` instead of `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Zero
+    /// disables local inhibition.
+    pub async fn client_with_inhibited_duration(
+        &self,
+        inhibited_duration: Duration,
+    ) -> anyhow::Result<client::Client> {
+        client::Client::with_reconcile_interval(self.clone(), inhibited_duration).await
     }
 
     /// Like [`Self::client`], but the returned `Client`'s background

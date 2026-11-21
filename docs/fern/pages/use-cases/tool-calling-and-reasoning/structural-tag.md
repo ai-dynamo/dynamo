@@ -34,13 +34,16 @@ Benefits:
 Structural tags are enabled by default. Configure the tool-call parser on the
 **worker**; the Frontend needs no extra flags:
 
-> [!NOTE]
-> TensorRT-LLM guided decoding remains **opt-in** pending
-> [TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913).
-> Its `--guided-decoding-backend` default is unset, so default deployments ignore
-> structural tags and do not enforce their tool argument schemas. For affected
-> deployments using `--guided-decoding-backend xgrammar`, pass
-> `--no-dyn-enable-structural-tag` until a supported upgrade resolves the issue.
+<Note>
+TensorRT-LLM guided decoding remains **opt-in** pending
+[TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913).
+Its `--guided-decoding-backend` default is unset, so default deployments ignore
+structural tags and do not enforce their tool argument schemas. For affected
+deployments using `--guided-decoding-backend xgrammar`, pass
+`--dyn-structural-tag false` until a supported upgrade resolves the issue.
+The TensorRT-LLM sidecar publishes no structural tags unless you pass
+`--dyn-structural-tag`.
+</Note>
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -130,6 +133,8 @@ To disable optional structural guidance, pass `false` to the worker:
 python3 -m dynamo.vllm ... --dyn-structural-tag false
 python3 -m dynamo.sglang ... --dyn-structural-tag false
 python3 -m dynamo.trtllm ... --dyn-structural-tag false
+dynamo-sglang-sidecar ... --dyn-structural-tag false
+dynamo-vllm-sidecar ... --dyn-structural-tag false
 ```
 
 Or set the equivalent environment variable before starting the worker:
@@ -138,8 +143,9 @@ Or set the equivalent environment variable before starting the worker:
 export DYN_STRUCTURAL_TAG=false
 ```
 
-Rust preprocessing still applies native tags to Kimi K2 `required`/named
-choices and Kimi K3 named choices when optional structural tags are disabled.
+Rust preprocessing, including the native sidecars, still applies native tags to
+Kimi K2 `required`/named choices and Kimi K3 named choices when optional
+structural tags are disabled.
 A lookahead pattern can still be rejected by XGrammar
 0.2.1 or 0.2.7 unless the tool sets `strict: false` under schema mode `auto`.
 Global schema mode `strict` overrides that workaround. Kimi K2/K3 automatic
@@ -161,6 +167,16 @@ The legacy `--dyn-enable-structural-tag`, `--no-dyn-enable-structural-tag`,
 `--dyn-structural-tag-scope`, and `--dyn-structural-tag-schema` flags and their
 environment variables remain accepted with a deprecation warning.
 
+The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
+as described in [CLI Flags](#cli-flags), but not the legacy flags or their
+environment variables. The SGLang sidecar uses the same default-on policy. The
+vLLM sidecar uses it when vLLM reports version 0.33 or later, the first release
+whose gRPC server compiles these tags with xgrammar. Against older vLLM it
+defaults to `false`, because that gRPC server compiles them with guidance,
+which rejects them. 0.33 release candidates and development builds also use
+it. The TensorRT-LLM sidecar defaults to `false`: the
+xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
+
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM
 0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
 non-strict also gets no structural tag from the registry; see
@@ -173,17 +189,20 @@ Not all parsers support structural tags. Parsers without a structural-tag
 builder fall back to their existing best-effort tool-calling behavior without
 rejecting the request.
 
-Currently tested and supported:
+After selector validation, builder lookup tries the compatible Unified builder, then the tool selector’s V1 builder if none is available. This does not change the response parser route: explicit V2 still rejects unavailable or incompatible selector configurations. Backend compilation and request-schema support are separate checks.
 
-- `qwen3_coder`, `nemotron_nano`
+- `beam` through the pinned Unified library builder
+- `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`
+- `glm47` (V1 and V2 builders)
+- `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict
 - `hermes`, `qwen25`
-- `deepseek_v3_2`, `deepseek_v4`
-- `kimi_k2`, `kimi_k3`, `kimi-k3`
 - `inkling`
-- `glm47` with parsers v2
+- `kimi_k2`, `kimi_k3`, `kimi-k3`
+- `minimax_m3` / `minimax-m3` with explicit V2
+- `muse_spark` / `muse_spark_open` on V2
+- `nemotron_nano`, `qwen3_coder`
 
-The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
-`DYN_PARSER_VERSION=2` in the worker and frontend processes.
+V2 builders need compatible frontend and worker routes; see [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing). The pinned V2 library has no native builder for `muse_glimmer`, `gemma4`, or `nemotron_v3`. Engine fallback uses the installed engine registry.
 
 Contributions adding structural tag support for new parsers are welcome.
 
@@ -192,12 +211,21 @@ frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
 
-> [!NOTE]
-> Native Rust sidecars retain their existing conservative `off`/`auto`
-> settings, including the native Kimi forced-tool exception described above,
-> and are not included in this default change. The default-on policy
-> applies when regular vLLM, SGLang, or TensorRT-LLM workers publish the
-> deployment runtime configuration consumed by frontend preprocessing.
+### Checking Grammar Availability
+
+Output-parser availability does not guarantee structural-tag support. Query the registered grammar builders separately:
+
+```python
+from dynamo._core import get_structural_tag_parser_names
+
+parser_name = "deepseek_v41"
+if parser_name not in get_structural_tag_parser_names():
+    raise ValueError(f"No structural-tag grammar registered for {parser_name}")
+```
+
+`get_structural_tag_parser_names()` returns a sorted, deduplicated inventory across the V1 and V2 registries. It does not select a parser generation, validate a tool/reasoning parser pair, or qualify the backend's installed XGrammar version. Check those deployment requirements separately.
+
+On a compatible V2 route, `deepseek_v41` uses its V4.1 framing and `deepseek_v4_1_xml` argument style; `deepseek_v4` retains `deepseek_xml`. With structural tags enabled, the registered V4.1 builder supplies guidance by default. Set `--dyn-structural-tag false` to disable optional guidance.
 
 ## Activation Scope
 
@@ -222,7 +250,9 @@ based on the request's `tool_choice`:
 
 ## Request Validation
 
-Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+By default, Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Strict client tools converted from `/v1/messages` use the same check. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+
+To retain legacy request admission during an upgrade, set `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` on the frontend. This skips strict function-schema preflight without requiring client changes, including definitions with optional properties, open objects, or `oneOf`. It applies to every model in the frontend process, including strict tools converted from `/v1/messages`, and preserves the submitted schema and `strict` declaration. Schema reference and complexity preflight checks are also skipped; basic tool validation, HTTP body limits, and downstream processor and backend checks remain active. This mode does not guarantee that a backend can enforce or compile the schema. See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#frontend-feature-switches).
 
 Use an object-only root. Close each object with `additionalProperties: false` and include every named property in `required`. These object checks also apply to nullable nested objects and schemas that declare `properties` or `patternProperties`. For example:
 
@@ -274,14 +304,15 @@ builder cannot produce an automatically added tool-call tag, Dynamo uses the exi
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
 
-> [!WARNING]
-> Valid tool schemas containing constructs unsupported by the backend's
-> XGrammar version, such as regex lookahead, can cause request rejection.
-> Backend compilation errors do not trigger Dynamo's builder fallback.
-> With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
-> function's `strict: false` avoids this lookahead rejection by disabling
-> argument-schema enforcement. This workaround is not guaranteed on older
-> versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
+<Warning>
+Valid tool schemas containing constructs unsupported by the backend's
+XGrammar version, such as regex lookahead, can cause request rejection.
+Backend compilation errors do not trigger Dynamo's builder fallback.
+With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
+function's `strict: false` avoids this lookahead rejection by disabling
+argument-schema enforcement. This workaround is not guaranteed on older
+versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
+</Warning>
 
 In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`

@@ -88,6 +88,9 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
 
     original_factory = Mock()
     assert hooks[_FACTORY_TARGET](original_factory, enable=True) is adapter
+    disabled = hooks[_FACTORY_TARGET](original_factory, enable=False)
+    assert disabled is original_factory.return_value
+    original_factory.assert_called_once_with(enable=False)
     with (
         adapter.region("weights", enable_cpu_backup=True),
         adapter.region("kv_cache", enable_cpu_backup=False),

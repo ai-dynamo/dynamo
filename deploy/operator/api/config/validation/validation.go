@@ -19,9 +19,11 @@ package validation
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	kubevalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -31,19 +33,18 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 		return field.ErrorList{field.Required(field.NewPath(""), "operator configuration is required")}
 	}
 
-	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, validateServer(&config.Server, field.NewPath("server"))...)
-	allErrs = append(allErrs, validateLeaderElection(&config.LeaderElection, field.NewPath("leaderElection"))...)
-	allErrs = append(allErrs, validateNamespace(&config.Namespace, field.NewPath("namespace"))...)
-	allErrs = append(allErrs, validateMPI(&config.MPI, field.NewPath("mpi"))...)
-	allErrs = append(allErrs, validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure"))...)
-	allErrs = append(allErrs, validateDiscovery(&config.Discovery, field.NewPath("discovery"))...)
-	allErrs = append(allErrs, validateRBAC(config)...)
-	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
-	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
-	allErrs = append(allErrs, validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh"))...)
-
-	return allErrs
+	return slices.Concat(
+		validateServer(&config.Server, field.NewPath("server")),
+		validateLeaderElection(&config.LeaderElection, field.NewPath("leaderElection")),
+		validateNamespace(&config.Namespace, field.NewPath("namespace")),
+		validateMPI(&config.MPI, field.NewPath("mpi")),
+		validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure")),
+		validateDiscovery(&config.Discovery, field.NewPath("discovery")),
+		validateRBAC(config),
+		validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators")),
+		validateIngress(&config.Ingress, field.NewPath("ingress")),
+		validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh")),
+	)
 }
 
 func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.Path) field.ErrorList {
@@ -237,6 +238,13 @@ func validateOrchestrators(orch *configv1alpha1.OrchestratorConfiguration, fldPa
 
 	if orch.Grove.TerminationDelay.Duration < 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("grove", "terminationDelay"), orch.Grove.TerminationDelay.Duration, "must not be negative"))
+	}
+
+	// Scheduler names use the same DNS subdomain validation as PodSpec.schedulerName.
+	if name := orch.KaiScheduler.SchedulerName; name != "" {
+		for _, message := range kubevalidation.IsDNS1123Subdomain(name) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("kaiScheduler", "schedulerName"), name, message))
+		}
 	}
 
 	return allErrs

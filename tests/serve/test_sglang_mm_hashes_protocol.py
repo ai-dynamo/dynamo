@@ -7,14 +7,12 @@ These fast unit tests import the installed sglang module and verify two
 contracts that the dynamo Rust frontend depends on for MM-aware KV
 routing:
 
-  1. ``sglang.srt.managers.schedule_batch._compute_pad_value(hash)`` must
-     equal ``MM_PAD_SHIFT_VALUE + (hash % (1 << 30))`` with
-     ``MM_PAD_SHIFT_VALUE == 1_000_000``. Mirrored in Rust at
-     ``dynamo_kv_router::protocols::pad_value_for_mm_hash`` (shared by the
-     frontend and the kv-router's vLLM-event normalization). Pinned by
-     the Rust unit ``pad_value_matches_sglang_protocol`` on our side;
-     this test pins the same constants on sglang's side so a future
-     sglang bump that shifts the formula fails-closed at PR time.
+  1. ``MultimodalDataItem`` exposes ``pad_values``, and every image pad
+     is at or above ``MM_PAD_SHIFT_VALUE == 1_000_000``. Dynamo detects
+     that field to enable text-prefix routing on wide-token builds. Its
+     KV event normalizer excludes blocks containing tokens at or above
+     ``dynamo_kv_router::protocols::MM_PAD_SHIFT_VALUE`` and their
+     descendants, without changing SGLang's cache identity.
 
   2. ``GenerateReqInput.mm_hashes`` field is present. Added by
      sgl-project/sglang#25300 and upstream in SGLang v0.5.13. A dynamo sglang
@@ -36,25 +34,22 @@ pytestmark = [
 ]
 
 
-def test_sglang_pad_value_formula_unchanged() -> None:
+def test_sglang_wide_pads_stay_above_router_exclusion_threshold() -> None:
     from sglang.srt.managers.schedule_batch import (
         MM_PAD_SHIFT_VALUE,
-        _compute_pad_value,
+        Modality,
+        MultimodalDataItem,
     )
 
     assert MM_PAD_SHIFT_VALUE == 1_000_000, (
-        f"sglang MM_PAD_SHIFT_VALUE changed to {MM_PAD_SHIFT_VALUE}; "
-        "dynamo's pad_value_for_sglang in lib/llm/src/preprocessor.rs "
-        "must be updated in lockstep or MM-aware routing will misroute."
+        f"sglang MM_PAD_SHIFT_VALUE changed to {MM_PAD_SHIFT_VALUE}; the KV "
+        "event normalizer excludes tokens at or above "
+        "dynamo_kv_router::protocols::MM_PAD_SHIFT_VALUE."
     )
-    assert _compute_pad_value(0) == 1_000_000
-    fits = (1 << 30) - 1
-    assert _compute_pad_value(fits) == 1_000_000 + fits
-    overflow = (1 << 30) | 0xCAFE
-    assert _compute_pad_value(overflow) == 1_000_000 + 0xCAFE, (
-        "high bits above the 30-bit mask must be discarded; sglang's "
-        "formula switched away from `hash % (1 << 30)` if this fails"
-    )
+    assert "pad_values" in MultimodalDataItem.__struct_fields__
+    item = MultimodalDataItem(modality=Modality.IMAGE, offsets=[(1, 5)])
+    item.set_hash(0x9F3A6C1D2E4B5A78)
+    assert min(item.padding_values()) >= MM_PAD_SHIFT_VALUE
 
 
 def test_sglang_generate_req_input_has_mm_hashes_field() -> None:

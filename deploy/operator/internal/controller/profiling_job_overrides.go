@@ -20,6 +20,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"maps"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -99,10 +100,8 @@ func ensureDGDOverrideTool(
 	spec.Volumes = mergeNamedSlice(
 		spec.Volumes,
 		[]corev1.Volume{{
-			Name: VolumeNameDGDOverrideTool,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
+			Name:     VolumeNameDGDOverrideTool,
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		}},
 		func(volume corev1.Volume) string { return volume.Name },
 	)
@@ -120,9 +119,9 @@ func ensureDGDOverrideTool(
 		Command:         []string{"/dgd-apply-overrides"},
 		Args:            []string{"--install-to", DGDOverrideToolPath},
 		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			ReadOnlyRootFilesystem:   ptr.To(true),
-			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: new(false),
+			ReadOnlyRootFilesystem:   new(true),
+			RunAsNonRoot:             new(true),
 			RunAsUser:                ptr.To[int64](1000),
 			RunAsGroup:               ptr.To[int64](1000),
 			Capabilities: &corev1.Capabilities{
@@ -177,36 +176,32 @@ func outputCopierKubeAPIAccessVolume() corev1.Volume {
 	expirationSeconds := int64(ServiceAccountTokenExpirationSeconds)
 	return corev1.Volume{
 		Name: VolumeNameOutputCopierKubeAPIAccess,
-		VolumeSource: corev1.VolumeSource{
-			Projected: &corev1.ProjectedVolumeSource{
-				Sources: []corev1.VolumeProjection{
-					{
-						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-							Path:              "token",
-							ExpirationSeconds: &expirationSeconds,
-						},
+		Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{
+				{
+					ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+						Path:              "token",
+						ExpirationSeconds: &expirationSeconds,
 					},
-					{
-						ConfigMap: &corev1.ConfigMapProjection{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: ConfigMapNameKubeRootCA,
+				},
+				{
+					ConfigMap: &corev1.ConfigMapProjection{
+						Name: ConfigMapNameKubeRootCA,
+						Items: []corev1.KeyToPath{{
+							Key:  "ca.crt",
+							Path: "ca.crt",
+						}},
+					},
+				},
+				{
+					DownwardAPI: &corev1.DownwardAPIProjection{
+						Items: []corev1.DownwardAPIVolumeFile{{
+							Path: "namespace",
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.namespace",
 							},
-							Items: []corev1.KeyToPath{{
-								Key:  "ca.crt",
-								Path: "ca.crt",
-							}},
-						},
-					},
-					{
-						DownwardAPI: &corev1.DownwardAPIProjection{
-							Items: []corev1.DownwardAPIVolumeFile{{
-								Path: "namespace",
-								FieldRef: &corev1.ObjectFieldSelector{
-									APIVersion: "v1",
-									FieldPath:  "metadata.namespace",
-								},
-							}},
-						},
+						}},
 					},
 				},
 			},
@@ -295,9 +290,7 @@ func mergeAnnotations(tmpl *corev1.PodTemplateSpec, userAnnotations map[string]s
 	if tmpl.Annotations == nil {
 		tmpl.Annotations = make(map[string]string, len(userAnnotations))
 	}
-	for k, v := range userAnnotations {
-		tmpl.Annotations[k] = v
-	}
+	maps.Copy(tmpl.Annotations, userAnnotations)
 }
 
 // mergeImagePullSecrets combines base and override secrets, deduplicating by name.

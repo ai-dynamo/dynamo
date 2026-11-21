@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -41,14 +40,14 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 			t.Run(fmt.Sprintf("grouped=%t/%s", grouped, tc.name), func(t *testing.T) {
 				t.Log("Create the existing PCS with its creation-time replica seed")
 				dgd := &v1beta1.DynamoGraphDeployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid"},
+					Name: "graph", Namespace: "default", UID: "dgd-uid",
 					Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-						ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(tc.seed),
+						ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(tc.seed),
 						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:1.6.0"}}}},
 					}}},
 				}
 				if grouped {
-					dgd.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}}
+					dgd.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)}}
 				}
 				config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 				runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
@@ -69,9 +68,9 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 						items, _, err := unstructured.NestedSlice(wire.Object, "spec", "template", field)
 						require.NoError(t, err)
 						for _, raw := range items {
-							item := raw.(map[string]interface{})
+							item := raw.(map[string]any)
 							if _, exists := item["rollingUpdate"]; !exists {
-								item["rollingUpdate"] = map[string]interface{}{"maxUnavailable": int64(1)}
+								item["rollingUpdate"] = map[string]any{"maxUnavailable": int64(1)}
 							}
 						}
 						require.NoError(t, unstructured.SetNestedSlice(wire.Object, items, "spec", "template", field))
@@ -83,7 +82,7 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 
 				t.Log("Render a new capacity and budget while preserving the existing seed")
 				component := &dgd.Spec.Components[0]
-				component.Replicas = ptr.To(tc.desired)
+				component.Replicas = new(tc.desired)
 				component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: provideroverride.GroveAPIVersion, Value: apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf(`{"rollingUpdate":{"maxUnavailable":%d}}`, tc.budget))}}
 				provideroverride.DefaultTarget(component.ProviderOverride, "grove", provideroverride.ScopeComponent, component)
 				original := dgd.DeepCopy()

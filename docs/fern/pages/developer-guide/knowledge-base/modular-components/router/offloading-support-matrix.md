@@ -110,13 +110,13 @@ See the [TensorRT-LLM backend docs](../backends/tensorrt-llm/overview.md) for wo
 
 ### How the router actually computes
 
-The Rust worker selector (`lib/kv-router/src/scheduling/selector.rs`) scores each candidate worker with:
+The Rust worker selector (`lib/router/scheduler/src/selector/reference.rs`) scores each candidate worker with:
 
 ```
 overlap_credit_blocks = device_overlap_blocks       * effective_device_credit
                       + host_pinned_overlap_blocks  * 0.75  // host_cache_hit_weight, configurable in router config
                       + disk_overlap_blocks         * 0.25  // disk_cache_hit_weight, configurable in router config
-                      + shared_overlap_blocks       * shared_cache_multiplier
+                      + (shared_overlap_blocks + fetchable_blocks) * shared_cache_multiplier
 
 adjusted_prefill_blocks = max(raw_prefill_blocks - overlap_credit_blocks, 0)
 
@@ -127,7 +127,7 @@ logit = prefill_load_scale * adjusted_prefill_blocks   // default 1.0
 
 Before applying the device term, the router computes
 `effective_device_credit = overlap_score_credit / (1 + overlap_score_credit_decay * normalized_excess_prefill)`.
-The host, disk, and shared-cache credits do not decay.
+The host, disk, shared-cache, and fetchable-block credits do not decay. `fetchable_blocks` are the blocks a worker could fetch from a peer through a KV fetch hint, such as from KVCR, beyond everything it holds.
 
 The router picks the worker with the **minimum** logit.
 
@@ -148,5 +148,5 @@ See [Configuration and Tuning](configuration-and-tuning.md) for the cache-hit we
 - [Router Guide](router-guide.md) — routing modes, deployment modes, and event transport
 - [Native KV Offloading](../backends/vllm/native-kv-offloading.md) — vLLM detail page
 - [Using HiCache](../backends/sglang/hicache.md) — SGLang detail page
-- [KV Cache Offloading](../backends/vllm/kv-cache-offloading.md) — vLLM offloading backend catalog (native, KVBM, LMCache, FlexKV)
+- [KV Cache Offloading](../backends/vllm/kv-cache-offloading.md) — vLLM offloading backend catalog (native, LMCache, FlexKV)
 - [Feature Matrix](../../../../reference/general/compatibility.mdx) — per-backend feature support across Dynamo

@@ -51,7 +51,6 @@ from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
     managed_runtime,
-    parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
     wait_for_frontend_ready,
@@ -65,6 +64,7 @@ from tests.router.mocker_process import (
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.router_nvext import parse_sse_json_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -214,13 +214,13 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 
 def _require_router_ais() -> dict[str, Any]:
     pytest.importorskip(
-        "aisimulate_core",
-        reason="router AIS test requires aisimulate-core",
+        "aisim_core",
+        reason="router AIS test requires aisim-core",
     )
     # The native AIS callback requires the matching Python SDK.
     pytest.importorskip(
-        "aisimulate_core.sdk.engine",
-        reason="router AIS test requires aisimulate_core.sdk.engine",
+        "aisim_core.sdk.engine",
+        reason="router AIS test requires aisim_core.sdk.engine",
     )
     return ROUTER_AIS_CONFIG.copy()
 
@@ -462,6 +462,7 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
             {"planner_profile_data": PLANNER_PROFILE_DATA_DIR},
             id="kv-planner",
         ),
+        # The old mocker switch without a value: it still works and warns.
         pytest.param(
             "kv",
             {"ais_perf_model": True, "ais_system": "h200_sxm"},
@@ -469,7 +470,6 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
         ),
         pytest.param("round-robin", {}, id="roundrobin"),
         pytest.param("random", {}, id="random"),
-        pytest.param("power-of-two", {}, id="power-of-two"),
     ],
 )
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -1072,7 +1072,7 @@ async def _wait_for_expected_disagg_worker_ids(
                 ) as response:
                     if response.status != 200:
                         await response.read()
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(0.05)
                         continue
 
                     body = await response.text()
@@ -1087,6 +1087,16 @@ async def _wait_for_expected_disagg_worker_ids(
             last_worker_ids = worker_ids
             prefill_worker_id = worker_ids["prefill_worker_id"]
             decode_worker_id = worker_ids["decode_worker_id"]
+            # Both roles are registered, so a 200 that decode served as its own
+            # prefill means the prefill hop was skipped (#16529); the activation
+            # window must fail closed with a retryable 503 instead.
+            assert decode_worker_id is None or prefill_worker_id not in (
+                None,
+                decode_worker_id,
+            ), (
+                "Request was served by decode without a prefill hop after the "
+                f"prefill worker registered; worker IDs: {worker_ids}"
+            )
             if (
                 prefill_worker_id is not None
                 and decode_worker_id is not None
@@ -1478,6 +1488,50 @@ def test_disagg_per_role_router_modes(
 
 
 @pytest.mark.timeout(180)
+def test_disagg_per_role_policy_file(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """KV-routed prefill in front of round-robin decode, from a policy file alone.
+
+    The frontend takes only ``--router-policy-config`` and no worker advertises a
+    router configuration.
+    """
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text(
+        "worker_selection:\n  prefill: dynamo-default-cost-fn\n  decode: round-robin\n"
+    )
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+            router_policy_config=str(policy_file),
+        )
+
+
+@pytest.mark.timeout(180)
 def test_disagg_per_role_session_affinity(
     request,
     runtime_services_dynamic_ports,
@@ -1532,9 +1586,15 @@ def test_router_decisions_disagg_router_ais(
     logger.info("Starting disaggregated router prefix reuse test with router-side AIC")
 
     router_ais_config = {**_require_router_ais(), "worker_type": "prefill"}
+    # The frontend and the mockers all start with an AIS perf model value. The
+    # mockers share one config without worker_type: each fills in its own.
+    mocker_ais_config = {
+        key: value for key, value in router_ais_config.items() if key != "worker_type"
+    }
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
+        "ais_perf_model": mocker_ais_config,
     }
 
     run_disagg_router_decisions_test(

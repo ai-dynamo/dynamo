@@ -28,7 +28,7 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 	if annotations == nil {
 		return fmt.Errorf("checkpoint restore candidate annotations map is required")
 	}
-	removeRestoreCandidateMetadata(annotations)
+	RemoveRestoreCandidateMetadata(annotations)
 	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
 	}
@@ -90,7 +90,9 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 	return nil
 }
 
-func removeRestoreCandidateMetadata(annotations map[string]string) {
+// RemoveRestoreCandidateMetadata deletes Dynamo's private restore-candidate
+// handoff annotations and leaves the standalone Snapshot annotations untouched.
+func RemoveRestoreCandidateMetadata(annotations map[string]string) {
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
 	delete(annotations, commonconsts.RestoreCandidateSourceKindAnnotation)
@@ -158,10 +160,8 @@ func EnsureRestoreStartupProbe(container *corev1.Container) {
 	}
 	if startup == nil {
 		container.StartupProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{"cat", path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile)},
-				},
+			Exec: &corev1.ExecAction{
+				Command: []string{"cat", path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile)},
 			},
 			TimeoutSeconds:   1,
 			PeriodSeconds:    1,

@@ -143,8 +143,7 @@ curl http://localhost:8000/v1/chat/completions \
 ### Dynamo Infrastructure Debugging
 
 **KV cache and routing issues:**
-- Check KV event logs in `lib/llm/src/block_manager/kv_consolidator/tracker.rs`
-- Look at block manager state and consolidation behavior
+- Check KV event handling in `lib/llm/src/kv_router/publisher/`
 - Inspect routing decisions in the KV-aware router
 
 **ZMQ / networking issues:**

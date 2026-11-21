@@ -10,12 +10,15 @@ import pytest
 
 pytest.importorskip("vllm.config")
 
+from dynamo.common import kv_state_agent  # noqa: E402
+from dynamo.common.kv_state_agent import worker_raw_topic  # noqa: E402
 from dynamo.vllm import state_agent  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.router,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
@@ -42,7 +45,9 @@ def _config(mapping: dict[str, str], host: str = "worker-a.example"):
                 }
             ),
             kv_events_config=SimpleNamespace(
-                endpoint="tcp://*:5557", enable_kv_cache_events=True
+                endpoint="tcp://*:5557",
+                enable_kv_cache_events=True,
+                topic=worker_raw_topic(mapping.values()),
             ),
             enable_prefix_caching=True,
         ),
@@ -99,7 +104,7 @@ async def test_closed_lifecycle_bounds_late_owner_cleanup(monkeypatch):
     never_finishes = asyncio.Event()
     lifecycle = state_agent.StateAgentLifecycle()
     owner = SimpleNamespace(close=AsyncMock(side_effect=never_finishes.wait))
-    monkeypatch.setattr(state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+    monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
 
     await lifecycle.close()
     with pytest.raises(RuntimeError, match="closed"):
@@ -109,16 +114,17 @@ async def test_closed_lifecycle_bounds_late_owner_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_close_has_a_bounded_wait(monkeypatch):
+async def test_lifecycle_close_has_a_bounded_wait(monkeypatch, caplog):
     never_finishes = asyncio.Event()
     lifecycle = state_agent.StateAgentLifecycle()
     owner = SimpleNamespace(close=AsyncMock(side_effect=never_finishes.wait))
-    monkeypatch.setattr(state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+    monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
     await lifecycle.install(owner)
 
     await lifecycle.close()
 
     owner.close.assert_awaited_once()
+    assert "cleanup timed out" in caplog.text
 
 
 def test_cli_validates_state_agent_after_vllm_engine_config():
@@ -152,6 +158,8 @@ def test_cli_validates_state_agent_after_vllm_engine_config():
     )
 
     assert state_agent.state_agent_settings(config) is not None
+    # The worker publishes on its state-agent topic, not the configured one.
+    assert config.engine_args.kv_events_config.topic == worker_raw_topic([_owner("a")])
 
 
 @pytest.mark.asyncio
@@ -211,27 +219,70 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
         "tcp://worker-a.example:5563",
         "tcp://worker-a.example:5564",
     ]
+    topic = worker_raw_topic([_owner(slot) for slot in "abcd"])
+    assert [item["raw_topic"] for item in captured["descriptors"]] == [topic] * 4
     assert [item["image_token_id"] for item in captured["descriptors"]] == [99] * 4
     assert [item["video_token_id"] for item in captured["descriptors"]] == [100] * 4
     assert [item["router_hint_source"] for item in captured["descriptors"]] == [
         {
             "source_control_endpoint": "tcp://cache-owner.example:23284",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
         {
             "source_control_endpoint": "tcp://cache-owner.example:23285",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
         {
             "source_control_endpoint": "tcp://cache-owner.example:23286",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
         {
             "source_control_endpoint": "tcp://cache-owner.example:23287",
             "worker_type": "prefill",
+            "topology_domains": {},
         },
     ]
     assert captured["started"] is True
+
+
+@pytest.mark.asyncio
+async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
+    captured = {}
+
+    class FakeOwner:
+        def __init__(self, endpoint, worker_id, descriptors):
+            captured["descriptors"] = descriptors
+
+        async def start(self):
+            pass
+
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", FakeOwner)
+    config = _config({"0": _owner("a")})
+    config.disaggregation_mode = state_agent.DisaggregationMode.PREFILL
+    config.engine_args.kv_transfer_config.kv_connector_extra_config[
+        "secondary_tiers"
+    ] = [
+        {
+            "router_capabilities": ["router_hint"],
+            "control_advertise_host": "cache-owner.example",
+            "control_ports": ["23280"],
+        }
+    ]
+    await state_agent.start_attachment_owner(
+        config,
+        SimpleNamespace(connection_id=lambda: 17),
+        _vllm_config(0, 1),
+        image_token_id=None,
+        topology_domains={"rdma-island": "island-1"},
+    )
+
+    assert [
+        item["router_hint_source"]["topology_domains"]
+        for item in captured["descriptors"]
+    ] == [{"rdma-island": "island-1"}]
 
 
 @pytest.mark.asyncio
@@ -252,3 +303,17 @@ async def test_partial_rank_mapping_is_rejected_before_owner_construction(monkey
             image_token_id=None,
         )
     assert constructed is False
+
+
+@pytest.mark.asyncio
+async def test_topic_mismatch_is_rejected_before_owner_construction(monkeypatch):
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", None)
+    config = _config({"4": _owner("a")})
+    config.engine_args.kv_events_config.topic = "kv-events"
+    with pytest.raises(ValueError, match="state-agent worker topic"):
+        await state_agent.start_attachment_owner(
+            config,
+            SimpleNamespace(connection_id=lambda: 17),
+            _vllm_config(4, 1),
+            image_token_id=None,
+        )

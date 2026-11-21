@@ -25,6 +25,7 @@ current_replica_target = aggregation.current_replica_target
 ScheduledTick = planner_types.ScheduledTick
 TickInput = planner_types.TickInput
 WorkerCounts = planner_types.WorkerCounts
+engine_protocol = importlib.import_module("dynamo.planner.core.engine_protocol")
 
 
 def _cold_start_tick() -> tuple[ScheduledTick, TickInput]:
@@ -41,6 +42,25 @@ def _cold_start_tick() -> tuple[ScheduledTick, TickInput]:
         need_worker_fpm=True,
     )
     return tick, TickInput(now_s=15.0, worker_counts=counts)
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+@pytest.mark.parametrize(
+    "autoscaler_factory",
+    [
+        partial(StaticAutoscaler, num_prefill=1, num_decode=1),
+        ReactiveAutoscaler,
+        KedaAutoscaler,
+    ],
+)
+def test_rivals_keep_the_common_tick_contract_without_runtime_reconfiguration(
+    autoscaler_factory,
+):
+    autoscaler = autoscaler_factory()
+    assert isinstance(autoscaler, engine_protocol.EngineProtocol)
+    assert isinstance(autoscaler.initial_tick(0.0), ScheduledTick)
 
 
 def test_current_target_prefers_non_draining_expected_count() -> None:

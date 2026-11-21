@@ -100,6 +100,7 @@ def test_telemetry_capture_callback_and_jsonl_share_one_sample_stream(
     assert sum(sample["traffic"]["completed_requests"] for sample in samples) == 6
 
     assert set(samples[0]) == {
+        "host_caches",
         "sample_ordinal",
         "kind",
         "interval_start_ms",
@@ -118,6 +119,7 @@ def test_telemetry_capture_callback_and_jsonl_share_one_sample_stream(
         "draining_prefill_ids",
         "draining_decode_ids",
     }
+    assert all(sample["host_caches"] == [] for sample in samples)
 
 
 class _DisabledScalingPolicy:

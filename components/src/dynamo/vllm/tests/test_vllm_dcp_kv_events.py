@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from importlib.metadata import version
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,7 +10,6 @@ import pytest
 import pytest_asyncio
 import zmq
 import zmq.asyncio
-from packaging.version import Version
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm.v1.core.kv_cache_manager")
@@ -53,9 +51,7 @@ async def runtime(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
-    if Version(version("vllm")).release < (0, 31):
-        pytest.skip("Native effective cache-group metadata requires vLLM 0.31+")
-
+    """Check DCP events use effective block sizes without changing the cache config."""
     from vllm.distributed.kv_events import KVEventBatch
     from vllm.sampling_params import SamplingParams
     from vllm.utils.hashing import sha256
@@ -149,11 +145,19 @@ async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
         try:
             router = KvRouter(endpoint, block_size, KvRouterConfig(use_kv_events=True))
             assert await asyncio.wait_for(socket.recv(), timeout=5) == b"\x01kv-events"
-            await socket.send_multipart(
-                [b"kv-events", (0).to_bytes(8, "big"), msgspec.msgpack.encode(batch)]
-            )
+            payload = msgspec.msgpack.encode(batch)
             deadline = asyncio.get_running_loop().time() + 10
+            next_send = 0.0
+            seq = 0
             while True:
+                # The router's subscription is not observable, so an early publish can be
+                # lost; resend with the next engine sequence, as a real engine would.
+                if asyncio.get_running_loop().time() >= next_send:
+                    await socket.send_multipart(
+                        [b"kv-events", seq.to_bytes(8, "big"), payload]
+                    )
+                    seq += 1
+                    next_send = asyncio.get_running_loop().time() + 0.1
                 scores = await router.get_overlap_scores(tokens, include_shared=False)
                 if any(
                     row["worker_id"] == endpoint.connection_id()

@@ -118,6 +118,15 @@ impl TcpClient {
         info: ConnectionInfo,
         cancellation_counter: Option<IntCounter>,
     ) -> Result<StreamSender> {
+        Self::create_response_stream_with_guard(context, info, cancellation_counter, None).await
+    }
+
+    pub(crate) async fn create_response_stream_with_guard(
+        context: Arc<dyn AsyncEngineContext>,
+        info: ConnectionInfo,
+        cancellation_counter: Option<IntCounter>,
+        writer_guard: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<StreamSender> {
         let info =
             TcpStreamConnectionInfo::try_from(info).context("tcp-stream-connection-info-error")?;
         tracing::trace!("Creating response stream for {:?}", info);
@@ -187,12 +196,10 @@ impl TcpClient {
 
         // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
         let writer_context = context.clone();
-        let writer_task = tokio::spawn(handle_writer(
-            framed_writer,
-            bytes_rx,
-            alive_rx,
-            writer_context,
-        ));
+        let writer_task = tokio::spawn(async move {
+            let _writer_guard = writer_guard;
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
 
         let subject = info.subject.clone();
         let monitor_context = context;
@@ -288,7 +295,9 @@ impl TcpClient {
                 .instrument(reader_span),
         );
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver {
+            rx: bytes_rx.into(),
+        })
     }
 }
 
@@ -812,6 +821,7 @@ mod tests {
     async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
         let captured = Arc::new(CancellationEventCapture::default());
         // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(CancellationEventLayer(captured.clone())),
         );
@@ -924,6 +934,45 @@ mod tests {
             expected_sentinel.as_slice(),
             "sentinel header should match serialized ControlMessage::Sentinel"
         );
+    }
+
+    #[tokio::test]
+    async fn response_writer_retains_guard_while_socket_has_pending_output() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let context = Arc::new(Controller::default());
+        let info: ConnectionInfo = TcpStreamConnectionInfo {
+            address: listener.local_addr().unwrap().to_string(),
+            subject: "drain-test".to_string(),
+            context: context.id().to_string(),
+            stream_type: StreamType::Response,
+        }
+        .into();
+        let guard = Arc::new(());
+        let sender =
+            TcpClient::create_response_stream_with_guard(context, info, None, Some(guard.clone()))
+                .await
+                .unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+
+        // Larger than the loopback socket buffers, so dropping the publisher
+        // while the peer is paused leaves the writer with pending output.
+        let data = Bytes::from(vec![1; 16 * 1024 * 1024]);
+        sender.send(data.clone()).await.unwrap();
+        drop(sender);
+        tokio::task::yield_now().await;
+        assert_eq!(Arc::strong_count(&guard), 2);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut reader = FramedRead::new(peer, TwoPartCodec::default());
+            recv_msg(&mut reader).await; // transport handshake
+            assert_data_only_message(recv_msg(&mut reader).await, &data);
+            assert_sentinel_message(recv_msg(&mut reader).await);
+            while Arc::strong_count(&guard) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Test that handle_writer forwards messages from the channel to the framed writer

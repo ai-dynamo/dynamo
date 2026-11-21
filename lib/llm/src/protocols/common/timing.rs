@@ -94,6 +94,10 @@ pub struct RequestTracker {
     /// When the request was received (wall clock time as epoch milliseconds)
     request_received_epoch_ms: u64,
 
+    /// How long the request had been in the system before this process received it, as stamped
+    /// by an upstream router or gateway. Unset for a request received from a client.
+    upstream_elapsed: OnceLock<Duration>,
+
     /// When prefill started (for disaggregated serving) - set once via OnceLock
     prefill_start_time: OnceLock<Instant>,
 
@@ -215,6 +219,19 @@ pub struct RoutingData {
 }
 
 impl RequestTracker {
+    /// Apply metadata forwarded by a standalone router to this request's tracker.
+    pub(crate) fn ingest_routing_data(&self, data: RoutingData) {
+        if let Some(timing) = data.timing {
+            self.set_external_timing(timing);
+        }
+        if let Some(worker_id) = data.worker_id {
+            self.set_external_worker_info(worker_id);
+        }
+        if let Some(token_ids) = data.token_ids {
+            self.set_external_query_token_ids(token_ids);
+        }
+    }
+
     /// Create a new request tracker, capturing the current time as request received.
     pub fn new() -> Self {
         let now = Instant::now();
@@ -226,6 +243,7 @@ impl RequestTracker {
         RequestTracker {
             request_received: now,
             request_received_epoch_ms: epoch_ms,
+            upstream_elapsed: OnceLock::new(),
             prefill_start_time: OnceLock::new(),
             first_token_time: OnceLock::new(),
             decode_first_token_time: OnceLock::new(),
@@ -252,6 +270,22 @@ impl RequestTracker {
             external_query_token_ids: OnceLock::new(),
             prompt_token_ids: OnceLock::new(),
         }
+    }
+
+    /// Create a tracker for a request an upstream router dispatched `upstream_elapsed` after the
+    /// frontend received it. Only [`Self::elapsed_since_arrival`] counts that time; every other
+    /// timing starts when this process received the request.
+    pub fn with_upstream_elapsed(upstream_elapsed: Duration) -> Self {
+        let tracker = Self::new();
+        tracker.set_upstream_elapsed(upstream_elapsed);
+        tracker
+    }
+
+    /// Record how long the request had been in the system before this process received it.
+    /// For a tracker that exists before that age is known, such as the one the response
+    /// generator creates. The first value stands.
+    pub fn set_upstream_elapsed(&self, upstream_elapsed: Duration) {
+        let _ = self.upstream_elapsed.set(upstream_elapsed);
     }
 
     /// Record when prefill started. Returns true if this was the first call.
@@ -356,6 +390,16 @@ impl RequestTracker {
 
     pub fn request_received_epoch_ms(&self) -> u64 {
         self.request_received_epoch_ms
+    }
+
+    /// Time since the frontend received the request, on the monotonic clock: the time since
+    /// this process received it plus the time upstream routers held it before that.
+    pub fn elapsed_since_arrival(&self) -> Duration {
+        self.upstream_elapsed
+            .get()
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(self.request_received.elapsed())
     }
 
     /// KV cache hit rate as a ratio (0.0 to 1.0).
@@ -771,6 +815,23 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn upstream_elapsed_is_added_once_to_the_arrival_age() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.elapsed_since_arrival() < Duration::from_secs(1));
+
+        tracker.set_upstream_elapsed(Duration::from_secs(40));
+        let age = tracker.elapsed_since_arrival();
+        assert!(age >= Duration::from_secs(40) && age < Duration::from_secs(41));
+
+        // The first value stands, so a later hop cannot move the arrival.
+        tracker.set_upstream_elapsed(Duration::from_secs(900));
+        assert!(tracker.elapsed_since_arrival() < Duration::from_secs(41));
+
+        let seeded = RequestTracker::with_upstream_elapsed(Duration::from_secs(5));
+        assert!(seeded.elapsed_since_arrival() >= Duration::from_secs(5));
+    }
 
     #[test]
     fn test_record_isl_osl() {

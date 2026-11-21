@@ -36,6 +36,18 @@
 #     serves /engine/control/*.
 #   * BOTH the decode and the prefill CUDA graph disabled, passed explicitly
 #     below: SGLang asserts this for elastic-EP scale-up and exits on startup.
+#   * The three BF16 settings below (SGLANG_DEEPEP_BF16_DISPATCH,
+#     SGLANG_NIXL_EP_BF16_DISPATCH, --moe-runner-backend deep_gemm), on the
+#     primary and the joiner. SGLang 0.5.21/0.5.22 route unquantized experts
+#     over nixl to a removed code path ("forward_deepgemm_masked is
+#     deprecated") and the worker crash-loops.
+#   * SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024 (the maximum) with
+#     --chunked-prefill-size 1024: the NIXL dispatcher aborts on any step above
+#     its budget (default 128 tokens per rank).
+#   * A lenient liveness probe: a scale-up pauses serving for a few seconds
+#     (kernel recompile) and the operator's default probe kills the worker.
+#   * --moe-dense-tp-size 1 on the primary and the joiner: otherwise the joiner
+#     dies on its first forward after admission and the primary hangs.
 #
 # The joining group is NOT launched by the operator yet (that orchestration is
 # tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
@@ -80,6 +92,12 @@ spec:
         # Rendezvous address the joining group dials on scale-up.
         - name: SGLANG_ELASTIC_SCALE_DIST_INIT
           value: "127.0.0.1:24555"
+        - name: SGLANG_DEEPEP_BF16_DISPATCH
+          value: "1"
+        - name: SGLANG_NIXL_EP_BF16_DISPATCH
+          value: "1"
+        - name: SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+          value: "1024"
       extraPodSpec:
         imagePullSecrets:
         - name: nvcr-imagepullsecret
@@ -94,6 +112,14 @@ spec:
           volumeMounts:
           - name: model-cache
             mountPath: /model-cache
+          # Lenient on purpose; see REQUIREMENTS in the header.
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 30
+            failureThreshold: 20
+            timeoutSeconds: 10
           command:
           - python3
           - -m
@@ -107,6 +133,8 @@ spec:
             - --skip-tokenizer-init
             - --page-size
             - "16"
+            - --chunked-prefill-size
+            - "1024"
             # DP-attention MoE: the primary group runs EP size 4 (4 GPUs).
             - --tp
             - "4"
@@ -114,11 +142,15 @@ spec:
             - "4"
             - --enable-dp-attention
             - --enable-dp-lm-head
+            - --moe-dense-tp-size
+            - "1"
             # All-to-all + elastic-EP weight transfer backends.
             - --moe-a2a-backend
             - nixl
             - --deepep-mode
             - low_latency
+            - --moe-runner-backend
+            - deep_gemm
             - --elastic-ep-backend
             - mooncake
             # REQUIRED: set to the node's IB device list, e.g. "mlx5_0,mlx5_1".

@@ -185,14 +185,12 @@ func dgdAdmissionContextWithUserInfo(
 		requestUserInfo = *userInfo.DeepCopy()
 	}
 	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: operation,
-			UserInfo:  requestUserInfo,
-			Kind: metav1.GroupVersionKind{
-				Group:   gvk.Group,
-				Version: gvk.Version,
-				Kind:    gvk.Kind,
-			},
+		Operation: operation,
+		UserInfo:  requestUserInfo,
+		Kind: metav1.GroupVersionKind{
+			Group:   gvk.Group,
+			Version: gvk.Version,
+			Kind:    gvk.Kind,
 		},
 	})
 	return features.WithGate(ctx, features.Defaults())

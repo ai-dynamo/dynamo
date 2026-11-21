@@ -9,6 +9,10 @@ Dynamo uses the same router for RL and other inference workloads. What changes i
 
 Use the [router configuration reference](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md) for complete flag definitions and defaults.
 
+## How the KV-Aware Router Helps RL Rollouts
+
+RL training waits on rollout generation, so inference throughput per GPU and rollout completion time set the pace of each training step. Multi-turn trajectories resend their whole history every turn, and parallel samples share one prompt. The KV-aware router (`--router-mode kv`) tracks which KV blocks each worker holds and picks the worker with the lowest combined cache-miss and load cost. A short predicted-placement window (`--router-predicted-ttl-secs`) keeps sibling samples together before KV events arrive, and session affinity is available when turns must stay on one worker. To bound a burst or to put evaluation requests ahead of a rollout batch, admission control (experimental) can queue, prioritize, or reject requests before they reach an engine.
+
 ## Choose a Starting Strategy
 
 | Rollout shape | Start with | Watch for |

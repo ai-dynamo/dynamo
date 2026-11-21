@@ -42,6 +42,7 @@ from unittest.mock import MagicMock, patch
 import power_agent
 from power_agent import PowerAgent
 
+from tests.actuator_double import actuator_double
 from tests.test_multi_pod_policy import _FakeMetrics
 
 # ---------------------------------------------------------------------------
@@ -124,13 +125,13 @@ def _make_eight_gpu_agent(metrics) -> PowerAgent:
     ``__init__`` (which would call ``nvmlInit()`` and ``k8s_config.*``)
     and inject a mocked actuator + metrics object directly.
     """
-    actuator = MagicMock()
+    actuator = actuator_double()
 
     def _pids(gpu_idx: int, expected_uuid=None) -> list[int]:
         return PIDS_PER_GPU.get(gpu_idx, [])
 
     actuator.list_running_pids.side_effect = _pids
-    # apply_cap is a no-op MagicMock — we assert on its call list.
+    # apply_cap returns a CapWriteResult — we assert on its call list.
 
     agent = object.__new__(PowerAgent)
     agent._actuator = actuator

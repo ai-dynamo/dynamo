@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use aisimulate_core::engine::{EngineConfig, EngineFactory, TimingModel, TimingModelConfig};
-use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
+use aisim_core::engine::{EngineConfig, EngineFactory, TimingModel, TimingModelConfig};
+use aisim_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -87,6 +87,8 @@ pub(crate) fn aggregated_replay_setup(
         kv_eviction_policy: Default::default(),
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
+        // Mocker does not currently configure prefill context parallelism.
+        prefill_context_parallel_size: 1,
         // Mocker arguments reach this boundary with a concrete capacity,
         // whether authored directly or supplied by the Dynamo planner.
         num_gpu_blocks_is_explicit: Some(true),
@@ -112,12 +114,14 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill_role = ReplayRoleConfig {
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: decode.rank,
     };
@@ -125,6 +129,7 @@ pub(crate) fn disaggregated_replay_setup(
         kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        prefill_context_parallel_size: prefill_role.prefill_context_parallel_size,
         num_gpu_blocks_is_explicit: Some(true),
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),
@@ -171,14 +176,14 @@ impl TimingModel for DynamoPerfTimingModel {
 mod tests {
     use std::num::NonZeroU32;
 
-    use aisimulate_core::engine::generalized::EngineIdentity;
-    use aisimulate_core::replay::WorkerStage;
+    use aisim_core::engine::generalized::EngineIdentity;
+    use aisim_core::replay::WorkerStage;
     use ndarray_interp::InterpolateError;
 
     use super::*;
     use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
     use crate::common::protocols::NativeHostOffloadConfig;
-    use aisimulate_core::engine::{Backend, SglangSchedulePolicy};
+    use aisim_core::engine::{Backend, SglangSchedulePolicy};
 
     struct EchoPrefill;
 

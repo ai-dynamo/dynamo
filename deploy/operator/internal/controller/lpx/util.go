@@ -206,9 +206,7 @@ func scalePodCliques(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.
 // The scale response does not replace or mutate the complete resource observation.
 func updateScale(ctx context.Context, cl client.Client, resource client.Object, replicas int32) error {
 	scale := &autoscalingv1.Scale{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: resource.GetName(), Namespace: resource.GetNamespace(), ResourceVersion: resource.GetResourceVersion(),
-		},
+		Name: resource.GetName(), Namespace: resource.GetNamespace(), ResourceVersion: resource.GetResourceVersion(),
 		Spec: autoscalingv1.ScaleSpec{Replicas: replicas},
 	}
 

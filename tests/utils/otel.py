@@ -31,6 +31,18 @@ def get_span_attribute(span, key):
     return _get_attribute(span.attributes, key)
 
 
+def has_complete_span_chain(spans, *, span_id: bytes, ancestor_id: bytes) -> bool:
+    """Check that a snapshot includes both spans and their acyclic parent chain."""
+    spans_by_id = {span.span_id: span for span in spans}
+    visited = set()
+    while span_id != ancestor_id:
+        if span_id in visited or span_id not in spans_by_id:
+            return False
+        visited.add(span_id)
+        span_id = spans_by_id[span_id].parent_span_id
+    return ancestor_id in spans_by_id
+
+
 class InProcOtlpCollector:
     """Minimal thread-safe in-process OTLP/gRPC trace collector."""
 

@@ -31,6 +31,11 @@ class EngineInputs:
             image requests). None means use the default for the request type.
         output_format: The output format to use for the response.
             None means use the default for the request type.
+        input_images: Reference images the request consumed (``input_reference``),
+            reported back as image accounting. Only image requests set it.
+        num_inference_steps: The step count the request asked for
+            (``nvext.num_inference_steps``), reported back as image accounting.
+            None when the model default applies.
     """
 
     prompt: Union[OmniTextPrompt, Dict[str, Any]]
@@ -42,3 +47,5 @@ class EngineInputs:
     output_format: str | None = None
     lora_request: LoRARequest | None = None
     stream_audio: bool = False
+    input_images: int = 0
+    num_inference_steps: int | None = None

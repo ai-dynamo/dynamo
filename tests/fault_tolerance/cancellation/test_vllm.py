@@ -136,13 +136,19 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
+                (
+                    f"http://localhost:{frontend_port}/health?instances=true",
+                    check_health_generate,
+                ),
             ]
         else:
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
+                (
+                    f"http://localhost:{frontend_port}/health?instances=true",
+                    check_health_generate,
+                ),
             ]
 
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
@@ -475,7 +481,9 @@ def test_request_cancellation_vllm_prefill_cancel(
     phase in a disaggregated setup, the prefill worker still runs the
     request to completion so KV blocks are released via the normal path
     (rather than leaking on a torn-down NIXL transfer), and decode routing
-    still proceeds so the KV-transfer-complete guard can free the blocks.
+    still proceeds; the decode worker aborts its request as soon as the
+    cancellation arrives and vLLM frees the blocks once any in-flight KV
+    receive settles.
 
     Reference: PR ai-dynamo/dynamo#7489
 

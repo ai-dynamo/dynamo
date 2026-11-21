@@ -21,7 +21,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -29,9 +28,9 @@ import (
 
 func TestPipelineRequestDeadlines(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	oldStart := ptr.To(metav1.NewTime(now.Add(-time.Hour)))
-	newStart := ptr.To(metav1.NewTime(now.Add(time.Minute)))
-	laterStart := ptr.To(metav1.NewTime(now.Add(2 * time.Minute)))
+	oldStart := new(metav1.NewTime(now.Add(-time.Hour)))
+	newStart := new(metav1.NewTime(now.Add(time.Minute)))
+	laterStart := new(metav1.NewTime(now.Add(2 * time.Minute)))
 	for _, tc := range []struct {
 		name             string
 		starts           []*metav1.Time
@@ -48,19 +47,19 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 		{name: "disabled deadline", starts: []*metav1.Time{oldStart}},
 		{name: "omitted scheduling", starts: []*metav1.Time{oldStart}, noPolicies: true},
 		{name: "omitted scheduling preserves prior deadline", starts: []*metav1.Time{oldStart}, noPolicies: true, previousWake: now, wantWake: now},
-		{name: "no requests", seconds: ptr.To(int64(30))},
-		{name: "no scheduler receipt expires from creation", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), noStatus: true, wantExpired: []string{"request-0"}},
-		{name: "no scheduling start expires from creation", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
-		{name: "zero scheduling start expires from creation", starts: []*metav1.Time{{}}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
-		{name: "new request awaits scheduler with a deadline", starts: []*metav1.Time{nil}, created: ptr.To(metav1.NewTime(now)), seconds: ptr.To(int64(30)), noStatus: true, wantWake: now.Add(30 * time.Second)},
-		{name: "unpublished request has no deadline", starts: []*metav1.Time{nil}, created: &metav1.Time{}, seconds: ptr.To(int64(30)), noStatus: true},
-		{name: "expired cycle", starts: []*metav1.Time{oldStart}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
-		{name: "deleting request", starts: []*metav1.Time{oldStart}, seconds: ptr.To(int64(30)), deleting: true},
-		{name: "independent starts", starts: []*metav1.Time{laterStart, newStart}, seconds: ptr.To(int64(30)), wantWake: newStart.Add(30 * time.Second)},
-		{name: "expired and active cycles", starts: []*metav1.Time{oldStart, newStart}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}, wantWake: newStart.Add(30 * time.Second)},
-		{name: "surviving request starts again", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), lastPlanRevision: 1, wantWake: newStart.Add(30 * time.Second)},
-		{name: "preserve earlier workload deadline", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), previousWake: now, wantWake: now},
-		{name: "replace later workload deadline", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), previousWake: laterStart.Time, wantWake: newStart.Add(30 * time.Second)},
+		{name: "no requests", seconds: new(int64(30))},
+		{name: "no scheduler receipt expires from creation", starts: []*metav1.Time{nil}, seconds: new(int64(30)), noStatus: true, wantExpired: []string{"request-0"}},
+		{name: "no scheduling start expires from creation", starts: []*metav1.Time{nil}, seconds: new(int64(30)), wantExpired: []string{"request-0"}},
+		{name: "zero scheduling start expires from creation", starts: []*metav1.Time{{}}, seconds: new(int64(30)), wantExpired: []string{"request-0"}},
+		{name: "new request awaits scheduler with a deadline", starts: []*metav1.Time{nil}, created: new(metav1.NewTime(now)), seconds: new(int64(30)), noStatus: true, wantWake: now.Add(30 * time.Second)},
+		{name: "unpublished request has no deadline", starts: []*metav1.Time{nil}, created: &metav1.Time{}, seconds: new(int64(30)), noStatus: true},
+		{name: "expired cycle", starts: []*metav1.Time{oldStart}, seconds: new(int64(30)), wantExpired: []string{"request-0"}},
+		{name: "deleting request", starts: []*metav1.Time{oldStart}, seconds: new(int64(30)), deleting: true},
+		{name: "independent starts", starts: []*metav1.Time{laterStart, newStart}, seconds: new(int64(30)), wantWake: newStart.Add(30 * time.Second)},
+		{name: "expired and active cycles", starts: []*metav1.Time{oldStart, newStart}, seconds: new(int64(30)), wantExpired: []string{"request-0"}, wantWake: newStart.Add(30 * time.Second)},
+		{name: "surviving request starts again", starts: []*metav1.Time{newStart}, seconds: new(int64(30)), lastPlanRevision: 1, wantWake: newStart.Add(30 * time.Second)},
+		{name: "preserve earlier workload deadline", starts: []*metav1.Time{newStart}, seconds: new(int64(30)), previousWake: now, wantWake: now},
+		{name: "replace later workload deadline", starts: []*metav1.Time{newStart}, seconds: new(int64(30)), previousWake: laterStart.Time, wantWake: newStart.Add(30 * time.Second)},
 		{name: "unlimited workload preserves prior deadline", starts: []*metav1.Time{oldStart}, previousWake: now, wantWake: now},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,9 +67,9 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 			requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(tc.starts))
 			for index, start := range tc.starts {
 				request := &lpxv1alpha1.LPUPipelineRequest{
-					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("request-%d", index), Generation: 1, CreationTimestamp: *oldStart},
+					Name: fmt.Sprintf("request-%d", index), Generation: 1, CreationTimestamp: *oldStart,
 					Status: &lpxv1alpha1.LPUPipelineRequestStatus{
-						Phase: lpxv1alpha1.RequestPhasePending, ObservedGeneration: ptr.To(int64(1)),
+						Phase: lpxv1alpha1.RequestPhasePending, ObservedGeneration: new(int64(1)),
 						SchedulingStartedAt: start, LastPlanRevision: tc.lastPlanRevision,
 					},
 				}
@@ -82,7 +81,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 					request.Status = nil
 				}
 				if tc.deleting {
-					request.DeletionTimestamp = ptr.To(metav1.Now())
+					request.DeletionTimestamp = new(metav1.Now())
 				}
 				requests[request.Name] = request
 			}
@@ -114,27 +113,27 @@ func TestIsPipelineRequestDeadlineExempt(t *testing.T) {
 	}{
 		{name: "no receipt", noStatus: true},
 		{name: "unobserved Bound", phase: lpxv1alpha1.RequestPhaseBound},
-		{name: "stale Bound", phase: lpxv1alpha1.RequestPhaseBound, observed: ptr.To(int64(1))},
-		{name: "current Bound", phase: lpxv1alpha1.RequestPhaseBound, observed: ptr.To(int64(2)), want: true},
-		{name: "NoFit", phase: lpxv1alpha1.RequestPhaseNoFit, observed: ptr.To(int64(2)), want: true},
-		{name: "Unsupported", phase: lpxv1alpha1.RequestPhaseUnsupported, observed: ptr.To(int64(2)), want: true},
-		{name: "Pending", phase: lpxv1alpha1.RequestPhasePending, observed: ptr.To(int64(2)), accepted: ptr.To(int64(2))},
-		{name: "Planned", phase: lpxv1alpha1.RequestPhasePlanned, observed: ptr.To(int64(2))},
-		{name: "Reserving", phase: lpxv1alpha1.RequestPhaseReserving, observed: ptr.To(int64(2))},
-		{name: "Binding", phase: lpxv1alpha1.RequestPhaseBinding, observed: ptr.To(int64(2))},
-		{name: "Degraded without execution", phase: lpxv1alpha1.RequestPhaseDegraded, observed: ptr.To(int64(2))},
-		{name: "Degraded stale execution", phase: lpxv1alpha1.RequestPhaseDegraded, observed: ptr.To(int64(2)), accepted: ptr.To(int64(1))},
-		{name: "Degraded accepted execution", phase: lpxv1alpha1.RequestPhaseDegraded, observed: ptr.To(int64(2)), accepted: ptr.To(int64(2)), want: true},
-		{name: "Releasing without execution", phase: lpxv1alpha1.RequestPhaseReleasing, observed: ptr.To(int64(2))},
-		{name: "Releasing accepted execution", phase: lpxv1alpha1.RequestPhaseReleasing, observed: ptr.To(int64(2)), accepted: ptr.To(int64(2)), want: true},
-		{name: "Released without execution", phase: lpxv1alpha1.RequestPhaseReleased, observed: ptr.To(int64(2))},
-		{name: "Released accepted execution", phase: lpxv1alpha1.RequestPhaseReleased, observed: ptr.To(int64(2)), accepted: ptr.To(int64(2)), want: true},
-		{name: "unknown phase", phase: "future", observed: ptr.To(int64(2))},
+		{name: "stale Bound", phase: lpxv1alpha1.RequestPhaseBound, observed: new(int64(1))},
+		{name: "current Bound", phase: lpxv1alpha1.RequestPhaseBound, observed: new(int64(2)), want: true},
+		{name: "NoFit", phase: lpxv1alpha1.RequestPhaseNoFit, observed: new(int64(2)), want: true},
+		{name: "Unsupported", phase: lpxv1alpha1.RequestPhaseUnsupported, observed: new(int64(2)), want: true},
+		{name: "Pending", phase: lpxv1alpha1.RequestPhasePending, observed: new(int64(2)), accepted: new(int64(2))},
+		{name: "Planned", phase: lpxv1alpha1.RequestPhasePlanned, observed: new(int64(2))},
+		{name: "Reserving", phase: lpxv1alpha1.RequestPhaseReserving, observed: new(int64(2))},
+		{name: "Binding", phase: lpxv1alpha1.RequestPhaseBinding, observed: new(int64(2))},
+		{name: "Degraded without execution", phase: lpxv1alpha1.RequestPhaseDegraded, observed: new(int64(2))},
+		{name: "Degraded stale execution", phase: lpxv1alpha1.RequestPhaseDegraded, observed: new(int64(2)), accepted: new(int64(1))},
+		{name: "Degraded accepted execution", phase: lpxv1alpha1.RequestPhaseDegraded, observed: new(int64(2)), accepted: new(int64(2)), want: true},
+		{name: "Releasing without execution", phase: lpxv1alpha1.RequestPhaseReleasing, observed: new(int64(2))},
+		{name: "Releasing accepted execution", phase: lpxv1alpha1.RequestPhaseReleasing, observed: new(int64(2)), accepted: new(int64(2)), want: true},
+		{name: "Released without execution", phase: lpxv1alpha1.RequestPhaseReleased, observed: new(int64(2))},
+		{name: "Released accepted execution", phase: lpxv1alpha1.RequestPhaseReleased, observed: new(int64(2)), accepted: new(int64(2)), want: true},
+		{name: "unknown phase", phase: "future", observed: new(int64(2))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Only current scheduler receipts and accepted executions can exempt a cycle")
 			request := &lpxv1alpha1.LPUPipelineRequest{
-				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Generation: 2,
 				Status:     &lpxv1alpha1.LPUPipelineRequestStatus{Phase: tc.phase, ObservedGeneration: tc.observed},
 			}
 			if tc.accepted != nil {
@@ -208,8 +207,8 @@ func TestReconcileExpiredPipelineRequests(t *testing.T) {
 			deployment := newLPXTestDeployment(t, dgd)
 			pcs := newTestPodCliqueSet(deployment)
 			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{Name: "engines", Namespace: deployment.Namespace},
-				Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: tc.replicas},
+				Name: "engines", Namespace: deployment.Namespace,
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: tc.replicas},
 			}
 			requests := make([]*lpxv1alpha1.LPUPipelineRequest, tc.replicas)
 			objects := []client.Object{pcs, pcsg}
@@ -284,7 +283,7 @@ func TestExpiredPipelineRequestSuffix(t *testing.T) {
 			requests := make([]*lpxv1alpha1.LPUPipelineRequest, len(tc.ordinals))
 			var expired []*lpxv1alpha1.LPUPipelineRequest
 			for i, ordinal := range tc.ordinals {
-				requests[i] = &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("request-%d", i)}}
+				requests[i] = &lpxv1alpha1.LPUPipelineRequest{Name: fmt.Sprintf("request-%d", i)}
 				requests[i].Spec.MaterializationTarget.PodCliqueScalingGroupRef = &lpxv1alpha1.PodCliqueScalingGroupReference{Name: "engines", ReplicaIndex: ordinal}
 			}
 			for _, index := range tc.expired {
@@ -308,13 +307,11 @@ func newTestPipelineRequest(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev
 	generation := int64(1)
 	schedulingStartedAt := metav1.NewTime(created.UTC().Truncate(time.Second))
 	request := &lpxv1alpha1.LPUPipelineRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: deployment.Namespace, UID: types.UID(name + "-uid"), ResourceVersion: "1",
-			Generation: generation, CreationTimestamp: metav1.NewTime(created),
-			Labels:          map[string]string{deploymentUIDLabel: string(deployment.UID)},
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
-		},
-		Spec: lpxv1alpha1.LPUPipelineRequestSpec{ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal},
+		Name: name, Namespace: deployment.Namespace, UID: types.UID(name + "-uid"), ResourceVersion: "1",
+		Generation: generation, CreationTimestamp: metav1.NewTime(created),
+		Labels:          map[string]string{deploymentUIDLabel: string(deployment.UID)},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
+		Spec:            lpxv1alpha1.LPUPipelineRequestSpec{ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal},
 		Status: &lpxv1alpha1.LPUPipelineRequestStatus{
 			Phase: phase, ObservedGeneration: &generation,
 			SchedulingStartedAt: &schedulingStartedAt,
@@ -335,11 +332,9 @@ func newTestPipelineRequest(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev
 
 func newTestPodCliqueSet(deployment *v1alpha1.LPXGraphDeployment) *grovev1alpha1.PodCliqueSet {
 	return &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: dynamo.PCSNameForLPX(deployment), Namespace: deployment.Namespace, UID: "pcs-uid", ResourceVersion: "1",
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, v1alpha1.LPXGraphDeploymentGVK)},
-		},
-		Spec: grovev1alpha1.PodCliqueSetSpec{Replicas: 1},
+		Name: dynamo.PCSNameForLPX(deployment), Namespace: deployment.Namespace, UID: "pcs-uid", ResourceVersion: "1",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, v1alpha1.LPXGraphDeploymentGVK)},
+		Spec:            grovev1alpha1.PodCliqueSetSpec{Replicas: 1},
 	}
 }
 

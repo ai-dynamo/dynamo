@@ -30,6 +30,8 @@ import re
 import sys
 from pathlib import Path
 
+from helm_chart_version import set_chart_versions as _set_chart_versions
+
 # token -> Chart.yaml files; the operator subchart rides the platform token.
 # Snapshot is an external OCI dependency of the platform chart
 # (github.com/ai-dynamo/snapshot), pinned in
@@ -78,35 +80,7 @@ _TAG_HOP = r"(?:(?![^\n]*repository:)[^\n]*\n)*?"
 
 
 def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
-    text = path.read_text()
-
-    # Top-level version/appVersion, line-start anchored (platform has no appVersion).
-    top = re.compile(
-        r'^(?P<pre>(?:appVersion|version)\s*:\s*)(?P<q>"?)[^"\n]*(?P=q)(?P<post>\s*)$',
-        re.MULTILINE,
-    )
-    text, n_top = top.subn(
-        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
-        text,
-    )
-    if n_top == 0:
-        raise RuntimeError(f"no top-level version/appVersion in {path}")
-
-    # dynamo-operator exact pin; hop bounded so third-party pins stay untouched.
-    dep = re.compile(
-        r"(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n"
-        r"(?:(?!\s*-\s)[^\n]*\n)*?"
-        r'\s*version\s*:\s*)("?)[^"\n]*\2(\s*)$'
-    )
-    text, n_dep = dep.subn(
-        lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}{m.group(3)}", text
-    )
-    if expect_operator_pin and n_dep != 1:
-        raise RuntimeError(
-            f"expected exactly one dynamo-operator dependency pin in {path}, found {n_dep}"
-        )
-
-    path.write_text(text)
+    _set_chart_versions(path, new, expect_operator_pin)
     print(f"  {path}: version -> {new}")
 
 

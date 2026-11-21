@@ -70,7 +70,7 @@ export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-32}"
 #   nixl  — NIXL RDMA transfer. Required for cross-node deployments.
 # Set DYNAMO_DISABLE_NIXL_MM=1 to disable the transfer channel entirely; the
 # backend then re-downloads + reprocesses the image from the original URL.
-# See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for details.
+# See docs/fern/pages/use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md for details.
 export DYNAMO_MM_TRANSFER="${DYNAMO_MM_TRANSFER:-shm}"
 
 # Extra args (word-splitting is intentional for shell-style overrides)
@@ -95,7 +95,7 @@ Single-GPU mode (--single-gpu or SINGLE_GPU=true) requires CUDA_VISIBLE_DEVICES.
 All workers use its first entry; an unset or empty first entry is an error.
 Example: CUDA_VISIBLE_DEVICES=1 $0 --single-gpu
 
-See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for env vars.
+See docs/fern/pages/use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md for env vars.
 EOF
             exit 0
             ;;

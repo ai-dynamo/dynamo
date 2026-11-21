@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# uv dependency overrides for the planner image.
+#
+# The planner installs the ai-dynamo wheel alongside aiperf in a single resolve.
+# aiperf 0.13.0 declares pillow~=12.3.0, which forbids the 13.0.0 floor that
+# requirements.common.txt sets for the other images. The planner installs
+# aiperf for the thorough profiler path, so without this override the image
+# resolves back to 12.3.x no matter what the requirements files ask for.
+#
+# The upper bound is required, not decorative: a uv override REPLACES every
+# other constraint on the package, so nothing else caps this at the 13.x series
+# once the override is in force. Drop this entry once aiperf widens its own
+# constraint.
+pillow>=13.0.0,<14

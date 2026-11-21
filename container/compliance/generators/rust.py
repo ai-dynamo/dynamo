@@ -3,7 +3,7 @@
 """NOTICES-Rust.txt generator.
 
 Reads CycloneDX 1.5/1.6 SBOMs embedded in installed wheels under the runtime
-venv. The dynamo runtime + kvbm wheels ship these via cargo-cyclonedx (run
+venv. The dynamo runtime wheel ships these via cargo-cyclonedx (run
 through maturin); NIXL ships its own once we wire cargo-cyclonedx into the
 NIXL block in wheel_builder.
 
@@ -13,7 +13,7 @@ to that wheel scan, so their SBOMs are passed in explicitly via `extra_sboms`
 for: it is built from the ext-proc crate in a separate image and copied in, so
 nothing under site-packages describes it.
 
-First-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`, `nvidia-*`) are KEPT in
+First-party crates (`dynamo-*`, `nixl-*`, `nvidia-*`) are KEPT in
 the output — auditors and customers should see every crate that's actually
 in the binary, including ours.
 """

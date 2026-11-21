@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use aisimulate_core::engine::KvEvent;
+use aisim_core::engine::KvEvent;
 use anyhow::Context;
-use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
+use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_events::residency::StorageTier;
 
 use crate::common::protocols::{MockerConfig, OutputSignal};
 use crate::engine_observations::dynamo_kv_event;
@@ -12,7 +13,7 @@ use crate::replay::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
 use crate::scheduler::RouterEventVisibility;
-use aisimulate_core::replay::{
+use aisim_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, EngineEventBatch, KvIngestEventEncoder, ProviderSpec,
     ReplayAdapters, ReplayArtifactKvEventVisibility, ReplayEngineObservation, ReplayRuntimeInput,
     ReplaySpec, ReplayTopology, Replayer, WorkerPoolSpec, WorkerStage,
@@ -65,8 +66,10 @@ impl ReplayEngineObservation for RouterEventObservation {
                 .into_iter()
                 .map(|event| {
                     let tier = crate::engine_observations::dynamo_storage_tier(event.tier);
-                    let (event, _) = dynamo_kv_event(event);
-                    RouterEvent::with_storage_tier(worker_id, event, tier)
+                    let (event, _, session_id) = dynamo_kv_event(event);
+                    let mut event = RouterEvent::with_storage_tier(worker_id, event, tier);
+                    event.session_id = session_id;
+                    event
                 })
                 .collect(),
         )
@@ -81,11 +84,9 @@ impl ReplayEngineObservation for RouterEventObservation {
             // handoff destinations.
             .filter(|event| event.storage_tier == StorageTier::Device)
             .flat_map(|event| match &event.event.data {
-                dynamo_kv_router::protocols::KvCacheEventData::Stored(store) => {
-                    store.blocks.as_slice()
-                }
-                dynamo_kv_router::protocols::KvCacheEventData::Removed(_)
-                | dynamo_kv_router::protocols::KvCacheEventData::Cleared => &[],
+                dynamo_kv_events::event::KvCacheEventData::Stored(store) => store.blocks.as_slice(),
+                dynamo_kv_events::event::KvCacheEventData::Removed(_)
+                | dynamo_kv_events::event::KvCacheEventData::Cleared => &[],
             })
             .map(|block| block.tokens_hash.0)
             .collect()
@@ -103,11 +104,31 @@ impl ReplayEngineObservation for RouterEventObservation {
     }
 }
 
+/// Observation for a router without KV events (`--no-router-kv-events`), which indexes its own
+/// routing decisions and never reads engine KV events, so its engines export none.
+#[derive(Debug, Default)]
+pub(in crate::replay) struct NoRouterEventObservation;
+
+impl ReplayEngineObservation for NoRouterEventObservation {
+    type Batch = RouterEventBatch;
+
+    const CAPTURE_ENGINE_KV_EVENTS: bool = false;
+
+    fn observe_engine_events(
+        _stage: WorkerStage,
+        _worker_id: usize,
+        _dp_rank: u32,
+        _events: Vec<KvEvent>,
+    ) -> Self::Batch {
+        RouterEventBatch::default()
+    }
+}
+
 fn encode_events(
     encoder: &mut KvIngestEventEncoder<'_>,
     events: &[RouterEvent],
 ) -> anyhow::Result<()> {
-    use dynamo_kv_router::protocols::KvCacheEventData;
+    use dynamo_kv_events::event::KvCacheEventData;
 
     for event in events {
         let (tier_tag, tier_name) = storage_tier_identity(event.storage_tier);
@@ -199,6 +220,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
         max_in_flight: None,
         record_per_request: false,
         sla: Default::default(),
+        encoder: None,
         requests: Vec::new(),
     };
     let visibility = match router_event_visibility_override {
@@ -257,7 +279,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisimulate_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
+    use aisim_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
 
     fn stored(tier: KvEventTier, event_id: u64) -> KvEvent {
         KvEvent {
@@ -272,6 +294,8 @@ mod tests {
                     tokens_hash: 7,
                     token_ids: None,
                 }],
+                session_id: Some("session-1".to_owned()),
+                cache_salt: None,
             }),
         }
     }
@@ -323,7 +347,15 @@ mod tests {
                 ),
             ];
             for (event, expected_tier, expected_hashes, transition) in transitions {
+                let expected_session = match &event.data {
+                    KvEventData::Stored(stored) => stored.session_id.clone(),
+                    _ => None,
+                };
                 let batch = RouterEventObservation::observe_engine_events(stage, 3, 0, vec![event]);
+                assert_eq!(
+                    batch.0[0].session_id, expected_session,
+                    "{transition}: preserve session attribution"
+                );
                 assert_eq!(batch.0.len(), 1, "{transition}: retain the router event");
                 assert_eq!(
                     batch.0[0].storage_tier, expected_tier,
