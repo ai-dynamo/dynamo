@@ -77,15 +77,8 @@ class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
-    # vLLM's FlashAttention-2 library ships sm_80 code only. On newer GPUs the
-    # CUDA driver JIT-compiles a whole kernel module the first time one of its
-    # kernels runs. Decode switches to the split-KV module at 129 KV tokens,
-    # and on a cold cache that module alone takes about a minute to compile,
-    # which is longer than a 60 s test request allows. The readiness request
-    # decodes past that point so the compile happens before the timed
-    # requests, and the on-disk driver cache serves the other workers. Keep it
-    # well under the 5 s limit of each readiness attempt once compiled.
-    # Configs whose decode is too slow for that override it back to 8.
+    # Decode past 128 KV tokens so the FlashAttention-2 split-KV JIT (~1 min cold
+    # on post-sm_80 GPUs) runs in readiness; still fit the 5 s readiness attempt.
     chat_health_check_max_tokens: int = 128
 
 
@@ -99,9 +92,8 @@ for _profile in VLLM_MULTIMODAL_PROFILES:
     _mm_configs.update(
         make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
     )
-# Multimodal configs keep the 8-token chat probe. The only one that gets it is
-# the text-only LLaVA-1.5-7B case on the 24 GiB gpu_1 lane, where a 128-token
-# 7B decode can exceed the 5 s readiness attempt.
+# Keep the 8-token chat probe: a 128-token 7B decode (text-only LLaVA case on
+# the 24 GiB gpu_1 lane) can exceed the 5 s readiness attempt.
 for _mm_config in _mm_configs.values():
     _mm_config.chat_health_check_max_tokens = 8
 
