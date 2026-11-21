@@ -91,11 +91,11 @@ def _with_endpoint_readiness_checks(
     config: EngineConfig, frontend_port: int
 ) -> EngineConfig:
     def make_check(factory):
-        if factory is make_chat_health_check:
+        if factory in (make_chat_health_check, make_completions_health_check):
             return factory(
                 frontend_port,
                 config.model,
-                max_tokens=config.chat_health_check_max_tokens,
+                max_tokens=config.health_check_max_tokens,
             )
         return factory(frontend_port, config.model)
 

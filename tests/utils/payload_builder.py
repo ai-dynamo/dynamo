@@ -675,12 +675,12 @@ def make_chat_health_check(port: int, model: str, max_tokens: int = 8):
     return _check_chat_endpoint
 
 
-def make_completions_health_check(port: int, model: str):
+def make_completions_health_check(port: int, model: str, max_tokens: int = 8):
     def _check_completions_endpoint(remaining_timeout: float = 30.0) -> bool:
         payload = completion_payload_default(
             repeat_count=1,
             expected_response=[],
-            max_tokens=8,
+            max_tokens=max_tokens,
             temperature=0.0,
             stream=False,
         ).with_model(model)

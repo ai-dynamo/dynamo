@@ -79,7 +79,7 @@ class VLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
     # Decode past 128 KV tokens so the FlashAttention-2 split-KV JIT (~1 min cold
     # on post-sm_80 GPUs) runs in readiness; still fit the 5 s readiness attempt.
-    chat_health_check_max_tokens: int = 128
+    health_check_max_tokens: int = 128
 
 
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
@@ -92,10 +92,10 @@ for _profile in VLLM_MULTIMODAL_PROFILES:
     _mm_configs.update(
         make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
     )
-# Keep the 8-token chat probe: a 128-token 7B decode (text-only LLaVA case on
+# Keep the 8-token probes: a 128-token 7B decode (text-only LLaVA case on
 # the 24 GiB gpu_1 lane) can exceed the 5 s readiness attempt.
 for _mm_config in _mm_configs.values():
-    _mm_config.chat_health_check_max_tokens = 8
+    _mm_config.health_check_max_tokens = 8
 
 
 @dataclass
@@ -269,7 +269,7 @@ vllm_configs = {
         # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
         script_args=["--max-model-len", "4096"],
         # A 128-token 8B decode on that lane can exceed the 5 s readiness attempt.
-        chat_health_check_max_tokens=8,
+        health_check_max_tokens=8,
         request_payloads=[
             chat_payload_default(),
             chat_payload(
@@ -578,7 +578,7 @@ vllm_configs = {
         timeout=700,
         # At ~15.5 tok/s (below) a 128-token readiness probe cannot fit the 5 s
         # readiness attempt.
-        chat_health_check_max_tokens=8,
+        health_check_max_tokens=8,
         # Each request is bounded by BasePayload.timeout (60s, tests/utils/
         # payloads.py), not by the readiness budget above. This deployment
         # decodes at ~15.5 tok/s, so the 1000-token payload default needs ~65s
