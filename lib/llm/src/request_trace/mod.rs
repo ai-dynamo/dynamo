@@ -55,6 +55,20 @@ static BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();
 pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
 pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "request_trace.x_request_id";
 
+/// Client x-request-id: distributed tracing context first, then the request context.
+pub(crate) fn x_request_id_from_context(
+    context: &dynamo_runtime::pipeline::Context<()>,
+) -> Option<String> {
+    dynamo_runtime::logging::get_distributed_tracing_context()
+        .and_then(|c| c.x_request_id)
+        .or_else(|| {
+            context
+                .get::<String>(X_REQUEST_ID_CONTEXT_KEY)
+                .ok()
+                .map(|v| v.as_ref().clone())
+        })
+}
+
 /// Context key for an endpoint that gives clients other tool-call IDs than the
 /// backend's; its value is the endpoint's [`ClientToolCallIds`].
 pub const CLIENT_TOOL_CALL_IDS_CONTEXT_KEY: &str = "request_trace.client_tool_call_ids";
