@@ -52,6 +52,7 @@ from dynamo.vllm.errors import vllm_client_error_to_public_error
 from .prepost import (
     StreamingPostProcessor,
     _glm_prompt_reasoning_open,
+    is_gemma4_parser_pair,
     preprocess_chat_request,
 )
 from .structural_tag_policy import (
@@ -1293,6 +1294,9 @@ class VllmProcessor:
                     stream_response=bool(request.get("stream", False)),
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
+                    ),
+                    gemma4_parser_pair=is_gemma4_parser_pair(
+                        self.tool_parser_class, self.reasoning_parser_class
                     ),
                     tool_catalog_names=tool_catalog_names,
                 )
