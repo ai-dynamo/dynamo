@@ -76,7 +76,7 @@ python -m dynamo.vllm \
 
 The `endpoint` value is the base ZeroMQ port. vLLM assigns each data-parallel rank the port at `base port + data-parallel rank`. When multiple workers share a host or network namespace, reserve one port per rank and choose base ports whose resulting ranges do not overlap.
 
-If workers do not publish KV events, configure the frontend with `--no-router-kv-events` for prediction-based KV routing or `--load-aware` for load-only routing.
+If workers do not publish KV events, configure the frontend with `--no-router-kv-events` for prediction-based KV routing or a [load-only policy file](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset) for load-only routing.
 
 ## Native KV transfer configuration
 

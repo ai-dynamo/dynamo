@@ -317,7 +317,7 @@ worker_selection:
 
 `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` each select the policy for the matching worker pool. `type` selects a registered provider and `parameters` is the mapping that provider validates. A role may also be a bare type name when the provider accepts an empty `parameters` mapping. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
 
-The pre-v1.7 form, a `worker_selection.instances` list of named `{type, parameters}` entries referenced by name from each role, still loads with a deprecation warning and is scheduled for removal in v1.8.
+The form used through v1.7, a `worker_selection.instances` list of named `{type, parameters}` entries referenced by name from each role, still loads with a deprecation warning and is scheduled for removal in v1.9.
 
 `worker_selection.encode` applies only to a surface-carrying encode worker set that constructs the standard KV chooser. It does not configure the surface-less multimodal encoder hop: `EncoderRouter` selects those workers independently with round-robin routing.
 
@@ -545,12 +545,10 @@ uv pip install -e .
 # Start the frontend with the policy configuration.
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-policy-config "$POLICY_DIR/worker-selection.yaml" \
-  --router-prefill-policy prefill-least-busy \
-  --router-decode-policy least-busy
+  --router-policy-config "$POLICY_DIR/worker-selection.yaml"
 ```
 
-The role-specific CLI flags override the matching YAML fields for this process. In this command, `prefill-least-busy` replaces `worker_selection.prefill`, and `least-busy` replaces `worker_selection.decode`.
+The file selects the policy for each role. The `--router-prefill-policy` and `--router-decode-policy` flags, which overrode `worker_selection.prefill` and `worker_selection.decode` for one process, were removed in v1.8.
 
 The linked extension also applies custom policies in `python3 -m dynamo.router`. That process waits for a worker model card so it can choose built-in or custom policy behavior from the card's typed role. `DYN_ROUTER_MODEL_CARD_WAIT_SECS` bounds the startup wait and defaults to 600 seconds.
 

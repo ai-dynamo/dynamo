@@ -70,8 +70,8 @@ API layer. Dynamo converts that value before passing it to vLLM, which uses a
 different native priority polarity internally.
 
 Do not negate `nvext.agent_hints.priority` in the client for vLLM. If you are
-also using the router queue, configure the frontend-side
-`--router-queue-threshold` separately; vLLM engine scheduling only applies
+also using the router queue, configure it separately in the frontend's
+`--router-policy-config`; vLLM engine scheduling only applies
 after a request reaches the worker.
 
 For the cross-layer behavior, see

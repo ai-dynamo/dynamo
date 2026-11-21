@@ -209,9 +209,7 @@ does.
 - `type` selects a registered provider; `parameters` is the mapping it validates.
 - `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select separate policies for their matching worker pools.
 - `worker_selection.encode` applies only to surface-carrying encode worker sets that construct the standard KV chooser. The surface-less multimodal encoder hop uses `EncoderRouter` and round-robin selection instead.
-- `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections with a policy type run on default parameters.
-- `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
-- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every worker-type YAML selection.
+- `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every worker-type YAML selection with a policy type run on default parameters.
 - The override value `default` selects Dynamo's built-in policy.
 
 Unknown policy types, duplicate registrations, and invalid parameters stop startup.

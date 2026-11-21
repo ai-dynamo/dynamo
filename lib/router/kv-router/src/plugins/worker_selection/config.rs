@@ -204,7 +204,7 @@ impl RawWorkerSelectionConfig {
 
         if !self.instances.is_empty() {
             tracing::warn!(
-                "worker_selection.instances is deprecated for removal in v1.8; write each role's policy inline as a type name or a {{type, parameters}} mapping"
+                "worker_selection.instances is deprecated for removal in v1.9; write each role's policy inline as a type name or a {{type, parameters}} mapping"
             );
         }
 

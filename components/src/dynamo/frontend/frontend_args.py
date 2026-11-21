@@ -280,14 +280,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         elif self.preprocess_workers < 0:
             raise ValueError("--dyn-preprocess-workers must be >= 0")
 
-        # Check what was asked for before --load-aware forces KV routing, so a
-        # policy file with a conflicting --router-mode still fails.
         self.router_mode = resolve_router_mode(
             self.router_mode, self.router_policy_config
         )
-        if self.load_aware:
-            self.router_mode = "kv"
-        self.apply_router_config()
+        self.apply_router_config(kv_routing=self.router_mode == "kv")
 
         # Fail at startup on an invalid DYN_MM_* value, not on every request.
         # Imported here: dynamo.common.http imports this configuration package.

@@ -12,8 +12,6 @@ unpacked directly into ``KvRouterConfig(**config.kv_router_kwargs())``.
 
 import argparse
 import json
-import logging
-import os
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Optional, get_type_hints
@@ -28,10 +26,9 @@ from dynamo.common.configuration.utils import (
     Deprecated,
     add_argument,
     add_negatable_bool_argument,
-    nullable_float,
+    add_removed_flags,
+    reject_removed_env_vars,
 )
-
-logger = logging.getLogger(__name__)
 
 # Shared router infrastructure settings accepted by the YAML `router` section.
 _ROUTER_SETTINGS = (
@@ -60,18 +57,10 @@ _ROUTER_SETTINGS = (
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     *_ROUTER_SETTINGS,
-    "overlap_score_weight",
     "overlap_score_credit",
-    "overlap_score_credit_decay",
     "prefill_load_scale",
-    "decode_active_request_weight",
     "router_temperature",
-    "router_queue_threshold",
     "router_policy_config",
-    "router_prefill_policy",
-    "router_decode_policy",
-    "router_queue_policy",
-    "shared_cache_multiplier",
     "conditional_disagg_enabled",
     "conditional_disagg_policy",
     "conditional_disagg_eff_isl_threshold",
@@ -97,26 +86,83 @@ _CONDITIONAL_DISAGG_CONFIG_FIELDS: dict[str, str] = {
     "decode_busy_threshold": "conditional_disagg_decode_busy_threshold",
 }
 
-_LOAD_AWARE_KWARG_OVERRIDES = {
-    "overlap_score_credit": 0.0,
-    "use_kv_events": False,
-    "router_track_active_blocks": True,
-    "router_assume_kv_reuse": False,
-    "router_track_prefill_tokens": True,
-    "use_remote_indexer": False,
-    "serve_indexer": False,
-    "shared_cache_multiplier": 0.0,
-    "shared_cache_type": "none",
-    "router_predicted_ttl_secs": None,
+_POLICY_PARAMETERS = "worker_selection.<role>.parameters"
+_POLICY_FILE = "--router-policy-config"
+
+# Removed in v1.8: (flags, environment variables, the policy-file key that
+# replaces them). A removed flag fails when parsed. A removed variable fails
+# the startup of a process that used to read it, whatever its value; one that
+# was only ignored would stop applying without a signal.
+# TODO(v1.9): Remove this table and the checks that read it.
+_REMOVED: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+    (
+        ("--load-aware", "--no-load-aware"),
+        ("DYN_ROUTER_LOAD_AWARE",),
+        f"overlap_score_credit: 0 and shared_cache_multiplier: 0 under "
+        f"{_POLICY_PARAMETERS}, with the router tracking settings, in {_POLICY_FILE}",
+    ),
+    (
+        ("--router-kv-overlap-score-credit-decay",),
+        ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",),
+        f"{_POLICY_PARAMETERS}.overlap_score_credit_decay in {_POLICY_FILE}",
+    ),
+    (
+        ("--router-kv-overlap-score-weight", "--kv-overlap-score-weight"),
+        ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT"),
+        f"{_POLICY_PARAMETERS}.prefill_load_scale in {_POLICY_FILE}",
+    ),
+    (
+        ("--router-decode-active-request-weight",),
+        ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",),
+        f"{_POLICY_PARAMETERS}.decode_active_request_weight in {_POLICY_FILE}",
+    ),
+    (
+        ("--router-queue-threshold",),
+        ("DYN_ROUTER_QUEUE_THRESHOLD",),
+        f"policy_classes[].prefill_busy_threshold_frac in {_POLICY_FILE}, and set "
+        "queue_policy there: the removed queue defaulted to fcfs, a class "
+        "defaults to edf",
+    ),
+    (
+        ("--router-queue-policy",),
+        ("DYN_ROUTER_QUEUE_POLICY",),
+        f"policy_classes[].queue_policy in {_POLICY_FILE}, which takes edf, "
+        "fcfs or wspt and not lcfs",
+    ),
+    (
+        ("--router-prefill-policy",),
+        ("DYN_ROUTER_PREFILL_POLICY",),
+        f"worker_selection.prefill in {_POLICY_FILE}",
+    ),
+    (
+        ("--router-decode-policy",),
+        ("DYN_ROUTER_DECODE_POLICY",),
+        f"worker_selection.decode in {_POLICY_FILE}",
+    ),
+    (
+        ("--shared-cache-multiplier",),
+        ("DYN_SHARED_CACHE_MULTIPLIER",),
+        f"{_POLICY_PARAMETERS}.shared_cache_multiplier in {_POLICY_FILE}",
+    ),
+)
+REMOVED_KV_ROUTER_FLAGS: dict[str, str] = {
+    flag: replacement for flags, _, replacement in _REMOVED for flag in flags
 }
+REMOVED_KV_ROUTER_ENV_VARS: dict[str, str] = {
+    name: replacement for _, names, replacement in _REMOVED for name in names
+}
+# A frontend read it in every router mode (a true value forced KV routing),
+# so it fails one in any mode.
+_LOAD_AWARE_ENV_VAR = "DYN_ROUTER_LOAD_AWARE"
 
 
-# TODO(v1.7): Remove these flags/env aliases after the v1.6 YAML migration
-# release. Keep wire/config compatibility fields until their own N-2 window ends.
+# These three flags outlive the others deprecated in v1.6: the AISimulate DGD
+# output sets them on the frontend it generates, and the planner's live retune
+# reads a frontend's startup from them and cannot read a policy file.
 def _policy_parameter(parameter: str) -> Deprecated:
     return Deprecated(
-        f"{parameter} in the default policy parameters in --router-policy-config",
-        remove_in="v1.7",
+        f"{_POLICY_PARAMETERS}.{parameter} in {_POLICY_FILE}",
+        remove_in="a later release",
     )
 
 
@@ -175,11 +221,8 @@ def _conditional_disagg_config_arg(value: str) -> dict[str, Any]:
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
-    overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
-    overlap_score_credit_decay: float
     prefill_load_scale: float
-    decode_active_request_weight: float
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
@@ -195,16 +238,11 @@ class KvRouterConfigBase(ConfigBase):
     router_prefill_load_model: str
     router_ttl_secs: float
     router_approximate_cache_policy: str = "ttl"
-    router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
-    router_prefill_policy: Optional[str] = None
-    router_decode_policy: Optional[str] = None
     router_event_threads: int
-    router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
     enable_session_prefix_index: bool = False
-    shared_cache_multiplier: Optional[float] = None
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
     conditional_disagg_config: Optional[dict[str, Any]] = None
@@ -214,7 +252,6 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_prefill_busy_threshold: Optional[float] = None
     conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
-    load_aware: bool = False
 
     @cached_property
     def _router_settings(self) -> dict[str, Any]:
@@ -263,19 +300,21 @@ class KvRouterConfigBase(ConfigBase):
             if isinstance(entry, dict) and entry.get("hints")
         ]
 
-    def apply_router_config(self) -> None:
-        self.apply_load_aware_preset()
+    def apply_router_config(self, *, kv_routing: bool = True) -> None:
+        """Apply the settings that depend on more than one input.
+
+        ``kv_routing`` is False on a frontend in another router mode. It never
+        read the removed scoring, selection and queue variables, so only
+        DYN_ROUTER_LOAD_AWARE fails it.
+        """
+        removed = REMOVED_KV_ROUTER_ENV_VARS
+        if not kv_routing:
+            removed = {_LOAD_AWARE_ENV_VAR: removed[_LOAD_AWARE_ENV_VAR]}
+        reject_removed_env_vars(removed, removed_in="v1.8")
         self.apply_conditional_disagg_config()
-        # Explicit YAML settings win over legacy flags and the load-aware preset.
+        # Explicit YAML settings win over the flags.
         for name, value in self._router_settings.items():
             setattr(self, name, value)
-
-    def apply_load_aware_preset(self) -> None:
-        if not self.load_aware:
-            return
-
-        for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
-            setattr(self, field, value)
 
     def apply_conditional_disagg_config(self) -> None:
         if (
@@ -295,22 +334,11 @@ class KvRouterConfigBase(ConfigBase):
         if self.conditional_disagg_policy not in LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES:
             return
         # Load-aware conditional-disagg policies need a prefill busy threshold.
-        # If threshold is not user-provided via --router-conditional-disagg-config,
-        # default to --router-queue-threshold when that flag is set.
-        if self.conditional_disagg_prefill_busy_threshold is not None:
-            return
-        if self.router_queue_threshold is not None:
-            self.conditional_disagg_prefill_busy_threshold = self.router_queue_threshold
-            logger.info(
-                "conditional_disagg prefill_busy_threshold defaults to "
-                "--router-queue-threshold=%s",
-                self.router_queue_threshold,
-            )
-        else:
+        if self.conditional_disagg_prefill_busy_threshold is None:
             raise ValueError(
                 f"conditional_disagg policy={self.conditional_disagg_policy!r} "
-                "needs prefill_busy_threshold, but neither "
-                "prefill_busy_threshold nor --router-queue-threshold is set"
+                "needs prefill_busy_threshold; set it in "
+                "--router-conditional-disagg-config"
             )
 
     def kv_router_kwargs(self) -> dict:
@@ -330,29 +358,9 @@ class KvRouterArgGroup(ArgGroup):
         self.env = env
 
     def add_arguments(self, parser) -> None:
-        environ = os.environ if self.env is None else self.env.environ
         g = parser.add_argument_group("KV Router Options")
+        add_removed_flags(g, REMOVED_KV_ROUTER_FLAGS, removed_in="v1.8")
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--load-aware",
-            deprecated=Deprecated(
-                "the load-only policy and router tracking settings in --router-policy-config",
-                remove_in="v1.7",
-            ),
-            env_var="DYN_ROUTER_LOAD_AWARE",
-            default=False,
-            dest="load_aware",
-            help=(
-                "KV Router: Enable the load-aware routing preset. "
-                "On the frontend, this implies --router-mode kv. "
-                "This preset sets overlap_score_credit=0, disables KV events and "
-                "KV-reuse assumptions, enables active-block "
-                "and prefill-token load tracking, and disables remote/shared cache indexers. "
-                "The builtin policy does not request cache inputs in this mode."
-            ),
-            env=self.env,
-        )
         add_argument(
             g,
             flag_name="--router-kv-overlap-score-credit",
@@ -370,38 +378,6 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-kv-overlap-score-credit-decay",
-            deprecated=_policy_parameter("overlap_score_credit_decay"),
-            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
-            default=0.0,
-            help=(
-                "KV Router: Decay rate for device-local overlap credit as active "
-                "prefill load rises above the least-loaded eligible worker. "
-                "0 disables decay; 1 halves credit at one request-equivalent "
-                "of excess active prefill load."
-            ),
-            arg_type=float,
-            dest="overlap_score_credit_decay",
-            env=self.env,
-        )
-        add_argument(
-            g,
-            flag_name="--router-kv-overlap-score-weight",
-            obsolete_flag="--kv-overlap-score-weight",
-            env_var=(
-                "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"
-                if "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT" in environ
-                else "DYN_OVERLAP_SCORE_WEIGHT"
-            ),
-            dest="overlap_score_weight",
-            arg_type=float,
-            deprecated=_policy_parameter("prefill_load_scale"),
-            default=None,
-            help=argparse.SUPPRESS,
-            env=self.env,
-        )
-        add_argument(
-            g,
             flag_name="--router-prefill-load-scale",
             deprecated=_policy_parameter("prefill_load_scale"),
             env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
@@ -412,22 +388,6 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
-            env=self.env,
-        )
-        add_argument(
-            g,
-            flag_name="--router-decode-active-request-weight",
-            deprecated=_policy_parameter("decode_active_request_weight"),
-            env_var="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
-            default=0.0,
-            help=(
-                "[EXPERIMENTAL] KV Router: Block-equivalent decode cost added for "
-                "each active request on a candidate worker. Use this to balance "
-                "decode batch size when step latency depends more on request count "
-                "than resident KV footprint. Must be finite and non-negative."
-            ),
-            arg_type=float,
-            dest="decode_active_request_weight",
             env=self.env,
         )
         add_argument(
@@ -619,31 +579,6 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-queue-threshold",
-            deprecated=Deprecated(
-                "policy_classes[].prefill_busy_threshold_frac in --router-policy-config",
-                remove_in="v1.7",
-            ),
-            env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=None,
-            help=(
-                "KV Router: Queue threshold fraction for prefill token capacity. "
-                "Requests are queued if all workers exceed this fraction of "
-                "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue once every eligible worker has active "
-                "prefill load). "
-                "Unset by default; setting a numeric value enables router queueing. "
-                "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
-                "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
-                "cache pool size), not the per-step prefill window, which inflates "
-                "the threshold's effective denominator. Set --max-prefill-tokens "
-                "explicitly for predictable semantics, or use a smaller threshold."
-            ),
-            arg_type=nullable_float,
-            env=self.env,
-        )
-        add_argument(
-            g,
             flag_name="--router-policy-config",
             env_var="DYN_ROUTER_POLICY_CONFIG",
             default=None,
@@ -652,9 +587,7 @@ class KvRouterArgGroup(ArgGroup):
                 "policy-class queues, per-role worker-selection policies, and hint policies. "
                 "On the frontend it needs no --router-mode: the file selects each "
                 "role's policy, and any --router-mode other than kv is an error. "
-                "When omitted, router_queue_threshold and router_queue_policy define "
-                "one synthetic policy class; queueing remains disabled unless "
-                "router_queue_threshold is set."
+                "When omitted, router queueing is disabled."
             ),
             arg_type=str,
             env=self.env,
@@ -692,40 +625,6 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-prefill-policy",
-            deprecated=Deprecated(
-                "worker_selection.prefill in --router-policy-config", remove_in="v1.7"
-            ),
-            env_var="DYN_ROUTER_PREFILL_POLICY",
-            default=None,
-            help=(
-                "KV Router: Process-local worker-selection policy type for "
-                "disaggregated prefill workers in this router process. "
-                "Overrides worker_selection.prefill from --router-policy-config. "
-                "Use 'default' for Dynamo's built-in worker selector."
-            ),
-            arg_type=str,
-            env=self.env,
-        )
-        add_argument(
-            g,
-            flag_name="--router-decode-policy",
-            deprecated=Deprecated(
-                "worker_selection.decode in --router-policy-config", remove_in="v1.7"
-            ),
-            env_var="DYN_ROUTER_DECODE_POLICY",
-            default=None,
-            help=(
-                "KV Router: Process-local worker-selection policy type for decode "
-                "workers in this router process. "
-                "Overrides worker_selection.decode from --router-policy-config. "
-                "Use 'default' for Dynamo's built-in worker selector."
-            ),
-            arg_type=str,
-            env=self.env,
-        )
-        add_argument(
-            g,
             flag_name="--router-event-threads",
             env_var="DYN_ROUTER_EVENT_THREADS",
             default=4,
@@ -735,24 +634,6 @@ class KvRouterArgGroup(ArgGroup):
                 "approximate routing when --no-router-kv-events is set."
             ),
             arg_type=int,
-            env=self.env,
-        )
-        add_argument(
-            g,
-            flag_name="--router-queue-policy",
-            deprecated=Deprecated(
-                "policy_classes[].queue_policy in --router-policy-config",
-                remove_in="v1.7",
-            ),
-            env_var="DYN_ROUTER_QUEUE_POLICY",
-            default="fcfs",
-            help=(
-                "KV Router: Scheduling policy for the router queue. "
-                "'fcfs' (default): first-come first-served with priority bumps — optimizes tail TTFT. "
-                "'wspt': weighted shortest processing time (Smith's rule) — optimizes average TTFT."
-            ),
-            arg_type=str,
-            choices=["fcfs", "wspt"],
             env=self.env,
         )
         add_negatable_bool_argument(
@@ -778,23 +659,6 @@ class KvRouterArgGroup(ArgGroup):
                 "index for routing decisions yet."
             ),
             dest="enable_session_prefix_index",
-            env=self.env,
-        )
-        add_argument(
-            g,
-            flag_name="--shared-cache-multiplier",
-            deprecated=_policy_parameter("shared_cache_multiplier"),
-            env_var="DYN_SHARED_CACHE_MULTIPLIER",
-            default=None,
-            help=(
-                "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
-                "Blocks in the shared cache are less valuable than device-local blocks. "
-                "E.g. 0.5 means each shared hit counts as half a device-local hit. "
-                "Under the kvcr worker-selection policy, also credits blocks a worker can "
-                "copy from a peer through a KV fetch hint. "
-                "The default policy uses 0.5 when shared cache is enabled."
-            ),
-            arg_type=float,
             env=self.env,
         )
         add_argument(
