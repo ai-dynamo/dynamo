@@ -62,9 +62,10 @@ def split_shell(text: str) -> list[str]:
 def container_argv(container: Mapping) -> list[str]:
     """Return the combined ``command`` + ``args`` tokens of a container.
 
-    A string ``command``/``args``, and any list item that follows ``-c`` (the
-    ``sh -c "<script>"`` form, whether the script sits in ``command`` or
-    ``args``), is shell-split so its flags are visible as separate tokens.
+    A string ``command``/``args``, and any list item that follows a short
+    option group containing ``c`` (the ``sh -c``, ``bash -lc`` and ``sh -ec``
+    ``"<script>"`` forms, whether the script sits in ``command`` or ``args``),
+    is shell-split so its flags are visible as separate tokens.
     """
     argv: list[str] = []
     for key in ("command", "args"):
@@ -74,7 +75,8 @@ def container_argv(container: Mapping) -> list[str]:
         elif isinstance(value, list):
             for item in value:
                 item = str(item)
-                if argv and argv[-1] == "-c":
+                prev = argv[-1] if argv else ""
+                if prev.startswith("-") and not prev.startswith("--") and "c" in prev:
                     argv.extend(split_shell(item))
                 else:
                     argv.append(item)

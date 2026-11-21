@@ -118,7 +118,7 @@ def test_elastic_ep_launcher_disables_both_cuda_graphs():
 
 
 def test_manifest_lint_reports_only_noncompliant_containers(tmp_path):
-    # v1beta1 multi-document manifest: argv-list, --flag=value and sh -c forms
+    # v1beta1 multi-document manifest: argv-list, --flag=value and bash -lc forms
     # pass; the last worker omits the decode flag.
     (tmp_path / "multi.yaml").write_text(
         """
@@ -139,7 +139,7 @@ spec:
       spec:
         containers:
         - name: main
-          command: [sh, -c]
+          command: [/bin/bash, -lc]
           args: ["python3 -m dynamo.sglang --elastic-ep-backend mooncake --disable-cuda-graph"]
 ---
 apiVersion: nvidia.com/v1beta1
