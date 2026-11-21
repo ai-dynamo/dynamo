@@ -209,7 +209,7 @@ The interpolation `.npz` files are the same data the Planner consumes for autosc
 |---|---|
 | Author a DGDR step by step | [Auto Deploy with DGDR](auto-deploy-with-dgdr.md) |
 | Full field table and lifecycle | [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx) |
-| Copy-ready DGDR manifests | [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx) |
+| Copy-ready DGDR manifests | [DGDR Templates](../../recipes/examples/dgdr.mdx) |
 | Runtime autoscaling from profiling data | [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md) |
 | Simulate engines without GPUs | [Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) |
 | Profiling algorithm internals and interpolation schema | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |

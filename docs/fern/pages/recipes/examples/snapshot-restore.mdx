@@ -1,0 +1,53 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Snapshot Restore"
+subtitle: "Restore a TensorRT-LLM worker from a checkpoint."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+**Prerequisites:** [Restore Workers with Dynamo Snapshot](../../kubernetes/model-deployment/model-loading/snapshot.mdx)
+
+<Warning>
+**Experimental.** Create the `model-cache` PersistentVolumeClaim and verify the host checkpoint requirements before applying a manifest.
+</Warning>
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-trtllm-snapshot-restore-yaml", "target": "kubernetes:trtllm", "label": "snapshot-restore.yaml", "description": "Restore a TensorRT-LLM worker from a checkpoint"},
+    {"id": "kubernetes-trtllm-snapshot-qwen3-0-6b-yaml", "target": "kubernetes:trtllm", "label": "snapshot/qwen3-0.6b.yaml", "description": "Capture and restore Qwen3-0.6B on one GPU"},
+    {"id": "kubernetes-trtllm-snapshot-glm-5-3-yaml", "target": "kubernetes:trtllm", "label": "snapshot/glm-5.3.yaml", "description": "Capture and restore GLM 5.3 NVFP4 on eight B200 GPUs"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-snapshot-restore-yaml">
+
+[Source: `snapshot-restore.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/snapshot-restore.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/snapshot-restore.yaml" title="snapshot-restore.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-snapshot-qwen3-0-6b-yaml">
+
+[Source: `qwen3-0.6b.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/snapshot/qwen3-0.6b.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/snapshot/qwen3-0.6b.yaml" title="qwen3-0.6b.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-snapshot-glm-5-3-yaml">
+
+Prefetch the pinned model with
+[`glm-5.3-model-cache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/snapshot/glm-5.3-model-cache.yaml)
+before applying the DGD.
+
+[Source: `glm-5.3.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/snapshot/glm-5.3.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/snapshot/glm-5.3.yaml" title="glm-5.3.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

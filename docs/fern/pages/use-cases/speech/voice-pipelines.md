@@ -55,11 +55,11 @@ Dynamo adapters, plus a Nemotron LLM served by vLLM. ASR, LLM, and TTS run in
 separate pods.
 
 Follow the
-[deployment and smoke-test instructions](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline#deploy-on-kubernetes)
+[deployment and smoke-test instructions](nemotron-speech-pipeline.md#deploy-on-kubernetes)
 in the example. It requires compatible source-built Dynamo images; check the
 example's runtime-image requirements before you deploy. The deployment smoke test
 checks the speech endpoints, not a complete browser voice agent. See
-[external orchestration](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline#external-orchestration)
+[external orchestration](nemotron-speech-pipeline.md#external-orchestration)
 for client integration.
 
 </Tab>

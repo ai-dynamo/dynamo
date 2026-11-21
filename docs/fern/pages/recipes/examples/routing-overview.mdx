@@ -1,0 +1,101 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Routing Examples
+sidebar-title: Overview
+subtitle: Explore KV-aware, approximate, request-plane, gateway, and session-affinity routing
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
+
+Choose a routing example, then filter its available deployment platforms and inference backends.
+
+<ExamplesCatalog topicFilter={false}>
+
+<div className="dynamo-example-card" data-example="aggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg_router.sh agg_router.yaml agg_router_replicas.sh agg_router_xpu.sh agg_router_xpu_dra.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="route" /></span>
+
+### Aggregated KV-Aware Routing
+
+Cache-aware routing to aggregated workers.
+
+<ExampleTargets targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="aggregated-kv-routing.mdx">Open Aggregated KV-Aware Routing example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="disaggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:trtllm kubernetes:vllm local:sglang local:tokenspeed local:trtllm local:vllm" data-keywords="disagg_router.sh disagg_router.yaml disagg_router_gaudi.sh disagg_router_xpu_dra.yaml disagg_router_xpu_gdr.sh launch_disagg.sh">
+
+<span className="dynamo-example-icon"><Icon icon="code-fork" /></span>
+
+### Disaggregated KV-Aware Routing
+
+Cache-aware routing to separate prefill and decode workers.
+
+<ExampleTargets targets="kubernetes:trtllm kubernetes:vllm local:sglang local:tokenspeed local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="disaggregated-kv-routing.mdx">Open Disaggregated KV-Aware Routing example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="approximate-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:vllm local:trtllm local:vllm" data-keywords="agg_router_approx.sh agg_router_approx_xpu.sh agg_router_kv_approx.yaml agg_router_kv_approx_xpu_dra.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="location-crosshairs" /></span>
+
+### Approximate Cache Tracking
+
+KV-aware routing without worker cache-event publishing.
+
+<ExampleTargets targets="kubernetes:vllm local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="approximate-kv-routing.mdx">Open Approximate Cache Tracking example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="request-planes" data-topic="routing" data-topic-label="Routing" data-targets="local:vllm" data-keywords="agg_request_planes.sh agg_request_planes_xpu.sh">
+
+<span className="dynamo-example-icon"><Icon icon="right-left" /></span>
+
+### Request-Plane Transports
+
+Select the transport used for worker requests.
+
+<ExampleTargets targets="local:vllm" />
+
+<a className="dynamo-example-card-link" href="request-planes.mdx">Open Request-Plane Transports example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="gateway-api" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:sglang kubernetes:vllm" data-keywords="agg.yaml disagg.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="archway" /></span>
+
+### Gateway API Routing
+
+Aggregated and disaggregated serving behind an Endpoint Picker.
+
+<ExampleTargets targets="kubernetes:sglang kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="gateway-api.mdx">Open Gateway API Routing example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="session-affinity" data-topic="routing" data-topic-label="Routing" data-targets="local:sglang" data-keywords="agg_agent.sh">
+
+<span className="dynamo-example-icon"><Icon icon="magnet" /></span>
+
+### Session Affinity
+
+SGLang agentic serving with sticky sessions and KV-aware routing.
+
+<ExampleTargets targets="local:sglang" />
+
+<a className="dynamo-example-card-link" href="session-affinity.mdx">Open Session Affinity example</a>
+
+</div>
+
+</ExamplesCatalog>

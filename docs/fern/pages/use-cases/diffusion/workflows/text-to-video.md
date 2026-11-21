@@ -689,7 +689,7 @@ The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual
 
 ## See Also
 
-- [Cosmos3 Nano example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md) — experimental short-clip generation and reference conditioning
+- [Cosmos 3 guide](../cosmos3.md) — experimental short-clip generation and reference conditioning
 - [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni) — animate a source image with the same `/v1/videos` endpoint
 - [Text-to-Video with SGLang](text-to-video.md#sglang)
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm)
@@ -736,7 +736,7 @@ curl http://localhost:8000/v1/videos \
 - [Image-to-Video with SGLang](image-to-video.md#sglang)
 - [Text-to-Video with vLLM-Omni](text-to-video.md#vllm-omni)
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm)
-- [SGLang Examples](../../../recipes/cli-templates/sglang.mdx)
+- [Deployment Examples](../../../recipes/examples/video-generation.mdx)
 
 </Tab>
 <Tab title="TensorRT-LLM">
