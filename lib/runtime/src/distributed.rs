@@ -456,7 +456,7 @@ impl DistributedRuntime {
             };
             match system_status_server::spawn_system_status_server(
                 &config.system_host,
-                config.system_port as u16,
+                u16::try_from(config.system_port)?,
                 stop,
                 Arc::new(distributed_runtime.clone()),
                 distributed_runtime.discovery_metadata.clone(),
