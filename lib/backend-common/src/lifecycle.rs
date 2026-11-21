@@ -190,9 +190,26 @@ pub async fn stage_unregister(
     discovery: &dyn DiscoveryRegistration,
     budget: &ShutdownBudget,
 ) -> StageOutcome {
+    stage_unregister_endpoints(discovery, None, budget).await
+}
+
+pub(crate) async fn stage_unregister_endpoints<D: DiscoveryRegistration + ?Sized>(
+    primary: &D,
+    auxiliary: Option<&D>,
+    budget: &ShutdownBudget,
+) -> StageOutcome {
     let started = Instant::now();
+    let unregister = async {
+        if let Some(auxiliary) = auxiliary {
+            // The primary withdrawal must proceed even if RL discovery stalls.
+            let (primary, auxiliary) = tokio::join!(primary.unregister(), auxiliary.unregister());
+            primary.and(auxiliary)
+        } else {
+            primary.unregister().await
+        }
+    };
     let (reason, detail) =
-        match maybe_timeout(budget.allowance(Stage::Unregister), discovery.unregister()).await {
+        match maybe_timeout(budget.allowance(Stage::Unregister), unregister).await {
             Ok(Ok(())) => (StageReason::Completed, None),
             Ok(Err(error)) => {
                 tracing::warn!(%error, "discovery unregister failed");
@@ -573,13 +590,14 @@ mod tests {
         assert!(outcome.detail.is_none());
     }
 
-    struct HangingDiscovery;
+    #[derive(Default)]
+    struct HangingDiscovery(std::sync::atomic::AtomicBool);
 
     #[async_trait]
     impl DiscoveryRegistration for HangingDiscovery {
         async fn unregister(&self) -> Result<()> {
-            std::future::pending::<()>().await;
-            unreachable!("pending never resolves")
+            self.0.store(true, Ordering::Relaxed);
+            std::future::pending().await
         }
         async fn register(&self) -> Result<()> {
             Ok(())
@@ -594,8 +612,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stage_unregister_gives_up_when_discovery_never_answers() {
         let budget = ShutdownBudget::starting_now(Duration::from_secs(10));
-        let outcome = stage_unregister(&HangingDiscovery, &budget).await;
+        let primary = HangingDiscovery::default();
+        let rl = HangingDiscovery::default();
+        let outcome = stage_unregister_endpoints(&primary, Some(&rl), &budget).await;
         assert_eq!(outcome.reason, StageReason::TimedOut);
+        assert!(primary.0.load(Ordering::Relaxed));
+        assert!(rl.0.load(Ordering::Relaxed));
     }
 
     /// A worker that cannot reach discovery must still shut down — reporting

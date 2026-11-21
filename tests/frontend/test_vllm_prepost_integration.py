@@ -240,6 +240,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     response = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
+        headers={"x-dynamo-session-id": "session-123"},
         timeout=60,
         stream=True,
     )
@@ -248,6 +249,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
 
     assert captured["model"] == TEST_MODEL
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
+    assert captured["agent_context"]["session_id"] == "session-123"
 
     guided_decoding = captured["sampling_options"].get("guided_decoding")
     assert isinstance(guided_decoding, dict)

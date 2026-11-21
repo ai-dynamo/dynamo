@@ -547,8 +547,9 @@ jobs:
           DIFF_REPO: ${{ github.repository }}
           DIFF_RUN_ID: ${{ github.run_id }}
           # Container artifact prefix: lets the main-baseline walk look up
-          # compliance-<sha>-<prefix> availability per commit.
-          DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          # compliance-<sha>-<prefix> availability per commit. Must match
+          # artifact_name_prefix below so enterprise resolves its own evidence.
+          DIFF_ARTIFACT_PREFIX: ${{ inputs.image_tag_suffix == '-enterprise' && format('{0}-enterprise', steps.calculate-target-tag.outputs.target_tag_plain) || steps.calculate-target-tag.outputs.target_tag_plain }}
         run: |
           # The build checkout is shallow with no tags. Make the refs each
           # baseline rule needs reachable (all best-effort; a miss just yields an
@@ -606,7 +607,8 @@ jobs:
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           builder_name: ${{ inputs.builder_name }}
-          artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          # Enterprise has its own OSRB evidence; keep the existing OSS/nightly tokens.
+          artifact_name_prefix: ${{ inputs.image_tag_suffix == '-enterprise' && format('{0}-enterprise', steps.calculate-target-tag.outputs.target_tag_plain) || steps.calculate-target-tag.outputs.target_tag_plain }}
           git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           # Freshly-built ECR EPP image (frontend only) — must match the build's
           # EPP_IMAGE so the epp stage cache-hits instead of resolving the

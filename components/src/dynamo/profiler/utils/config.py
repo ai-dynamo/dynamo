@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.monitoring.dgd_roles import match_role_components
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -435,8 +436,14 @@ def get_component_name_by_type(
 ) -> str:
     """Return a component name by its v1beta1 component type.
 
-    First match ``spec.components[].type``, then fall back to the backend's
-    canonical component name.
+    The profiler edits a template, so it is lenient where the planner raises.
+    Its policy on top of ``match_role_components``, in order:
+
+    1. The first component typed as the role.
+    2. The sole generic ``type: worker`` component, for prefill and decode
+       alike, so both roles of an aggregated template resolve to one component.
+    3. The backend's canonical component name, whether or not the template has
+       a component with that name.
 
     Args:
         config: Configuration object
@@ -446,30 +453,21 @@ def get_component_name_by_type(
     Returns:
         The component name
     """
-    if not config.spec or not config.spec.components:
-        if sub_component_type == SubComponentType.DECODE:
-            return WORKER_COMPONENT_NAMES[backend].decode_worker_k8s_name
-        return WORKER_COMPONENT_NAMES[backend].prefill_worker_k8s_name
+    components = (config.spec.components if config.spec else None) or []
+    candidates = match_role_components(
+        ((component.name, component.component_type) for component in components),
+        sub_component_type,
+    )
 
-    for component in config.spec.components:
-        if component.component_type == sub_component_type.value:
-            return component.name
+    if candidates.typed:
+        return candidates.typed[0]
+    if candidates.sole_generic_worker is not None:
+        return candidates.sole_generic_worker
 
-    generic_workers = [
-        component
-        for component in config.spec.components
-        if component.component_type == "worker"
-    ]
-    if len(generic_workers) == 1:
-        return generic_workers[0].name
-
-    # Fall back to default component names
+    default_names = WORKER_COMPONENT_NAMES[backend]
     if sub_component_type == SubComponentType.DECODE:
-        default_name = WORKER_COMPONENT_NAMES[backend].decode_worker_k8s_name
-    else:
-        default_name = WORKER_COMPONENT_NAMES[backend].prefill_worker_k8s_name
-
-    return default_name
+        return default_names.decode_worker_k8s_name
+    return default_names.prefill_worker_k8s_name
 
 
 def get_worker_component_from_config(

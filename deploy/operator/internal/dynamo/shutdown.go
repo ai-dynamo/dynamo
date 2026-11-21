@@ -29,43 +29,56 @@ func validateShutdownBudget(podSpec *corev1.PodSpec, isWorker bool) error {
 	}
 
 	// Validate after all container overrides have merged.
-	for index, container := range podSpec.Containers {
-		var canonical, legacy *corev1.EnvVar
-		for i := range container.Env {
-			env := &container.Env[i]
-			switch env.Name {
-			case "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS":
-				canonical = env
-			case "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT":
-				legacy = env
-			}
+	runtime := findRuntimeInitContainer(podSpec)
+	if runtime != nil {
+		if err := validateContainerBudget(runtime, grace, isWorker); err != nil {
+			return err
 		}
+	}
+	for i := range podSpec.Containers {
+		if err := validateContainerBudget(&podSpec.Containers[i], grace, isWorker && runtime == nil && i == 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-		// Match runtime precedence: a non-empty canonical value wins.
-		selected := legacy
-		if canonical != nil && (canonical.ValueFrom != nil || strings.TrimSpace(canonical.Value) != "") {
-			selected = canonical
+func validateContainerBudget(container *corev1.Container, grace int64, useWorkerDefault bool) error {
+	var canonical, legacy *corev1.EnvVar
+	for i := range container.Env {
+		env := &container.Env[i]
+		switch env.Name {
+		case "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS":
+			canonical = env
+		case "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT":
+			legacy = env
 		}
-		// Only the primary worker inherits the worker default. Unrelated
-		// containers and non-worker components require an explicit setting.
-		if (selected == nil || (selected.ValueFrom == nil && strings.TrimSpace(selected.Value) == "")) && !(isWorker && index == 0) {
-			continue
+	}
+
+	// Match runtime precedence: a non-empty canonical value wins.
+	selected := legacy
+	if canonical != nil && (canonical.ValueFrom != nil || strings.TrimSpace(canonical.Value) != "") {
+		selected = canonical
+	}
+	// Only the primary worker inherits the worker default. Unrelated
+	// containers and non-worker components require an explicit setting.
+	if (selected == nil || (selected.ValueFrom == nil && strings.TrimSpace(selected.Value) == "")) && !useWorkerDefault {
+		return nil
+	}
+	if selected != nil && selected.ValueFrom != nil {
+		return fmt.Errorf("container %s: %s must be a literal to validate the shutdown budget", container.Name, selected.Name)
+	}
+	// Report invalid configuration rather than silently validating a fallback.
+	total := int64(30)
+	if selected != nil && strings.TrimSpace(selected.Value) != "" {
+		var err error
+		total, err = strconv.ParseInt(strings.TrimSpace(selected.Value), 10, 64)
+		if err != nil || total <= 0 || total > 315360000 {
+			return fmt.Errorf("container %s: invalid %s=%q", container.Name, selected.Name, selected.Value)
 		}
-		if selected != nil && selected.ValueFrom != nil {
-			return fmt.Errorf("container %s: %s must be a literal to validate the shutdown budget", container.Name, selected.Name)
-		}
-		// Report invalid configuration rather than silently validating a fallback.
-		total := int64(30)
-		if selected != nil && strings.TrimSpace(selected.Value) != "" {
-			var err error
-			total, err = strconv.ParseInt(strings.TrimSpace(selected.Value), 10, 64)
-			if err != nil || total <= 0 || total > 315360000 {
-				return fmt.Errorf("container %s: invalid %s=%q", container.Name, selected.Name, selected.Value)
-			}
-		}
-		if grace < total+5 {
-			return fmt.Errorf("container %s: terminationGracePeriodSeconds=%d must be at least %d (shutdown total plus 5s margin); include additional time for preStop hooks and sequential restartable-init-container teardown", container.Name, grace, total+5)
-		}
+	}
+	if grace < total+5 {
+		return fmt.Errorf("container %s: terminationGracePeriodSeconds=%d must be at least %d (shutdown total plus 5s margin); include additional time for preStop hooks and sequential restartable-init-container teardown", container.Name, grace, total+5)
 	}
 	return nil
 }
