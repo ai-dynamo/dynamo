@@ -54,6 +54,14 @@ pub struct NvCreateCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_stop_trim: Option<bool>,
 
+    /// Whether a text prompt is tokenized with the special tokens the model's
+    /// tokenizer declares, such as BOS. This vLLM-compatible field is optional.
+    /// When omitted, `DYN_COMPLETIONS_TOKENIZATION_ADD_SPECIAL_TOKENS` decides,
+    /// and without it text prompts get the special tokens, matching vLLM's
+    /// `/v1/completions` default. Token-id prompts are never modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_special_tokens: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(
         flatten,

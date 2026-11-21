@@ -1714,7 +1714,11 @@ impl ModelDeploymentCard {
         self.tokenizer_id_bound.get().copied()
     }
 
-    pub(crate) fn embedding_tokenizer_with_options(
+    /// Tokenizer for requests that choose whether to add the model's declared
+    /// special tokens (embeddings and completions). Adding them needs the
+    /// Hugging Face post-processor, so that variant always uses the Hugging Face
+    /// backend and bypasses the prefix cache.
+    pub(crate) fn request_tokenizer_with_options(
         &self,
         options: crate::tokenizers::TokenizerOptions,
     ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
