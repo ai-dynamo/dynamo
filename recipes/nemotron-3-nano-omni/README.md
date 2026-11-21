@@ -148,27 +148,24 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Optional: Run without NATS
 
-The Dynamo runtime defaults to NATS for the event plane and connects to a
-NATS server if `NATS_SERVER` is set in the environment (the operator
-auto-injects this on most clusters). On clusters without NATS — or where
-you'd rather avoid the dependency — you can run on TCP request plane + ZMQ
-event plane only. Add to both Frontend and worker:
+The Dynamo runtime defaults to a TCP request plane and a ZMQ event plane
+for every discovery backend. These defaults do not require NATS.
+`NATS_SERVER` sets the server address when a plane uses NATS; setting it
+alone does not open a NATS connection, even when the operator injects it.
+
+If your deployment overrides these defaults, set both planes explicitly
+on the frontend and each worker to run without NATS:
 
 ```yaml
 mainContainer:
   env:
+    - name: DYN_REQUEST_PLANE
+      value: tcp
     - name: DYN_EVENT_PLANE
       value: zmq
-  command: ["/bin/bash", "-lc"]
-  args:
-    # Operator-injected NATS_SERVER takes effect even when set to ""; we have
-    # to actually unset it before the runtime reads env.
-    - >-
-      unset NATS_SERVER &&
-      exec python3 -m dynamo.frontend ...   # or dynamo.vllm
 ```
 
-The request plane defaults to TCP already, so no further flags are needed.
+Selecting NATS for either plane requires a running NATS server.
 
 ## File Layout
 

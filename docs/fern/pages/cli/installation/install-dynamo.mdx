@@ -159,7 +159,7 @@ On a single machine you can run either of two configurations:
 |---|---|---|
 | **Extra services** | None | etcd + NATS (via Docker Compose) |
 | **Discovery** | Local filesystem | etcd |
-| **Events** | ZMQ (in-process) | NATS |
+| **Events** | ZMQ | ZMQ (default), NATS (opt-in) |
 | **Scope** | Single machine only | Single **or** multi-node |
 | **Failure cleanup** | None | Lease-based auto-cleanup (default 10s TTL) — a crashed worker's endpoints are removed automatically and the frontend reroutes |
 | **KV events and KV-aware routing** | Available (ZMQ, no NATS or etcd) | Available |
