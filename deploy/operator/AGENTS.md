@@ -26,6 +26,9 @@ SPDX-License-Identifier: Apache-2.0
   nested types, examples, and compatibility notes against the Go source and
   regenerated reference. Shared component fields belong in the DCD page; the
   DGD page links there rather than duplicating the field inventory.
+- Before approving a CRD API change, the operator reviewer must verify that
+  affected curated pages remain aligned with the Go types, runtime behavior,
+  and regenerated reference, even when no curated page changed in the PR.
 - When introducing CRD/admission or platform chart breaking changes, or dependency
   compatibility changes that require migration, update the platform README's
   `Upgrading` section in the same PR. Edit
