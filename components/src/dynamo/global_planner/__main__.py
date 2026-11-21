@@ -149,21 +149,26 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
         status_endpoint = runtime.endpoint(
             f"{namespace}.GlobalPlanner.allocation_status"
         )
-        operations.extend(
-            [
-                status_endpoint.serve_endpoint(managed_handler.allocation_status),
-                controller.run(),
-            ]
+        operations.append(
+            status_endpoint.serve_endpoint(managed_handler.allocation_status)
         )
-    # Cancel the remaining operations when any one fails, so a stopped
-    # controller never leaves endpoints accepting demand it cannot serve.
+    # Stop everything once all endpoints return (runtime shutdown), one fails, or
+    # the controller stops, so neither keeps running without the other.
     tasks = [asyncio.ensure_future(operation) for operation in operations]
+    endpoints_done = asyncio.gather(*tasks)
+    waiters: list[asyncio.Future] = [endpoints_done]
+    if controller is not None:
+        controller_task = asyncio.ensure_future(controller.run())
+        tasks.append(controller_task)
+        waiters.append(controller_task)
     try:
-        await asyncio.gather(*tasks)
+        done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        for finished in done:
+            finished.result()
     finally:
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(endpoints_done, *tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
