@@ -63,6 +63,9 @@ class GenerateRequest(TypedDict, total=False):
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
     require_reasoning: bool
+    # Best-effort cache-pollution hint: "decode-only" or "new-blocks". An engine can
+    # ignore it or apply "decode-only" in place of "new-blocks", but not the opposite.
+    disable_caching: str
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
     multi_modal_data: dict[str, Any]
