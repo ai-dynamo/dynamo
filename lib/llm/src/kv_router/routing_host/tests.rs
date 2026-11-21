@@ -5520,6 +5520,19 @@ async fn a_role_hosted_by_its_policy_honors_required_taints() {
             "{policy_type}: {error:#}"
         );
         assert!(fixture.dispatch.worker_ids.lock().unwrap().is_empty());
+
+        // The worker with the taint is not routable and the other is busy. No routable
+        // worker can take the request, so it fails with no endpoint, not as overloaded.
+        client.override_instance_avail(vec![UNTAINTED]);
+        client.set_overloaded_instances(&[UNTAINTED]);
+        fixture
+            .assert_no_endpoints(requiring("zone-a"), "the tainted worker is not routable")
+            .await;
+        client.override_instance_avail(vec![]);
+        fixture
+            .assert_no_endpoints(requiring("zone-a"), "no worker is routable")
+            .await;
+        client.override_instance_avail(vec![UNTAINTED, ZONE_A]);
         client.set_overloaded_instances(&[]);
 
         if policy_type == "least-loaded" {
