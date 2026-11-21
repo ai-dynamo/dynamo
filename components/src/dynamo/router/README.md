@@ -29,7 +29,7 @@ python -m dynamo.router \
 
 **Router Configuration:**
 Most KV tuning options use the `--router-*` prefix, but shared options such as
-`--load-aware`, `--serve-indexer`, `--use-remote-indexer`, and `--shared-cache-*` do
+`--serve-indexer`, `--use-remote-indexer`, and `--shared-cache-type` do
 not. Standalone-only options include `--endpoint` and `--router-block-size`. Legacy
 names such as `--block-size` and `--kv-events` are still accepted but deprecated.
 Run `python -m dynamo.router --help` for the standalone command surface. The

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import os
 import warnings
 from pathlib import Path
 
@@ -13,10 +14,15 @@ from dynamo.common.configuration.groups.ais_perf_args import (
     AisPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
+    REMOVED_KV_ROUTER_ENV_VARS,
+    REMOVED_KV_ROUTER_FLAGS,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import (
+    REMOVED_ROUTER_ENV_VARS,
+    REMOVED_ROUTER_FLAGS,
+)
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -109,92 +115,6 @@ def test_ais_mtp_cli_documents_conditional_rates_and_seed() -> None:
     assert "all earlier drafts were accepted" in " ".join(parser.format_help().split())
 
 
-def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(
-        FutureWarning, match="--router-kv-overlap-score-weight is deprecated"
-    ):
-        args = parser.parse_args(["--router-kv-overlap-score-weight", "2.5"])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 2.5
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
-
-
-def test_deprecated_overlap_score_weight_env_flows_to_binding_kwargs(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "2.5")
-
-    with pytest.warns(FutureWarning, match="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 2.5
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
-
-
-@pytest.mark.parametrize(
-    ("canonical_env", "cli_args", "expected_credit", "expected_scale"),
-    [
-        (("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"), [], 1.0, 2.5),
-        (("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.5"), [], 0.5, 1.0),
-        (None, ["--router-prefill-load-scale", "3"], 1.0, 3.0),
-        (None, ["--router-kv-overlap-score-credit", "0.5"], 0.5, 1.0),
-    ],
-    ids=["scale-env", "credit-env", "scale-cli", "credit-cli"],
-)
-def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
-    monkeypatch,
-    canonical_env,
-    cli_args,
-    expected_credit,
-    expected_scale,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-    if canonical_env is not None:
-        monkeypatch.setenv(*canonical_env)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    if cli_args:
-        with pytest.warns(FutureWarning, match="deprecated"):
-            args = parser.parse_args(cli_args)
-    else:
-        args = parser.parse_args(cli_args)
-
-    assert args.overlap_score_credit == expected_credit
-    assert args.prefill_load_scale == expected_scale
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(["--router-decode-active-request-weight", "64"])
-    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
-
-    assert kwargs["decode_active_request_weight"] == 64.0
-
-
 def test_session_prefix_index_is_opt_in() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -229,62 +149,6 @@ def test_session_prefix_index_environment_flows_to_binding_kwargs(
         parser.parse_args(["--no-enable-session-prefix-index"])
     ).kv_router_kwargs()
     assert overridden["enable_session_prefix_index"] is False
-
-
-def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(["--load-aware"])
-
-    assert args.load_aware is True
-    config = KvRouterConfigBase.from_cli_args(args)
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["overlap_score_credit"] == 0.0
-    assert kwargs["use_kv_events"] is False
-    assert kwargs["router_track_active_blocks"] is True
-    assert kwargs["router_assume_kv_reuse"] is False
-    assert kwargs["router_track_prefill_tokens"] is True
-    assert kwargs["use_remote_indexer"] is False
-    assert kwargs["serve_indexer"] is False
-    assert kwargs["shared_cache_multiplier"] == 0.0
-    assert kwargs["shared_cache_type"] == "none"
-    assert "load_aware" not in kwargs
-    assert kwargs["overlap_score_weight"] is None
-
-
-def test_load_aware_env_applies_no_cache_load_balancing_preset(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
-    parser = argparse.ArgumentParser()
-    with pytest.warns(FutureWarning, match="DYN_ROUTER_LOAD_AWARE"):
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.load_aware is True
-    config = KvRouterConfigBase.from_cli_args(args)
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["overlap_score_credit"] == 0.0
-    assert kwargs["use_kv_events"] is False
-    assert kwargs["router_assume_kv_reuse"] is False
-    assert kwargs["router_track_prefill_tokens"] is True
-
-
-def test_load_aware_preserves_prefill_load_scale() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(["--load-aware", "--router-prefill-load-scale", "2.5"])
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["overlap_score_credit"] == 0.0
-    assert kwargs["prefill_load_scale"] == 2.5
 
 
 def test_tracking_hash_cli_flows_to_binding_kwargs(tmp_path: Path) -> None:
@@ -327,29 +191,6 @@ def test_tracking_hash_environment_flows_to_binding_kwargs(
     assert kwargs["router_tracking_key_id"] == "2026-01"
 
 
-def test_load_aware_preserves_cache_hit_weights() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(
-            [
-                "--load-aware",
-                "--router-host-cache-hit-weight",
-                "0.9",
-                "--router-disk-cache-hit-weight",
-                "0.1",
-            ]
-        )
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["overlap_score_credit"] == 0.0
-    assert kwargs["host_cache_hit_weight"] == 0.9
-    assert kwargs["disk_cache_hit_weight"] == 0.1
-
-
 def test_policy_config_cli_overrides_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -364,67 +205,6 @@ def test_policy_config_cli_overrides_environment(
     config = KvRouterConfigBase.from_cli_args(args)
 
     assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
-
-
-def test_stage_policy_cli_and_environment_precedence(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_PREFILL_POLICY", "env-prefill")
-    monkeypatch.setenv("DYN_ROUTER_DECODE_POLICY", "env-decode")
-    parser = argparse.ArgumentParser()
-    with pytest.warns(FutureWarning, match="deprecated") as records:
-        KvRouterArgGroup().add_arguments(parser)
-    assert len(records) == 2
-
-    with pytest.warns(FutureWarning, match="--router-prefill-policy is deprecated"):
-        args = parser.parse_args(["--router-prefill-policy", "cli-prefill"])
-    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
-
-    assert kwargs["router_prefill_policy"] == "cli-prefill"
-    assert kwargs["router_decode_policy"] == "env-decode"
-
-
-def test_stage_policy_help_describes_router_process_pool_roles() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-    help_by_dest = {action.dest: action.help for action in parser._actions}
-
-    assert "Process-local" in help_by_dest["router_prefill_policy"]
-    assert "disaggregated prefill workers" in help_by_dest["router_prefill_policy"]
-    assert "Process-local" in help_by_dest["router_decode_policy"]
-    assert "this router process" in help_by_dest["router_decode_policy"]
-
-
-def test_load_aware_clears_predicted_ttl() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(["--load-aware", "--router-predicted-ttl-secs", "5"])
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["use_kv_events"] is False
-    assert kwargs["router_predicted_ttl_secs"] is None
-
-
-def test_load_aware_preserves_deprecated_overlap_score_weight_env(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "2.5")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(["--load-aware"])
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["overlap_score_credit"] == 0.0
-    assert kwargs["prefill_load_scale"] == 1.0
-    assert kwargs["overlap_score_weight"] == 2.5
 
 
 def _frontend_config(argv: list[str]) -> FrontendConfig:
@@ -480,44 +260,6 @@ def test_frontend_rejects_a_policy_file_with_a_router_mode_other_than_kv(
         _frontend_config(
             ["--router-mode", router_mode, "--router-policy-config", str(path)]
         )
-
-
-def test_load_aware_does_not_hide_a_router_mode_that_conflicts_with_a_policy_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
-    path = tmp_path / "policy.yaml"
-    path.write_text("worker_selection:\n  decode: round-robin\n")
-
-    with (
-        pytest.warns(FutureWarning, match="deprecated"),
-        pytest.raises(ValueError, match="mutually exclusive"),
-    ):
-        _frontend_config(
-            [
-                "--load-aware",
-                "--router-mode",
-                "direct",
-                "--router-policy-config",
-                str(path),
-            ]
-        )
-
-
-def test_load_aware_frontend_implies_kv_router_mode() -> None:
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        args = parser.parse_args(["--load-aware"])
-
-    config = FrontendConfig.from_cli_args(args)
-    config.validate()
-
-    assert config.router_mode == "kv"
-    assert config.overlap_score_credit == 0.0
-    assert config.use_kv_events is False
-    assert config.router_assume_kv_reuse is False
 
 
 def test_frontend_reasoning_field_name_cli_and_environment(
@@ -623,36 +365,6 @@ def test_conditional_disagg_requires_router_kv_events() -> None:
         config.validate()
 
 
-def test_conditional_disagg_prefill_busy_threshold_defaults_to_queue_threshold(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level("INFO")
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="--router-queue-threshold is deprecated"):
-        config = FrontendConfig.from_cli_args(
-            parser.parse_args(
-                [
-                    "--router-mode",
-                    "kv",
-                    "--router-conditional-disagg",
-                    "--router-conditional-disagg-config",
-                    '{"policy":"prefill_load"}',
-                    "--router-queue-threshold",
-                    "16",
-                ]
-            )
-        )
-    config.validate()
-
-    assert config.conditional_disagg_prefill_busy_threshold == 16.0
-    assert (
-        "conditional_disagg prefill_busy_threshold defaults to "
-        "--router-queue-threshold=16.0"
-    ) in caplog.text
-
-
 def test_conditional_disagg_prefill_load_errors_without_busy_threshold() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
@@ -668,7 +380,10 @@ def test_conditional_disagg_prefill_load_errors_without_busy_threshold() -> None
             ]
         )
     )
-    with pytest.raises(ValueError, match="needs prefill_busy_threshold"):
+    with pytest.raises(
+        ValueError,
+        match="needs prefill_busy_threshold; set it in --router-conditional-disagg-config",
+    ):
         config.validate()
 
 
@@ -712,12 +427,9 @@ def test_frontend_rejection_thresholds_default_to_none(
 
     assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
-    assert config.router_queue_threshold is None
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": None,
-        "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
@@ -733,12 +445,6 @@ def test_frontend_rejection_thresholds_default_to_none(
             "0.5",
             "active_decode_blocks_threshold",
             0.5,
-        ),
-        (
-            "--active-prefill-tokens-threshold",
-            "1000",
-            "active_prefill_tokens_threshold",
-            1000,
         ),
         (
             "--active-prefill-tokens-threshold-frac",
@@ -766,20 +472,11 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
 
     thresholds = {
         "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
-        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
         "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
     }
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
     assert f"{flag}={expected}" in caplog.text
-
-    # The deprecation notice is emitted where the frontend forwards the value,
-    # the same path worker advertisements take, and exactly once per process.
-    build_router_config(config)
-    deprecated = field == "active_prefill_tokens_threshold"
-    assert caplog.text.count("--active-prefill-tokens-threshold is deprecated") == int(
-        deprecated
-    )
 
 
 @pytest.mark.parametrize(
@@ -789,11 +486,6 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
             "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
             "active_decode_blocks_threshold",
             0.6,
-        ),
-        (
-            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            "active_prefill_tokens_threshold",
-            2000,
         ),
         (
             "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
@@ -818,49 +510,37 @@ def test_each_environment_rejection_threshold_is_independently_opt_in(
 
     thresholds = {
         "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
-        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
         "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
     }
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
 
 
-def test_all_rejection_thresholds_and_queue_override_are_forwarded(
+def test_all_rejection_thresholds_are_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_rejection_threshold_env(monkeypatch)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    with pytest.warns(FutureWarning, match="--router-queue-threshold is deprecated"):
-        config = FrontendConfig.from_cli_args(
-            parser.parse_args(
-                [
-                    "--active-decode-blocks-threshold",
-                    "0.5",
-                    "--active-prefill-tokens-threshold",
-                    "1000",
-                    "--active-prefill-tokens-threshold-frac",
-                    "2.0",
-                    "--router-queue-threshold",
-                    "32.0",
-                ]
-            )
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--active-decode-blocks-threshold",
+                "0.5",
+                "--active-prefill-tokens-threshold-frac",
+                "2.0",
+            ]
         )
+    )
     config.validate()
 
-    assert config.active_decode_blocks_threshold == 0.5
-    assert config.active_prefill_tokens_threshold == 1000
-    assert config.active_prefill_tokens_threshold_frac == 2.0
-    assert config.router_queue_threshold == 32.0
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": 0.5,
-        "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
     }
-    assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
 
 @pytest.mark.parametrize(
@@ -925,7 +605,6 @@ def test_admission_control_cli_flag_warns_and_is_ignored(
 
     assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert "--admission-control is no longer supported and is ignored" in caplog.text
 
@@ -947,7 +626,6 @@ def test_removed_admission_control_environment_warns_and_is_ignored(
 
     assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert "DYN_ADMISSION_CONTROL is no longer supported and is ignored" in caplog.text
 
@@ -956,7 +634,6 @@ def test_removed_admission_control_environment_warns_and_is_ignored(
     "flag",
     [
         "--active-decode-blocks-threshold",
-        "--active-prefill-tokens-threshold",
         "--active-prefill-tokens-threshold-frac",
     ],
 )
@@ -972,7 +649,6 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
     config.validate()
 
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
 
 
@@ -982,7 +658,6 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
         ("--active-decode-blocks-threshold", "-0.1"),
         ("--active-decode-blocks-threshold", "1.1"),
         ("--active-decode-blocks-threshold", "nan"),
-        ("--active-prefill-tokens-threshold", "-1"),
         ("--active-prefill-tokens-threshold-frac", "-0.1"),
         ("--active-prefill-tokens-threshold-frac", "inf"),
     ],
@@ -1098,26 +773,11 @@ def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
             "overlap_score_credit",
         ),
         (
-            "--router-kv-overlap-score-credit-decay",
-            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
-            "overlap_score_credit_decay",
-        ),
-        (
             "--router-prefill-load-scale",
             "DYN_ROUTER_PREFILL_LOAD_SCALE",
             "prefill_load_scale",
         ),
-        (
-            "--router-decode-active-request-weight",
-            "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
-            "decode_active_request_weight",
-        ),
         ("--router-temperature", "DYN_ROUTER_TEMPERATURE", "router_temperature"),
-        (
-            "--shared-cache-multiplier",
-            "DYN_SHARED_CACHE_MULTIPLIER",
-            "shared_cache_multiplier",
-        ),
     ],
 )
 def test_deprecated_policy_flags_preserve_values_and_cli_precedence(
@@ -1163,23 +823,94 @@ def test_shared_cache_weight_default_is_left_to_the_policy(
         parser.parse_args(args)
     ).kv_router_kwargs()
     assert kwargs["shared_cache_type"] == ("none" if source == "default" else "hicache")
-    assert kwargs["shared_cache_multiplier"] is None
+    # Not forwarded, so the binding keeps None and the policy picks its default.
+    assert "shared_cache_multiplier" not in kwargs
 
 
-def test_no_load_aware_overrides_deprecated_environment(monkeypatch):
-    monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
+_REMOVED_FLAGS = {**REMOVED_KV_ROUTER_FLAGS, **REMOVED_ROUTER_FLAGS}
+_REMOVED_ENV_VARS = {**REMOVED_KV_ROUTER_ENV_VARS, **REMOVED_ROUTER_ENV_VARS}
+
+
+@pytest.mark.parametrize("flag", sorted(_REMOVED_FLAGS))
+def test_removed_flag_fails_and_names_its_replacement(
+    capsys: pytest.CaptureFixture[str], flag: str
+) -> None:
     parser = argparse.ArgumentParser()
-    with pytest.warns(FutureWarning, match="DYN_ROUTER_LOAD_AWARE"):
-        KvRouterArgGroup().add_arguments(parser)
-    with pytest.warns(FutureWarning, match="--router-policy-config"):
-        args = parser.parse_args(["--no-load-aware"])
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.load_aware is False
-    assert config.kv_router_kwargs()["overlap_score_credit"] == 1.0
+    FrontendArgGroup().add_arguments(parser)
+
+    # A value too: --active-prefill-tokens-threshold must not be read as an
+    # abbreviation of --active-prefill-tokens-threshold-frac.
+    with pytest.raises(SystemExit):
+        parser.parse_args([flag, "1"])
+
+    error = capsys.readouterr().err
+    assert f"{flag} was removed in v1.8; use {_REMOVED_FLAGS[flag]}" in error
+    assert flag not in parser.format_help().split()
+
+
+@pytest.mark.parametrize("name", sorted(_REMOVED_ENV_VARS))
+def test_removed_environment_variable_fails_a_kv_frontend(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    for other in _REMOVED_ENV_VARS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(name, "1")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args(["--router-mode", "kv"]))
+
+    with pytest.raises(ValueError) as error:
+        config.validate()
+
+    assert "removed in v1.8" in str(error.value)
+    assert f"{name} (use {_REMOVED_ENV_VARS[name]})" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("name", "fails"),
+    [
+        # Forced KV routing, so its absence changes this frontend's routing.
+        ("DYN_ROUTER_LOAD_AWARE", True),
+        # Applied to every mode but direct.
+        ("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", True),
+        # Never read outside KV routing; the EPP beside this frontend may read it.
+        ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY", False),
+        ("DYN_ROUTER_QUEUE_THRESHOLD", False),
+    ],
+)
+def test_round_robin_frontend_fails_only_on_removed_variables_it_read(
+    monkeypatch: pytest.MonkeyPatch, name: str, fails: bool
+) -> None:
+    for other in _REMOVED_ENV_VARS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    monkeypatch.setenv(name, "1")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+
+    if fails:
+        with pytest.raises(ValueError, match=f"removed in v1.8 are still set: {name}"):
+            config.validate()
+    else:
+        config.validate()
+        assert config.router_mode == "round-robin"
+
+
+def test_removed_environment_variable_fails_a_standalone_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_QUEUE_THRESHOLD", "0.5")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
+
+    with pytest.raises(ValueError, match="policy_classes.*prefill_busy_threshold_frac"):
+        config.kv_router_kwargs()
 
 
 def test_default_policy_flags_do_not_warn(monkeypatch):
-    for name in tuple(kv_router_args.os.environ):
+    for name in tuple(os.environ):
         if name.startswith(("DYN_ROUTER_", "DYN_SHARED_CACHE_", "DYN_OVERLAP_")):
             monkeypatch.delenv(name)
     with warnings.catch_warnings(record=True) as recorded:
@@ -1191,95 +922,16 @@ def test_default_policy_flags_do_not_warn(monkeypatch):
     assert not recorded
 
 
-def test_load_aware_migration_preserves_router_tracking():
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-    with pytest.warns(FutureWarning, match="--router-policy-config"):
-        legacy = FrontendConfig.from_cli_args(parser.parse_args(["--load-aware"]))
-    legacy.validate()
-    migrated = FrontendConfig.from_cli_args(
-        parser.parse_args(
-            [
-                "--router-mode",
-                "kv",
-                "--no-router-kv-events",
-                "--router-track-active-blocks",
-                "--router-track-prefill-tokens",
-                "--no-router-assume-kv-reuse",
-                "--no-use-remote-indexer",
-                "--no-serve-indexer",
-                "--shared-cache-type",
-                "none",
-            ]
-        )
-    )
-    migrated.validate()
-    assert migrated.router_mode == legacy.router_mode
-    # These two values move to YAML; the remaining settings stay host-owned.
-    migrated_kwargs = migrated.kv_router_kwargs()
-    migrated_kwargs.update(overlap_score_credit=0.0, shared_cache_multiplier=0.0)
-    assert migrated_kwargs == legacy.kv_router_kwargs()
-
-
-@pytest.mark.parametrize(
-    "flag, env, value, field, replacement",
-    [
-        (
-            "--router-prefill-policy",
-            "DYN_ROUTER_PREFILL_POLICY",
-            "default",
-            "router_prefill_policy",
-            "worker_selection.prefill",
-        ),
-        (
-            "--router-decode-policy",
-            "DYN_ROUTER_DECODE_POLICY",
-            "default",
-            "router_decode_policy",
-            "worker_selection.decode",
-        ),
-        (
-            "--router-queue-threshold",
-            "DYN_ROUTER_QUEUE_THRESHOLD",
-            "0.7",
-            "router_queue_threshold",
-            "prefill_busy_threshold_frac",
-        ),
-        (
-            "--router-queue-policy",
-            "DYN_ROUTER_QUEUE_POLICY",
-            "wspt",
-            "router_queue_policy",
-            "queue_policy",
-        ),
-    ],
-)
-def test_selection_and_queue_deprecations(
-    monkeypatch, flag, env, value, field, replacement
-):
-    monkeypatch.setenv(env, value)
-    parser = argparse.ArgumentParser()
-    with pytest.warns(
-        FutureWarning, match=rf"{env} is deprecated.*v1.7.*{replacement}"
-    ):
-        KvRouterArgGroup().add_arguments(parser)
-    expected = float(value) if field == "router_queue_threshold" else value
-    assert getattr(parser.parse_args([]), field) == expected
-    with pytest.warns(
-        FutureWarning, match=rf"{flag} is deprecated.*v1.7.*{replacement}"
-    ):
-        assert getattr(parser.parse_args([flag, value]), field) == expected
-
-
-def test_router_yaml_overrides_legacy_preset_and_reads_once(tmp_path):
+def test_router_yaml_overrides_flags_and_reads_once(tmp_path):
     path = tmp_path / "router.yaml"
     path.write_text(
         "router:\n  use_kv_events: true\n  router_predicted_ttl_secs: null\n  router_track_output_blocks: true\n"
     )
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
-    with pytest.warns(FutureWarning, match="--load-aware is deprecated"):
-        args = parser.parse_args(["--load-aware", "--router-policy-config", str(path)])
+    args = parser.parse_args(
+        ["--no-router-kv-events", "--router-policy-config", str(path)]
+    )
     config = FrontendConfig.from_cli_args(args)
     config.validate()
     assert config.router_mode == "kv"

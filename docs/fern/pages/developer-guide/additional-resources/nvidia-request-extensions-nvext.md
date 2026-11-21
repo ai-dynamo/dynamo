@@ -159,7 +159,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 `priority` is the cross-layer scheduling hint. Higher values mean "more
 important" across Dynamo.
 
-When the router queue is active and the request's policy class uses `fcfs` or `wspt`, such as the synthetic class that `--router-queue-threshold` enables, higher-priority requests are shifted earlier in the router queue. An `edf` class, the default for configured policy classes, does not reorder by priority. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
+When the router queue is active and the request's policy class sets `queue_policy` to `fcfs` or `wspt`, higher-priority requests are shifted earlier in the router queue. An `edf` class, the default for configured policy classes, does not reorder by priority. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
 [Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx).
@@ -183,8 +183,9 @@ still orders requests within the same tier; see
 [Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx) for how due-time
 ordering applies within a tier. An `edf` class, the default for configured policy
 classes, orders by due time and arrival alone and ignores `strict_priority`. Only the
-synthetic fallback class can use `lcfs`, through the router-wide queue policy;
-policy-class YAML rejects it.
+synthetic fallback class can use `lcfs`, through the `router_queue_policy` keyword of the
+Python `KvRouterConfig`; policy-class YAML rejects it, and the flag and environment variable
+that set it were removed in v1.8.
 
 This field does not change backend engine priority, preempt running work, or
 provide ordering across router replicas. It also does not prevent an eligible

@@ -214,15 +214,7 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 ### KV scoring and cache locality
 
-Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Deprecated flags and their environment variables remain accepted until removal in v1.7.
-
-<ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
-  **Deprecated.** Use [policy parameters and explicit tracking settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset).
-
-  Preset for KV load-aware routing; implies `--router-mode kv`. Disables device-cache credit, KV event consumption, and remote/shared cache indexers. The worker-selection policy's `CACHE` declaration still controls local approximate indexing.
-
-  Environment variable: `DYN_ROUTER_LOAD_AWARE`
-</ParamField>
+Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Three scoring flags remain, deprecated. The others were removed in v1.8; see [Removed router flags](#removed-router-flags).
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
   **Deprecated.** Set `overlap_score_credit` in the default policy parameters.
@@ -232,16 +224,6 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
   Environment variable: `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`
-</ParamField>
-
-<ParamField path="--router-kv-overlap-score-credit-decay" type="float" default="0.0">
-  **Deprecated.** Set `overlap_score_credit_decay` in the default policy parameters.
-
-  Decay rate for device-local overlap credit as active prefill load rises above the least-loaded
-  eligible worker. `0` disables decay; `1` halves the credit at one request-equivalent of excess
-  active prefill load.
-
-  Environment variable: `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY`
 </ParamField>
 
 <ParamField path="--router-prefill-load-scale" type="float" default="1.0">
@@ -263,14 +245,6 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Credit multiplier from `0.0` through `1.0` for disk or other lower-tier prefix-cache hits.
 
   Environment variable: `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT`
-</ParamField>
-
-<ParamField path="--shared-cache-multiplier" type="float">
-  **Deprecated.** Set `shared_cache_multiplier` in the default policy parameters. The policy defaults to `0.5` when shared cache is enabled.
-
-  **Experimental.** Credit multiplier from `0.0` through `1.0` for external shared-cache hits.
-
-  Environment variable: `DYN_SHARED_CACHE_MULTIPLIER`
 </ParamField>
 
 <ParamField path="--shared-cache-type" type="string" default="none">
@@ -381,16 +355,6 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Environment variable: `DYN_ROUTER_TRACK_OUTPUT_BLOCKS`
 </ParamField>
 
-<ParamField path="--router-decode-active-request-weight" type="float" default="0.0">
-  **Deprecated.** Set `decode_active_request_weight` in the default policy parameters.
-
-  **Experimental.** Finite, nonnegative block-equivalent decode cost added for each active request on
-  a candidate worker. Tune this value only when decode step latency depends materially on active batch
-  size.
-
-  Environment variable: `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT`
-</ParamField>
-
 <ParamField path="--router-track-prefill-tokens / --no-router-track-prefill-tokens" type="boolean" default="true">
   Track prompt-side prefill tokens in worker load accounting.
 
@@ -406,58 +370,36 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Environment variable: `DYN_ROUTER_PREFILL_LOAD_MODEL`
 </ParamField>
 
-<ParamField path="--router-queue-threshold" type="float" default="null">
-  **Deprecated; removal in v1.7.** Set `policy_classes[].prefill_busy_threshold_frac` in `--router-policy-config`.
-
-  Queue threshold fraction of prefill capacity. Setting a nonnegative numeric value enables queueing;
-  priority hints affect only requests waiting in this queue.
-
-  Environment variable: `DYN_ROUTER_QUEUE_THRESHOLD`
-</ParamField>
-
-<ParamField path="--router-queue-policy" type="string" default="fcfs">
-  **Deprecated; removal in v1.7.** Set `policy_classes[].queue_policy` in `--router-policy-config`.
-
-  Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
-  TTFT.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>wspt</Badge></span>
-
-  Environment variable: `DYN_ROUTER_QUEUE_POLICY`
-</ParamField>
-
 <ParamField path="--router-policy-config" type="string" default="null">
   Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies.
   The file selects each role's policy, so pass it without `--router-mode`; any `--router-mode` other
-  than `kv` alongside it is an error. When omitted,
-  `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
-  Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
+  than `kv` alongside it is an error. When omitted, the router uses one synthetic policy class and
+  does not queue. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
 
-<ParamField path="--router-prefill-policy" type="string" default="null">
-  **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
+### Removed router flags
 
-  Worker-selection policy type for disaggregated prefill workers in the current router process,
-  run with its default parameters. This option overrides `worker_selection.prefill` from
-  `--router-policy-config`. It is not included in worker model cards. Set it to `default` to use
-  Dynamo's built-in worker selector.
+These flags and environment variables were removed in v1.8. A frontend, router, or worker that passes one of the flags fails at startup with a message that names the replacement. So does one that used to read a variable that is still set: a frontend with `--router-mode kv` or a policy file, a standalone router, and a worker that advertises `--router-mode kv`. `DYN_ROUTER_LOAD_AWARE` fails a frontend in any router mode. A set variable fails with any value, an empty one included. Write the replacement in the file passed to `--router-policy-config`.
 
-  Environment variable: `DYN_ROUTER_PREFILL_POLICY`
-</ParamField>
+| Removed flag | Removed environment variable | Policy-file key |
+|---|---|---|
+| `--load-aware`, `--no-load-aware` | `DYN_ROUTER_LOAD_AWARE` | `overlap_score_credit: 0` and `shared_cache_multiplier: 0` under `worker_selection.<role>.parameters`, with the `router` settings in [Replace the Load-Aware Preset](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset) |
+| `--router-kv-overlap-score-credit-decay` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `worker_selection.<role>.parameters.overlap_score_credit_decay` |
+| `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`, `DYN_OVERLAP_SCORE_WEIGHT` | `worker_selection.<role>.parameters.prefill_load_scale` |
+| `--router-decode-active-request-weight` | `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT` | `worker_selection.<role>.parameters.decode_active_request_weight` |
+| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `worker_selection.<role>.parameters.shared_cache_multiplier` |
+| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `policy_classes[].prefill_busy_threshold_frac`, with `queue_policy: fcfs` on the class |
+| `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `policy_classes[].queue_policy` (`edf`, `fcfs`, or `wspt`) |
+| `--router-prefill-policy` | `DYN_ROUTER_PREFILL_POLICY` | `worker_selection.prefill` |
+| `--router-decode-policy` | `DYN_ROUTER_DECODE_POLICY` | `worker_selection.decode` |
 
-<ParamField path="--router-decode-policy" type="string" default="null">
-  **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
+`<role>` is `aggregated`, `prefill`, `decode`, or `encode`, and the parameters belong to an entry with `type: dynamo-default-cost-fn`. A flag applied to every role; a policy file applies to the roles it names. `--router-queue-threshold` queued with `fcfs` by default and a policy class defaults to `edf`, which ignores `priority` and `strict_priority`, so set `queue_policy: fcfs` to keep the queue order. See [Configure the Default Policy](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) and [Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues).
 
-  Worker-selection policy type for decode workers in the current router process, run with its
-  default parameters. This option overrides `worker_selection.decode` from `--router-policy-config`.
-  It is not included in worker model cards. Set it to `default` to use Dynamo's built-in worker
-  selector. Configure an aggregated pool with `worker_selection.aggregated` or
-  `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+`--active-prefill-tokens-threshold` and `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` were removed in the same release; use `--active-prefill-tokens-threshold-frac`.
 
-  Environment variable: `DYN_ROUTER_DECODE_POLICY`
-</ParamField>
+The standalone EPP links no policy catalog and still reads the scoring variables; see [EPP Runtime Environment](gateway-api-routing.mdx#epp-runtime-environment).
 
 ## AIS prefill load model
 
@@ -633,18 +575,9 @@ With the flat flags, MoE models require `ais_tp_size * ais_attention_dp_size == 
   Environment variable: `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD`
 </ParamField>
 
-<ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
-  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
-
-  Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
-  enables this check. Uses OR logic with the fractional prefill threshold.
-
-  Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`
-</ParamField>
-
 <ParamField path="--active-prefill-tokens-threshold-frac" type="float" default="null">
   Non-negative fraction of `max_num_batched_tokens` used as the active-prefill-token threshold. A
-  numeric value independently enables this check. Uses OR logic with the absolute prefill threshold.
+  numeric value independently enables this check.
 
   Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC`
 </ParamField>
@@ -1184,7 +1117,7 @@ All endpoint paths can be overridden via environment variables:
 ## Deprecated
 
 <ParamField path="--admission-control" type="string" default="null" deprecated={true}>
-  **Deprecated and ignored.** Configure the three busy thresholds directly. The compatibility flag
+  **Deprecated and ignored.** Configure the busy thresholds directly. The compatibility flag
   and `DYN_ADMISSION_CONTROL` are accepted only so older launch commands continue to start.
 
   Environment variable: `DYN_ADMISSION_CONTROL`

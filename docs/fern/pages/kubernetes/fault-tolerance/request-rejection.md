@@ -26,10 +26,9 @@ Use the signals that match the workers you want to protect:
 
 - Set `--active-decode-blocks-threshold` for decode workers. The value is the fraction of available
   KV cache blocks in use, from `0.0` through `1.0`.
-- Set `--active-prefill-tokens-threshold` for an absolute prefill-token limit. This flag is deprecated
-  and will be removed in v1.7; use `--active-prefill-tokens-threshold-frac`.
-- Set `--active-prefill-tokens-threshold-frac` when the prefill limit should scale with the worker's
-  `max_num_batched_tokens` value.
+- Set `--active-prefill-tokens-threshold-frac` for a prefill-token limit. The value is a fraction of
+  the worker's `max_num_batched_tokens`, so the limit scales with the worker. The absolute
+  `--active-prefill-tokens-threshold` flag was removed in v1.8.
 
 The checks use OR logic. If you configure more than one threshold, exceeding any configured threshold
 marks that data-parallel rank as busy. A worker is rejected only after all of its ranks are busy, and a
@@ -65,15 +64,18 @@ output-block tracking so generated tokens contribute to the observed KV cache lo
             - --active-decode-blocks-threshold
             - "0.85"
             - --router-track-output-blocks
-            - --active-prefill-tokens-threshold
-            - "10000"
+            - --active-prefill-tokens-threshold-frac
+            - "1.5"
 ```
+
+With `1.5`, a rank is busy while its active prefill tokens exceed 1.5 times the worker's
+`max_num_batched_tokens`.
 
 `--router-track-output-blocks` is especially important for long generations. Without it, a workload
 can fill KV cache with generated tokens without crossing the load value observed by the router.
 
 You can configure just one signal. For example, a prefill-only deployment can omit the decode-block
-threshold and KV-specific options. To disable rejection, remove all three threshold settings or set
+threshold and KV-specific options. To disable rejection, remove both threshold settings or set
 their environment-variable values to `None`.
 
 See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#fault-tolerance)

@@ -61,14 +61,16 @@ from typing import TYPE_CHECKING, Any, Optional
 from dynamo.common.ais_perf_model import ROUTER_WORKER_TYPE_ENV
 from dynamo.common.configuration.groups.kv_router_args import (
     _KV_ROUTER_FIELDS,
+    REMOVED_KV_ROUTER_ENV_VARS,
     KvRouterConfigBase,
 )
 from dynamo.common.configuration.groups.router_args import (
+    REMOVED_ROUTER_ENV_VARS,
     RouterConfigBase,
     add_worker_router_arguments,
     resolve_router_mode,
 )
-from dynamo.common.configuration.utils import ArgEnv
+from dynamo.common.configuration.utils import ArgEnv, reject_removed_env_vars
 from dynamo.frontend.frontend_args import build_frontend_parser
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.retune.controller import startup_router_domain
@@ -168,7 +170,6 @@ ENV_TRACE_PATH = "DYN_REQUEST_TRACE_FILE_PATH"
 _GZ_FORMATS = frozenset({"jsonl_gz", "jsonl.gz"})
 
 ENV_WORKER_SELECTION_POLICY = "DYN_ROUTER_WORKER_SELECTION_POLICY"
-ENV_LOAD_AWARE = "DYN_ROUTER_LOAD_AWARE"
 # A worker that resolves a router mode (router_args.add_worker_router_arguments)
 # advertises a RouterConfig in its model card.
 ENV_ROUTER_MODE = "DYN_ROUTER_MODE"
@@ -187,9 +188,10 @@ _TRANSPORT_ROUTER_ENV = frozenset(
 # Router env that only chooses the entry of an AIS perf model. It cannot change
 # a result here: live retune already requires the load model 'none'.
 _IGNORED_ROUTER_ENV = frozenset({ROUTER_WORKER_TYPE_ENV})
-# The deprecated overlap_score_weight: KvRouterArgGroup reads the first name
-# when it is set and the second otherwise.
-_OVERLAP_WEIGHT_ENV = ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT")
+# Router env removed in v1.8. A frontend that routes by KV fails to start
+# while one is set; in another router mode only two of them fail it, and
+# live retune rejects that frontend for its mode anyway.
+_REMOVED_ROUTER_ENV = {**REMOVED_KV_ROUTER_ENV_VARS, **REMOVED_ROUTER_ENV_VARS}
 
 # RouterConfig (not KvRouterConfig) fields that change routing or admission:
 # session affinity pins requests and the busy thresholds reject them. The
@@ -197,15 +199,12 @@ _OVERLAP_WEIGHT_ENV = ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_
 _ROUTER_ADMISSION_FIELDS = (
     "session_affinity_ttl_secs",
     "active_decode_blocks_threshold",
-    "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
 )
 # KvRouterConfig fields serde skips (to_json drops them and from_json
 # rejects them), so they are checked on the parsed flags.
 _SERDE_SKIPPED_DEFAULTS: dict[str, Any] = {
     "router_approximate_cache_policy": "ttl",
-    "router_prefill_policy": None,
-    "router_decode_policy": None,
 }
 # KvRouterConfig JSON keys a frontend may set to a non-default value: they
 # do not change which worker the router picks, or another premise covers
@@ -236,7 +235,6 @@ _RELEVANT_DESTS = frozenset(
         *_TLS_DESTS,
         "router_mode",
         "session_affinity_mode",
-        "load_aware",
         "conditional_disagg_config",
     }
 )
@@ -673,11 +671,20 @@ def _parse(
     def relevant(name: str) -> bool:
         if name in registered:
             return registered[name] in _RELEVANT_DESTS
-        return name in _OVERLAP_WEIGHT_ENV or (
+        return (
             name.startswith(_ROUTER_ENV_PREFIX)
             and name not in _TRANSPORT_ROUTER_ENV
             and name not in _IGNORED_ROUTER_ENV
         )
+
+    try:
+        reject_removed_env_vars(
+            _REMOVED_ROUTER_ENV,
+            removed_in="v1.8",
+            environ=dict.fromkeys([*values, *opaque], ""),
+        )
+    except ValueError as error:
+        raise FrontendParseError(f"P4: invalid frontend env: {error}") from None
 
     # Router env the planner cannot read makes the startup unknowable.
     hidden = sorted(name for name in opaque if relevant(name))
@@ -718,11 +725,8 @@ def _parse(
         )
 
     view = _RouterView.from_cli_args(namespace)
-    # FrontendConfig.validate: an omitted --router-mode is round-robin, and the
-    # load-aware preset implies KV routing.
+    # FrontendConfig.validate: an omitted --router-mode is round-robin.
     view.router_mode = resolve_router_mode(view.router_mode, None)
-    if view.load_aware:
-        view.router_mode = "kv"
     if view.router_policy_config is not None:
         raise FrontendParseError(
             "P4: the frontend sets --router-policy-config "
@@ -730,7 +734,6 @@ def _parse(
             "and live retune needs the builtin default policy"
         )
     try:
-        view.apply_load_aware_preset()
         view.apply_conditional_disagg_config()
         kwargs = {name: getattr(view, name) for name in _KV_ROUTER_FIELDS}
         config = KvRouterConfig(**kwargs)
@@ -754,22 +757,12 @@ def _parse(
         ) from None
 
     violations: list[str] = []
-    if kwargs["overlap_score_weight"] is not None:
-        violations.append(
-            "P4: the frontend sets the deprecated overlap_score_weight, which "
-            "overrides prefill_load_scale"
-        )
     for name, default in _SERDE_SKIPPED_DEFAULTS.items():
         if kwargs[name] != default:
             violations.append(
                 f"P4: the frontend sets {name}={kwargs[name]!r} (default "
                 f"{default!r}), which live retune cannot model"
             )
-    if view.load_aware:
-        violations.append(
-            f"P4: the frontend enables the load-aware preset (--load-aware / "
-            f"{ENV_LOAD_AWARE})"
-        )
     for name in _ROUTER_ADMISSION_FIELDS:
         value = getattr(view, name)
         if value is not None:

@@ -24,7 +24,6 @@ These checks are centralized in the router's routing eligibility path so selecti
 Busy thresholds are worker filters. They are configured separately from the queue threshold:
 
 - `--active-decode-blocks-threshold`
-- `--active-prefill-tokens-threshold`
 - `--active-prefill-tokens-threshold-frac`
 
 When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the [`/busy_threshold` admin endpoint](../../../../reference/components/frontend-configuration.mdx#admin).
@@ -37,7 +36,7 @@ Busy filtering preserves error classification:
 
 ## Queue Backpressure
 
-`--router-queue-threshold` is not candidate eligibility. It is admission backpressure.
+A policy class's `prefill_busy_threshold_frac` is not candidate eligibility. It is admission backpressure.
 
 When queueing is enabled, the router checks active prefill tokens for the request's eligible workers. If all eligible workers are above the configured fraction of `max_num_batched_tokens`, the request waits in the router queue. The request is scored only after capacity frees up, so dispatch uses fresh load and cache state.
 

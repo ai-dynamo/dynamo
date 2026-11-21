@@ -816,12 +816,6 @@ pub mod router {
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
-    /// Queue threshold fraction for prefill token capacity.
-    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
-    pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
-
-    /// Scheduling policy for the router queue ("fcfs" or "wspt").
-    pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
 
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
@@ -1269,8 +1263,6 @@ mod tests {
             model::huggingface::HF_HUB_OFFLINE,
             // Router
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
-            router::DYN_ROUTER_QUEUE_THRESHOLD,
-            router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE,

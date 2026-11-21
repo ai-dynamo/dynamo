@@ -185,13 +185,10 @@ python -m dynamo.frontend \
 | Flag                        | Env var                       | Default | Description                                                                                                                                                        |
 | --------------------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--shared-cache-type`       | `DYN_SHARED_CACHE_TYPE`       | `none`  | `none` disables shared-pool tracking; `hicache` enables the Mooncake event-backed index.                                                                           |
-| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5`   | Discount factor for shared-pool hits. `0.0` ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally.             |
+| —                           | —                             | `0.5`   | Policy parameter `shared_cache_multiplier`: discount factor for shared-pool hits. `0.0` ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally. |
 | —                           | `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` | unset | Mooncake PUB endpoint consumed by the frontend. When unset, Dynamo uses one consistently advertised worker endpoint. |
 
-Set `shared_cache_multiplier` in the [default policy parameters](../../router/configuration-and-tuning.md#configure-the-default-policy). The default is `0.5` when shared cache is enabled. The legacy flag and environment variable are deprecated; per-request score overrides do not apply to the default policy.
-
-> [!WARNING]
-> During a mixed-version rollout, set `--shared-cache-multiplier 0.5` explicitly on workers that advertise HiCache routing configuration until all frontends support policy-owned defaults. Older frontends interpret an omitted multiplier as zero and give shared-cache hits no scoring credit. Use your existing value if you have tuned this multiplier.
+Set `shared_cache_multiplier` in the [default policy parameters](../../router/configuration-and-tuning.md#configure-the-default-policy). The default is `0.5` when shared cache is enabled. The `--shared-cache-multiplier` flag and `DYN_SHARED_CACHE_MULTIPLIER` were removed in v1.8; per-request score overrides do not apply to the default policy.
 
 Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the frontend to the Mooncake PUB endpoint, such as `tcp://mooncake-master.internal:5557`. The endpoint must be reachable from the frontend. Workers can advertise the same variable as a fallback, but a missing worker value does not disable shared-cache routing.
 
@@ -228,7 +225,7 @@ curl -s localhost:8000/metrics | grep shared_cache
 | `shared_cache_hit_rate` is always 0                     | Event endpoint missing, unreachable, or connected after objects were stored | Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the frontend and inspect `dynamo_router_shared_cache_errors_total`. |
 | Events only ever carry `medium=GPU`                     | SGLang older than 0.5.11 or a custom build missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Upgrade to SGLang 0.5.11 or later. |
 | Workers registered but router never tracks shared cache | `--shared-cache-type` left at default `none`                                | Set `--shared-cache-type hicache` on the frontend.                                        |
-| Shared hits do not affect worker selection              | `--shared-cache-multiplier 0.0`                                             | Raise the multiplier — typical starting range is `0.3`–`0.7`.                             |
+| Shared hits do not affect worker selection              | `shared_cache_multiplier: 0` in the policy parameters                        | Raise the multiplier — typical starting range is `0.3`–`0.7`.                             |
 | Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`                      | They must agree; the router hashes pages using the worker's page size.                        |
 | Mooncake page-size mismatch on a DCP worker              | DCP widens radix-event blocks but Mooncake objects retain the physical page size | DCP with Mooncake shared-cache tracking is unsupported; use `--shared-cache-type none`.     |
 | Router logs "no workers have HiCache enabled"            | No worker published `sglang_hicache_mooncake` metadata                       | Confirm workers started with `--hicache-storage-backend mooncake`.                            |
