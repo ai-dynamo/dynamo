@@ -548,6 +548,17 @@ impl MockerExecutionContext {
         }
     }
 
+    /// Whether this prefill worker follows bootstrap rooms that it is never sent. The prefill
+    /// router only adds a room when the worker advertises a bootstrap host and port, so
+    /// without `--bootstrap-ports` only requests with an explicit `dp_rank`, such as those
+    /// placed by the KV router, can be served.
+    fn bootstrap_rooms_unavailable(&self) -> bool {
+        self.engine_args.dp_size > 1
+            && self.engine_args.is_prefill()
+            && self.engine_args.runtime.bootstrap_port.is_none()
+            && self.dp_load_balance_method() == DpLoadBalanceMethod::FollowBootstrapRoom
+    }
+
     /// Charges a request to `DpBudget` and returns the chosen rank with its charge.
     fn charge_dp_budget(
         &self,
@@ -601,8 +612,10 @@ impl MockerExecutionContext {
                 let Some(bootstrap_info) = request.bootstrap_info.as_ref() else {
                     return Err(
                         "request has no bootstrap room, which the follow_bootstrap_room \
-                        load-balance method requires; send requests through the router, or set \
-                        --dp-load-balance-method round_robin to accept direct requests"
+                        load-balance method requires; the router only adds one when the prefill \
+                        worker serves a bootstrap port (--bootstrap-ports). Send requests through \
+                        the router to a worker started with --bootstrap-ports, or set \
+                        --dp-load-balance-method round_robin to accept requests without a room"
                             .to_string(),
                     );
                 };
@@ -701,6 +714,15 @@ impl MockerExecutionContext {
         endpoint: dynamo_runtime::component::Endpoint,
         model_name: String,
     ) -> Result<()> {
+        if self.bootstrap_rooms_unavailable() {
+            tracing::warn!(
+                dp_size = self.engine_args.dp_size,
+                "prefill worker places requests by bootstrap room (follow_bootstrap_room) but \
+                has no bootstrap port, so the router sends it no rooms and it rejects every \
+                request without an explicit dp_rank, including all requests from a non-KV \
+                router; set --bootstrap-ports, or --dp-load-balance-method round_robin"
+            );
+        }
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
@@ -1904,6 +1926,7 @@ mod tests {
                 .resolve_admitted_dp_rank(&dp_rank_request(None, None))
                 .unwrap_err();
             assert!(error.contains("bootstrap room"), "{error}");
+            assert!(error.contains("--bootstrap-ports"), "{error}");
             assert_eq!(
                 engine.resolve_admitted_dp_rank(&dp_rank_request(Some(6), None)),
                 Ok(2)
@@ -2103,6 +2126,32 @@ mod tests {
         let next = charge();
         assert_eq!(next.rank, 0);
         assert_eq!(budget.lock().total_requests, [2, 2]);
+    }
+
+    #[test]
+    fn bootstrap_rooms_unavailable_without_a_prefill_bootstrap_port() {
+        let prefill = |dp_size, method| {
+            dp_rank_engine_with_method(EngineType::Sglang, WorkerType::Prefill, dp_size, method)
+        };
+        for method in [
+            DpLoadBalanceMethod::Auto,
+            DpLoadBalanceMethod::FollowBootstrapRoom,
+        ] {
+            assert!(
+                prefill(2, method).bootstrap_rooms_unavailable(),
+                "{method:?}"
+            );
+        }
+        assert!(!prefill(1, DpLoadBalanceMethod::Auto).bootstrap_rooms_unavailable());
+        assert!(!prefill(2, DpLoadBalanceMethod::RoundRobin).bootstrap_rooms_unavailable());
+        let mut with_port = prefill(2, DpLoadBalanceMethod::Auto);
+        with_port.engine_args.runtime.bootstrap_port = Some(9001);
+        assert!(!with_port.bootstrap_rooms_unavailable());
+        // A decode worker gets rooms whenever its prefill workers serve a bootstrap port.
+        assert!(
+            !dp_rank_engine(EngineType::Sglang, WorkerType::Decode, 2)
+                .bootstrap_rooms_unavailable()
+        );
     }
 
     #[test]

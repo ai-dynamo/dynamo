@@ -402,7 +402,8 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         "explicit DP rank, mirroring SGLang's --load-balance-method. 'auto' (default) "
         "uses follow_bootstrap_room on SGLang prefill workers and round_robin elsewhere. "
         "follow_bootstrap_room rejects requests without a bootstrap room, as SGLang does; "
-        "use round_robin to send requests directly to a prefill worker.",
+        "the router only adds one when the prefill worker has --bootstrap-ports. "
+        "Use round_robin to send requests directly to a prefill worker.",
     )
     parser.add_argument(
         "--startup-time",
