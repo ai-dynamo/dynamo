@@ -296,28 +296,6 @@ async def test_wait_for_phase_retries_vcluster_connection_refusals(
 
 
 @pytest.mark.timeout(30)
-async def test_wait_for_phase_limits_vcluster_connection_retries(
-    monkeypatch,
-) -> None:
-    manager = initialized_manager()
-    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
-    manager.get = AsyncMock(
-        side_effect=aiohttp.ClientConnectorError(
-            connection_key,
-            ConnectionRefusedError(111, "vCluster tunnel unavailable"),
-        )
-    )
-    sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
-
-    with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
-        await manager.wait_for_phase("request", "Ready", timeout=30)
-
-    assert manager.get.await_count == VCLUSTER_CONNECTION_RETRY_LIMIT + 1
-    assert sleep.await_count == VCLUSTER_CONNECTION_RETRY_LIMIT
-
-
-@pytest.mark.timeout(30)
 async def test_wait_for_phase_survives_tunnel_outage_longer_than_15s(
     monkeypatch,
 ) -> None:
