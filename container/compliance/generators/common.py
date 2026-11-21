@@ -206,7 +206,6 @@ _BASE_DEBS_FILTERED = (
     "followed by its copyright file where the image ships one. "
 )
 
-# Where a Debian package installs its copyright file, relative to the root.
 DEB_COPYRIGHT_DIR = Path("usr/share/doc")
 
 

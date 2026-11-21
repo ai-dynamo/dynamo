@@ -393,14 +393,17 @@ def test_main_retains_baseline_python_license_text(
         == 0
     )
 
-    text = (out / "THIRD-PARTY.txt").read_text()
+    text = (out / "THIRD-PARTY.txt").read_text(encoding="utf-8")
     assert "## base-pkg 1.0" in text
     assert (copyright_text in text) == bundled_license
     assert "MIT License" in text  # Canonical text remains available as fallback.
     # The retained base license must not turn the delta reports into full inventories.
-    assert "base-pkg" not in (out / "osrb-deps.csv").read_text()
-    assert "Base_Pkg" not in (out / "osrb-deps.csv").read_text()
-    assert json.loads((out / "osrb.cdx.json").read_text())["components"] == []
+    assert "base-pkg" not in (out / "osrb-deps.csv").read_text(encoding="utf-8")
+    assert "Base_Pkg" not in (out / "osrb-deps.csv").read_text(encoding="utf-8")
+    assert (
+        json.loads((out / "osrb.cdx.json").read_text(encoding="utf-8"))["components"]
+        == []
+    )
 
 
 def test_base_python_license_matches_version_and_ecosystem(tmp_path: Path) -> None:
