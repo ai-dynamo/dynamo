@@ -85,6 +85,7 @@ class VLLMConfig(EngineConfig):
     # decodes past that point so the compile happens before the timed
     # requests, and the on-disk driver cache serves the other workers. Keep it
     # well under the 5 s limit of each readiness attempt once compiled.
+    # Configs whose decode is too slow for that override it back to 8.
     chat_health_check_max_tokens: int = 128
 
 
@@ -98,6 +99,11 @@ for _profile in VLLM_MULTIMODAL_PROFILES:
     _mm_configs.update(
         make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
     )
+# Multimodal configs keep the 8-token chat probe. The only one that gets it is
+# the text-only LLaVA-1.5-7B case on the 24 GiB gpu_1 lane, where a 128-token
+# 7B decode can exceed the 5 s readiness attempt.
+for _mm_config in _mm_configs.values():
+    _mm_config.chat_health_check_max_tokens = 8
 
 
 @dataclass
@@ -270,6 +276,8 @@ vllm_configs = {
         model="meta-llama/Meta-Llama-3.1-8B-Instruct",
         # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
         script_args=["--max-model-len", "4096"],
+        # A 128-token 8B decode on that lane can exceed the 5 s readiness attempt.
+        chat_health_check_max_tokens=8,
         request_payloads=[
             chat_payload_default(),
             chat_payload(
@@ -576,6 +584,9 @@ vllm_configs = {
             "2",
         ],
         timeout=700,
+        # At ~15.5 tok/s (below) a 128-token readiness probe cannot fit the 5 s
+        # readiness attempt.
+        chat_health_check_max_tokens=8,
         # Each request is bounded by BasePayload.timeout (60s, tests/utils/
         # payloads.py), not by the readiness budget above. This deployment
         # decodes at ~15.5 tok/s, so the 1000-token payload default needs ~65s
