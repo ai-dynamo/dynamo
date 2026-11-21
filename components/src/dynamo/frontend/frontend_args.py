@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
+    is_policy_type,
     resolve_router_mode,
 )
 from dynamo.common.configuration.utils import (
@@ -280,13 +281,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         elif self.preprocess_workers < 0:
             raise ValueError("--dyn-preprocess-workers must be >= 0")
 
-        # Check what was asked for before --load-aware forces KV routing, so a
-        # policy file with a conflicting --router-mode still fails.
         self.router_mode = resolve_router_mode(
-            self.router_mode, self.router_policy_config
+            self.router_mode, self.router_policy_config, load_aware=self.load_aware
         )
-        if self.load_aware:
-            self.router_mode = "kv"
         self.apply_router_config()
 
         # Fail at startup on an invalid DYN_MM_* value, not on every request.
@@ -355,8 +352,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 "--isolate-tool-call-markers requires --dyn-chat-processor=sglang"
             )
         self.validate_ais_perf_inputs()
+        # A policy type runs on the KV router unless it is only a picker, which
+        # the router knows and checks at startup.
+        on_kv_router = self.router_mode == "kv" or is_policy_type(self.router_mode)
         if self.router_prefill_load_model == "ais":
-            if self.router_mode != "kv":
+            if not on_kv_router:
                 raise ValueError(
                     "--router-prefill-load-model=ais requires --router-mode=kv"
                 )
@@ -372,7 +372,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                     "--router-track-prefill-tokens"
                 )
         if self.serve_indexer:
-            if self.router_mode != "kv":
+            if not on_kv_router:
                 raise ValueError("--serve-indexer requires --router-mode=kv")
             if self.use_remote_indexer:
                 raise ValueError(
@@ -407,7 +407,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 "--router-conditional-disagg-config decode_busy_threshold must be >= 0"
             )
-        if self.conditional_disagg_enabled and self.router_mode != "kv":
+        if self.conditional_disagg_enabled and not on_kv_router:
             raise ValueError("--router-conditional-disagg requires --router-mode=kv")
         if self.conditional_disagg_enabled and not self.use_kv_events:
             raise ValueError("--router-conditional-disagg requires --router-kv-events")

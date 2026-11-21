@@ -234,7 +234,7 @@ impl Frontend {
             env.runtime.clone(),
             service.state().manager_clone(),
             RouterConfig {
-                router_mode: RouterMode::RoundRobin,
+                router_mode: RouterMode::RoundRobin.into(),
                 ..Default::default()
             },
             migration_limit,

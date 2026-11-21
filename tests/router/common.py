@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -735,6 +736,79 @@ def _test_session_affinity(
                 ) == (worker_a, 0)
 
         asyncio.run(run_test())
+
+
+def _test_router_mode_policy_type(
+    worker_groups: list,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict[str, Any],
+    policy_type: str,
+    num_requests: int,
+) -> tuple[list[dict[str, int]], str]:
+    """Send one session's requests through ``--router-mode <policy_type>``.
+
+    ``worker_groups`` is the aggregated workers, or the prefill and the decode
+    workers of one namespace. The requests share no prompt prefix and run one
+    at a time, so neither cache overlap nor load prefers a worker. Returns the
+    workers that served each request, by role, and the frontend's log.
+    """
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        worker_groups[-1].namespace,
+        "etcd",
+        router_mode=policy_type,
+        min_initial_workers=worker_groups[-1].num_workers,
+    ) as frontend:
+        frontend_url = f"http://localhost:{frontend_port}"
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=sum(group.num_workers for group in worker_groups),
+                timeout=120,
+                engine_workers=worker_groups,
+            )
+        )
+        headers = {"x-dynamo-session-id": f"policy-type-{uuid.uuid4()}"}
+
+        async def send_requests() -> list[dict[str, int]]:
+            worker_ids = []
+            async with aiohttp.ClientSession() as client:
+                for _ in range(num_requests):
+                    payload = {
+                        **test_payload,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": " ".join([uuid.uuid4().hex] * block_size),
+                            }
+                        ],
+                        "stream": True,
+                        "max_tokens": 1,
+                        "nvext": {"extra_fields": ["worker_id"]},
+                    }
+                    async with client.post(
+                        f"{frontend_url}/v1/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    ) as response:
+                        body = await response.text()
+                        assert response.status == 200, body
+                    worker_ids.append(
+                        next(
+                            chunk["nvext"]["worker_id"]
+                            for chunk in parse_sse_json_chunks(body)
+                            if chunk.get("nvext", {}).get("worker_id")
+                        )
+                    )
+            return worker_ids
+
+        worker_ids = asyncio.run(send_requests())
+        # The frontend colors its log lines.
+        return worker_ids, re.sub(r"\x1b\[[0-9;]*m", "", frontend.read_logs())
 
 
 def _test_remote_indexer_decisions(

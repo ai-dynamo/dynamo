@@ -25,7 +25,7 @@ use dynamo_renderer::PromptFormatter;
 use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
-    entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
+    entrypoint::{self, ChatEngineFactoryCallback, RouterConfig, RouterModeSetting},
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{
@@ -444,8 +444,6 @@ impl ModelWatcher {
 
         validate_card_parser_version(card, self.chat_engine_factory.is_some())?;
 
-        validate_policy_worker_role(card, &self.plugins)?;
-
         // Prepare without exact video routing unless the cohort agreed on a contract.
         let mut removed_video_contract = false;
         if spec.video_contract.is_none() {
@@ -467,6 +465,7 @@ impl ModelWatcher {
         }
         let router_config =
             role_routing::serving_set_routing(card.router_config.as_ref(), &self.router_config);
+        validate_policy_worker_role(card, &self.plugins, &router_config.router_mode)?;
 
         let component = self
             .drt
@@ -641,10 +640,18 @@ impl ModelWatcher {
             // Python chat factories receive a Rust-routed engine, so they also
             // need the shared chooser in KV mode.
             let policy = match needs_preprocessed_routing
-                .then(|| role_routing::role_policy(router_config.router_mode))
+                .then(|| {
+                    role_routing::role_policy(
+                        &router_config.router_mode,
+                        effective_worker_type(card.worker_type, card.model_type),
+                        &router_config.kv_router_config,
+                        Some(&card.display_name),
+                    )
+                })
                 .transpose()?
             {
-                Some(RolePolicy::Kv) => {
+                Some(RolePolicy::Kv { selection }) => {
+                    let plugins = selection.map(|named| self.plugins.with_selection_policy(named));
                     let mut chooser = self
                         .manager
                         .kv_chooser_for_with_plugins_and_client(
@@ -654,7 +661,7 @@ impl ModelWatcher {
                                 .client()
                                 .clone(),
                             card.kv_cache_block_size,
-                            &self.plugins,
+                            plugins.as_ref().unwrap_or(&self.plugins),
                             Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             card.worker_type,
@@ -695,7 +702,7 @@ impl ModelWatcher {
                 Some(PrefillRouter::new_with_selection_policy(
                     None,
                     self.manager.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.clone(),
                     card.runtime_config
                         .supports_runtime_capability(DISAGG_PREFILL_CANCEL_ANYTIME_V1),
                     card.kv_cache_block_size,
@@ -919,7 +926,7 @@ impl ModelWatcher {
                     Annotated<NvCreateEmbeddingResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -932,7 +939,7 @@ impl ModelWatcher {
                     Annotated<NvCreateClassifyResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -945,7 +952,7 @@ impl ModelWatcher {
                     Annotated<NvCreatePoolingResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -958,7 +965,7 @@ impl ModelWatcher {
                     Annotated<NvCreateRerankResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -971,7 +978,7 @@ impl ModelWatcher {
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -984,7 +991,7 @@ impl ModelWatcher {
                     Annotated<NvCreateCompletionResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -997,7 +1004,7 @@ impl ModelWatcher {
                     Annotated<NvImagesResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -1017,7 +1024,7 @@ impl ModelWatcher {
                     Annotated<NvVideosResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -1030,7 +1037,7 @@ impl ModelWatcher {
                     Annotated<NvAudioSpeechResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -1043,7 +1050,7 @@ impl ModelWatcher {
                     Annotated<NvAudioTranscriptionResponse>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -1057,7 +1064,7 @@ impl ModelWatcher {
                     Annotated<RealtimeServerEvent>,
                 >::from_client_with_options(
                     client.clone(),
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
@@ -1095,7 +1102,7 @@ impl ModelWatcher {
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_options(
                 client,
-                router_config.router_mode,
+                router_config.router_mode.fixed_mode(),
                 crate::kv_router::plugins::push_router_options(),
             )
             .await?;
@@ -1121,7 +1128,7 @@ impl ModelWatcher {
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_options(
                     client,
-                    router_config.router_mode,
+                    router_config.router_mode.fixed_mode(),
                     crate::kv_router::plugins::push_router_options(),
                 )
             .await?;
@@ -1218,7 +1225,8 @@ impl ControllerHost for ModelWatcher {
         validate_card_shape(&card)?;
         let router_mode =
             role_routing::serving_set_routing(card.router_config.as_ref(), &self.router_config)
-                .router_mode;
+                .router_mode
+                .fixed_mode();
         anyhow::ensure!(
             card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
             "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
@@ -1584,7 +1592,7 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
 /// The prefill router shares this handle, because in direct mode the caller
 /// (EPP) picks both workers, decode and prefill.
 fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
-    if !router_config.router_mode.is_direct_routing() {
+    if !router_config.router_mode.fixed_mode().is_direct_routing() {
         return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
     }
     if router_config.load_threshold_config.is_configured() {
@@ -1598,12 +1606,16 @@ fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
 }
 
 /// A custom policy factory cannot infer whether an untyped legacy card is
-/// decode or aggregated, so it requires an explicit `worker_type`.
+/// decode or aggregated, so it requires an explicit `worker_type`. A policy
+/// type the router mode names is built by its factory in the same way.
 fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
     plugins: &RouterPluginBuilder,
+    router_mode: &RouterModeSetting,
 ) -> anyhow::Result<()> {
-    if plugins.has_custom_worker_selection() && card.worker_type.is_none() {
+    let names_a_policy =
+        plugins.has_custom_worker_selection() || router_mode.policy_type().is_some();
+    if names_a_policy && card.worker_type.is_none() {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
@@ -2201,7 +2213,7 @@ mod tests {
             frontend,
             manager.clone(),
             RouterConfig {
-                router_mode: RouterMode::RoundRobin,
+                router_mode: RouterMode::RoundRobin.into(),
                 ..Default::default()
             },
             0,
@@ -2912,7 +2924,7 @@ request_classifier:
                 drt.clone(),
                 manager.clone(),
                 RouterConfig {
-                    router_mode,
+                    router_mode: router_mode.into(),
                     ..Default::default()
                 },
                 0,
@@ -2989,7 +3001,7 @@ request_classifier:
                 drt.clone(),
                 Arc::new(ModelManager::new()),
                 RouterConfig {
-                    router_mode: frontend_mode,
+                    router_mode: frontend_mode.into(),
                     ..Default::default()
                 },
                 0,
@@ -3005,7 +3017,7 @@ request_classifier:
                     card.model_type = ModelType::Chat;
                     card.worker_type = Some(WorkerType::Aggregated);
                     card.router_config = worker_mode.map(|router_mode| RouterConfig {
-                        router_mode,
+                        router_mode: router_mode.into(),
                         ..Default::default()
                     });
                     let DiscoveryEvent::Added(instance) = discovered_card("kv-text-ns", 1, &card)
@@ -3028,7 +3040,7 @@ request_classifier:
                                 .card
                                 .router_config
                                 .as_ref()
-                                .map(|config| config.router_mode),
+                                .map(|config| config.router_mode.fixed_mode()),
                             worker_mode
                         );
                         assert_eq!(desired.card.model_input, model_input);
@@ -3058,7 +3070,7 @@ request_classifier:
             drt,
             manager.clone(),
             RouterConfig {
-                router_mode: RouterMode::KV,
+                router_mode: RouterMode::KV.into(),
                 ..Default::default()
             },
         );
@@ -3067,7 +3079,7 @@ request_classifier:
         valid.model_type = ModelType::Chat;
         valid.worker_type = Some(WorkerType::Aggregated);
         valid.router_config = Some(RouterConfig {
-            router_mode: RouterMode::RoundRobin,
+            router_mode: RouterMode::RoundRobin.into(),
             ..Default::default()
         });
         apply_discovery_event(
@@ -3123,7 +3135,7 @@ request_classifier:
             .await
             .unwrap();
         let router_config = RouterConfig {
-            router_mode: RouterMode::KV,
+            router_mode: RouterMode::KV.into(),
             kv_router_config: dynamo_kv_router::config::KvRouterConfig {
                 skip_initial_worker_wait: true,
                 use_kv_events: false,
@@ -3709,12 +3721,17 @@ request_classifier:
             )),
         );
         let mut card = ModelDeploymentCard::with_name_only("model");
-        assert!(validate_policy_worker_role(&card, &unresolved).is_ok());
-        assert!(validate_policy_worker_role(&card, &builtin).is_ok());
-        assert!(validate_policy_worker_role(&card, &custom).is_err());
+        let kv = RouterModeSetting::Mode(RouterMode::KV);
+        assert!(validate_policy_worker_role(&card, &unresolved, &kv).is_ok());
+        assert!(validate_policy_worker_role(&card, &builtin, &kv).is_ok());
+        assert!(validate_policy_worker_role(&card, &custom, &kv).is_err());
+        // A router mode that names a policy type selects one for every role.
+        let named = RouterModeSetting::PolicyType("dynamo-two-tier-cost-fn".to_owned());
+        assert!(validate_policy_worker_role(&card, &builtin, &named).is_err());
 
         card.worker_type = Some(WorkerType::Decode);
-        assert!(validate_policy_worker_role(&card, &custom).is_ok());
+        assert!(validate_policy_worker_role(&card, &custom, &kv).is_ok());
+        assert!(validate_policy_worker_role(&card, &builtin, &named).is_ok());
     }
 
     #[test]

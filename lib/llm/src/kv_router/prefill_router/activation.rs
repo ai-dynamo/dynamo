@@ -27,7 +27,7 @@ pub(super) enum ActivationSnapshot {
 }
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
-    entrypoint::RouterConfig,
+    entrypoint::{RouterConfig, RouterModeSetting},
     kv_router::{
         RolePolicy, RouterLoadSource, RoutingHost, RoutingLoadContext, RoutingPolicy,
         SelectionPolicySource,
@@ -62,7 +62,7 @@ fn resolve_advertisement_from_cards(
     let mode_of = |card: &ModelDeploymentCard| {
         card.router_config
             .as_ref()
-            .map_or(decode_router_mode, |config| config.router_mode)
+            .map_or(decode_router_mode, |config| config.router_mode.fixed_mode())
     };
 
     let Some(first) = cards.first() else {
@@ -155,6 +155,7 @@ impl PrefillRouter {
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
     ) -> Arc<Self> {
+        let decode_router_mode = decode_router_mode.into();
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
             target: parking_lot::Mutex::new(None),
@@ -184,7 +185,7 @@ impl PrefillRouter {
     pub(crate) fn new_with_selection_policy(
         activation_rx: Option<oneshot::Receiver<Endpoint>>,
         model_manager: Arc<ModelManager>,
-        decode_router_mode: RouterMode,
+        decode_router_mode: impl Into<RouterModeSetting>,
         decode_supports_prefill_cancellation: bool,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
@@ -222,7 +223,7 @@ impl PrefillRouter {
             selection_policy: Some(selection_policy),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
-            decode_router_mode,
+            decode_router_mode: decode_router_mode.into(),
             decode_supports_prefill_cancellation,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
@@ -305,7 +306,7 @@ impl PrefillRouter {
         let advertisement = match &target {
             WorkerSetTarget::Committed(target) => resolve_advertisement_from_cards(
                 std::slice::from_ref(target.card.as_ref()),
-                context.decode_router_mode,
+                context.decode_router_mode.fixed_mode(),
             )?,
             WorkerSetTarget::Legacy(endpoint) => {
                 Self::resolve_prefill_advertisement(context, endpoint).await?
@@ -316,7 +317,7 @@ impl PrefillRouter {
         let routing = role_routing::prefill_routing(
             advertisement.router_config,
             DecodeRouting {
-                router_mode: context.decode_router_mode,
+                router_mode: context.decode_router_mode.clone(),
                 kv_router_config,
                 session_affinity_ttl: context.session_affinity_ttl,
                 session_affinity_mode: context.session_affinity_mode,
@@ -356,15 +357,20 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
-        let policy = match role_routing::role_policy(prefill_router_mode)? {
-            RolePolicy::Kv => {
+        let policy = match role_routing::role_policy(
+            &prefill_router_mode,
+            crate::worker_type::WorkerType::Prefill,
+            &routing.kv_router_config.clone().unwrap_or_default(),
+            Some(&context.model_name),
+        )? {
+            RolePolicy::Kv { selection } => {
                 // Create KV chooser using the endpoint (this is a prefill router)
                 let kv_chooser = context
                     .model_manager
                     .kv_chooser_for_with_policy_and_client(
                         client.clone(),
                         prefill_block_size,
-                        context.selection_policy.clone(),
+                        selection.unwrap_or_else(|| context.selection_policy.clone()),
                         routing.kv_router_config,
                         context.prefill_load_estimator.clone(),
                         Some(crate::worker_type::WorkerType::Prefill),
@@ -381,7 +387,7 @@ impl PrefillRouter {
             // available in KV routing mode where the router has actual bookkeeping.
             RolePolicy::Ready(policy) => {
                 crate::kv_router::check_hint_policies_route_on_kv_path(
-                    prefill_router_mode,
+                    prefill_router_mode.fixed_mode(),
                     &routing.kv_router_config.unwrap_or_default(),
                     &[crate::worker_type::WorkerType::Prefill],
                 )?;
@@ -406,7 +412,7 @@ impl PrefillRouter {
             target_id,
             endpoint_id,
             router,
-            prefill_router_mode,
+            prefill_router_mode: prefill_router_mode.fixed_mode(),
         })
     }
 
@@ -449,7 +455,7 @@ impl PrefillRouter {
             })
             .collect();
 
-        resolve_advertisement_from_cards(&cards, context.decode_router_mode)
+        resolve_advertisement_from_cards(&cards, context.decode_router_mode.fixed_mode())
             .with_context(|| format!("prefill endpoint {endpoint_id}"))
     }
 
@@ -500,7 +506,7 @@ impl PrefillRouter {
             }
             let build_context = PrefillBuildContext {
                 model_manager: router_ref.model_manager.clone(),
-                decode_router_mode: router_ref.decode_router_mode,
+                decode_router_mode: router_ref.decode_router_mode.clone(),
                 selection_policy: router_ref
                     .selection_policy
                     .clone()
@@ -688,7 +694,9 @@ mod tests {
         let resolved = resolve_advertisement_from_cards(&advertised, RouterMode::RoundRobin)
             .expect("resolves");
         assert_eq!(
-            resolved.router_config.map(|config| config.router_mode),
+            resolved
+                .router_config
+                .map(|config| config.router_mode.fixed_mode()),
             Some(RouterMode::KV)
         );
     }

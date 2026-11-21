@@ -40,7 +40,7 @@ RoutingHost
  │   │   ├─ RequestLeaseManager      booking leases, reaper
  │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/router/kv-router)
  │   │                               classify, queue, score, admit, account load
- │   ├─ Hosted(HostedPolicy)         round-robin, random, least-loaded; opens the transport in its mode
+ │   ├─ Hosted(HostedPolicy)         round-robin, random, least-loaded, or a picker-only policy type
  │   ├─ Direct                       the worker the request names
  │   └─ DeviceAwareWeighted
  ├─ affinity: AffinityCoordinator    session affinity (optional; crate::session_affinity)

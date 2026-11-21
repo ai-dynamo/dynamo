@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -30,6 +31,7 @@ from tests.router.common import (
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
+    _test_router_mode_policy_type,
     _test_router_overload_529,
     _test_router_override_router_config,
     _test_router_query_instance_id,
@@ -546,6 +548,74 @@ def test_mocker_router_soak(
         router_mode=router_mode,
         min_initial_workers=NUM_MOCKERS,
     )
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [["decode"], ["prefill", "decode"]],
+    ids=["aggregated", "disaggregated"],
+)
+@pytest.mark.timeout(180)
+def test_router_mode_names_a_policy_type(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    roles,
+):
+    """``--router-mode <policy type>`` runs that type on every role, with no policy file.
+
+    dynamo-sticky-min-load keeps a session on its first worker. The default KV
+    policy breaks ties between idle workers at random instead, so it would
+    spread these requests over the workers of each role.
+    """
+    policy_type = "dynamo-sticky-min-load"
+    num_requests = 10
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+
+    with contextlib.ExitStack() as stack:
+        if "prefill" in roles:
+            worker_groups = list(
+                stack.enter_context(
+                    launch_disagg_workers(
+                        request,
+                        f"test-namespace-{generate_random_suffix()}",
+                        "prefill_first",
+                        prefill_mocker_args=mocker_args,
+                        decode_mocker_args=mocker_args,
+                        num_prefill_mockers=3,
+                        num_decode_mockers=3,
+                        enable_disagg_bootstrap=False,
+                    )
+                )
+            )
+        else:
+            worker_groups = [
+                stack.enter_context(
+                    MockerProcess(request, mocker_args=mocker_args, num_mockers=3)
+                )
+            ]
+        worker_ids, frontend_log = _test_router_mode_policy_type(
+            worker_groups=worker_groups,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            policy_type=policy_type,
+            num_requests=num_requests,
+        )
+
+    for role in roles:
+        served = [ids[f"{role}_worker_id"] for ids in worker_ids]
+        assert len(set(served)) == 1, (
+            f"{policy_type} keeps a session on one {role} worker, but the requests "
+            f"went to {served}"
+        )
+    assert re.search(f"Activating router .* router_mode={policy_type} ", frontend_log)
+    if "prefill" in roles:
+        assert re.search(
+            f"Activating prefill router prefill_router_mode={policy_type} ",
+            frontend_log,
+        )
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])

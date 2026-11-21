@@ -169,14 +169,26 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
+  Routing strategy: a router mode, or any
+  [registered worker-selection policy type](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies),
+  such as `dynamo-two-tier-cost-fn`. Every worker role then uses that type with its default
+  parameters. A value that is neither a router mode nor a registered type fails at startup, with
+  an error that lists both.
+  `kv` selects the default policy. `direct` and `device-aware-weighted` are router modes only, not
+  policy types. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
   fallback path.
 
   When neither this flag nor `--router-policy-config` is set, the mode is `round-robin`. When only
   a policy file is set, the mode is `kv` and the file selects each role's policy. A policy file
-  with any mode other than `kv` is an error.
+  with any value other than `kv` is an error: to give roles different policies, or to set a
+  policy's parameters, use the file alone. A policy type named here is also an error together
+  with `DYN_ROUTER_WORKER_SELECTION_POLICY`, `--router-prefill-policy`, `--router-decode-policy`
+  or `--load-aware`.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  A worker's own `--router-mode` takes the router modes only, so set a policy type on the
+  frontend, not in an environment shared with workers.
+
+  <span className="enum-values"><span className="enum-label">Router modes:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
