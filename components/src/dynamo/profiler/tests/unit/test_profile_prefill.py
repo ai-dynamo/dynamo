@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from dynamo.profiler.utils.profile_prefill import _profile_prefill_helper
+from dynamo.profiler.utils.profile_prefill import (
+    _profile_prefill_helper,
+    profile_prefill,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -45,3 +50,26 @@ def test_prefill_profile_saves_data_with_three_points(tmp_path):
     _run(tmp_path, [10.0, 20.0, 30.0, None])
 
     assert (tmp_path / "raw_data.npz").exists()
+
+
+def test_profile_prefill_fails_when_every_aiperf_run_exits_nonzero(tmp_path):
+    aiperf = MagicMock(returncode=1)
+    aiperf.communicate.return_value = ("", "endpoint returned 503")
+
+    with patch(
+        "dynamo.profiler.utils.aiperf.subprocess.Popen", return_value=aiperf
+    ) as popen:
+        with pytest.raises(RuntimeError, match="measured 0 TTFT data points"):
+            profile_prefill(
+                str(tmp_path),
+                "test-model",
+                "test-tokenizer",
+                "http://mock:8000",
+                num_gpus=1,
+                max_context_length=4612,
+                interpolation_granularity=4,
+            )
+
+    # Every ISL point was attempted before the sweep failed.
+    assert popen.call_count == 4
+    assert not (tmp_path / "raw_data.npz").exists()
