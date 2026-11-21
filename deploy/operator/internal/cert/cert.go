@@ -93,20 +93,30 @@ type CertManager struct {
 // NewCertManager creates a CertManager. The client should be a direct
 // (non-cached) client because the manager's cache isn't started yet when
 // Setup is called. Only used to create the placeholder secret in auto mode;
-// RBAC is the actual access boundary.
+// RBAC is the actual access boundary. cl and cfg must be non-nil.
 func NewCertManager(cl client.Client, cfg *configv1alpha1.WebhookServer) (*CertManager, error) {
 	ns, err := getOperatorNamespace()
 	if err != nil {
 		return nil, fmt.Errorf("reading operator namespace: %w", err)
 	}
+
+	// Build certificate management with the validated operator namespace.
+	return NewCertManagerInNamespace(cl, cfg, ns), nil
+}
+
+// NewCertManagerInNamespace creates certificate management for an explicit operator
+// namespace. cl and cfg must be non-nil, and namespace must be non-empty.
+// Use a direct client before the manager cache starts, as with NewCertManager.
+func NewCertManagerInNamespace(cl client.Client, cfg *configv1alpha1.WebhookServer, namespace string) *CertManager {
+	// Initialize the lifecycle state shared by automatic and manual provisioning.
 	return &CertManager{
 		client:      cl,
 		cfg:         cfg,
-		namespace:   ns,
+		namespace:   namespace,
 		ready:       make(chan struct{}),
 		logger:      ctrl.Log.WithName("cert-manager"),
 		provisioner: opaCertProvisioner{},
-	}, nil
+	}
 }
 
 // SetupAndRunOnce configures certificate management before the manager starts.
