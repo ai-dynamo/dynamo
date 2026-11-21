@@ -290,7 +290,7 @@ Dynamo uses TCP for inter-component communication. On Kubernetes, native resourc
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
-| **Local Development** | ❌ Not required | ❌ Not required | Pass `--discovery-backend file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **Local Development** | ❌ Not required | ❌ Not required | Pass `--discovery-backend file`; no other flag is needed. To publish vLLM KV events over ZMQ, add `--kv-events-config` with `"enable_kv_cache_events": true` and keep prefix caching enabled |
 | **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
 
 > **Note:** KV-aware routing does not require NATS. Enable KV events when you need event-backed cache-state tracking, or use `--no-router-kv-events` for prediction-based routing without external event infrastructure.

@@ -159,11 +159,13 @@ On a single machine you can run either of two configurations:
 |---|---|---|
 | **Extra services** | None | etcd + NATS (via Docker Compose) |
 | **Discovery** | Local filesystem | etcd |
-| **Events** | ZMQ (in-process) | NATS |
+| **Events** | ZMQ | ZMQ (default), NATS (opt-in) |
 | **Scope** | Single machine only | Single **or** multi-node |
 | **Failure cleanup** | None | Lease-based auto-cleanup (default 10s TTL) — a crashed worker's endpoints are removed automatically and the frontend reroutes |
-| **KV events / routing / planner** | Not available | Available |
+| **KV events and KV-aware routing** | Available (ZMQ, no NATS or etcd) | Available |
 | **Matches production / Kubernetes** | No | Yes |
+
+In `file` mode, KV events travel over the default ZMQ event plane, so KV-aware routing needs no NATS or etcd. A vLLM worker publishes KV events only when you start it with `--kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'` and prefix caching is enabled (the default); without that flag, or with `--no-enable-prefix-caching`, it publishes none. Give each additional worker on the same host its own port, such as `tcp://*:5558`. The `*` binds the publisher on every network interface, and it does not authenticate subscribers. Its `BlockStored` events carry the token IDs of cached blocks, which can reveal prompt content, so use a firewall or network isolation to let only trusted hosts reach the port. If you select the NATS event plane (`--event-plane nats` or `DYN_EVENT_PLANE=nats`) or the NATS request plane (`--request-plane nats` or `DYN_REQUEST_PLANE=nats`), NATS is required again.
 
 The `file` mode is the lightest way to get a model answering with no prerequisites — ideal for a quick local smoke test. This guide uses **etcd + NATS** instead because it is the same discovery path Dynamo uses for multi-node and Kubernetes deployments, so what you learn here carries forward to production.
 

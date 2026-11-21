@@ -233,7 +233,7 @@ Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[C
 
 | 部署 | etcd | NATS | 说明 |
 |------|------|------|------|
-| **本地开发** | ❌ 不需要 | ❌ 不需要 | 传入 `--discovery-backend file`；vLLM 还需要 `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **本地开发** | ❌ 不需要 | ❌ 不需要 | 传入 `--discovery-backend file`，无需其他参数。如需让 vLLM 通过 ZMQ 发布 KV event，请添加 `--kv-events-config` 并设置 `"enable_kv_cache_events": true`，同时保持 prefix caching 启用 |
 | **Kubernetes** | ❌ 不需要 | ❌ 不需要 | K8s 原生服务发现；TCP 请求平面 |
 
 > **注意：** KV 感知路由不需要 NATS。需要基于事件的 cache 状态跟踪时可以启用 KV event；如果不需要外部事件基础设施，可以使用 `--no-router-kv-events` 进行基于预测的路由。
