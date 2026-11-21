@@ -495,8 +495,28 @@ impl Discovery for KubeDiscoveryClient {
             (initial, rx)
         };
         let list_state = self.list_state.clone();
+        let mut daemon_state = self.daemon_state.clone();
 
         tokio::spawn(async move {
+            let daemon_ended = async move {
+                match daemon_state
+                    .wait_for(|state| {
+                        matches!(state, DaemonState::Stopped | DaemonState::Failed(_))
+                    })
+                    .await
+                {
+                    Ok(state) => match &*state {
+                        DaemonState::Failed(reason) => Err(anyhow::anyhow!(
+                            "the Kubernetes discovery daemon failed: {reason}"
+                        )),
+                        _ => Ok(()),
+                    },
+                    Err(_) => Err(anyhow::anyhow!(
+                        "the Kubernetes discovery daemon ended without reporting its state"
+                    )),
+                }
+            };
+            tokio::pin!(daemon_ended);
             tracing::debug!(
                 stream_id = %stream_id,
                 initial_count = initial_instances.len(),
@@ -530,16 +550,25 @@ impl Discovery for KubeDiscoveryClient {
             }
 
             loop {
-                let recv_result = if let Some(ref token) = cancel_token {
-                    tokio::select! {
-                        result = broadcast_rx.recv() => result,
-                        _ = token.cancelled() => {
-                            tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
-                            break;
+                let recv_result = tokio::select! {
+                    biased;
+                    _ = async {
+                        match &cancel_token {
+                            Some(token) => token.cancelled().await,
+                            None => std::future::pending().await,
                         }
+                    } => {
+                        tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
+                        break;
                     }
-                } else {
-                    broadcast_rx.recv().await
+                    result = &mut daemon_ended => {
+                        if let Err(error) = result {
+                            let _ = out_tx.send(Err(error));
+                        }
+                        break;
+                    }
+                    _ = out_tx.closed() => break,
+                    result = broadcast_rx.recv() => result,
                 };
 
                 match recv_result {
@@ -789,7 +818,7 @@ mod tests {
 
     /// A client over `instances` with no cluster behind it, and the sender for its daemon
     /// state, which starts `Pending`.
-    fn client_with(
+    pub(super) fn client_with(
         instances: &[DiscoveryInstance],
     ) -> (KubeDiscoveryClient, watch::Sender<DaemonState>) {
         let kube_client =
