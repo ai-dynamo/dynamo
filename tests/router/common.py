@@ -1746,6 +1746,7 @@ def _test_disagg_router_overload_529(
     max_tokens: int = 50,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    busy_threshold_write: dict | None = None,
 ):
     """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
 
@@ -1763,6 +1764,9 @@ def _test_disagg_router_overload_529(
     - Decode rejection: low ``blocks_threshold`` (active-decode-blocks), prefill
       threshold disabled. Gates the decode pool.
 
+    ``busy_threshold_write`` is posted to ``/busy_threshold`` once the frontend
+    is ready, for a case whose gating threshold is set at runtime.
+
     In both cases the shared probe asserts that some requests succeed, some are
     rejected with 529, and the rejection metric matches.
 
@@ -1770,7 +1774,13 @@ def _test_disagg_router_overload_529(
         AssertionError: If no 529 is observed (the threshold did not gate the
         pool) or if any non-200/529 status appears.
     """
-    with KVRouterProcess(
+    # The admin API is enabled only for a case that writes thresholds.
+    admin_ports = (
+        reserved_ports(1, DynamoPortRange.FRONTEND)
+        if busy_threshold_write
+        else contextlib.nullcontext((None,))
+    )
+    with admin_ports as (admin_port,), KVRouterProcess(
         request=request,
         block_size=block_size,
         frontend_port=frontend_port,
@@ -1782,6 +1792,14 @@ def _test_disagg_router_overload_529(
         router_queue_threshold=router_queue_threshold,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
+        extra_env=(
+            {
+                "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
+                "DYN_FRONTEND_ADMIN_PORT": str(admin_port),
+            }
+            if busy_threshold_write
+            else None
+        ),
     ):
         logger.info(
             "Starting disagg KV router frontend on port %s for overload 529 test",
@@ -1804,6 +1822,16 @@ def _test_disagg_router_overload_529(
                 request_plane=request_plane,
             )
         )
+
+        if busy_threshold_write:
+            response = requests.post(
+                f"http://127.0.0.1:{admin_port}/busy_threshold",
+                json={"model": test_payload["model"], **busy_threshold_write},
+                timeout=10,
+            )
+            assert response.status_code == 200, response.text
+            written = response.json()
+            assert busy_threshold_write.items() <= written.items(), written
 
         _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
 
