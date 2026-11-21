@@ -132,9 +132,10 @@ def test_worker_initializes_only_private_kda_after_zeroing_and_disables_before_s
     assert worker._benchmark_kda_layers == []
 
 
+@pytest.mark.parametrize("kv_api", ["group_spec", "layer_specs"])
 @pytest.mark.parametrize("has_zeroing_api", [True, False])
 def test_worker_binds_only_recurrent_layers_from_runtime_cache_groups(
-    monkeypatch, has_zeroing_api
+    monkeypatch, has_zeroing_api, kv_api
 ):
     worker = BenchmarkWorker.__new__(BenchmarkWorker)
     state = (torch.zeros(4, 2, 4), torch.zeros(4, 2, 3, 4))
@@ -150,12 +151,19 @@ def test_worker_binds_only_recurrent_layers_from_runtime_cache_groups(
         _zero_block_ids=(lambda _ids: None) if has_zeroing_api else None
     )
     spec = MambaSpec(block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align")
-    cache_config = SimpleNamespace(
-        kv_cache_groups=[
+    if kv_api == "group_spec":
+        # Older vLLM: one kv_cache_spec per group.
+        groups = [
             SimpleNamespace(kv_cache_spec=object(), layer_names=["mla"]),
             SimpleNamespace(kv_cache_spec=spec, layer_names=["kda"]),
         ]
-    )
+    else:
+        # Newer vLLM: per-layer kv_cache_specs, no group-level kv_cache_spec.
+        groups = [
+            SimpleNamespace(kv_cache_specs={"mla": object()}, layer_names=["mla"]),
+            SimpleNamespace(kv_cache_specs={"kda": spec}, layer_names=["kda"]),
+        ]
+    cache_config = SimpleNamespace(kv_cache_groups=groups)
     monkeypatch.setattr(Worker, "initialize_from_config", lambda *_args: None)
     if not has_zeroing_api:
         with pytest.raises(ValueError, match="KV-zeroing API"):
