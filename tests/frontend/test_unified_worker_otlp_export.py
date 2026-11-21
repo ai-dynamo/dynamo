@@ -691,6 +691,7 @@ def test_disagg_decode_span_links_to_prefill_span(
             disaggregation_mode="prefill",
             extra_env=otel_env,
             worker_id="sample-prefill",
+            wait_for_frontend_model=False,
         ):
             with SampleUnifiedWorkerProcess(
                 request,

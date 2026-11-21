@@ -268,6 +268,7 @@ def tracing_services_disagg(
                 extra_args=["--disaggregation-mode", "prefill"],
                 worker_id="prefill-worker",
                 extra_env=JSONL_ENV,
+                wait_for_frontend_model=False,
             ) as prefill_worker:
                 with MockerWorkerProcess(
                     request,
@@ -620,6 +621,7 @@ def tracing_services_disagg_slow(
                 extra_args=["--disaggregation-mode", "prefill"],
                 worker_id="prefill-worker",
                 extra_env=JSONL_ENV,
+                wait_for_frontend_model=False,
             ) as prefill_worker:
                 with MockerWorkerProcess(
                     request,
