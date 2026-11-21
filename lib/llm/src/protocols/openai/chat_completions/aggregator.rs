@@ -3018,7 +3018,6 @@ mod tests {
             ("cd", r#"{"workspace"}"#),
             ("mkdir", r#"{"dir_name": "Projects"}"#),
         ];
-        // (input finish, raw text, expected finish, expected calls)
         let cases = [
             (
                 FinishReason::Stop,
