@@ -247,6 +247,20 @@ class Endpoint:
         """
         ...
 
+    async def runtime_configs(self) -> Dict[int, ModelRuntimeConfig]:
+        """
+        The runtime config that each instance of this endpoint registered with
+        its model, keyed by instance ID, as discovery lists them now. LoRA
+        adapter registrations are left out.
+
+        Each config is a copy: changing it does not change what the instance
+        published. A value an instance set with
+        ``set_engine_specific(key, json_text)`` is in ``runtime_data[key]`` as
+        JSON text for the same value; whitespace can differ, so parse it with
+        ``json.loads`` rather than comparing text.
+        """
+        ...
+
     @property
     def metrics(self) -> PyRuntimeMetrics:
         """
