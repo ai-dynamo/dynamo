@@ -957,6 +957,21 @@ impl OfflineReplayRouter {
             None
         };
 
+        tracing::info!(
+            ?worker_type,
+            enabled = overlap_refresh_after.is_some(),
+            reason = if !reads_kv_index { "selector_does_not_read_index" }
+                else if config.use_remote_indexer { "remote_indexer" }
+                else if !profile.classes().iter().any(|class| class.queueing_enabled()) { "queueing_disabled" }
+                else if overlap_refresh_after.is_none() { "disabled_by_configuration" }
+                else { "enabled" },
+            refresh_after_secs = ?overlap_refresh_after.map(|duration| duration.as_secs_f64()),
+            reads_kv_index,
+            remote_indexer = config.use_remote_indexer,
+            queueing_enabled = profile.classes().iter().any(|class| class.queueing_enabled()),
+            "Offline replay queue overlap refresh configuration"
+        );
+
         let mut router = Self {
             config,
             block_size: args.block_size as u32,
@@ -1121,35 +1136,72 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         self.apply_due_kv_events(now_ms)?;
         self.advance_affinity_clock(now_ms)?;
-        let mut pending =
-            self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
+        let queue_decision = if self.affinity.is_none() {
+            Some(self.queue_decision(request.metadata().policy_class.as_deref(), None, now_ms)?)
+        } else {
+            None
+        };
+        let retain_for_refresh = self.overlap_refresh_after.is_some()
+            && queue_decision.is_some_and(|(_, should_queue)| should_queue);
+        let mut pending = self.build_pending_request_with_queue_refresh(
+            request,
+            max_output_tokens,
+            replay_hashes,
+            session_id,
+            retain_for_refresh,
+        )?;
         if !self.acquire_affinity(&mut pending)? {
             self.affinity_waiting.push_back(pending);
             return Ok(RouterEffects::default());
         }
-        self.enqueue_or_admit(pending, now_ms)
+        self.enqueue_or_admit_with_decision(pending, now_ms, queue_decision)
     }
 
-    fn enqueue_or_admit(
-        &mut self,
-        mut pending: PendingRequest,
+    fn queue_decision(
+        &self,
+        policy_class: Option<&str>,
+        request: Option<&PendingRequest>,
         now_ms: f64,
-    ) -> Result<RouterEffects> {
-        let decay_now = self.decay_now(now_ms);
+    ) -> Result<(usize, bool)> {
         let class_index = self
             .profile
-            .resolve_class_index(pending.policy_class.as_deref())
+            .resolve_class_index(policy_class)
             .map_err(dynamo_scheduler::host::KvSchedulerError::from)?;
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
-            && (self.pending.has_backlog(class_index)
-                || Self::request_workers_busy(
-                    &self.slots.project_worker_loads(None, decay_now),
-                    &self.workers_with_configs,
-                    class,
-                    &pending,
-                ));
+            && (self.pending.has_backlog(class_index) || {
+                let loads = self
+                    .slots
+                    .project_worker_loads(None, self.decay_now(now_ms));
+                match request {
+                    Some(request) => Self::request_workers_busy(
+                        &loads,
+                        &self.workers_with_configs,
+                        class,
+                        request,
+                    ),
+                    None => Self::all_workers_busy_with(&loads, &self.workers_with_configs, class),
+                }
+            });
+        Ok((class_index, should_queue))
+    }
 
+    fn enqueue_or_admit(&mut self, pending: PendingRequest, now_ms: f64) -> Result<RouterEffects> {
+        self.enqueue_or_admit_with_decision(pending, now_ms, None)
+    }
+
+    fn enqueue_or_admit_with_decision(
+        &mut self,
+        mut pending: PendingRequest,
+        now_ms: f64,
+        decision: Option<(usize, bool)>,
+    ) -> Result<RouterEffects> {
+        let decay_now = self.decay_now(now_ms);
+        let (class_index, should_queue) = match decision {
+            Some(decision) => decision,
+            None => self.queue_decision(pending.policy_class.as_deref(), Some(&pending), now_ms)?,
+        };
+        let class = self.profile.class(class_index);
         if should_queue {
             pending.queued_at = Some(decay_now);
             let snapshot = self.snapshot_for(&mut pending);
@@ -1423,12 +1475,30 @@ impl OfflineReplayRouter {
         self.decay_time_epoch + Duration::from_secs_f64(now_ms.max(0.0) / 1000.0)
     }
 
+    #[cfg(test)]
     fn build_pending_request<Request: PlacementRequestView>(
         &self,
         request_view: &Request,
         max_output_tokens: usize,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
+    ) -> Result<PendingRequest> {
+        self.build_pending_request_with_queue_refresh(
+            request_view,
+            max_output_tokens,
+            replay_hashes,
+            session_id,
+            false,
+        )
+    }
+
+    fn build_pending_request_with_queue_refresh<Request: PlacementRequestView>(
+        &self,
+        request_view: &Request,
+        max_output_tokens: usize,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        retain_for_refresh: bool,
     ) -> Result<PendingRequest> {
         let request = request_view.metadata();
         anyhow::ensure!(
@@ -1446,7 +1516,7 @@ impl OfflineReplayRouter {
         let (priority_jump, strict_priority) = request.router_priorities();
         let retain_hashes = self.affinity.is_some()
             || self.indexer.approximate.is_some()
-            || self.overlap_refresh_after.is_some()
+            || retain_for_refresh
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
         // A request list arrives without replay hashes; a salted request
@@ -4469,6 +4539,114 @@ policy_classes:
             admitted.admissions[0].overlap_blocks,
             expected_overlap_blocks
         );
+    }
+
+    #[test]
+    fn queued_overlap_refresh_finds_blocks_added_after_empty_index_arrival() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router.overlap_refresh_after = Some(Duration::from_secs(10));
+        router
+            .on_request_arrival(&request(1, 8), None, 0.0)
+            .unwrap();
+        let target = request(2, 7);
+        assert!(
+            router
+                .on_request_arrival(&target, None, 500.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert!(router.pending_count() == 1);
+        let hash = compute_block_hash_for_seq(&target.tokens, 64, BlockHashOptions::default())[0];
+        router
+            .on_kv_events(vec![store_event(0, 1, hash.0, StorageTier::Device)])
+            .unwrap();
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 20_000.0)
+            .unwrap();
+        assert_eq!(admitted.admissions[0].overlap_blocks, 1);
+    }
+
+    #[rstest::rstest]
+    #[case::aggregated(WorkerType::Aggregated)]
+    #[case::decode(WorkerType::Decode)]
+    #[test]
+    fn immediate_refresh_does_not_retain_hashes(#[case] worker_type: WorkerType) {
+        let args = queueing_args();
+        let config = if worker_type == WorkerType::Decode {
+            super::composition::derive_decode_router_config(&args, Some(queueing_router_config()))
+        } else {
+            queueing_router_config()
+        };
+        let router = OfflineReplayRouter::new(&args, Some(config), None, 1).unwrap();
+        assert_eq!(
+            router.overlap_refresh_after.is_some(),
+            worker_type != WorkerType::Decode
+        );
+        let target = request(1, 7);
+        let (_, should_queue) = router.queue_decision(None, None, 0.0).unwrap();
+        assert!(!should_queue);
+        for hashes in [
+            None,
+            Some(ReplayRequestHashes::from_tokens(&target.tokens, 64)),
+        ] {
+            let pending = router
+                .build_pending_request_with_queue_refresh(
+                    &target,
+                    target.max_output_tokens,
+                    hashes,
+                    None,
+                    should_queue,
+                )
+                .unwrap();
+            assert!(pending.block_hashes.is_none());
+            assert!(pending.overlap.tier_overlap_blocks.device.is_empty());
+        }
+    }
+
+    #[test]
+    fn queued_overlap_refresh_expires_approximate_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_ttl_secs: 1.0,
+            router_temperature: 0.0,
+            ..queueing_router_config()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        router.overlap_refresh_after = Some(Duration::from_secs(10));
+        let first = request_with_priorities(1, 7, 128, 0, 0);
+        let second = request_with_priorities(2, 7, 128, 0, 0);
+        assert_eq!(
+            router
+                .on_request_arrival(&first, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+        assert!(
+            router
+                .on_request_arrival(&second, None, 500.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert_eq!(router.pending_count(), 1, "must exercise router queueing");
+        let before = router.debug_snapshot(500.0);
+        assert_eq!(before.pending[0].overlap_blocks_by_worker, vec![(0, 2)]);
+        router.apply_due_kv_events(20_000.0).unwrap();
+        assert_eq!(
+            router.debug_snapshot(20_000.0).indexer.total_cached_blocks,
+            0
+        );
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 20_000.0)
+            .unwrap();
+        assert_eq!(admitted.admissions.len(), 1);
+        assert_eq!(admitted.admissions[0].uuid, Uuid::from_u128(2));
+        assert_eq!(admitted.admissions[0].overlap_blocks, 0);
     }
 
     #[test]

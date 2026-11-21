@@ -381,16 +381,28 @@ impl KvReplayRouter {
     async fn request_identities(
         &self,
         request: &DirectRequest,
-    ) -> Result<(TieredMatchDetails, Option<Vec<u64>>, Option<Vec<LocalBlockHash>>)> {
+    ) -> Result<(
+        TieredMatchDetails,
+        Option<Vec<u64>>,
+        Option<Vec<LocalBlockHash>>,
+    )> {
         let cache_salt = request_cache_salt(request);
-        let salted_hashes = if let Some(cache_salt) = cache_salt { Some({
-            local_block_hashes(
-                salted_request_hashes(&request.tokens, self.block_size, cache_salt)
-                    .local_block_hashes,
-            )
-        }) } else if self.refresh_overlap {
-            Some(compute_block_hash_for_seq(&request.tokens, self.block_size, BlockHashOptions::default()))
-        } else { None };
+        let salted_hashes = if let Some(cache_salt) = cache_salt {
+            Some({
+                local_block_hashes(
+                    salted_request_hashes(&request.tokens, self.block_size, cache_salt)
+                        .local_block_hashes,
+                )
+            })
+        } else if self.refresh_overlap {
+            Some(compute_block_hash_for_seq(
+                &request.tokens,
+                self.block_size,
+                BlockHashOptions::default(),
+            ))
+        } else {
+            None
+        };
         // Public tracking chains the salted block hashes, as the engine does.
         // Keyed identities never meet engine hashes; their namespace only
         // keeps one salt's active blocks apart from another's.
@@ -408,7 +420,10 @@ impl KvReplayRouter {
             },
             salted_hashes.as_deref(),
         );
-        let block_hashes = self.refresh_overlap.then(|| salted_hashes.clone()).flatten();
+        let block_hashes = self
+            .refresh_overlap
+            .then(|| salted_hashes.clone())
+            .flatten();
         let tiered = match salted_hashes {
             Some(hashes) => self.indexer.find_matches_for_hashes(hashes).await?,
             None => {
@@ -421,6 +436,17 @@ impl KvReplayRouter {
     }
 
     async fn select_worker(&self, request: &DirectRequest) -> Result<ReplayPlacement> {
+        let request = self.prepare_schedule_request(request).await?;
+        let response = self.scheduler.schedule_request(request).await?;
+        Ok(ReplayPlacement {
+            worker_idx: usize::try_from(response.best_worker.worker_id)
+                .map_err(|_| anyhow!("selected worker id does not fit into usize"))?,
+            dp_rank: usize::try_from(response.best_worker.dp_rank)
+                .map_err(|_| anyhow!("selected DP rank does not fit into usize"))?,
+        })
+    }
+
+    async fn prepare_schedule_request(&self, request: &DirectRequest) -> Result<ScheduleRequest> {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("online replay requires requests to have stable UUIDs"))?;
@@ -432,45 +458,36 @@ impl KvReplayRouter {
         )
         .signals();
         let (priority_jump, strict_priority) = request.router_priorities();
-        let response = self
-            .scheduler
-            .schedule_request(ScheduleRequest {
-                accounting_attribution: Default::default(),
-                mode: ScheduleMode::Tracked {
-                    request_id: uuid.to_string(),
-                },
-                token_seq,
-                block_hashes,
-                isl_tokens: request.tokens.len(),
-                overlap,
-                kv_transfer_candidates: None,
-                retain_kv_transfer_chain: false,
-                routing_constraints: RoutingConstraints::default(),
-                router_config_override: None,
-                lora_name: None,
-                priority_jump,
-                strict_priority,
-                policy_class: request.policy_class.clone(),
-                session_context: request
-                    .replay_context
-                    .as_ref()
-                    .and_then(|context| context.session_id())
-                    .map(|id| SessionContext::new(id.to_owned(), None, None, None)),
-                expected_output_tokens: Some(
-                    u32::try_from(request.max_output_tokens)
-                        .context("max_output_tokens does not fit into u32")?,
-                ),
-                affinity_target: None,
-                pinned_worker: None,
-                allowed_worker_ids: None,
-                shared_cache_hits: None,
-            })
-            .await?;
-        Ok(ReplayPlacement {
-            worker_idx: usize::try_from(response.best_worker.worker_id)
-                .map_err(|_| anyhow!("selected worker id does not fit into usize"))?,
-            dp_rank: usize::try_from(response.best_worker.dp_rank)
-                .map_err(|_| anyhow!("selected DP rank does not fit into usize"))?,
+        Ok(ScheduleRequest {
+            accounting_attribution: Default::default(),
+            mode: ScheduleMode::Tracked {
+                request_id: uuid.to_string(),
+            },
+            token_seq,
+            block_hashes,
+            isl_tokens: request.tokens.len(),
+            overlap,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
+            routing_constraints: RoutingConstraints::default(),
+            router_config_override: None,
+            lora_name: None,
+            priority_jump,
+            strict_priority,
+            policy_class: request.policy_class.clone(),
+            session_context: request
+                .replay_context
+                .as_ref()
+                .and_then(|context| context.session_id())
+                .map(|id| SessionContext::new(id.to_owned(), None, None, None)),
+            expected_output_tokens: Some(
+                u32::try_from(request.max_output_tokens)
+                    .context("max_output_tokens does not fit into u32")?,
+            ),
+            affinity_target: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            shared_cache_hits: None,
         })
     }
 
@@ -838,10 +855,14 @@ mod tests {
     #[case::concurrent(2)]
     #[tokio::test(start_paused = true)]
     async fn online_queued_overlap_refresh_moves_worker(#[case] threads: u32) {
+        queued_worker_case(threads, Duration::from_secs(10), true).await;
+    }
+
+    async fn queued_worker_case(threads: u32, wait: Duration, refreshes: bool) {
         use dynamo_scheduler::host::TrackingHashAlgorithm;
         use std::io::Write;
 
-        let clock_guard = keep_online_clock_paused();
+        let clock_guard = PausedIndexerClock::new();
         let mut key = tempfile::NamedTempFile::new().unwrap();
         key.write_all(&[0x39; 32]).unwrap();
         let args = MockerConfig::from_value(serde_json::json!({
@@ -888,11 +909,12 @@ mod tests {
             ))
             .await;
         router.indexer.flush().await;
-        let queued = {
-            let router = Arc::clone(&router);
-            tokio::spawn(async move { router.select_worker(&request).await.unwrap() })
-        };
-        wait_for_online_queue(&router).await;
+        let request = router.prepare_schedule_request(&request).await.unwrap();
+        let queued = router.scheduler.schedule_request(request);
+        tokio::pin!(queued);
+        assert!(futures::poll!(queued.as_mut()).is_pending());
+        router.scheduler.admission_barrier().await.unwrap();
+        assert_eq!(router.scheduler.pending_count(), 1);
         router
             .indexer
             .apply_event(remove_event(first.worker_idx as u64, 2, 1))
@@ -908,14 +930,13 @@ mod tests {
             ))
             .await;
         router.indexer.flush().await;
-        let threshold = dynamo_scheduler::host::read_overlap_refresh_after();
-        tokio::time::advance(threshold.unwrap_or(Duration::from_secs(10))).await;
+        tokio::time::advance(wait).await;
         router.free(Uuid::from_u128(1)).await.unwrap();
         router.free(Uuid::from_u128(2)).await.unwrap();
-        let selected = finish_online_admission(queued).await;
+        let selected = queued.await.unwrap().best_worker.worker_id as usize;
         assert_eq!(
-            selected.worker_idx,
-            if threshold.is_some() {
+            selected,
+            if refreshes {
                 second.worker_idx
             } else {
                 first.worker_idx
@@ -923,7 +944,7 @@ mod tests {
         );
         router.free(Uuid::from_u128(3)).await.unwrap();
         router.shutdown().await.unwrap();
-        clock_guard.abort();
+        clock_guard.release().await;
     }
 
     #[rstest::rstest]
@@ -937,7 +958,25 @@ mod tests {
         #[case] host: bool,
         #[case] threads: u32,
     ) {
-        let clock_guard = keep_online_clock_paused();
+        queued_load_case(
+            threads,
+            host,
+            if at_threshold {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_secs(5)
+            },
+            if at_threshold {
+                if host { 32 } else { 64 }
+            } else {
+                0
+            },
+        )
+        .await;
+    }
+
+    async fn queued_load_case(threads: u32, host: bool, wait: Duration, expected: usize) {
+        let clock_guard = PausedIndexerClock::new();
         let args = MockerConfig::from_value(serde_json::json!({
             "engine": {"block_size": 64, "max_num_batched_tokens": 64}
         }))
@@ -968,11 +1007,12 @@ mod tests {
             .apply_event(store_event(0, 1, 0, hash, StorageTier::Device))
             .await;
         router.indexer.flush().await;
-        let queued = {
-            let router = Arc::clone(&router);
-            tokio::spawn(async move { router.select_worker(&request).await.unwrap() })
-        };
-        wait_for_online_queue(&router).await;
+        let request = router.prepare_schedule_request(&request).await.unwrap();
+        let queued = router.scheduler.schedule_request(request);
+        tokio::pin!(queued);
+        assert!(futures::poll!(queued.as_mut()).is_pending());
+        router.scheduler.admission_barrier().await.unwrap();
+        assert_eq!(router.scheduler.pending_count(), 1);
         router.indexer.apply_event(remove_event(0, 2, 1)).await;
         if host {
             router
@@ -981,23 +1021,16 @@ mod tests {
                 .await;
         }
         router.indexer.flush().await;
-        let threshold = dynamo_scheduler::host::read_overlap_refresh_after();
-        let wait = threshold.unwrap_or(Duration::from_secs(10));
-        tokio::time::advance(if at_threshold { wait } else { wait / 2 }).await;
+        tokio::time::advance(wait).await;
         router.free(Uuid::from_u128(1)).await.unwrap();
-        finish_online_admission(queued).await;
-        let expected = if at_threshold && threshold.is_some() {
-            if host { 32 } else { 64 }
-        } else {
-            0
-        };
+        queued.await.unwrap();
         assert_eq!(
             router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
             expected
         );
         router.free(Uuid::from_u128(2)).await.unwrap();
         router.shutdown().await.unwrap();
-        clock_guard.abort();
+        clock_guard.release().await;
     }
 
     #[rstest::rstest]
@@ -1029,41 +1062,96 @@ mod tests {
         router.shutdown().await.unwrap();
     }
 
-    fn keep_online_clock_paused() -> tokio::task::JoinHandle<()> {
-        // Indexer workers run outside Tokio; idle auto-advance would count their CPU wait as queue time.
-        tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        })
+    struct PausedIndexerClock {
+        release: Option<tokio::sync::oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+        _watchdog: std::sync::mpsc::Sender<()>,
     }
 
-    async fn finish_online_admission<T>(task: tokio::task::JoinHandle<T>) -> T {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !task.is_finished() && std::time::Instant::now() < deadline {
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            task.is_finished(),
-            "online scheduler did not finish admission"
-        );
-        task.await.unwrap()
-    }
-
-    async fn wait_for_online_queue(router: &KvReplayRouter) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            tokio::task::yield_now().await;
-            let scheduler = Arc::clone(&router.scheduler);
-            finish_online_admission(tokio::spawn(async move {
-                scheduler.admission_barrier().await.unwrap();
-            }))
-            .await;
-            if router.scheduler.pending_count() == 1 {
-                return;
+    impl PausedIndexerClock {
+        fn new() -> Self {
+            let (watchdog, expiry) = std::sync::mpsc::channel::<()>();
+            // A coarse hang limit; routing assertions use only the explicitly advanced clock.
+            std::thread::spawn(move || {
+                if matches!(
+                    expiry.recv_timeout(Duration::from_secs(120)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    eprintln!("online refresh test exceeded its hang watchdog");
+                    std::process::exit(2);
+                }
+            });
+            let (release, wait) = tokio::sync::oneshot::channel();
+            // Tokio inhibits paused-clock auto-advance while a blocking task exists.
+            // Wait without spinning while indexer threads process their commands.
+            let task = tokio::task::spawn_blocking(move || {
+                let _ = wait.blocking_recv();
+            });
+            Self {
+                release: Some(release),
+                task,
+                _watchdog: watchdog,
             }
         }
-        panic!("request never entered the online scheduler queue");
+
+        async fn release(mut self) {
+            self.release.take();
+            (&mut self.task).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn queued_overlap_refresh_environment_controls() {
+        for (case, value) in [
+            ("default", None),
+            ("disabled", Some("0")),
+            ("custom", Some("0.01")),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "replay::online::router::tests::queued_refresh_environment_child",
+                    "--ignored",
+                ])
+                .env("DYNAMO_REPLAY_REFRESH_TEST_CASE", case)
+                .env_remove("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS");
+            if let Some(value) = value {
+                command.env("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS", value);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "run in isolated processes by queued_overlap_refresh_environment_controls"]
+    async fn queued_refresh_environment_child() {
+        match std::env::var("DYNAMO_REPLAY_REFRESH_TEST_CASE")
+            .unwrap()
+            .as_str()
+        {
+            "default" => {
+                queued_worker_case(1, Duration::from_secs(10), true).await;
+                queued_load_case(1, false, Duration::from_secs(5), 0).await;
+                queued_load_case(1, false, Duration::from_secs(10), 64).await;
+            }
+            "disabled" => {
+                queued_worker_case(1, Duration::from_secs(20), false).await;
+                queued_load_case(1, false, Duration::from_secs(20), 0).await;
+            }
+            "custom" => {
+                queued_load_case(1, false, Duration::from_millis(5), 0).await;
+                queued_load_case(1, false, Duration::from_millis(10), 64).await;
+                queued_worker_case(2, Duration::from_millis(10), true).await;
+            }
+            case => panic!("unknown test case {case}"),
+        }
     }
 
     fn remove_event(worker_id: WorkerId, event_id: u64, block_id: u64) -> RouterEvent {
@@ -1509,7 +1597,7 @@ policy_classes:
     /// Device overlap in blocks, per worker, that routing sees for the prompt
     /// in one cache namespace.
     async fn routed_overlap(router: &KvReplayRouter, cache_salt: Option<&str>) -> Vec<(u64, u32)> {
-        let (tiered, _) = router
+        let (tiered, _, _) = router
             .request_identities(&cache_salt_request(0, cache_salt))
             .await
             .unwrap();
@@ -1643,7 +1731,7 @@ policy_classes:
 
         let worker = WorkerWithDpRank::new(1, 0);
         for (cache_salt, host_blocks) in [(Some("a"), Some(1)), (Some("b"), None), (None, None)] {
-            let (tiered, _) = kv_router
+            let (tiered, _, _) = kv_router
                 .request_identities(&cache_salt_request(0, cache_salt))
                 .await
                 .unwrap();
@@ -1738,7 +1826,7 @@ policy_classes:
         };
         let mut identities = Vec::new();
         for cache_salt in [None, Some(""), Some("a"), Some("a"), Some("b")] {
-            let (_, token_seq) = kv_router
+            let (_, token_seq, _) = kv_router
                 .request_identities(&cache_salt_request(0, cache_salt))
                 .await
                 .unwrap();

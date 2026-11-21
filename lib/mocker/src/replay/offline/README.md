@@ -36,7 +36,10 @@ is 10 seconds; `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` overrides it, and `0`
 disables refresh. The wait uses virtual time from entry into the policy queue,
 excluding any earlier affinity wait. Remote-indexer configurations do not refresh,
 matching production. Refresh affects worker selection and load accounting, while
-queue ordering keeps its enqueue-time priority.
+queue ordering keeps its enqueue-time priority. Each router logs its resolved refresh
+threshold and eligibility once at construction. Refresh-only hashes are retained
+when a request actually queues; affinity, session indexing and approximate-index
+routing retain their independently required identities.
 
 ## Reproducibility
 

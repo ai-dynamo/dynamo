@@ -2664,14 +2664,7 @@ mod tests {
         let repeat = record(&report, 3);
         let route = &repeat.routing_history[0];
         assert!(route.queue_wait_ms.is_some_and(|wait| wait >= 10_000.0));
-        let refresh_after = dynamo_scheduler::host::read_overlap_refresh_after();
-        let refreshes = refresh_after.is_some_and(|threshold| {
-            route.queue_wait_ms.unwrap() >= threshold.as_secs_f64() * 1000.0
-        });
-        assert_eq!(
-            route.reported_overlap_tokens,
-            Some(if refreshes { 0 } else { 64 })
-        );
+        assert_eq!(route.reported_overlap_tokens, Some(0));
     }
 
     fn single_turn_dynamo_trace(first_arrival_timestamp_ms: Option<f64>) -> Trace {
