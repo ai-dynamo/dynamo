@@ -23,7 +23,7 @@ from dynamo.runtime import Endpoint
 from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
-from .kv_hints import resolve_kv_transfer_hint_sources
+from .kv_hints import kvcr_inventory_is_process_local, resolve_kv_transfer_hint_sources
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +172,9 @@ async def start_attachment_owner(
     kv_state_endpoint = config.kv_state_endpoint or (
         f"{config.namespace}/{config.component}/{config.endpoint}"
     )
+    # Without a KVCR memory service the pool dies with this engine, so the
+    # state agent must drop its inventory when the engine detaches.
+    process_local_inventory = kvcr_inventory_is_process_local(config.engine_args)
     descriptors = []
     for rank in sorted(expected_ranks):
         cache_owner_id = settings.cache_owner_ids[rank]
@@ -193,6 +196,7 @@ async def start_attachment_owner(
                 "raw_topic": raw_topic,
                 "image_token_id": image_token_id,
                 "video_token_id": video_token_id,
+                "process_local_inventory": process_local_inventory,
                 "router_hint_source": (
                     {
                         "source_control_endpoint": kv_transfer_hint_source.source_control_endpoint,

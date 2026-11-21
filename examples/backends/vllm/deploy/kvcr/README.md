@@ -105,9 +105,11 @@ state agent or its local vLLM process exits, the supervisor terminates worker
 0's container and Kubernetes restarts both processes. The operator supplies
 the standard HTTP probes for the `main` container. Worker 1 runs only vLLM.
 KVCR uses process-local host memory, so this variant does not preserve its KV
-pool across a restart. Because live state-agent host reselection is not yet
-supported, restart both workers to restore state tracking after worker 0
-restarts.
+pool across a restart. When an engine exits, the state agent drops that
+engine's KVCR inventory and releases its slot, so the router stops scoring
+blocks the pool no longer holds. Because live state-agent host reselection is
+not yet supported, restart both workers to restore state tracking after worker
+0 restarts.
 
 In `agg-memory-service.yaml`, `dynamo.vllm` runs in `main`. A regular
 `kvcr-services` sidecar runs the KVCR memory service (`kvcr.service.server`)

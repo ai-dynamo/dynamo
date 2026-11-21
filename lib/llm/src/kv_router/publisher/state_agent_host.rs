@@ -142,6 +142,7 @@ struct HostedSlot {
     indexer_domain_id: dynamo_router_protocol::identity::IndexerDomainId,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
+    process_local_inventory: bool,
 }
 
 impl HostedSlot {
@@ -151,6 +152,7 @@ impl HostedSlot {
             && self.indexer_domain_id == intent.indexer_domain_id
             && self.kv_block_size == intent.kv_block_size
             && self.ingress_protocol == intent.ingress_protocol
+            && self.process_local_inventory == intent.has_process_local_inventory()
     }
 }
 
@@ -624,7 +626,7 @@ async fn reconcile_owner(
     let intent = match matching.map(HashMap::len).unwrap_or(0) {
         0 => {
             if let Some(slot) = slots.get_mut(&owner) {
-                if slot.ingress_protocol.has_process_local_inventory() {
+                if slot.process_local_inventory {
                     if let Err(error) = detach_slot(slot).await {
                         tracing::warn!(%owner, %error, "Failed to detach engine-local KV state-agent slot");
                     }
@@ -678,6 +680,7 @@ async fn reconcile_owner(
             indexer_domain_id: intent.indexer_domain_id,
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            process_local_inventory: intent.has_process_local_inventory(),
         };
         slots.insert(owner, slot_shape);
         let (slot_sockets, publisher_index) = sockets.for_new_slot()?;
@@ -691,6 +694,7 @@ async fn reconcile_owner(
             },
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            process_local_inventory: intent.has_process_local_inventory(),
             sockets: slot_sockets.clone(),
         })
         .await
@@ -867,6 +871,7 @@ mod tests {
                         indexer_domain_id: owner.pool().indexer_domain(),
                         kv_block_size: 64,
                         ingress_protocol: KvStateIngressProtocol::SglangHiCacheV1,
+                        process_local_inventory: true,
                     },
                 );
             }
@@ -895,9 +900,10 @@ mod tests {
 
     #[test]
     fn missing_intent_releases_failed_engine_local_slot_but_retains_durable_slot() {
-        for (protocol, has_process_local_inventory) in [
-            (KvStateIngressProtocol::SglangHiCacheV1, true),
-            (KvStateIngressProtocol::VllmResidencyV1, false),
+        for (protocol, declared, has_process_local_inventory) in [
+            (KvStateIngressProtocol::SglangHiCacheV1, false, true),
+            (KvStateIngressProtocol::VllmResidencyV1, true, true),
+            (KvStateIngressProtocol::VllmResidencyV1, false, false),
         ] {
             let agent_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -914,6 +920,7 @@ mod tests {
                     101,
                 );
                 request.ingress_protocol = protocol;
+                request.process_local_inventory = declared;
                 request.raw_zmq_endpoint = raw.endpoint().to_string();
                 let mut slots = HashMap::new();
                 let mut sockets = HostSockets {
@@ -1082,6 +1089,7 @@ mod tests {
             image_token_id: None,
             video_token_id: None,
             engine_owned_mm_identity: false,
+            process_local_inventory: false,
             router_hint_source: None,
         }
     }
@@ -1108,6 +1116,7 @@ mod tests {
             indexer_domain_id: original.indexer_domain_id,
             kv_block_size: original.kv_block_size,
             ingress_protocol: original.ingress_protocol,
+            process_local_inventory: original.has_process_local_inventory(),
         };
         let mut upgraded = original.clone();
         upgraded.router_hint_source = Some(RouterHintSourceMetadata {
@@ -1118,6 +1127,10 @@ mod tests {
 
         assert!(slot.matches(&original));
         assert!(slot.matches(&upgraded));
+
+        let mut engine_local = original.clone();
+        engine_local.process_local_inventory = true;
+        assert!(!slot.matches(&engine_local));
     }
 
     fn added(
