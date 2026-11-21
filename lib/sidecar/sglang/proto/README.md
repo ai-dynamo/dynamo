@@ -23,6 +23,11 @@ The files are unchanged copies of SGLang upstream `main`
 | `sglang/api/v1/service.proto` | `c2794fb9d4fdb8dc489a75c5f22066d2b5b455c77e3606137785c2278521ac11` |
 | `sglang/json/v1/options.proto` | `d1aa73d1a5ee39b180ccc5967dae55d061a4e6e10f9a01d4c116d3a269b111fe` |
 
+`sglang/api/v1/control.proto` is local: it carries only the pause/continue
+messages, forward-ported from SGLang `main` `f01462f3b3d0`, which the snapshot
+above predates. `service.proto` carries the matching two RPCs and so is no
+longer byte-identical to upstream either. Both go away with the re-sync.
+
 All of them are excluded from Dynamo's formatting and copyright-header checks.
 The SGLang sidecar generates both client and server types and temporarily
 exposes them to the Mocker server.

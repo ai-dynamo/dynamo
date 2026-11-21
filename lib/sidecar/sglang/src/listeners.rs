@@ -19,7 +19,7 @@ use dynamo_sidecar_common::GrpcEndpoint;
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
 
-use crate::client::{self, AbortRpc, Pool};
+use crate::client::{self, AbortRpc, Client, Pool};
 use crate::native_http::NativeHttp;
 use crate::protocol::validate_dp_rank;
 
@@ -161,6 +161,12 @@ impl NodeListeners {
     /// not serve is refused before any stream opens, which keeps the worker
     /// routable. Requests that name no rank go round-robin over the node's
     /// listeners.
+    /// A gRPC client for node-wide control calls; every listener serves the
+    /// same deployment.
+    pub(crate) fn control(&self) -> Client {
+        self.listeners[0].pool.control_client()
+    }
+
     pub(crate) fn select(
         &self,
         request: &PreprocessedRequest,

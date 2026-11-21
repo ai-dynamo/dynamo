@@ -347,3 +347,14 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
     engine.start(0).await.unwrap();
     common::check_kv_events(&engine, block_size).await;
 }
+
+#[tokio::test]
+async fn sidecar_advertises_no_generation_controls_the_mocker_cannot_serve() {
+    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+
+    assert!(engine.supported_controls().await.unwrap().is_empty());
+    let outputs = collect(&engine, request(1)).await;
+    assert_eq!(outputs[0].token_ids.len(), 1);
+}
