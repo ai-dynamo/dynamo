@@ -27,6 +27,8 @@ from dynamo.common.protocols.image_protocol import (
     NvCreateImageRequest,
     NvImagesResponse,
 )
+from dynamo.common.storage import get_fs, remove_from_fs
+from dynamo.common.storage import upload_to_fs as real_upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
@@ -512,6 +514,67 @@ class TestImageHandlerResponseFormats:
             )
 
         return handler
+
+    @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    @pytest.mark.timeout(5)
+    async def test_failed_batch_removes_uploads_that_finish_after_failure(
+        self, tmp_path
+    ):
+        handler = self._make_handler(
+            tmp_path, engine_output_batch=3, default_num_images_per_prompt=3
+        )
+        handler.media_output_fs = get_fs(handler.config.media_output_fs_url)
+        first_uploaded = asyncio.Event()
+        upload_failed = asyncio.Event()
+        late_upload_finished = asyncio.Event()
+        original_error = OSError("upload failed")
+
+        async def upload_then_fail(fs, storage_path, data, base_url):
+            if storage_path.endswith("_1.png"):
+                await first_uploaded.wait()
+                upload_failed.set()
+                raise original_error
+            if storage_path.endswith("_2.png"):
+                await upload_failed.wait()
+            url = await real_upload_to_fs(fs, storage_path, data, base_url)
+            if storage_path.endswith("_0.png"):
+                first_uploaded.set()
+            else:
+                late_upload_finished.set()
+            return url
+
+        async def cleanup_after_uploads(fs, storage_paths, request_id):
+            assert late_upload_finished.is_set()
+            assert len(storage_paths) == 2
+            await remove_from_fs(fs, storage_paths, request_id)
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": "url",
+        }
+        with (
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"image bytes",
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                side_effect=upload_then_fail,
+            ),
+            patch(
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.remove_from_fs",
+                side_effect=cleanup_after_uploads,
+            ) as cleanup,
+            pytest.raises(OSError, match="upload failed") as exc_info,
+        ):
+            async for _ in handler.generate(request, MagicMock()):
+                pytest.fail("A failed batch must not return a response")
+
+        assert exc_info.value is original_error
+        cleanup.assert_awaited_once()
+        assert not any((tmp_path / "test_media" / "images").iterdir())
 
     @pytest.mark.asyncio
     async def test_url_response_format(self, tmp_path):

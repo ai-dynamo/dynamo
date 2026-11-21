@@ -806,11 +806,16 @@ class TestNParameter:
             return "http://x/img.png", uploads[-1]
 
         handler._upload_to_fs = fake_upload
-        handler._cleanup_uploads = AsyncMock()
 
         req = self._request(n=2)
         req["response_format"] = "url"
-        with pytest.raises(RuntimeError, match="upload failed"):
+        with (
+            patch(
+                "dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler.remove_from_fs",
+                new_callable=AsyncMock,
+            ) as cleanup,
+            pytest.raises(RuntimeError, match="upload failed"),
+        ):
             async for _ in handler.generate(req, mock_context):
                 pass
-        handler._cleanup_uploads.assert_awaited_once_with(uploads)
+        cleanup.assert_awaited_once_with(handler.fs, uploads, "test-context-id")

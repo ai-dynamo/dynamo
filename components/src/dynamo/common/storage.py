@@ -34,10 +34,13 @@ S3:
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 import fsspec
 from fsspec.implementations.dirfs import DirFileSystem
+
+logger = logging.getLogger(__name__)
 
 
 def get_fs(fs_url: str) -> DirFileSystem:
@@ -123,3 +126,30 @@ async def upload_to_fs(
     """
     await asyncio.to_thread(fs.pipe, storage_path, data)
     return get_media_url(fs, storage_path, base_url)
+
+
+async def remove_from_fs(
+    fs: DirFileSystem, storage_paths: list[str], request_id: str
+) -> None:
+    """Remove uploaded files on a best-effort basis, e.g. after a failed batch.
+
+    A failed removal is logged and the remaining paths are still removed, so
+    the caller can then raise or report its original error.
+
+    Args:
+        fs: The DirFileSystem returned by ``get_fs()``.
+        storage_paths: Relative paths previously passed to ``upload_to_fs()``.
+        request_id: Request that uploaded the files, included in the warning.
+    """
+    for path in storage_paths:
+        try:
+            await asyncio.to_thread(fs.rm, path)
+        except Exception as e:
+            # Storage backends raise different error types, and an error
+            # here must not replace the caller's original failure.
+            logger.warning(
+                "Failed to clean up uploaded file %s for request %s: %s",
+                path,
+                request_id,
+                e,
+            )
