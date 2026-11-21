@@ -96,6 +96,11 @@ def _rust_static_strings(source: str, name: str) -> set[str]:
         "fe80::1",
         "fc00::1",
         "240.0.0.1",  # reserved
+        "64:ff9b:1::a00:1",  # local-use NAT64
+        "2002:a00:1::1",  # 6to4 embedding 10.0.0.1
+        "2001::1",  # Teredo
+        "2001:db8::1",  # documentation
+        "100::1",  # discard-only
     ],
 )
 def test_is_blocked_ip_blocks_known_ranges(ip: str) -> None:
@@ -109,6 +114,9 @@ def test_is_blocked_ip_blocks_known_ranges(ip: str) -> None:
         "1.1.1.1",
         "93.184.216.34",  # example.com
         "2606:4700:4700::1111",  # Cloudflare
+        # Well-known NAT64: on an IPv6-only cluster every IPv4 destination
+        # (here 8.8.8.8) is reached through it, so it must stay allowed.
+        "64:ff9b::808:808",
     ],
 )
 def test_is_blocked_ip_allows_public(ip: str) -> None:
