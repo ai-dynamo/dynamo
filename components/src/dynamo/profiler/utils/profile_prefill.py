@@ -73,9 +73,14 @@ def _profile_prefill_helper(
             prefill_isl_np, prefill_ttft_np, prefill_thpt_per_gpu_np, work_dir
         )
     else:
-        logger.warning(
-            "Not enough data points to perform interpolation (need at least 3 points)"
+        # Fail closed: without raw_data.npz the profiler would report success
+        # with no prefill profile data.
+        error_message = (
+            f"Prefill profiling measured {len(prefill_isl)} TTFT data points; "
+            "need at least 3 to perform interpolation"
         )
+        logger.error(error_message)
+        raise RuntimeError(error_message)
 
     return
 
