@@ -996,6 +996,31 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
 
+#### TensorRT-LLM Watermark Policy
+
+**Experimental.** The top-level `watermarking` request field on
+`/v1/chat/completions` and `/v1/completions` preserves an optional boolean through
+the Rust frontend's sampling options to TensorRT-LLM Python workers. It applies
+to both streaming and non-streaming requests.
+
+| Value | TensorRT-LLM behavior |
+| --- | --- |
+| Omitted or `null` | Keep the engine's configured watermark policy. |
+| `false` | Opt out when the engine's watermark policy permits request opt-out. |
+| `true` | Follow the configured policy; this does not configure a key or enable an unconfigured engine. |
+
+Send the field at the request root, for example `"watermarking": false`, rather
+than inside `nvext`. Other JSON types are rejected. Use a frontend with this
+field and a TensorRT-LLM version that exposes `SamplingParams.watermarking`;
+older frontends reject or drop the unknown field, and older workers may reject
+the unsupported sampling option. Requests that omit it retain their existing
+wire representation during rolling upgrades.
+
+The engine owns watermark generation and opt-out admission. See the
+[TensorRT-LLM watermarking contract](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/features/watermarking.md).
+This field does not establish watermark support for vLLM, SGLang, native
+sidecars, or Python chat-processor paths.
+
 ### Image API Compatibility
 
 **Experimental.** Image editing requires a backend and model that support
