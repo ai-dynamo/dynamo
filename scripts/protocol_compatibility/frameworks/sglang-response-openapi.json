@@ -1,0 +1,31 @@
+{
+  "framework_name": "sglang",
+  "source": {
+    "repository": "https://github.com/sgl-project/sglang",
+    "revision": "43fbd836ab207917fd8cd147ec14f13c6dc17da3",
+    "pull_request": "https://github.com/sgl-project/sglang/pull/44146",
+    "status_at_freeze": "open patch; not a released SGLang contract"
+  },
+  "streams": [
+    {
+      "pointer": "#/paths/~1v1~1chat~1completions/post/responses/200/content/text~1event-stream/schema",
+      "interpretation": "event-schema"
+    },
+    {
+      "pointer": "#/paths/~1v1~1completions/post/responses/200/content/text~1event-stream/schema",
+      "interpretation": "event-schema"
+    }
+  ],
+  "capture": {
+    "kind": "production_app_asgi_no_lifespan",
+    "raw_sha256": "7d23e49ca2bcb1a659b0fc42ec0d7d63d4b189ff24efe98e6ab6b74c3d579df6",
+    "python": "3.12.3",
+    "dependency_versions": {
+      "fastapi": "0.136.3",
+      "pydantic": "2.13.5",
+      "openai": "2.6.1",
+      "torch": "2.14.0"
+    },
+    "qualification": "Recorded existing schema environment, not clean full install; source requests torch 2.14.1. Full dependency inventory belongs to acquisition.json and retained evidence. Expected hash is evidence, not an enforced universal export."
+  }
+}
