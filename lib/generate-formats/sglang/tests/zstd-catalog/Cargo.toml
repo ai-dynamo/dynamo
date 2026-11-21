@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "custom-generate-format-catalog"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Deliberately independent: this example uses only public APIs and explicit dependencies.
+[workspace]
+
+[dependencies]
+builtin-catalog = { package = "dynamo-generate-format-catalog", path = "../../../../generate-format-catalog" }
+dynamo-llm = { path = "../../../../llm", default-features = false }
+dynamo-sglang-generate = { path = "../.." }
+anyhow = "1"
+base64 = "0.22"
+zstd = "0.13"
+serde_json = "1"
+
+[dev-dependencies]
+dynamo-runtime = { path = "../../../../runtime" }
+proptest = "1"
+dynamo-sglang-generate = { path = "../..", features = ["testkit"] }
+async-trait = "0.1"
+axum = "0.8"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
