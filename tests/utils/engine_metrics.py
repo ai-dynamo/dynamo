@@ -159,6 +159,29 @@ class SGLangMetricsChecker(EngineMetrics):
             sum(self.samples(body, "sglang:num_queue_reqs")),
         )
 
+    def decode_queue_counts(self) -> tuple[int, int, int]:
+        """Read running, KV-allocation-waiting and KV-transfer-waiting decode requests.
+
+        Reads SGLang's `/v1/loads`, which queries the scheduler on demand. The
+        `sglang:num_decode_*_queue_reqs` gauges are not republished while a
+        request waits for KV and no batch runs, so `/metrics` cannot show it.
+        """
+        if self.url is None:
+            raise RuntimeError(
+                f"Engine metrics port has not been bound: {self.port_env}"
+            )
+        loads_url = self.url.removesuffix("/metrics") + "/v1/loads"
+        with requests.get(
+            loads_url, params={"include": "disagg"}, timeout=2
+        ) as response:
+            response.raise_for_status()
+            loads = response.json()["loads"]
+        return (
+            sum(load["num_running_reqs"] for load in loads),
+            sum(load["disaggregation"]["decode_prealloc_queue_reqs"] for load in loads),
+            sum(load["disaggregation"]["decode_transfer_queue_reqs"] for load in loads),
+        )
+
     def progress(self) -> float:
         return sum(
             self.samples(

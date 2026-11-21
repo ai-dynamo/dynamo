@@ -37,7 +37,11 @@ from tests.utils.payload_builder import (
     sglang_generate_cancellation_payloads,
     stop_string_payloads,
 )
-from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
+from tests.utils.payloads import (
+    KvTransferPayload,
+    OmittedMaxTokensChatPayload,
+    SGLangUnmatchedKvTransferCancellationPayload,
+)
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
@@ -139,6 +143,20 @@ def _disaggregated_payloads(
             decode_metrics, max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS
         ),
     ]
+
+
+def _sglang_unmatched_transfer_cancellation_payload():
+    transfer = disaggregated_token_count_payload()
+    return SGLangUnmatchedKvTransferCancellationPayload(
+        body=transfer.body,
+        expected_response=[],
+        expected_log=[],
+        expected_finish_reason=transfer.expected_finish_reason,
+        expected_completion_tokens=transfer.expected_completion_tokens,
+        prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+        decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+        transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+    )
 
 
 KV_ROUTING_BLOCK_SIZE = 64
@@ -488,11 +506,14 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
         },
-        request_payloads=_disaggregated_payloads(
-            prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-            decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
-            transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-        ),
+        request_payloads=[
+            *_disaggregated_payloads(
+                prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+                decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+                transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            _sglang_unmatched_transfer_cancellation_payload(),
+        ],
     ),
     "vllm_kv_router": SidecarConfig(
         name="vllm_kv_router",
