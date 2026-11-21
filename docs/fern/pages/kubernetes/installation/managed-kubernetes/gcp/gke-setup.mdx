@@ -87,9 +87,9 @@ After installation, verify the installation:
 kubectl get pods
 NAME                                                              READY   STATUS             RESTARTS   AGE
 dynamo-platform-dynamo-operator-controller-manager-69b9794fpgv9   2/2     Running            0          4m27s
-dynamo-platform-etcd-0                                            1/1     Running            0          4m27s
-dynamo-platform-nats-0                                            2/2     Running            0          4m27s
 ```
+
+The platform chart does not install NATS or etcd by default (`global.nats.install` and `global.etcd.install` are `false`), so only the operator pod is expected. If you installed them, `dynamo-platform-nats-0` and `dynamo-platform-etcd-0` are listed as well.
 
 </Step>
 <Step title="Deploy Inference Graph" id="deploy-inference-graph">
@@ -154,8 +154,6 @@ kubectl apply -f disagg.yaml -n ${NAMESPACE}
 kubectl get pods
 NAME                                                              READY   STATUS    RESTARTS   AGE
 dynamo-platform-dynamo-operator-controller-manager-c665684ssqkx   2/2     Running   0          65m
-dynamo-platform-etcd-0                                            1/1     Running   0          65m
-dynamo-platform-nats-0                                            2/2     Running   0          65m
 vllm-disagg-frontend-5954ddc4dd-4w2cb                             1/1     Running   0          11m
 vllm-disagg-decode-77844cfcff-ddn4v                     1/1     Running   0          11m
 vllm-disagg-prefill-55d5b74b4f-zrskh                    1/1     Running   0          11m
