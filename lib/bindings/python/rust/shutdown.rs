@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 
+mod signals;
+
 /// Last-resort exit independent of both the Python GIL and the async runtime.
 #[pyclass]
 pub struct ShutdownWatchdog {
@@ -27,7 +29,10 @@ impl ShutdownWatchdog {
         std::thread::Builder::new()
             .name("python-shutdown-watchdog".into())
             .spawn(move || {
-                if receiver.recv_timeout(timeout).is_err() {
+                if receiver
+                    .recv_timeout(timeout.saturating_sub(origin.elapsed()))
+                    .is_err()
+                {
                     // Dropping the Python handle must not disarm or advance the deadline.
                     std::thread::sleep(timeout.saturating_sub(origin.elapsed()));
                     // No Python, tracing subscriber, or async executor is needed here.
@@ -56,6 +61,7 @@ fn worker_shutdown_timeout_secs() -> u64 {
 
 pub fn add_to_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ShutdownWatchdog>()?;
+    module.add_class::<signals::ShutdownSignals>()?;
     module.add_function(wrap_pyfunction!(worker_shutdown_timeout_secs, module)?)?;
     Ok(())
 }

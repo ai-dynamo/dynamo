@@ -5,12 +5,14 @@
 
 import asyncio
 import ctypes
+import hashlib
 import importlib
 import os
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from types import ModuleType, SimpleNamespace
@@ -345,7 +347,17 @@ async def gateway_probe():
 
 if __name__ == "__main__":
     mode = sys.argv[1]
-    if mode == "python-failed":
+    if mode == "python-blocked-at-signal":
+
+        async def blocked_worker():
+            # The native call releases the GIL but delays main-thread signal
+            # dispatch. The watchdog must start when the timer sends SIGTERM.
+            threading.Timer(0.05, signal_self).start()
+            hashlib.pbkdf2_hmac("sha256", b"worker", b"busy", 100_000_000)
+
+        shutdown = WorkerShutdown(None, [], asyncio.Event())
+        asyncio.run(shutdown.run(blocked_worker()))
+    elif mode == "python-failed":
 
         async def failed_probe():
             class Runtime:

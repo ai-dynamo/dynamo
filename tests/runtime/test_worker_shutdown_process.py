@@ -67,6 +67,7 @@ def test_sdk_shutdown_watchdog_lifetime(mode):
         "python-push",
         "python-escalate",
         "python-wedged",
+        "python-blocked-at-signal",
         "python-failed",
         "embedding-idle",
         "embedding-slow",
@@ -94,8 +95,19 @@ def test_python_shutdown_signal_to_exit(mode):
         timeout=20,
         start_new_session=True,
     )
-    expected_code = 70 if mode in ("python-escalate", "python-wedged") else 0
+    expected_code = (
+        70
+        if mode in ("python-escalate", "python-wedged", "python-blocked-at-signal")
+        else 0
+    )
     assert result.returncode == expected_code, result.stdout + result.stderr
+    if mode == "python-blocked-at-signal":
+        sent = next(
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith("SIGTERM_AT=")
+        )
+        assert time.monotonic() - float(sent.split("=")[1]) < 4.5
     if mode == "python-failed":
         assert "HOST_SURVIVED" in result.stdout
         assert "ENGINE_CLEANED" in result.stdout

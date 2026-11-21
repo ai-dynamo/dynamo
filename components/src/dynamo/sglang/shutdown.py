@@ -64,7 +64,6 @@ def defer_engine_signals(loop: asyncio.AbstractEventLoop, shutdown: WorkerShutdo
     """Keep engine signal callbacks behind engine cleanup and runtime teardown."""
     signals = (signal.SIGTERM, signal.SIGINT)
     callbacks: dict[int, list] = defaultdict(list)
-    previous = {}
     signum = None
     original_add = loop.add_signal_handler
 
@@ -87,12 +86,9 @@ def defer_engine_signals(loop: asyncio.AbstractEventLoop, shutdown: WorkerShutdo
             if inspect.isawaitable(result):
                 await result
 
-    for sig in signals:
-        previous[sig] = signal.signal(sig, on_signal)
-    loop.add_signal_handler = capture  # type: ignore[method-assign, assignment]
-    try:
-        yield run_deferred
-    finally:
-        loop.add_signal_handler = original_add  # type: ignore[method-assign]
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
+    with shutdown.handle_signals(on_signal):
+        loop.add_signal_handler = capture  # type: ignore[method-assign, assignment]
+        try:
+            yield run_deferred
+        finally:
+            loop.add_signal_handler = original_add  # type: ignore[method-assign]

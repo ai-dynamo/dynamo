@@ -12,12 +12,17 @@ import struct
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Coroutine
-from contextlib import aclosing
+from contextlib import aclosing, contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
-from dynamo._core import ShutdownWatchdog, WorkerDraining, worker_shutdown_timeout_secs
+from dynamo._core import (
+    ShutdownWatchdog,
+    WorkerDraining,
+    _ShutdownSignals,
+    worker_shutdown_timeout_secs,
+)
 from dynamo.common.utils.graceful_shutdown import _unregister_endpoints
 
 logger = logging.getLogger(__name__)
@@ -49,10 +54,25 @@ def _seconds(
     return max(0.0, value)
 
 
+def _total_timeout() -> float:
+    total = min(float(worker_shutdown_timeout_secs()), _MAX_SECONDS)
+    return min(total, _seconds(_CHILD_TOTAL_ENV, total))
+
+
+def _parent_deadline_fd() -> int | None:
+    value = os.environ.get(_PARENT_DEADLINE_FD_ENV)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        # Fail closed on receipt of a signal just as for a closed descriptor.
+        return -1
+
+
 def child_shutdown_environment() -> dict[str, str]:
     """Leave the engine-owning parent its cleanup reserve after children exit."""
-    total = min(float(worker_shutdown_timeout_secs()), _MAX_SECONDS)
-    total = min(total, _seconds(_CHILD_TOTAL_ENV, total))
+    total = _total_timeout()
     cleanup = _seconds(
         "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS",
         _DEFAULT_CLEANUP_SECONDS,
@@ -106,6 +126,7 @@ class WorkerShutdown:
         self._worker: asyncio.Task | None = None
         self._sequence: asyncio.Task | None = None
         self._watchdog: ShutdownWatchdog | None = None
+        self._signals: _ShutdownSignals | None = None
         self._deadline = 0.0
         self._hard_deadline = 0.0
         self._started = False
@@ -143,19 +164,18 @@ class WorkerShutdown:
         if self._started:
             os._exit(70)
         self._started = True
-        origin = time.monotonic()
+        received = self._signals.received_at() if self._signals is not None else None
+        origin = received if received is not None else time.monotonic()
         grace = _seconds(
             "DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS",
             5.0,
             alias="DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS",
         )
-        timeout = float(worker_shutdown_timeout_secs())
-        total = min(timeout, _MAX_SECONDS)
-        total = min(total, _seconds(_CHILD_TOTAL_ENV, total))
-        parent_fd = os.environ.get(_PARENT_DEADLINE_FD_ENV)
+        total = _total_timeout()
+        parent_fd = _parent_deadline_fd()
         if parent_fd is not None:
             try:
-                deadline = struct.unpack("d", os.pread(int(parent_fd), 8, 0))[0]
+                deadline = struct.unpack("d", os.pread(parent_fd, 8, 0))[0]
             except (OSError, ValueError, struct.error):
                 logger.exception("Cannot read parent shutdown deadline")
                 deadline = origin
@@ -433,18 +453,33 @@ class WorkerShutdown:
             # environ while native runtime threads may be reading it.
             token = _child_deadline_fd.set(self._child_deadline_fd)
             try:
-                await self._run(worker, install_signals=install_signals)
+                with (
+                    self.handle_signals(lambda sig, _: self.request_shutdown(sig))
+                    if install_signals
+                    else nullcontext()
+                ):
+                    await self._run(worker)
             finally:
                 self._child_deadline_fd = None
                 _child_deadline_fd.reset(token)
 
-    async def _run(self, worker: Coroutine, *, install_signals: bool) -> None:
+    @contextmanager
+    def handle_signals(self, callback):
+        """Run the OS watchdog from signal delivery, even if Python cannot dispatch."""
         previous = {}
-        if install_signals:
+        self._signals = _ShutdownSignals(_total_timeout(), _parent_deadline_fd())
+        try:
             for sig in (signal.SIGTERM, signal.SIGINT):
-                previous[sig] = signal.signal(
-                    sig, lambda signum, _frame: self.request_shutdown(signum)
-                )
+                previous[sig] = signal.signal(sig, callback)
+                self._signals.intercept(sig)
+            yield
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+            self._signals.close()
+            self._signals = None
+
+    async def _run(self, worker: Coroutine) -> None:
         self._worker = asyncio.create_task(worker)
         requested = asyncio.create_task(self.requested_event.wait())
         try:
@@ -467,8 +502,6 @@ class WorkerShutdown:
         finally:
             requested.cancel()
             await asyncio.gather(requested, return_exceptions=True)
-            for sig, handler in previous.items():
-                signal.signal(sig, handler)
 
 
 async def serve_endpoint(
