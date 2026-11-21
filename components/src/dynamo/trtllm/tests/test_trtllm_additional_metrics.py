@@ -104,6 +104,33 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         output = generate_latest(self.registry).decode()
         self.assertIn("trtllm_num_aborted_requests_total", output)
 
+    def test_supported_metrics_are_exported_before_the_first_event(self):
+        """Startup samples are zero before recording events on the same labels."""
+        labels = {
+            "model_name": "test-model",
+            "disaggregation_mode": "prefill_and_decode",
+            "engine_type": "trtllm",
+        }
+        for name in (
+            "trtllm_num_aborted_requests_total",
+            "trtllm_request_type_image_total",
+            "trtllm_request_type_structured_output_total",
+            "trtllm_kv_transfer_success_total",
+            "trtllm_kv_event_id_gap_events_total",
+            "trtllm_kv_event_buffer_capacity",
+            "trtllm_kv_transfer_latency_seconds_count",
+            "trtllm_kv_transfer_bytes_count",
+            "trtllm_kv_transfer_speed_gb_s_count",
+            "trtllm_kv_event_drain_batch_size_count",
+        ):
+            self.assertEqual(self.registry.get_sample_value(name, labels), 0.0, name)
+
+        self.collector.record_request_type_image()
+        self.assertEqual(
+            self.registry.get_sample_value("trtllm_request_type_image_total", labels),
+            1.0,
+        )
+
     def test_request_type_counters(self):
         """Test request type counters."""
         self.collector.record_request_type_image()
