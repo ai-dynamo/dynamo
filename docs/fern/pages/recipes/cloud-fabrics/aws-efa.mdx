@@ -1,0 +1,236 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "AWS EFA"
+subtitle: "Add the configuration a disaggregated Dynamo recipe needs to transfer KV cache over AWS Elastic Fabric Adapter (EFA)."
+---
+
+Start from a baseline Dynamo recipe, then add the EFA configuration below to its `DynamoGraphDeployment` (DGD). EFA is the only RDMA fabric on AWS.
+
+<Warning title="Without these changes, KV cache silently moves over TCP">
+A disaggregated recipe deployed on AWS without these changes still starts and serves requests, but prefill-to-decode KV cache transfers fall back to TCP. Time to first token (TTFT) can rise from about 1 s to about 100 s. Aggregated recipes do not transfer KV cache between workers and need no changes.
+</Warning>
+
+**What you change:** only the prefill and decode components. The frontend stays as it is.
+
+| # | Change | Same for every engine? |
+| --- | --- | --- |
+| 1 | [Use an EFA-enabled container image](#step-1-use-an-efa-enabled-image) | Yes, but the image differs per engine |
+| 2 | [Select the LIBFABRIC KV-transfer backend](#step-2-select-the-libfabric-backend-for-your-engine) | **No.** vLLM, SGLang, and TensorRT-LLM each configure it differently |
+| 3 | [Leave libfabric (`FI_*`) settings at their defaults](#step-3-leave-libfabric-settings-at-their-defaults); optionally turn on NIXL metrics | Yes |
+| 4 | [Request EFA devices](#step-4-request-efa-devices), sized to your instance type and parallelism | Yes, but **you calculate the count** |
+
+## Before You Start
+
+Set up EFA on your EKS cluster by following AWS's guide, [Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html). It covers EFA-enabled node groups, the security group, the EFA device plugin, and testing EFA with NCCL. Dynamo's [EFA on AWS](../../kubernetes/installation/rdma-setup/efa-on-aws.mdx) guide covers the same cluster setup with Dynamo-specific checks.
+
+This page assumes you use the **EFA device plugin**, which exposes EFA devices as the `vpc.amazonaws.com/efa` resource. You also need the [Dynamo Kubernetes platform](../../kubernetes/installation/install-dynamo.md) installed.
+
+When you're done, note each GPU node's EFA and GPU counts. You need them in Step 4:
+
+```bash
+kubectl get nodes "-o=custom-columns=NAME:.metadata.name,INSTANCE:.metadata.labels.node\.kubernetes\.io/instance-type,EFA:.status.allocatable.vpc\.amazonaws\.com/efa,GPU:.status.allocatable.nvidia\.com/gpu"
+```
+
+## Step 1. Use an EFA-Enabled Image
+
+Worker containers need libfabric, the EFA libraries, and the AWS OFI NCCL plugin. Every Dynamo release publishes an EFA build of each runtime image, tagged `<version>-efa`, for both amd64 and arm64. Replace the worker image with the EFA build of the same engine and Dynamo version. See [Release Artifacts](../../reference/general/release-artifacts.mdx) for the current tags.
+
+```yaml
+    - name: prefill            # repeat for the decode component
+      type: prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/<engine>-runtime:<version>-efa
+              # <engine>: vllm | sglang | tensorrtllm
+```
+
+If your recipe uses a custom container with no published EFA build, such as a model-specific pre-release image, build an EFA version yourself by following [Build a Dynamo EFA Image](../../kubernetes/installation/rdma-setup/efa-on-aws.mdx#step-3-build-a-dynamo-efa-image).
+
+## Step 2. Select the LIBFABRIC Backend for Your Engine
+
+Dynamo moves KV cache with NIXL, which uses UCX by default. On EFA, UCX does not reach line rate and can quietly fall back to TCP, so every prefill and decode worker must select **LIBFABRIC**. Each engine sets it in a different place. Pick your engine and make the change on both workers.
+
+<Tabs>
+<Tab title="vLLM">
+
+Add `"kv_connector_extra_config":{"backends":["LIBFABRIC"]}` to the `--kv-transfer-config` JSON. Keep the rest of the JSON from your baseline recipe.
+
+```yaml
+    - name: prefill
+      type: prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              args:
+                - ...                       # keep the baseline args
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+    - name: decode
+      type: decode
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              args:
+                - ...
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+```
+
+Keep the `kv_role` values from your baseline. Some recipes use `kv_both` on both components. If the baseline recipe already sets `kv_connector_extra_config`, add the `backends` key to it rather than replacing it.
+
+</Tab>
+<Tab title="SGLang">
+
+SGLang must use NIXL as its disaggregation transfer backend, with LIBFABRIC selected inside NIXL:
+
+```yaml
+    - name: prefill            # repeat for the decode component
+      type: prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              args:
+                - ...                       # keep the baseline args
+                - --disaggregation-transfer-backend
+                - nixl
+              env:
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: LIBFABRIC
+```
+
+If the baseline recipe uses another transfer backend, such as Mooncake, switch it to `nixl`. Without `SGLANG_DISAGGREGATION_NIXL_BACKEND`, SGLang uses UCX, which falls back to TCP on kernel 6.8 and later.
+
+</Tab>
+<Tab title="TensorRT-LLM">
+
+TensorRT-LLM reads the KV-transfer backend from the engine configuration, usually a ConfigMap in the recipe. Set `cache_transceiver_config.backend` to `NIXL` in **both** the prefill and the decode engine configs:
+
+```yaml
+# prefill and decode engine config (for example, the recipe's ConfigMap)
+cache_transceiver_config:
+  backend: NIXL
+  # keep max_tokens_in_buffer and other fields from the baseline recipe
+```
+
+Then select LIBFABRIC inside NIXL on both workers:
+
+```yaml
+    - name: prefill            # repeat for the decode component
+      type: prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: TRTLLM_NIXL_KVCACHE_BACKEND
+                  value: LIBFABRIC
+```
+
+The prefill and decode configs must use the same backend.
+
+</Tab>
+</Tabs>
+
+## Step 3. Leave libfabric Settings at Their Defaults
+
+You do not need to add libfabric (`FI_*`) environment variables. libfabric detects the EFA provider and GPU-Direct RDMA on its own, and the EFA image already sets the library paths. Extra `FI_*` settings can cause problems; add one only when AWS or NVIDIA support asks you to while debugging a specific issue.
+
+If your baseline recipe or an older example sets variables such as `FI_PROVIDER`, `FI_EFA_USE_DEVICE_RDMA`, `FI_EFA_ENABLE_SHM_TRANSFER`, or `FI_EFA_USE_HUGE_PAGE`, consider removing them.
+
+<Note>
+Selecting the LIBFABRIC backend in Step 2 is still required. libfabric finds EFA by itself, but NIXL does not use libfabric unless the engine asks for it.
+</Note>
+
+**Recommended: turn on NIXL metrics** so you can verify that transfers run over EFA:
+
+```yaml
+    - name: prefill            # repeat for the decode component
+      type: prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+                - { name: NIXL_TELEMETRY_EXPORTER,        value: prometheus }
+                - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+```
+
+## Step 4. Request EFA Devices
+
+Each worker pod requests EFA devices in proportion to the GPUs it uses. **This number is not fixed. Calculate it for each worker** from your instance type and the worker's parallelism:
+
+```text
+EFA devices per pod = GPUs per pod × EFA devices per GPU
+
+EFA devices per GPU = node allocatable vpc.amazonaws.com/efa ÷ node GPUs
+GPUs per pod        = the worker's GPU request (for example TP, or TP × DP on
+                      that pod; for a multi-node worker, the GPUs on each node)
+```
+
+Reference values follow. The node check in [Before You Start](#before-you-start) is authoritative for your cluster.
+
+| Instance type | GPUs per node | EFA devices per GPU | TP2 pod | TP4 pod | TP8 pod |
+| --- | --- | --- | --- | --- | --- |
+| `p5.48xlarge` (H100) | 8 | 4 | 8 | 16 | 32 |
+| `p6-b200.48xlarge` (B200) | 8 | 1 | 2 | 4 | 8 |
+| P6e-GB200 (GB200) | 4 | 1 | 2 | 4 | n/a |
+
+Prefill and decode often use different parallelism, so compute each one separately. For example, on `p5.48xlarge` with TP2 prefill and TP4 decode:
+
+```yaml
+    - name: prefill
+      type: prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              resources:
+                requests:
+                  nvidia.com/gpu: "2"
+                  vpc.amazonaws.com/efa: "8"     # 2 GPUs × 4
+                limits:
+                  nvidia.com/gpu: "2"
+                  vpc.amazonaws.com/efa: "8"
+    - name: decode
+      type: decode
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  vpc.amazonaws.com/efa: "16"    # 4 GPUs × 4
+                limits:
+                  nvidia.com/gpu: "4"
+                  vpc.amazonaws.com/efa: "16"
+```
+
+Keep the GPU values and any other resources from your baseline recipe; only add the EFA lines. Keep the EFA value identical in `requests` and `limits`. Kubernetes rejects a pod whose extended-resource request and limit differ.
+
+## Verify Transfers Run over EFA
+
+After you deploy, confirm that NIXL instantiated the LIBFABRIC backend and that `nixl_bytes_transferred` increases while `nixl_num_failed_transfers` stays at 0. The [Verification](../../kubernetes/installation/rdma-setup/efa-on-aws.mdx#verification) section of the EFA on AWS guide lists each check, and [Common Failure Modes](../../kubernetes/installation/rdma-setup/efa-on-aws.mdx#common-failure-modes) maps symptoms such as a 100 s TTFT to their fix.
+
+## Recipes with an EFA Variant
+
+These recipes ship a ready-made EFA configuration you can deploy directly or compare against your own changes:
+
+| Recipe | Engine | Instance | EFA configuration |
+| --- | --- | --- | --- |
+| [Qwen3-32B](../model-recipes/qwen3-32b.mdx) | vLLM | `p5.48xlarge` | [`deploy-aws-p5.48xlarge.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/deploy-aws-p5.48xlarge.yaml) |
+| [Qwen3-235B-A22B FP8](../model-recipes/qwen3-235b-a22b-fp8.mdx) | TensorRT-LLM | `p6-b200.48xlarge` | [`aws-p6-b200.48xlarge` overlay](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/kustomize/overlays/aws-p6-b200.48xlarge) |
+| [GLM-5 NVFP4](../model-recipes/glm-5-nvfp4.mdx) | SGLang | P6e-GB200 | [`sglang/disagg/efa`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5-nvfp4/sglang/disagg/efa) (custom image build) |
+
+## See Also
+
+- [Cloud Fabrics](overview.mdx): which fabric each cloud provider uses
+- [EFA on AWS](../../kubernetes/installation/rdma-setup/efa-on-aws.mdx): cluster setup, image builds, and troubleshooting
+- [RDMA Setup](../../kubernetes/installation/rdma-setup/overview.md): when Dynamo needs RDMA

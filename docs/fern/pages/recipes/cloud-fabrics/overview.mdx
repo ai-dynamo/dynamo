@@ -1,0 +1,27 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Cloud Fabrics"
+subtitle: "Check whether your cloud's network fabric needs recipe changes before you deploy a disaggregated recipe."
+---
+
+Disaggregated recipes transfer KV cache from prefill workers to decode workers over the cluster's RDMA fabric. Dynamo moves that data with NIXL, which uses the UCX backend by default. Whether a recipe runs as published depends on which fabric your cloud provider offers.
+
+| Cloud provider | Fabric | Recipe changes |
+| --- | --- | --- |
+| AWS (EKS) | EFA (Elastic Fabric Adapter) | **Required.** Switch to the EFA image, select the LIBFABRIC backend, and request EFA devices. See [AWS EFA](aws-efa.mdx). |
+| Azure (AKS), Nebius, Nscale | InfiniBand | None to the transfer backend; the default UCX backend works. Request your cluster's RDMA resource. |
+| Google Cloud (GKE) | RoCE | None to the transfer backend; the default UCX backend works. Request your cluster's RDMA resource. |
+
+<Warning>
+On AWS, an unchanged disaggregated recipe still starts and serves requests, but KV cache moves over TCP and time to first token (TTFT) can rise from about 1 s to about 100 s. Apply the [AWS EFA](aws-efa.mdx) changes before you benchmark or serve traffic.
+</Warning>
+
+Aggregated recipes run prefill and decode in one worker, transfer no KV cache between workers, and need no fabric changes on any provider.
+
+For per-provider examples of the RDMA resources, annotations, and environment each fabric needs, see the [Qwen3-32B cloud provider overlays](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b/vllm/cloud-providers).
+
+## See Also
+
+- [RDMA Setup](../../kubernetes/installation/rdma-setup/overview.md): cluster-level RDMA setup for each platform
+- [Recipes](../model-recipes/overview.mdx): browse model recipes by provider, runtime, and hardware
