@@ -108,6 +108,20 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### Operator behavior breaking changes
 
+##### Worker GPU Power Caps
+
+When an upgraded operator first reconciles a supported DGD with an explicit worker
+GPU power cap, it removes the managed annotation from generated worker templates.
+This can trigger one worker rollout, including replacement of a coordinated Grove
+worker group and loss of its warm state. Schedule the upgrade for a window where
+that replacement is acceptable. After this transition, changing the watt value
+alone preserves worker identity and Pod templates.
+
+A newly created or recreated worker Pod can use the GPU before the power
+controller adds its annotation and Power Agent applies the cap. Allow for this
+startup window when planning GPU power budgets.
+
+
 ##### LPX units-only deployment contract
 
 **Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.

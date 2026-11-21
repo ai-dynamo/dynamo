@@ -267,6 +267,7 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
+	applyDesiredPowerCaps(result.ComponentStatus, req.DGD)
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 
 	// A status-only DGD update does not pass the primary predicate, so advance restart progress by requeueing.

@@ -63,9 +63,12 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
 
 ## Status, primary writes, and events
 
-- The outer DGD controller is the only DGD status-subresource writer. Programs and
+- The outer DGD controller is the only writer of workload-program status. Programs and
   nested reconcilers never call `Status().Update` for a DGD and do not use
   `request.DGD.Status` as their output accumulator.
+- An independently registered controller may contribute its own DGD condition types.
+  It writes only those types, with server-side apply and its own field manager.
+  Programs carry those conditions forward unchanged; they never set or remove them.
 - Initialize every program result from the current DGD status. Return a complete,
   authoritative, meaningful status on success and error, preserving prior fields and
   partial progress unless an operation deliberately replaces them.
@@ -142,8 +145,9 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
 
 - Characterize behavior before moving it across a receiver or package boundary. Cover
   success, pending, failure, idempotence, and meaningful partial status on error.
-- Prove the outer controller remains the sole DGD status writer and programs do not
-  mutate `request.DGD.Status` as output.
+- Prove the outer controller remains the sole writer of workload-program status,
+  programs do not mutate `request.DGD.Status` as output, and conditions contributed
+  by other controllers pass through unchanged.
 - Prove status-transition events are suppressed when status persistence fails and are
   emitted after successful persistence.
 - Preserve coverage for pathway selection, rollout and restart transitions, readiness,

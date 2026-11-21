@@ -157,6 +157,7 @@ func (p *componentProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
+	applyDesiredPowerCaps(result.ComponentStatus, req.DGD)
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }

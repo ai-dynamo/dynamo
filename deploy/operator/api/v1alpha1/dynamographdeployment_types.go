@@ -330,8 +330,9 @@ type ServiceReplicaStatus struct {
 	// +optional
 	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
 
-	// GPUPowerLimitWatts is the effective per-GPU power limit propagated to the
-	// component's Pods. Omission means no power limit is configured.
+	// GPUPowerLimitWatts is the configured per-GPU power limit in watts. For
+	// live-managed DGD caps it reports the desired value, independently of
+	// annotation propagation and hardware enforcement.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	GPUPowerLimitWatts *int64 `json:"gpuPowerLimitWatts,omitempty"`

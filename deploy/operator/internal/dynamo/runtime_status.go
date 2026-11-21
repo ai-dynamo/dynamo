@@ -61,12 +61,17 @@ func ResolveComponentRuntimeStatus(
 		}
 	}
 
-	if raw := annotations[commonconsts.KubeAnnotationGPUPowerLimit]; raw != "" {
-		if watts, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && watts > 0 {
-			status.GPUPowerLimitWatts = new(watts)
-		}
+	if watts, ok := GPUPowerLimitWatts(annotations[commonconsts.KubeAnnotationGPUPowerLimit]); ok {
+		status.GPUPowerLimitWatts = new(watts)
 	}
 	return status
+}
+
+// GPUPowerLimitWatts parses a GPU power-limit annotation value; ok is false for an absent,
+// malformed or non-positive value.
+func GPUPowerLimitWatts(raw string) (watts int64, ok bool) {
+	watts, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	return watts, err == nil && watts > 0
 }
 
 // ResolveGroveComponentRuntimeStatuses selects each component's semantic

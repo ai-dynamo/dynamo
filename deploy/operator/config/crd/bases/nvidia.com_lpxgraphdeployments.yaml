@@ -181,8 +181,9 @@ spec:
                         x-kubernetes-list-type: map
                       gpuPowerLimitWatts:
                         description: |-
-                          gpuPowerLimitWatts is the effective per-GPU power limit propagated to the
-                          component's Pods. Omission means no power limit is configured.
+                          gpuPowerLimitWatts is the configured per-GPU power limit in watts. For
+                          live-managed DGD caps it reports the desired value, independently of
+                          annotation propagation and hardware enforcement.
                         format: int64
                         minimum: 1
                         type: integer

@@ -264,6 +264,26 @@ The operator maintains observed state under `status`.
 <ParamField path="status.conditions" type="[]metav1.Condition">
   Latest observed conditions, merged by type. Includes `Available` and `DynamoComponentReady`.
 
+  `PowerCapPropagationReady` reports annotation convergence for
+  [supported worker power caps](dynamo-component-deployment.mdx#spec-reference).
+  Compare the condition's `observedGeneration` with the current DGD generation.
+
+  - `PodAnnotationsMatch` (`True`) means every eligible Pod has its component's
+    desired cap annotation. Eligible Pods have the Dynamo graph, component, and
+    worker-type labels. Pending Pods and both generations in a rollout count.
+    The controller excludes deleting, succeeded, and failed Pods.
+  - `NoWorkersObserved` (`Unknown`) means there are no eligible Pods.
+  - `PodAnnotationMismatch` (`False`) means one or more annotations need repair.
+  - `PodObservationFailed` (`Unknown`) means the controller could not observe
+    worker Pods.
+  - `PodPatchFailed` (`False`) means a repair failed. Concurrent Pod updates can
+    cause retryable conflicts.
+
+  The power controller owns this condition independently of workload status.
+  It retries observation and repair failures. Newly created Pods can move the
+  condition back to `False` until their annotations converge. The condition
+  measures Pod annotations only. GPU hardware enforcement can occur later.
+
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
 </ParamField>
 
@@ -501,7 +521,7 @@ Replica information for a single component, keyed by component name in `status.c
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">
-  Effective per-GPU power limit configured for the component. Omitted when no positive component-level power limit is configured. Minimum `1`.
+  Configured per-GPU power limit in watts. For live-managed caps, this reports the desired DGD value. See `PowerCapPropagationReady` for worker Pod annotation convergence. Omitted when the component has no configured positive cap. Minimum `1`.
 </ParamField>
 
 <ParamField path="gpusPerEngine" type="integer">

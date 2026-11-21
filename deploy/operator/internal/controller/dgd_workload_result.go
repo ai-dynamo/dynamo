@@ -102,6 +102,23 @@ func applyComponentRuntimeStatus(
 	status.GPUPowerLimitWatts = runtimeStatus.GPUPowerLimitWatts
 }
 
+// applyDesiredPowerCaps projects DGD intent after provider-derived status, because
+// generated templates omit managed caps. dgd must be non-nil.
+func applyDesiredPowerCaps(
+	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	for componentName, cap := range dynamo.DesiredWorkerPowerCaps(dgd) {
+		status, ok := statuses[componentName]
+		watts, valid := dynamo.GPUPowerLimitWatts(cap)
+		if !ok || !valid {
+			continue
+		}
+		status.GPUPowerLimitWatts = new(watts)
+		statuses[componentName] = status
+	}
+}
+
 // applyComponentRuntimeStatuses projects provider-resolved serving-role
 // identities onto observed component statuses.
 func applyComponentRuntimeStatuses(

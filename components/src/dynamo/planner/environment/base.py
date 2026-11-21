@@ -488,10 +488,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     ) -> None:
         """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
-        Caps are startup-static for the Planner lifetime. The operator's DGD
-        validating webhook makes a power-annotated component's cap, effective
-        NVIDIA GPU count, and node count immutable, and rejects DRA-backed
-        allocation for power-annotated components. Changing these inputs requires
+        Caps are startup-static for the Planner lifetime. Live cap edits are
+        supported only for no-Planner DGDs. The operator keeps caps immutable
+        on Planner-bearing DGDs, keeps GPU allocation and node count immutable,
+        and rejects DRA-backed allocation for power-annotated components.
+        Changing these inputs in a Planner deployment requires
         deleting and recreating the DGD, then restarting Planner against the
         settled deployment.
         """

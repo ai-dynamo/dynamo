@@ -2321,7 +2321,7 @@ RuntimeComponentName is an explicit Dynamo runtime component identity resolved f
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">
-GPUPowerLimitWatts is the effective per-GPU power limit propagated to the component's Pods. Omission means no power limit is configured.
+GPUPowerLimitWatts is the configured per-GPU power limit in watts. For live-managed DGD caps it reports the desired value, independently of annotation propagation and hardware enforcement.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2704,7 +2704,7 @@ runtimeComponentName is an explicit Dynamo runtime component identity resolved f
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">
-gpuPowerLimitWatts is the effective per-GPU power limit propagated to the component's Pods. Omission means no power limit is configured.
+gpuPowerLimitWatts is the configured per-GPU power limit in watts. For live-managed DGD caps it reports the desired value, independently of annotation propagation and hardware enforcement.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
