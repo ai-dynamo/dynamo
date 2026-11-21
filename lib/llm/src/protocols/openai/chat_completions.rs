@@ -1023,6 +1023,37 @@ mod tests {
     }
 
     #[test]
+    fn test_greed_sampling_forces_temperature_zero() {
+        for (extra, expected_temperature, expected_top_p) in [
+            (
+                json!({"nvext": {"greed_sampling": true}, "temperature": 0.7, "top_p": 0.9}),
+                Some(0.0),
+                None,
+            ),
+            (
+                json!({"nvext": {"greed_sampling": true}, "temperature": 0.0}),
+                Some(0.0),
+                None,
+            ),
+            (json!({"nvext": {"greed_sampling": true}}), Some(0.0), None),
+            (
+                json!({"nvext": {"greed_sampling": false}, "temperature": 0.7, "top_p": 0.9}),
+                Some(0.7),
+                Some(0.9),
+            ),
+        ] {
+            let sampling = chat_request_with(&extra)
+                .extract_sampling_options()
+                .unwrap_or_else(|e| panic!("{extra} must be valid, got: {e}"));
+            assert_eq!(
+                (sampling.temperature, sampling.top_p),
+                (expected_temperature, expected_top_p),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
     fn test_top_k_sentinel_contract() {
         for (top_k, expected) in [(-1, Some(-1)), (0, Some(-1)), (1, Some(1))] {
             let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
