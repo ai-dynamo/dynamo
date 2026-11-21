@@ -84,6 +84,7 @@ pub(super) fn spawn(
         };
         let broadcaster = PoolViewBroadcaster::<PoolId, Arc<grpc::PoolState>>::new();
         // Install the initial state before any router can attach.
+        drop_oversized_session_hints(&mut state);
         broadcaster.upsert(pool.clone(), Arc::new(state.clone()));
         let connections_cancel = cancel.clone();
         let fanout = broadcaster.run(routers, move |router| {
@@ -111,6 +112,7 @@ pub(super) fn spawn(
                     },
                 }
                 // Lag is safe: each notification reads the complete current window.
+                drop_oversized_session_hints(&mut state);
                 broadcaster.upsert(pool.clone(), Arc::new(state.clone()));
             }
         };
@@ -120,6 +122,28 @@ pub(super) fn spawn(
             _ = publish => {},
         }
     })
+}
+
+// Optional hints must not push otherwise usable catalog and load state over the frame limit.
+fn drop_oversized_session_hints(state: &mut grpc::PoolState) {
+    let frame = grpc::PoolViewFrame {
+        event: Some(grpc::pool_view_frame::Event::Snapshot(grpc::Snapshot {
+            revision: u64::MAX,
+            pool_present: true,
+            state: Some(state.clone()),
+        })),
+    };
+    if frame.encoded_len() <= grpc::MAX_POOL_VIEW_FRAME_BYTES {
+        return;
+    }
+    if let Ok(mut load) = ServingLoadUpdate::decode(state.serving_load.clone())
+        && load.models.iter().any(|model| !model.sessions.is_empty())
+    {
+        for model in &mut load.models {
+            model.sessions.clear();
+        }
+        state.serving_load = load.encode_to_vec().into();
+    }
 }
 
 async fn attach(
@@ -167,4 +191,50 @@ async fn attach(
         }
     });
     Ok(RouterConnection::with_transport(sender, transport))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::protocol::{ModelServingLoad, SessionObservation};
+    use super::*;
+
+    #[test]
+    fn session_hints_cannot_displace_catalog_and_load_from_a_global_frame() {
+        let load = ServingLoadUpdate {
+            window_sequence: 17,
+            models: vec![ModelServingLoad {
+                sessions: vec![
+                    SessionObservation {
+                        session_id: "s".repeat(256),
+                        last_seen_ms: 1,
+                    };
+                    8
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut state = grpc::PoolState {
+            serving_load: load.encode_to_vec().into(),
+            ..Default::default()
+        };
+        let original = state.serving_load.clone();
+        drop_oversized_session_hints(&mut state);
+        assert_eq!(state.serving_load, original);
+        state.catalog = vec![0; grpc::MAX_POOL_VIEW_FRAME_BYTES - 512].into();
+        let catalog = state.catalog.clone();
+        drop_oversized_session_hints(&mut state);
+        assert_eq!(state.catalog, catalog);
+        let bounded = ServingLoadUpdate::decode(state.serving_load.clone()).unwrap();
+        assert_eq!(bounded.window_sequence, 17);
+        assert!(bounded.models[0].sessions.is_empty());
+        let frame = grpc::PoolViewFrame {
+            event: Some(grpc::pool_view_frame::Event::Snapshot(grpc::Snapshot {
+                revision: u64::MAX,
+                pool_present: true,
+                state: Some(state),
+            })),
+        };
+        assert!(frame.encoded_len() < grpc::MAX_POOL_VIEW_FRAME_BYTES);
+    }
 }

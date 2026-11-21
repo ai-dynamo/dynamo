@@ -97,6 +97,22 @@ pub fn validate_pool_serving_load(pool: &PoolServingLoad) -> Result<(), WireIden
 pub fn validate_model_serving_load(model: &ModelServingLoad) -> Result<(), WireIdentityError> {
     validate_text("serving load namespace", &model.namespace)?;
     validate_text("serving load canonical model ID", &model.canonical_model_id)?;
+    if model.sessions.len() > crate::frontend_load::MAX_FRONTEND_SESSIONS {
+        return Err(WireIdentityError::LoadViewField("model session count"));
+    }
+    let mut session_ids = HashSet::new();
+    for session in &model.sessions {
+        validate_text("session ID", &session.session_id)?;
+        if session.session_id.len() > crate::frontend_load::MAX_SESSION_ID_BYTES
+            || session.session_id.chars().any(char::is_control)
+            || session.last_seen_ms == 0
+            || !session_ids.insert(&session.session_id)
+        {
+            return Err(WireIdentityError::LoadViewField(
+                "model session observation",
+            ));
+        }
+    }
     let load = model
         .load
         .as_ref()
