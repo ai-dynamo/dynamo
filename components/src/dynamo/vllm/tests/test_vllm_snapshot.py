@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.common.snapshot import restore_context
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
     write_snapshot_restore_context,
@@ -63,6 +64,8 @@ async def test_prepare_snapshot_preserves_engine_stat_loggers(monkeypatch):
 )
 def test_restore_served_model_name(monkeypatch, tmp_path, restore_pod_name, expected):
     monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path))
+    # Read the legacy context instead of the test runner's real ancestors.
+    monkeypatch.setattr(restore_context, "_PROC_ROOT", tmp_path / "proc")
     if restore_pod_name is None:
         monkeypatch.delenv("DYN_SERVED_MODEL_NAME", raising=False)
     else:
