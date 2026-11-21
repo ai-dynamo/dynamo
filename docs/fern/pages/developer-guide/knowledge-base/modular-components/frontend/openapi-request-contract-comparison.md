@@ -193,7 +193,16 @@ Direction alone does not determine compatibility.
 Read `report.md` for a concise review with declarations, specific checks, and evidence links.
 Use `report.json` for the full structured findings, raw deltas, and provenance; agents do not
 need to parse Markdown. Missing declaration evidence is marked unavailable. Unresolved
-union or `allOf` changes remain whole findings.
+request composition fragments remain ambiguity findings, while recognized sibling
+deltas produce separate findings. Response grouping is unchanged.
+
+Unsupported constructs remain explicit coverage gaps without suppressing supported
+request-field deltas. An added/deleted property declared on both sides, including
+through references or composition branches, is ambiguous rather than missing.
+For example, moving `properties.temperature` into `allOf[0].properties.temperature`
+does not remove the field. It also does not establish equivalent accepted values.
+The reporter does not discover extra fields absent from comparator deltas. The
+global flattening guard and `incomplete_coverage` status for remaining gaps are unchanged.
 
 The report defines categories in a suggested review order, not a severity ranking.
 Declared aliases classify spelling-only differences as `alias_evidence`; value constraints
