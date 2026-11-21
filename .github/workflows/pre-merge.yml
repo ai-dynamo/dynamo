@@ -538,11 +538,14 @@ jobs:
         compile_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         compile_bench dc-ckf-relay --bench dc_ckf_relay_bench
         compile_bench selection-replay --bench selection_replay_bench
+        compile_bench shadow-consumer --bin shadow_consumer
 
         cargo test --locked --no-default-features -p dynamo-bench \
           --features request-trace-to-mooncake --test request_trace_to_mooncake
         cargo test --locked --no-default-features -p dynamo-bench \
           --features selection-replay --test selection_replay
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features shadow-consumer --bin shadow_consumer
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -617,6 +620,7 @@ jobs:
         lint_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         lint_bench dc-ckf-relay --bench dc_ckf_relay_bench
         lint_bench selection-replay --bench selection_replay_bench --test selection_replay
+        lint_bench shadow-consumer --bin shadow_consumer
 
         cargo clippy --locked --no-deps -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench -- -D warnings
