@@ -111,7 +111,11 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_KV_BLOCK_SIZE",
             default=32,
             arg_type=int,
-            help="Size of a KV cache block.",
+            help="Fallback KV cache block size in tokens. Dynamo uses the block size "
+            "TensorRT-LLM reports; this value is used only when the engine reports no "
+            "KV cache capacity, and in encode mode. It is not passed to the engine; set "
+            "kv_cache_config.tokens_per_block in the engine args to change the engine's "
+            "block size.",
         )
         add_argument(
             g,
