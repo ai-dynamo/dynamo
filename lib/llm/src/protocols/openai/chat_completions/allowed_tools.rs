@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use anyhow::{Context, ensure};
 use dynamo_protocols::types::{
-    ChatCompletionMessageToolCallChunk, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    FunctionType,
+    ChatCompletionMessageToolCallChunk, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, FunctionType,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -126,7 +126,49 @@ impl AllowedToolsRequest {
     }
 }
 
+/// Rebuild the client's `tools` catalog and `allowed_tools` choice from a
+/// request that went through [`AllowedToolsRequest::normalize`]. `None` for any
+/// other request. The selection lists the allowed functions in catalog order.
+pub(crate) fn client_tools(
+    request: &NvCreateChatCompletionRequest,
+) -> Option<(&[ChatCompletionTool], serde_json::Value)> {
+    let catalog = request.chat_template_tools.as_deref()?;
+    let mode = match request.inner.tool_choice {
+        Some(ChatCompletionToolChoiceOption::Required) => "required",
+        _ => "auto",
+    };
+    let tools: Vec<_> = request
+        .inner
+        .tools
+        .iter()
+        .flatten()
+        .map(|tool| serde_json::json!({"type": "function", "function": {"name": tool.function.name}}))
+        .collect();
+    Some((
+        catalog,
+        serde_json::json!({
+            "type": "allowed_tools",
+            "allowed_tools": {"mode": mode, "tools": tools},
+        }),
+    ))
+}
+
 impl ToolAllowlist {
+    /// The allowlist a normalized `allowed_tools` request carries: its callable
+    /// `tools`. `None` for a request without `allowed_tools`.
+    pub(crate) fn from_request(request: &NvCreateChatCompletionRequest) -> Option<Self> {
+        request.chat_template_tools.as_ref()?;
+        Some(Self(
+            request
+                .inner
+                .tools
+                .iter()
+                .flatten()
+                .map(|tool| tool.function.name.clone())
+                .collect(),
+        ))
+    }
+
     #[allow(deprecated)]
     pub(crate) fn validate_response(
         &self,

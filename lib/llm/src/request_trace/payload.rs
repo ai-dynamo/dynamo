@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 
 use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse, allowed_tools::ToolAllowlist,
 };
 
 /// Context key for the allowlisted headers captured at the HTTP layer.
@@ -82,6 +82,15 @@ impl RequestPayloadHandle {
         response: Option<Arc<NvCreateChatCompletionResponse>>,
         drop_reason: Option<String>,
     ) {
+        // The HTTP layer returns an error instead of a tool call outside
+        // `allowed_tools`, so the record must not keep that output either.
+        let (response, drop_reason) = match (response, ToolAllowlist::from_request(&self.request)) {
+            (Some(response), Some(allowlist)) => match allowlist.validate_response(&response) {
+                Ok(()) => (Some(response), drop_reason),
+                Err(error) => (None, Some(format!("invalid_tool_call_output:{error}"))),
+            },
+            (response, _) => (response, drop_reason),
+        };
         let payload_complete = response.is_some() && drop_reason.is_none();
         let drop_reason = match (payload_complete, drop_reason) {
             (true, reason) => reason,
@@ -430,5 +439,113 @@ mod tests {
             "a record with no response must not claim to be complete"
         );
         assert_eq!(payload.payload_drop_reason.as_deref(), Some("unspecified"));
+    }
+
+    fn allowed_tools_request() -> NvCreateChatCompletionRequest {
+        let request: crate::protocols::openai::chat_completions::allowed_tools::AllowedToolsRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Look up the answer"}],
+                "tools": [
+                    {"type": "function", "function": {"name": "lookup"}},
+                    {"type": "function", "function": {"name": "delete"}}
+                ],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": "required", "tools": [
+                        {"type": "function", "function": {"name": "lookup"}}
+                    ]}
+                }
+            }))
+            .unwrap();
+        request.normalize().unwrap().0
+    }
+
+    fn tool_call_response(name: &str) -> NvCreateChatCompletionResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "tool_calls": [{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": name, "arguments": "{}"}
+                }]},
+                "finish_reason": "tool_calls"
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn allowed_tools_record_keeps_client_request_and_drops_rejected_output() {
+        crate::request_trace::init_bus_for_test(8);
+        let mut rx = crate::request_trace::subscribe();
+        let request = allowed_tools_request();
+        for (request_id, name) in [
+            ("payload-allowed-tools-ok", "lookup"),
+            ("payload-allowed-tools-rejected", "delete"),
+        ] {
+            create_handle_with_config(&request, request_id, true, true, None)
+                .unwrap()
+                .emit(Some(Arc::new(tool_call_response(name))), None);
+        }
+
+        let mut records = HashMap::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while records.len() < 2 {
+                let record = rx.recv().await.expect("record receives ok");
+                let Some(payload) = record.payload.as_ref() else {
+                    continue;
+                };
+                if payload.request_id.starts_with("payload-allowed-tools-") {
+                    records.insert(
+                        payload.request_id.clone(),
+                        serde_json::to_value(&record).unwrap(),
+                    );
+                }
+            }
+        })
+        .await
+        .expect("expected request payload records before timeout");
+
+        let ok = &records["payload-allowed-tools-ok"]["payload"];
+        let tool_names: Vec<_> = ok["request"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(tool_names, ["lookup", "delete"]);
+        assert_eq!(
+            ok["request"]["tool_choice"],
+            serde_json::json!({
+                "type": "allowed_tools",
+                "allowed_tools": {"mode": "required", "tools": [
+                    {"type": "function", "function": {"name": "lookup"}}
+                ]}
+            })
+        );
+        assert_eq!(ok["payload_complete"], true);
+        assert_eq!(
+            ok["response"]["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "lookup"
+        );
+        // The typed request still holds what generation used.
+        assert_eq!(request.inner.tools.as_ref().unwrap().len(), 1);
+
+        let rejected = &records["payload-allowed-tools-rejected"]["payload"];
+        assert_eq!(rejected["payload_complete"], false);
+        assert!(rejected.get("response").is_none());
+        assert!(
+            rejected["payload_drop_reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("invalid_tool_call_output:"),
+            "{rejected}"
+        );
     }
 }

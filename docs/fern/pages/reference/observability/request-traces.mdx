@@ -98,6 +98,11 @@ Contains the OpenAI `/v1/chat/completions` client request and, when available, i
 emits one row per eligible request. Canceled or failed requests omit `payload.response`. Oversized
 OTLP bodies use `payload_complete=false` and `payload_drop_reason`.
 
+For a request with an `allowed_tools` tool choice, `payload.request` keeps the client's full `tools`
+catalog and `allowed_tools` choice. If the response calls a tool outside that selection, the row omits
+`payload.response` and sets `payload_complete=false` with a `payload_drop_reason` that starts with
+`invalid_tool_call_output`.
+
 Allowlisted headers appear at `payload.http_request_headers`. Matching is case-insensitive. Empty,
 non-UTF-8, and unlisted values are omitted. Because values are not redacted, do not capture
 credential-bearing headers.
