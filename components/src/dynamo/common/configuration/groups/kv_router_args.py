@@ -93,7 +93,7 @@ _POLICY_FILE = "--router-policy-config"
 # replaces them). A removed flag fails when parsed. A removed variable fails
 # the startup of a process that used to read it, whatever its value; one that
 # was only ignored would stop applying without a signal.
-# TODO(v1.9): Remove this table and the two checks that read it.
+# TODO(v1.9): Remove this table and the checks that read it.
 _REMOVED: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
     (
         ("--load-aware", "--no-load-aware"),
@@ -126,7 +126,8 @@ _REMOVED: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
     (
         ("--router-queue-policy",),
         ("DYN_ROUTER_QUEUE_POLICY",),
-        f"policy_classes[].queue_policy in {_POLICY_FILE}",
+        f"policy_classes[].queue_policy in {_POLICY_FILE}, which takes edf, "
+        "fcfs or wspt and not lcfs",
     ),
     (
         ("--router-prefill-policy",),

@@ -827,12 +827,50 @@ def test_shared_cache_weight_default_is_left_to_the_policy(
     assert "shared_cache_multiplier" not in kwargs
 
 
-_REMOVED_FLAGS = {**REMOVED_KV_ROUTER_FLAGS, **REMOVED_ROUTER_FLAGS}
+# The removed spellings, written out and not read from the tables: a
+# spelling dropped from a table would drop out of these tests with it.
+_REMOVED_FLAGS = (
+    "--active-prefill-tokens-threshold",
+    "--kv-overlap-score-weight",
+    "--load-aware",
+    "--no-load-aware",
+    "--router-decode-active-request-weight",
+    "--router-decode-policy",
+    "--router-kv-overlap-score-credit-decay",
+    "--router-kv-overlap-score-weight",
+    "--router-prefill-policy",
+    "--router-queue-policy",
+    "--router-queue-threshold",
+    "--shared-cache-multiplier",
+)
+
+
+def test_every_removed_flag_is_listed() -> None:
+    assert set(_REMOVED_FLAGS) == {*REMOVED_KV_ROUTER_FLAGS, *REMOVED_ROUTER_FLAGS}
+
+
 _REMOVED_ENV_VARS = {**REMOVED_KV_ROUTER_ENV_VARS, **REMOVED_ROUTER_ENV_VARS}
+_REMOVED_ENV_VAR_NAMES = (
+    "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
+    "DYN_OVERLAP_SCORE_WEIGHT",
+    "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+    "DYN_ROUTER_DECODE_POLICY",
+    "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+    "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+    "DYN_ROUTER_LOAD_AWARE",
+    "DYN_ROUTER_PREFILL_POLICY",
+    "DYN_ROUTER_QUEUE_POLICY",
+    "DYN_ROUTER_QUEUE_THRESHOLD",
+    "DYN_SHARED_CACHE_MULTIPLIER",
+)
 
 
-@pytest.mark.parametrize("flag", sorted(_REMOVED_FLAGS))
-def test_removed_flag_fails_and_names_its_replacement(
+def test_every_removed_environment_variable_is_listed() -> None:
+    assert set(_REMOVED_ENV_VAR_NAMES) == set(_REMOVED_ENV_VARS)
+
+
+@pytest.mark.parametrize("flag", _REMOVED_FLAGS)
+def test_removed_flag_fails_and_stays_out_of_help(
     capsys: pytest.CaptureFixture[str], flag: str
 ) -> None:
     parser = argparse.ArgumentParser()
@@ -843,16 +881,48 @@ def test_removed_flag_fails_and_names_its_replacement(
     with pytest.raises(SystemExit):
         parser.parse_args([flag, "1"])
 
-    error = capsys.readouterr().err
-    assert f"{flag} was removed in v1.8; use {_REMOVED_FLAGS[flag]}" in error
+    assert f"{flag} was removed in v1.8; use " in capsys.readouterr().err
     assert flag not in parser.format_help().split()
 
 
-@pytest.mark.parametrize("name", sorted(_REMOVED_ENV_VARS))
+@pytest.mark.parametrize(
+    ("flag", "replacement"),
+    [
+        (
+            "--router-queue-threshold",
+            "policy_classes[].prefill_busy_threshold_frac in --router-policy-config, "
+            "and set queue_policy there: the removed queue defaulted to fcfs, a "
+            "class defaults to edf",
+        ),
+        (
+            "--router-queue-policy",
+            "policy_classes[].queue_policy in --router-policy-config, which takes "
+            "edf, fcfs or wspt and not lcfs",
+        ),
+        (
+            "--active-prefill-tokens-threshold",
+            "--active-prefill-tokens-threshold-frac",
+        ),
+    ],
+)
+def test_removed_flag_names_its_replacement(
+    capsys: pytest.CaptureFixture[str], flag: str, replacement: str
+) -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args([flag, "1"])
+
+    error = capsys.readouterr().err
+    assert error.endswith(f"{flag} was removed in v1.8; use {replacement}\n")
+
+
+@pytest.mark.parametrize("name", _REMOVED_ENV_VAR_NAMES)
 def test_removed_environment_variable_fails_a_kv_frontend(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
-    for other in _REMOVED_ENV_VARS:
+    for other in _REMOVED_ENV_VAR_NAMES:
         monkeypatch.delenv(other, raising=False)
     monkeypatch.setenv(name, "1")
     parser = argparse.ArgumentParser()
@@ -862,8 +932,7 @@ def test_removed_environment_variable_fails_a_kv_frontend(
     with pytest.raises(ValueError) as error:
         config.validate()
 
-    assert "removed in v1.8" in str(error.value)
-    assert f"{name} (use {_REMOVED_ENV_VARS[name]})" in str(error.value)
+    assert f"removed in v1.8 are still set: {name} (use " in str(error.value)
 
 
 @pytest.mark.parametrize(
