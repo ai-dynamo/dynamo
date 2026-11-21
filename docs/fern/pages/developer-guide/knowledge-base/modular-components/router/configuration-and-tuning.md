@@ -122,6 +122,7 @@ link no catalog and reject a configured policy type at startup.
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
+| `dynamo-sita` | Size-interval task assignment. Partitions workers into contiguous size bands and confines each request to the band matching its estimated size (uncached prefill plus optional weighted output), so short requests do not queue behind long prefills. Saturated bands spill into a quieter neighbor or borrow an idle short band. Inside the band it uses the default cost, optionally reshaped by `score_*` parameters. |
 
 Name the policy type under each worker role in the same YAML file that `--router-policy-config`
 already points at:
@@ -265,6 +266,45 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 | `eviction_interval_secs` | `60` | Minimum seconds between sweeps for idle bindings. |
 
 Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
+
+`dynamo-sita` is available in `dev` builds only; it is not in a released version yet. It accepts
+band parameters and score-shaping parameters. This example selects it for aggregated workers:
+
+```yaml
+worker_selection:
+  aggregated:
+    type: dynamo-sita
+    parameters:
+      boundary_1: 1024
+      boundary_2: 8192
+      small_band_share: 0.5
+      osl_weight: 0.0
+      spill_threshold: 0.85
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `boundary_1` | `1024` | Upper size of band 0, in tokens. Must be greater than `0`. |
+| `boundary_2` | `8192` | Upper size of band 1, in tokens. `0` leaves a two-band split at `boundary_1`; otherwise must exceed `boundary_1`. |
+| `small_band_share` | `0.5` | Fraction of the pool, ordered by worker ID, that serves band 0. Must be strictly between `0.0` and `1.0`. |
+| `osl_weight` | `0.0` | Weight on the request's declared `expected_output_tokens` in its size estimate. `0.0` sizes by prefill alone. |
+| `spill_threshold` | `0.85` | Relative band occupancy above which a band spills into a quieter neighbor or borrows an idle band 0. `1.0` turns off spill and borrowing. Must be in `[0.5, 1.0]`. |
+| `score_overlap_weight` | `1.0` | Multiplier on the cache credit. Must be in `[0.25, 4.0]`. |
+| `score_overlap_gamma` | `1.0` | Exponent on the fraction of the prompt a worker holds; above `1.0` favors near-full hits. Must be in `[0.5, 2.0]`. |
+| `score_min_overlap_frac` | `0.0` | Fraction below which a worker earns no local cache credit. Shared-cache credit is unaffected. Must be in `[0.0, 0.5]`. |
+| `score_load_weight` | `1.0` | Multiplier on the decode-side load term. Must be in `[0.25, 4.0]`. |
+| `score_load_gamma` | `1.0` | Convexity of decode-side load relative to the candidate mean; above `1.0` charges busier workers superlinearly. Must be in `[1.0, 2.0]`. |
+
+A request's size counts only cache held by its band's own workers, and the request goes to the
+smallest band it still fits after counting that cache. A cached prefix on another band's worker
+therefore never sends a request cold to a smaller band. A long request with no cached prefix in its
+band may use every non-short worker, even at `spill_threshold: 1.0`; band 0 is never lent at `1.0`.
+
+`dynamo-sita` also accepts every `dynamo-default-cost-fn` parameter (`overlap_score_credit`,
+`prefill_load_scale`, `router_temperature`, and the rest), with the same defaults and validation.
+With the `score_*` parameters at their defaults, workers inside a band are ranked as
+`dynamo-default-cost-fn` ranks them when both use the same effective cost weights. Parameters set on
+another policy instance don't carry over, so repeat any cost overrides under `dynamo-sita`.
 
 #### Override the Selection
 

@@ -4,7 +4,7 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom catalog
-//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, and ThunderAgent
+//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, SITA, and ThunderAgent
 //! providers through `register`. The default itself uses the same public candidate inputs and scorer/picker
 //! dispatch as external policies. Sequence tracking, eligibility, and admission remain in
 //! dynamo-kv-router.
@@ -13,6 +13,7 @@ mod default;
 pub mod kv_fetch;
 mod output_length;
 pub mod router_modes;
+mod sita;
 mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
@@ -48,6 +49,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     // kv_fetch names kvcr as a host, where it is on by default, so it registers with it.
     kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
+    sita::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
     output_length::register(registry)?;
@@ -124,6 +126,38 @@ worker_selection:
     type: dynamo-sticky-min-load
     parameters:
       max_idle_secs: 600
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+        let partition = RoutingPartitionRef::new("model", "default");
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            factory(&SelectionConfig::from(&config), worker_type, partition);
+        }
+    }
+
+    /// The documented SITA instance resolves, parameters included, for every role.
+    #[test]
+    fn resolves_sita_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated:
+    type: dynamo-sita
+    parameters:
+      boundary_1: 1024
+      boundary_2: 8192
+      small_band_share: 0.5
+      spill_threshold: 0.85
+      score_load_gamma: 1.2
+      overlap_score_credit: 1.0
+  prefill: dynamo-sita
+  decode: dynamo-sita
 "#,
         );
         let factory = resolved

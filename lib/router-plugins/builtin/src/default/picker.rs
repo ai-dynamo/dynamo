@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use std::cell::Cell;
 use std::sync::Arc;
 
-fn softmax_sample_index<T>(
+pub(crate) fn softmax_sample_index<T>(
     entries: &[T],
     cost: impl Fn(&T) -> f64,
     temperature: f64,
