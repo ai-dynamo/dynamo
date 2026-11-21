@@ -454,6 +454,10 @@ sidecar_configs = {
             "PYTHONUNBUFFERED": "1",
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
+            # Log UCX transports for the ~60 s decode KV read stall on Blackwell
+            # runners (DD_XBV5KL): did the NIXL read use cuda_ipc or a fallback?
+            "UCX_LOG_LEVEL": "info",
+            "UCX_PROTO_INFO": "y",
         },
         # disagg.sh launches decode as worker 1 and prefill as worker 2.
         request_payloads=_disaggregated_payloads(
