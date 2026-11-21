@@ -15,12 +15,14 @@
 #   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
 #   - Group 1 (general):     dynamo runtime, planner, frontend,
 #                            operator, snapshot, power-agent  (cuda13.0 base)
-#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa, Triton (cuda13.1 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa      (cuda13.4 base)
+#                            Triton                           (cuda13.1 base)
 #
 # Groups follow the dynamo_base image tag, not the framework: that is where the
 # rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
-# runtime_wheel_builder are shared by every build kind. TRT-LLM and Triton share
-# the cuda13.1 base, so they use one group. vLLM and SGLang share
+# runtime_wheel_builder are shared by every build kind. TRT-LLM and Triton use
+# one group. Triton is still on the cuda13.1 base (see the triton block in
+# container/context.yaml). vLLM and SGLang share
 # one because their build filters differ, and a dedicated pool for either would
 # idle whenever only the other changed.
 #
@@ -80,7 +82,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|triton|general|all> [--cuda <13.0|13.1>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|triton|general|all> [--cuda <13.0|13.4>]."
       exit 1
       ;;
   esac
@@ -106,7 +108,7 @@ fi
 #
 # # CUDA version is required for all flavors except "general"
 # if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
-#   echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
+#   echo "❌ Error: Must specify --cuda <13.0|13.4> for flavor '$FLAVOR_INPUT'."
 #   exit 1
 # fi
 
@@ -133,9 +135,9 @@ esac
 # routing is reintroduced.
 # if [ -n "$CUDA_VERSION" ]; then
 #   case $CUDA_VERSION in
-#     13.0|13.1) ;;
+#     13.0|13.4) ;;
 #     *)
-#       echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
+#       echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.4."
 #       exit 1
 #       ;;
 #   esac
