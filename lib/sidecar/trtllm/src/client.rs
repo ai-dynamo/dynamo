@@ -77,8 +77,7 @@ pub(crate) struct ModelLimits {
     /// `None` preserves token-ID behavior for older servers that omit both
     /// optional input-capability fields.
     pub(crate) supported_inputs: Option<SupportedInputs>,
-    /// Modalities advertised by both the portable and engine-specific capabilities.
-    /// `None` is unresolved metadata; startup always resolves this.
+    /// Positively advertised media accepted by the sidecar.
     pub(crate) supported_media: Option<SupportedMedia>,
     pub(crate) supports_image_routing: bool,
 }
@@ -87,6 +86,8 @@ pub(crate) struct ModelLimits {
 pub(crate) struct ModelInfo {
     pub(crate) limits: ModelLimits,
     pub(crate) served_model_name: String,
+    /// A complete advertisement also establishes which media are unsupported.
+    pub(crate) has_complete_media_capability: bool,
 }
 
 pub(crate) fn has_image_routing_v1(info: &pb::ModelInfo) -> bool {
@@ -235,7 +236,6 @@ impl TrtllmClient {
             })
             .await?
             .into_inner();
-        let mut supported_media = SupportedMedia::default();
         let supported_inputs =
             if info.supports_text_input.is_none() && info.supports_token_ids_input.is_none() {
                 None
@@ -245,36 +245,46 @@ impl TrtllmClient {
                     token_ids: info.supports_token_ids_input == Some(true),
                 })
             };
-        if info.supports_multimodal == Some(true)
-            && let Some(prost_types::value::Kind::ListValue(modalities)) = info
-                .extra
-                .as_ref()
-                .and_then(|extra| extra.fields.get("trtllm_supported_modalities"))
-                .and_then(|value| value.kind.as_ref())
-        {
-            for value in &modalities.values {
-                let Some(prost_types::value::Kind::StringValue(modality)) = value.kind.as_ref()
-                else {
-                    continue;
-                };
-                match modality.as_str() {
-                    "image" => supported_media.image = true,
-                    "video" => supported_media.video = true,
-                    "audio" => supported_media.audio = true,
-                    _ => {}
+        use prost_types::value::Kind;
+        let advertised = info
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.fields.get("trtllm_supported_modalities"))
+            .and_then(|value| value.kind.as_ref());
+        let (supported_media, has_complete_media_capability) =
+            match (info.supports_multimodal, advertised) {
+                (Some(false), _) => (Some(SupportedMedia::default()), true),
+                (Some(true), Some(Kind::ListValue(modalities))) => {
+                    let mut media = SupportedMedia::default();
+                    let mut complete = !modalities.values.is_empty();
+                    for value in &modalities.values {
+                        let modality = match &value.kind {
+                            Some(Kind::StringValue(modality)) => modality.as_str(),
+                            _ => "",
+                        };
+                        match modality {
+                            "image" => media.image = true,
+                            "video" => media.video = true,
+                            "audio" => media.audio = true,
+                            _ => complete = false,
+                        }
+                    }
+                    (Some(media), complete)
                 }
-            }
-        }
+                _ => (None, false),
+            };
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
-                supported_media: Some(supported_media),
-                supports_image_routing: supported_media.image && has_image_routing_v1(&info),
+                supported_media,
+                supports_image_routing: supported_media.is_some_and(|media| media.image)
+                    && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
+            has_complete_media_capability,
         })
     }
 
