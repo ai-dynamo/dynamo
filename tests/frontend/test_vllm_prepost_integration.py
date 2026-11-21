@@ -248,6 +248,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     captured = _read_captured_request(capture_path)
 
     assert captured["model"] == TEST_MODEL
+    assert captured["image_cache_scope"] == "session-123"
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
     assert captured["agent_context"]["session_id"] == "session-123"
 

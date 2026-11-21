@@ -45,6 +45,7 @@ class VllmPrepostTestHandler:
             "stop_conditions": request.get("stop_conditions"),
             "sampling_options": request.get("sampling_options"),
             "output_options": request.get("output_options"),
+            "image_cache_scope": request.get("image_cache_scope"),
             "eos_token_ids": request.get("eos_token_ids"),
             "agent_context": request.get("agent_context"),
             "decoded_prompt": self.tokenizer.decode(

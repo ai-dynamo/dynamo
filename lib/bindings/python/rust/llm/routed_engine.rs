@@ -79,6 +79,11 @@ fn copy_session_affinity(
 ) {
     if let Some(session_affinity) = parent_context.session_affinity() {
         child_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+        // Workers read the image-cache scope only from the request, and a chat processor replaces
+        // the preprocessor that fills it. A scope the processor set is kept.
+        child_context
+            .image_cache_scope
+            .get_or_insert_with(|| session_affinity.as_str().to_owned());
     }
 }
 
@@ -249,6 +254,18 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity restored after Python boundary");
         assert_eq!(session_affinity.as_str(), "session-123");
+        assert_eq!(
+            routed_context.image_cache_scope.as_deref(),
+            Some("session-123")
+        );
+
+        // A scope the chat processor set is kept.
+        routed_context.image_cache_scope = Some("from-processor".to_owned());
+        copy_session_affinity(&python_context, &mut routed_context);
+        assert_eq!(
+            routed_context.image_cache_scope.as_deref(),
+            Some("from-processor")
+        );
     }
 
     #[test]
