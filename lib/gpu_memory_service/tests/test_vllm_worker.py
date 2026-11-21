@@ -86,3 +86,100 @@ def test_v1_worker_uses_upstream_sleep_backend_accessor(monkeypatch):
         worker._maybe_get_memory_pool_context("kv_cache")
         is backend.capture_kv_cache.return_value
     )
+
+
+_GIB = 1 << 30
+# vLLM's budget for an engine whose GMS weights it never charged.
+_VLLM_AVAILABLE = 144 * _GIB
+_IMPORTED_WEIGHTS = 51 * _GIB
+
+
+def _default_kv_path_worker(
+    monkeypatch,
+    *,
+    pending_write: bool,
+    imported_weights: int = _IMPORTED_WEIGHTS,
+    kv_cache_memory_bytes=None,
+    vllm_available: int = _VLLM_AVAILABLE,
+):
+    """A GMSWorker on the default (non-scratch) KV path with vLLM faked out."""
+    pending = {"write": pending_write}
+    publish = Mock(side_effect=lambda: pending.update(write=False))
+    abort = Mock(side_effect=lambda: pending.update(write=False))
+
+    def fake_vllm_determine_available_memory(self):
+        self.available_kv_cache_memory_bytes = vllm_available
+        return vllm_available
+
+    monkeypatch.setattr(gms_worker, "is_scratch_kv_enabled", lambda: False)
+    monkeypatch.setattr(gms_worker, "has_pending_gms_write", lambda: pending["write"])
+    monkeypatch.setattr(
+        gms_worker, "get_imported_weights_bytes", lambda: imported_weights
+    )
+    monkeypatch.setattr(gms_worker, "publish_pending_gms_write", publish)
+    monkeypatch.setattr(gms_worker, "abort_pending_gms_write", abort)
+    monkeypatch.setattr(
+        gms_worker._BaseWorker,
+        "determine_available_memory",
+        fake_vllm_determine_available_memory,
+    )
+
+    worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
+    worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes)
+    worker.requested_memory = 148 * _GIB
+    return worker, publish, abort
+
+
+def test_default_kv_path_charges_read_only_imported_weights(monkeypatch):
+    worker, publish, _ = _default_kv_path_worker(monkeypatch, pending_write=False)
+
+    available = worker.determine_available_memory()
+
+    assert available == _VLLM_AVAILABLE - _IMPORTED_WEIGHTS
+    assert worker.available_kv_cache_memory_bytes == available
+    publish.assert_called_once_with()
+
+
+def test_default_kv_path_does_not_double_charge_pending_writer(monkeypatch):
+    # vLLM already charged the writer's weights: they were allocated after its
+    # initial memory snapshot. Publication only happens after sizing.
+    worker, publish, _ = _default_kv_path_worker(monkeypatch, pending_write=True)
+
+    available = worker.determine_available_memory()
+
+    assert available == _VLLM_AVAILABLE
+    assert worker.available_kv_cache_memory_bytes == _VLLM_AVAILABLE
+    publish.assert_called_once_with()
+
+
+def test_default_kv_path_keeps_explicit_kv_cache_memory_bytes(monkeypatch):
+    explicit = 64 * _GIB
+    worker, _, _ = _default_kv_path_worker(
+        monkeypatch,
+        pending_write=False,
+        kv_cache_memory_bytes=explicit,
+        vllm_available=explicit,
+    )
+
+    assert worker.determine_available_memory() == explicit
+
+
+def test_default_kv_path_unchanged_without_imported_weights(monkeypatch):
+    worker, _, _ = _default_kv_path_worker(
+        monkeypatch, pending_write=False, imported_weights=0
+    )
+
+    assert worker.determine_available_memory() == _VLLM_AVAILABLE
+    assert worker.available_kv_cache_memory_bytes == _VLLM_AVAILABLE
+
+
+def test_default_kv_path_raises_when_imported_weights_leave_no_budget(monkeypatch):
+    worker, publish, abort = _default_kv_path_worker(
+        monkeypatch, pending_write=False, vllm_available=_IMPORTED_WEIGHTS
+    )
+
+    with pytest.raises(ValueError, match="leave no KV cache memory"):
+        worker.determine_available_memory()
+
+    abort.assert_called_once_with()
+    publish.assert_not_called()

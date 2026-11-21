@@ -218,7 +218,7 @@ class GMSWorker(_BaseWorker):
 
     def _determine_available_memory_before_gms_publish(self) -> int:
         if not is_scratch_kv_enabled():
-            return super().determine_available_memory()
+            return self._determine_available_memory_with_imported_weights()
 
         import vllm.envs as envs
         from vllm.config import CUDAGraphMode
@@ -283,6 +283,43 @@ class GMSWorker(_BaseWorker):
         )
 
         return int(projected_available)
+
+    def _determine_available_memory_with_imported_weights(self) -> int:
+        """vLLM's budget, minus GMS weights this engine imported read-only.
+
+        vLLM charges this engine with the device free-memory drop from its
+        initial snapshot to the end of profiling (mem_get_info), not with
+        model_memory_usage. Read-only GMS weights were committed by another
+        process before that snapshot, and mapping them allocates nothing, so
+        vLLM never charges them and sizes the KV cache as if they were free.
+        A pending first writer allocates its weights after the snapshot, so
+        vLLM already charges them. An explicit kv_cache_memory_bytes is kept.
+        """
+        has_pending_write = has_pending_gms_write()
+        available = super().determine_available_memory()
+        if self.cache_config.kv_cache_memory_bytes or has_pending_write:
+            return available
+
+        weights_memory = get_imported_weights_bytes()
+        if weights_memory <= 0:
+            return available
+        corrected = available - weights_memory
+        if corrected <= 0:
+            raise ValueError(
+                f"Read-only GMS weights ({weights_memory / (1 << 30):.2f} GiB) "
+                f"leave no KV cache memory in the requested budget "
+                f"({self.requested_memory / (1 << 30):.2f} GiB). Increase "
+                "--gpu-memory-utilization."
+            )
+        self.available_kv_cache_memory_bytes -= weights_memory
+        logger.info(
+            "[GMS] Available KV cache memory after read-only GMS weights: "
+            "%.2f GiB (vLLM %.2f GiB - imported weights %.2f GiB)",
+            corrected / (1 << 30),
+            available / (1 << 30),
+            weights_memory / (1 << 30),
+        )
+        return corrected
 
     def initialize_from_config(self, kv_cache_config) -> None:
         """Allocate KV cache backing.
@@ -357,9 +394,9 @@ class GMSWorker(_BaseWorker):
             memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
             # The offset is not committed/restored GMS weight state. It is
             # load-time memory excluded from committed GMS bytes (pruned
-            # load-time allocations plus private rebound clones). vLLM uses
-            # model_memory_usage for KV sizing, so omitting it can allocate
-            # an oversized cache.
+            # load-time allocations plus private rebound clones). vLLM only
+            # reports model_memory_usage; the KV budget is corrected in
+            # determine_available_memory.
             model_memory_usage_bytes = int(
                 imported_weights_bytes + memory_usage_offset_bytes
             )
