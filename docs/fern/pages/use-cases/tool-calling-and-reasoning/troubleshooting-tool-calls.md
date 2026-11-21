@@ -28,6 +28,16 @@ up with the text in `reasoning_content`, `content`, and `tool_calls`. This note 
 the V1 route, where late entries can arrive in a final empty-`delta` chunk after `finish_reason`.
 </Info>
 
+## Tools with a Structured Final Answer
+
+If a request combines tools, `tool_choice="auto"`, and `response_format` but
+returns only JSON, check whether the deployment supports combined grammars.
+Composition defaults to enabled for validated parsers v2 families. Explicit
+`allow_tool_calls_with_structured_output: false`, parsers v1, and the Python vLLM
+chat processor retain JSON-only behavior for this combination. See
+[Tools with Structured Output](structural-tag.md#tools-with-structured-output)
+for the supported families and configuration.
+
 ## The request
 
 Add `"logprobs": true` to your failing request. Port-forward the Frontend Service first (`kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}`):
