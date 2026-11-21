@@ -1295,6 +1295,10 @@ func ConvertFromFailoverSpec(src *FailoverSpec, dst *v1beta1.FailoverSpec) {
 		Mode:       gmsModeToV1beta1(src.Mode),
 		NumShadows: src.NumShadows,
 	}
+	if src.GraphArchive != nil {
+		dst.GraphArchive = &v1beta1.GraphArchiveSpec{}
+		ConvertFromGraphArchiveSpec(src.GraphArchive, dst.GraphArchive)
+	}
 }
 
 // ConvertToFailoverSpec converts the v1beta1 experimental failover config into
@@ -1304,6 +1308,26 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 		Enabled:    true,
 		Mode:       gmsModeFromV1beta1(src.Mode),
 		NumShadows: src.NumShadows,
+	}
+	if src.GraphArchive != nil {
+		dst.GraphArchive = &GraphArchiveSpec{}
+		ConvertToGraphArchiveSpec(src.GraphArchive, dst.GraphArchive)
+	}
+}
+
+// ConvertFromGraphArchiveSpec converts the failover graph archive config to
+// v1beta1.
+func ConvertFromGraphArchiveSpec(src *GraphArchiveSpec, dst *v1beta1.GraphArchiveSpec) {
+	*dst = v1beta1.GraphArchiveSpec{
+		SizeLimit: src.SizeLimit,
+	}
+}
+
+// ConvertToGraphArchiveSpec converts the failover graph archive config from
+// v1beta1.
+func ConvertToGraphArchiveSpec(src *v1beta1.GraphArchiveSpec, dst *GraphArchiveSpec) {
+	*dst = GraphArchiveSpec{
+		SizeLimit: src.SizeLimit,
 	}
 }
 

@@ -368,6 +368,25 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	NumShadows int32 `json:"numShadows,omitempty"`
+	// GraphArchive mounts a pod-local emptyDir into both engine containers
+	// and points dynamo.vllm --gms-graph-archive at it. The first read-only
+	// shadow engine saves its CUDA graphs there, and later replacement
+	// engines load them. Presence enables the archive, which never outlives
+	// the pod. Experimental: supported only for single-node intraPod
+	// cold-start (snapshot-less) failover with the vLLM backend.
+	// +optional
+	GraphArchive *GraphArchiveSpec `json:"graphArchive,omitempty"`
+}
+
+// GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
+// intraPod failover engine containers.
+type GraphArchiveSpec struct {
+	// SizeLimit is the emptyDir size limit of the archive volume. Must be
+	// greater than zero. When omitted, the volume has no limit of its own.
+	// The archive uses the node's ephemeral storage, and the kubelet evicts
+	// a pod whose archive grows past the limit.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
