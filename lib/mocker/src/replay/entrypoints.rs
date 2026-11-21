@@ -2593,6 +2593,80 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::aggregated(false)]
+    #[case::disaggregated(true)]
+    fn queued_overlap_refresh_reaches_replay_reports(#[case] disaggregated: bool) {
+        let args = |worker_type| {
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": worker_type,
+                    "block_size": 64,
+                    "num_gpu_blocks": 1,
+                    "max_num_batched_tokens": 64,
+                    "max_num_seqs": 1,
+                    "timing_model": {"type": "fixed", "prefill_ms": 20_000.0, "decode_ms": 1.0}
+                }
+            }))
+            .unwrap()
+        };
+        let requests = [(1, 7, 0.0), (2, 8, 25_000.0), (3, 7, 25_001.0)]
+            .into_iter()
+            .map(|(id, token, arrival)| DirectRequest {
+                tokens: vec![token; 64],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(id)),
+                arrival_timestamp_ms: Some(arrival),
+                ..Default::default()
+            })
+            .collect();
+        let router = Some(KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            ..Default::default()
+        });
+        let report = if disaggregated {
+            crate::replay::offline::simulate_trace_disagg_with_scaling_policy(
+                OfflineDisaggReplayConfig {
+                    prefill_args: args(WorkerType::Prefill),
+                    decode_args: args(WorkerType::Decode),
+                    num_prefill_workers: 1,
+                    num_decode_workers: 1,
+                },
+                router,
+                None,
+                requests,
+                1.0,
+                ReplayRouterMode::KvRouter,
+                true,
+                Some(200_000.0),
+                SlaThresholds::default(),
+                None,
+                None,
+            )
+        } else {
+            crate::replay::offline::simulate_trace_with_scaling_policy(
+                args(WorkerType::Aggregated),
+                router,
+                None,
+                requests,
+                1,
+                1.0,
+                ReplayRouterMode::KvRouter,
+                true,
+                Some(200_000.0),
+                SlaThresholds::default(),
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        assert_eq!(report.per_request.len(), 3);
+        let repeat = record(&report, 3);
+        let route = &repeat.routing_history[0];
+        assert!(route.queue_wait_ms.is_some_and(|wait| wait >= 10_000.0));
+        assert_eq!(route.reported_overlap_tokens, Some(0));
+    }
+
     fn single_turn_dynamo_trace(first_arrival_timestamp_ms: Option<f64>) -> Trace {
         Trace {
             block_size: 4,
