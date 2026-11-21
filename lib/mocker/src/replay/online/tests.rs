@@ -245,9 +245,14 @@ fn test_online_trace_workload_completes_multiturn_sessions() {
     assert_eq!(report.request_counts.total_output_tokens, 6);
 }
 
-#[test]
-fn online_report_options_populate_request_goodput_and_capacity_metrics() {
-    let args = MockerConfig::from_value(serde_json::json!({
+#[rstest::rstest]
+#[case(None, 2)]
+#[case(Some(4), 8)]
+fn online_report_options_populate_request_goodput_and_capacity_metrics(
+    #[case] cp_size: Option<u32>,
+    #[case] expected_gpus: usize,
+) {
+    let mut args = MockerConfig::from_value(serde_json::json!({
         "tensor_parallel_size": 2,
         "engine": {
             "speedup_ratio": 1000.0,
@@ -255,6 +260,21 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
         }
     }))
     .unwrap();
+    if let Some(cp_size) = cp_size {
+        args.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({
+                "model": "test-model", "system": "h200_sxm",
+                "backend": "vllm", "worker_type": "aggregated",
+                "tp": 2, "cp_size": cp_size, "dcp": 2
+            }),
+        };
+        // Exercise report accounting without requiring timing tables or Python.
+        args.perf_model = Arc::new(crate::common::perf_model::PerfModel::Fixed {
+            prefill_ms: 1.0,
+            decode_ms: 1.0,
+        });
+    }
     let report = simulate_trace_workload(
         replay_config(
             args,
@@ -282,12 +302,12 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
     );
     assert_eq!(report.goodput.unwrap().completed_requests, 3);
     assert_eq!(report.throughput.prefill_worker_seconds, 0.0);
-    assert_eq!(report.throughput.decode_gpus_per_worker, 2);
+    assert_eq!(report.throughput.decode_gpus_per_worker, expected_gpus);
     let expected_worker_seconds = 2.0 * report.throughput.duration_ms / 1000.0;
     assert!(
         (report.throughput.decode_worker_seconds - expected_worker_seconds).abs() < f64::EPSILON
     );
-    let expected_gpu_hours = expected_worker_seconds * 2.0 / 3600.0;
+    let expected_gpu_hours = expected_worker_seconds * expected_gpus as f64 / 3600.0;
     assert!((report.throughput.gpu_hours - expected_gpu_hours).abs() < f64::EPSILON);
 }
 
