@@ -278,6 +278,9 @@ struct RequestObservability {
     first_token_recorded: bool,
     dispatch_guard: Option<StageGuard>,
     dispatched: bool,
+    /// The tracker's phase when this leg was created. The tracker's own phase moves
+    /// on to Decode once decode starts, so a late prefill cleanup cannot read it then.
+    phase: Option<RequestPhase>,
 }
 
 impl RequestObservability {
@@ -285,6 +288,7 @@ impl RequestObservability {
         tracker: Option<Arc<RequestTracker>>,
         request_metrics: Arc<RouterRequestMetrics>,
     ) -> Self {
+        let phase = tracker.as_ref().map(|tracker| tracker.phase());
         Self {
             tracker,
             request_metrics,
@@ -293,7 +297,16 @@ impl RequestObservability {
             first_token_recorded: false,
             dispatch_guard: None,
             dispatched: false,
+            phase,
         }
+    }
+
+    /// A disaggregated prefill leg shares the tracker with its decode leg but does not
+    /// own the request's final output count or finish time. Its reply can complete after
+    /// decode has finished and the response has ended, and a last-write-wins update from
+    /// it would replace decode's values (prefill's count is 0 on some backends).
+    fn is_prefill_leg(&self) -> bool {
+        self.phase == Some(RequestPhase::Prefill)
     }
 
     fn request_metrics(&self) -> &RouterRequestMetrics {
@@ -360,6 +373,9 @@ impl RequestObservability {
         let Some(tracker) = &self.tracker else {
             return;
         };
+        if self.is_prefill_leg() {
+            return;
+        }
 
         // Refresh finish time at block boundaries so the streaming ITL sample stays current.
         tracker.record_osl(self.cumulative_osl);
@@ -379,12 +395,14 @@ impl RequestObservability {
         self.metrics_recorded = true;
 
         if let Some(tracker) = &self.tracker {
-            tracker.record_finish();
-            tracker.record_osl(self.cumulative_osl);
-            if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
-                self.request_metrics
-                    .inter_token_latency_seconds
-                    .observe(avg_itl / 1000.0);
+            if !self.is_prefill_leg() {
+                tracker.record_finish();
+                tracker.record_osl(self.cumulative_osl);
+                if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
+                    self.request_metrics
+                        .inter_token_latency_seconds
+                        .observe(avg_itl / 1000.0);
+                }
             }
             if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
                 self.request_metrics
@@ -1337,6 +1355,53 @@ mod prefill_start_tests {
         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
         RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
         assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
+    }
+
+    /// The prefill reply can arrive after decode has finished and the response has
+    /// ended (the prefill router no longer holds the stream for it). The late prefill
+    /// cleanup must not replace decode's output-token count or finish time.
+    #[tokio::test]
+    async fn late_prefill_cleanup_keeps_decode_metrics() {
+        let tracker = Arc::new(RequestTracker::new());
+        let metrics = test_metrics();
+
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        let mut prefill = RequestObservability::new(Some(tracker.clone()), metrics.clone());
+        prefill.mark_dispatched();
+        prefill.observe_tokens(0); // SGLang prefill streams no output tokens
+        drop(prefill_permit);
+
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        let mut decode = RequestObservability::new(Some(tracker.clone()), metrics);
+        decode.mark_dispatched();
+        decode.observe_tokens(1);
+        decode.observe_tokens(6);
+        decode.observe_output_block_boundary();
+        decode.record_metrics(false);
+        let decode_osl = tracker.osl_tokens();
+        let decode_total = tracker.total_time_ms();
+        assert_eq!(decode_osl, 7);
+        assert!(decode_total.is_some());
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        prefill.observe_output_block_boundary();
+        prefill.record_metrics(false);
+
+        assert_eq!(tracker.osl_tokens(), decode_osl);
+        assert_eq!(tracker.total_time_ms(), decode_total);
+    }
+
+    /// An aggregated or decode leg still records its own output count and finish time.
+    #[tokio::test]
+    async fn aggregated_leg_records_output_and_finish() {
+        let tracker = Arc::new(RequestTracker::new());
+        let _permit = tracker.set_phase(RequestPhase::Aggregated).await;
+        let mut leg = RequestObservability::new(Some(tracker.clone()), test_metrics());
+        leg.mark_dispatched();
+        leg.observe_tokens(3);
+        leg.record_metrics(false);
+        assert_eq!(tracker.osl_tokens(), 3);
+        assert!(tracker.total_time_ms().is_some());
     }
 }
 
