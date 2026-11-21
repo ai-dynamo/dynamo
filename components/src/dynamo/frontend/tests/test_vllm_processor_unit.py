@@ -2214,6 +2214,89 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
     assert captured["sampling_options"]["min_p"] == expected_min_p
 
 
+@pytest.mark.core
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stop_fields,skip_validation,expected_stop,expected_stop_token_ids",
+    [
+        pytest.param({"stop": [576]}, True, [], [576], id="token-ids"),
+        pytest.param({"stop": [576]}, False, [], [576], id="token-ids-validated"),
+        pytest.param(
+            {"stop": [576], "tools": [TOOL_REQUEST["tools"][0]]},
+            True,
+            [],
+            [576],
+            id="token-ids-with-tools",
+        ),
+        pytest.param(
+            {"stop": [576], "stop_token_ids": [7]}, True, [], [7, 576], id="merged"
+        ),
+        pytest.param({"stop": ["END", "576"]}, True, ["END", "576"], [], id="strings"),
+    ],
+)
+async def test_generator_sends_integer_stop_as_stop_token_ids(
+    vllm_processor_module,
+    monkeypatch,
+    stop_fields,
+    skip_validation,
+    expected_stop,
+    expected_stop_token_ids,
+):
+    monkeypatch.setattr(prepost_module, "SKIP_REQUEST_VALIDATION", skip_validation)
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        # InputProcessor.process_inputs clones, which runs __post_init__ again.
+        return SimpleNamespace(
+            sampling_params=sampling_params.clone(), mm_features=None
+        )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=SimpleNamespace(
+            generation_config_fields={},
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                ),
+                process_for_engine_async=AsyncMock(return_value={}),
+            ),
+            process_inputs=process_inputs,
+            model_config=None,
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id, request, dynamo_preproc, *args, **kwargs
+    ):
+        captured["stop_conditions"] = dynamo_preproc["stop_conditions"]
+        yield {}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    async for _ in processor._generator_inner(
+        {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_completion_tokens": 8,
+            **stop_fields,
+        }
+    ):
+        pass
+
+    assert captured["stop_conditions"]["stop"] == expected_stop
+    assert captured["stop_conditions"]["stop_token_ids"] == expected_stop_token_ids
+
+
 @pytest.mark.asyncio
 async def test_generator_inner_forwards_reasoning_parser_and_model_config(
     vllm_processor_module,
