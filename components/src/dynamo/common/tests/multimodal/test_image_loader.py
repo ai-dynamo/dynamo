@@ -1638,3 +1638,15 @@ async def test_load_image_failure_keeps_signed_url_out(
     assert _SIGNATURE not in str(exc_info.value)
     assert _SIGNATURE not in caplog.text
     assert "bucket.s3.amazonaws.com/img.png" in str(exc_info.value)
+
+
+# --- Inline data URL cache ---
+
+
+async def test_repeated_data_url_is_decoded_once() -> None:
+    """Screenshots resent on every turn reuse the first decode."""
+    loader = ImageLoader(cache_size=4, session_scoped_cache=False)
+    reference = f"data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"
+
+    first = await loader.load_image(reference)
+    assert await loader.load_image(reference) is first

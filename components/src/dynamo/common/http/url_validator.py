@@ -244,6 +244,13 @@ class UrlValidationPolicy:
         )
 
 
+def fast_url_scheme(url: str) -> str:
+    """urlparse(url).scheme.lower(), without parsing a data: URL's base64 payload."""
+    if url[:5].lower() == "data:":
+        return "data"
+    return urlparse(url).scheme.lower()
+
+
 def check_remote_url_allowed(url: str, policy: UrlValidationPolicy) -> None:
     """Raise ``UrlValidationError`` if ``url`` is ``http(s)://`` and ``policy``
     disables remote URLs.
@@ -251,7 +258,7 @@ def check_remote_url_allowed(url: str, policy: UrlValidationPolicy) -> None:
     For call sites that hand URLs to an engine's own downloader, where the full
     :func:`validate_url` check does not run.
     """
-    scheme = urlparse(url).scheme.lower()
+    scheme = fast_url_scheme(url)
     if scheme in ("http", "https") and not policy.allow_remote_urls:
         raise UrlValidationError(
             f"{scheme}:// media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); "
@@ -276,8 +283,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     if not url:
         raise UrlValidationError("URL is empty")
 
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
+    scheme = fast_url_scheme(url)
 
     # Before the label: describe_media_source copies the source, and a data:
     # URI carries the whole payload inline, so building one for the branch that
@@ -316,7 +322,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
             "http:// URLs are not allowed; set DYN_MM_ALLOW_INTERNAL=1 to enable"
         )
 
-    host = (parsed.hostname or "").lower()
+    host = (urlparse(url).hostname or "").lower()
     if not host:
         raise UrlValidationError(f"URL has no host component: {label!r}")
 
@@ -428,12 +434,11 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
     if not url:
         raise UrlValidationError("URL is empty")
 
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
+    scheme = fast_url_scheme(url)
 
     if scheme in ("", "file"):
         # file:// paths are percent-encoded; a bare path is literal.
-        raw_path = unquote(parsed.path) if scheme == "file" else url
+        raw_path = unquote(urlparse(url).path) if scheme == "file" else url
         resolved = validate_local_path(raw_path, policy)
         return resolved.as_uri()
 

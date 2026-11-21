@@ -16,6 +16,7 @@ import socket
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -25,6 +26,7 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     describe_error_detail,
     describe_media_source,
+    fast_url_scheme,
     is_blocked_ip,
     validate_local_path,
     validate_media_reference,
@@ -170,6 +172,21 @@ async def test_validate_url_rejects_ftp() -> None:
 async def test_validate_url_accepts_data_url_by_default() -> None:
     # data: URLs never touch the network — we allow them without further checks.
     await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", STRICT_HTTPS)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "data:image/png;base64,AAAA",
+        "DATA:image/png;base64,AAAA",
+        " data:image/png;base64,AAAA",
+        "https://example.com/x.png",
+        "file:///etc/passwd",
+        "/etc/passwd",
+    ],
+)
+def test_fast_url_scheme_matches_urlparse(url: str) -> None:
+    assert fast_url_scheme(url) == urlparse(url).scheme.lower()
 
 
 _MIB = 1024 * 1024

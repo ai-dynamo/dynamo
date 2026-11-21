@@ -3010,6 +3010,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]

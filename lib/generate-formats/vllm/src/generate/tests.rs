@@ -246,6 +246,8 @@ fn generate_response_matches_vllm_null_metadata_shape() {
         }],
         prompt_logprobs: None,
         kv_transfer_params: None,
+        prompt_token_ids: None,
+        mm_placeholders: None,
     };
 
     let value = serde_json::to_value(&resp).expect("serialize");
@@ -255,6 +257,8 @@ fn generate_response_matches_vllm_null_metadata_shape() {
     );
     assert_eq!(value["prompt_logprobs"], Value::Null);
     assert_eq!(value["kv_transfer_params"], Value::Null);
+    assert_eq!(value["prompt_token_ids"], Value::Null);
+    assert_eq!(value["mm_placeholders"], Value::Null);
     assert_eq!(value["choices"][0]["token_ids"], Value::Null);
     assert_eq!(value["choices"][0]["logprobs"], Value::Null);
     assert_eq!(value["choices"][0]["sampling_mask"], Value::Null);
@@ -450,6 +454,7 @@ fn generate_response_accumulates_engine_deltas() {
         GenerateResponseOptions {
             include_logprobs: true,
             include_prompt_logprobs: true,
+            include_prompt_token_ids: false,
         },
     )
     .expect("aggregate engine deltas");
@@ -933,6 +938,7 @@ fn generate_response_clamps_logprobs_to_vllm_floor() {
         GenerateResponseOptions {
             include_logprobs: true,
             include_prompt_logprobs: true,
+            include_prompt_token_ids: false,
         },
     )
     .expect("aggregate clamped logprobs");
@@ -945,4 +951,107 @@ fn generate_response_clamps_logprobs_to_vllm_floor() {
         json!(-9999.0)
     );
     assert_eq!(wire["prompt_logprobs"][1]["22"]["logprob"], json!(-9999.0));
+}
+
+fn validate_content_parts(content_parts: Value, extra: Value) -> Result<(), String> {
+    let mut raw = json!({
+        "token_ids": [1, 2, 3],
+        "sampling_params": {},
+        "content_parts": content_parts,
+    });
+    raw.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    serde_json::from_value::<GenerateRequest>(raw)
+        .unwrap()
+        .validate()
+}
+
+#[test]
+fn content_parts_follow_the_chat_media_rules() {
+    let image = json!({"type": "image_url", "url": "data:image/png;base64,AAAA"});
+    assert_eq!(
+        validate_content_parts(
+            json!([image, {"type": "image_url", "uuid": "seen"}]),
+            json!({})
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        validate_content_parts(
+            json!([]),
+            json!({"features": {"mm_hashes": {}}, "return_token_ids": null})
+        ),
+        Ok(())
+    );
+
+    for (content_parts, extra, expected) in [
+        (
+            json!([{"type": "image", "url": "https://a/b.png"}]),
+            json!({}),
+            "is not supported",
+        ),
+        (
+            json!([{"type": "video_url", "uuid": "v"}]),
+            json!({}),
+            "UUID-only",
+        ),
+        (
+            json!([image]),
+            json!({"features": {"mm_hashes": {}}}),
+            "mutually exclusive",
+        ),
+    ] {
+        let error = validate_content_parts(content_parts, extra).unwrap_err();
+        assert!(
+            error.contains(expected),
+            "{error:?} should contain {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn generate_response_returns_the_prompt_the_engine_ran() {
+    let chunks = || {
+        [
+            LLMEngineOutput {
+                token_ids: vec![100],
+                engine_data: Some(Box::new(json!({
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+                }))),
+                ..Default::default()
+            },
+            LLMEngineOutput {
+                token_ids: vec![101],
+                finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+                engine_data: Some(Box::new(json!({"prompt_token_ids": [1, 7, 7, 7, 2]}))),
+                ..Default::default()
+            },
+        ]
+    };
+    let requested = GenerateResponseOptions {
+        include_prompt_token_ids: true,
+        ..Default::default()
+    };
+
+    let response = aggregate(chunks(), "req-prompt".to_string(), requested)
+        .expect("aggregate the expanded prompt");
+    assert_eq!(response.prompt_token_ids, Some(vec![1, 7, 7, 7, 2]));
+    assert_eq!(
+        response.mm_placeholders,
+        Some(json!({"image": [{"offset": 1, "length": 3}]}))
+    );
+
+    let response = aggregate(chunks(), "req-plain".to_string(), Default::default())
+        .expect("aggregate without return_token_ids");
+    assert_eq!(response.prompt_token_ids, None);
+    assert_eq!(response.mm_placeholders, None);
+
+    let missing = [LLMEngineOutput {
+        token_ids: vec![100],
+        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        ..Default::default()
+    }];
+    let error = aggregate(missing, "req-missing".to_string(), requested).unwrap_err();
+    assert!(error.to_string().contains("returned no prompt_token_ids"));
 }

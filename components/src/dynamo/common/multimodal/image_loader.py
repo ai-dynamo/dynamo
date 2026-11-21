@@ -31,6 +31,7 @@ from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
+    fast_url_scheme,
     validate_media_url,
 )
 from .media_source import decode_data_uri
@@ -291,6 +292,16 @@ class ImageLoader:
                 ImageLoader._open_image_sync, image_data, max_pixels, to_rgb
             )
 
+    def _cached_image(self, key: str, max_pixels: int | None) -> Image.Image | None:
+        """Return a cached image under the caller's pixel limit, marking it recently used."""
+        image = self._image_cache.get(key)
+        if image is None:
+            return None
+        self._image_cache.move_to_end(key)
+        if max_pixels is not None and image.width * image.height > max_pixels:
+            raise HttpStatusError(413, "Image exceeds the decoded pixel limit", "image")
+        return image
+
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
         # A capacity of zero or less means caching is off. Falling through would
@@ -489,33 +500,27 @@ class ImageLoader:
         if max_pixels is not None and max_pixels < 1:
             raise HttpStatusError(413, "Image exceeds the decoded pixel limit", "image")
 
-        parsed_url = urlsplit(image_url)
-        if parsed_url.scheme in ("", "file"):
+        if fast_url_scheme(image_url) in ("", "file"):
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
         normalized_url = await validate_media_url(image_url, self._url_policy)
-        parsed_url = urlsplit(normalized_url)
+        scheme = fast_url_scheme(normalized_url)
 
-        if parsed_url.scheme in ("http", "https"):
+        if scheme in ("http", "https"):
             key = self._cache_key(normalized_url, cache_scope)
 
             if key is None:
                 return await self._fetch_and_process(None, normalized_url, max_pixels)
 
-            if key in self._image_cache:
+            cached = self._cached_image(key, max_pixels)
+            if cached is not None:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "Image found in cache for URL: %s",
                         describe_media_source(image_url),
                     )
-                self._image_cache.move_to_end(key)
-                image = self._image_cache[key]
-                if max_pixels is not None and image.width * image.height > max_pixels:
-                    raise HttpStatusError(
-                        413, "Image exceeds the decoded pixel limit", "image"
-                    )
-                return image
+                return cached
 
             if private_fetch:
                 image = await self._fetch_and_process(key, normalized_url, max_pixels)
@@ -532,17 +537,29 @@ class ImageLoader:
 
             return await asyncio.shield(self._inflight[key])
 
-        if parsed_url.scheme == "data":
+        if scheme == "data":
+            # Inline images repeat across the turns of a conversation, so key
+            # them by content and skip decoding on a hit. The key also includes
+            # the byte limit at insert time, so a new limit checks them again.
+            max_bytes = self._max_bytes()
+            digest = hashlib.sha256(normalized_url.encode()).hexdigest()
+            key = scope_image_cache_key(
+                f"data:{max_bytes}:sha256:{digest}",
+                cache_scope,
+                session_scoped_cache=self._session_scoped_cache,
+            )
+            if key is not None:
+                cached = self._cached_image(key, max_pixels)
+                if cached is not None:
+                    return cached
             try:
                 with _nvtx.annotate("mm:img:base64_decode", color="lime"):
-                    if not parsed_url.path.startswith("image/"):
+                    if not normalized_url.partition(":")[2].startswith("image/"):
                         raise ValueError("Data URL must be an image type")
 
-                    image_bytes = decode_data_uri(
-                        normalized_url, max_bytes=self._max_bytes()
-                    )
+                    image_bytes = decode_data_uri(normalized_url, max_bytes=max_bytes)
                     image_data = BytesIO(image_bytes)
-                return await self._open_image(image_data, max_pixels, self._to_rgb)
+                image = await self._open_image(image_data, max_pixels, self._to_rgb)
             except Image.UnidentifiedImageError as e:
                 logger.error(
                     "Unsupported image format decoding: '%s'",
@@ -571,9 +588,12 @@ class ImageLoader:
                     describe_media_source(image_url),
                 )
                 raise
+            if key is not None:
+                self._cache_put(key, image)
+            return image
 
         # It's not file:, http:, https:, or data:
-        raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+        raise ValueError(f"Invalid image source scheme: {scheme}")
 
     @overload
     async def load_image_batch(

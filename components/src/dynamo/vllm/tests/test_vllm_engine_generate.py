@@ -179,6 +179,27 @@ def test_tito_adapter_rejects_out_of_range_routed_experts_start(prompt_start):
         )
 
 
+def test_tito_adapter_defers_routed_experts_start_check_for_unexpanded_images():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    # Past the 3 request tokens, but each image expands into many in vLLM.
+    request = _request(
+        sampling_params={"max_tokens": 1, "routed_experts_prompt_start": 99}
+    )
+    request["multi_modal_data"] = {"image_url": [{"Url": "http://img.png"}]}
+
+    adapted = adapt_engine_generate_request(
+        request,
+        enable_multimodal=True,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+
+    assert adapted is not None
+    assert adapted.sampling_params.routed_experts_prompt_start == 99
+
+
 def test_tito_adapter_rejects_nonprogressing_guided_json_cycle():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
@@ -462,6 +483,20 @@ def test_tito_adapter_resolves_omitted_max_tokens_from_server_limits():
 
     assert adapted is not None
     assert adapted.sampling_params.max_tokens == 17
+
+
+def test_response_mm_placeholders_match_vllm_generate_api():
+    from vllm.multimodal.inputs import PlaceholderRange
+
+    from dynamo.vllm.engine_generate import response_mm_placeholders
+
+    assert response_mm_placeholders({"prompt_token_ids": [1, 2]}) is None
+    rendered = {
+        "type": "multimodal",
+        "prompt_token_ids": [1, 7, 7, 2],
+        "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=2)]},
+    }
+    assert response_mm_placeholders(rendered) == {"image": [{"offset": 1, "length": 2}]}
 
 
 @pytest.mark.parametrize(
