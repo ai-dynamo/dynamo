@@ -756,6 +756,68 @@ async fn streaming_text_baseline() {
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn raw_reasoning_requires_opt_in_over_http() {
+    temp_env::async_with_vars(ENV, async {
+        const REASONING: &str = "Work toward the answer.";
+        let mut script = load_agent_fixture("text.sse").await.unwrap();
+        let mut reasoning = script[1].clone();
+        let delta = &mut reasoning.data.as_mut().unwrap().inner.choices[0].delta;
+        delta.content = None;
+        delta.reasoning_content = Some(REASONING.into());
+        script.insert(1, reasoning);
+        let svc = HarnessService::start(std::iter::repeat_n(script, 4)).await;
+
+        for stream in [false, true] {
+            for include_reasoning in [false, true] {
+                let mut request = json!({"model": MODEL, "input": "ping", "stream": stream});
+                if include_reasoning {
+                    request["reasoning"] = json!({"summary": "auto"});
+                }
+                let response = post_responses(&svc, &request).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let wire = response.text().await.unwrap();
+                assert_eq!(wire.contains(REASONING), include_reasoning);
+                let body: Value = if stream {
+                    let events = parse_responses_sse(&wire).await.unwrap();
+                    assert_eq!(
+                        events
+                            .iter()
+                            .any(|event| event.event == "response.reasoning_text.delta"),
+                        include_reasoning
+                    );
+                    assert!(
+                        events
+                            .iter()
+                            .all(|event| !event.event.starts_with("response.reasoning_summary"))
+                    );
+                    assert_eq!(events.last().unwrap().event, "response.completed");
+                    events.last().unwrap().data["response"].clone()
+                } else {
+                    serde_json::from_str(&wire).unwrap()
+                };
+                let output = body["output"].as_array().unwrap();
+                assert_eq!(output.len(), 1 + usize::from(include_reasoning));
+                if include_reasoning {
+                    assert_eq!(output[0]["type"], "reasoning");
+                    assert_eq!(output[0]["summary"], json!([]));
+                    assert_eq!(
+                        output[0]["content"],
+                        json!([{"type": "reasoning_text", "text": REASONING}])
+                    );
+                }
+                let answer = output.last().unwrap();
+                assert_eq!(answer["phase"], "final_answer");
+                assert_eq!(answer["content"][0]["text"], "Pong.");
+            }
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 fn logprob_tokens(logprobs: &Value) -> Vec<&str> {
     logprobs
         .as_array()
