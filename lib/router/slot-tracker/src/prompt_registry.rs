@@ -598,6 +598,20 @@ impl PromptRegistry {
     pub fn is_block_index_empty(&self) -> bool {
         self.membership.is_empty()
     }
+
+    #[cfg(test)]
+    pub(super) fn make_prompt_cleanup_due(&mut self) {
+        self.membership.make_cleanup_due();
+    }
+
+    #[cfg(test)]
+    pub(super) fn prompt_trie_root_child(
+        &self,
+        first_hash: SequenceHash,
+    ) -> Option<std::sync::Arc<parking_lot::RwLock<super::prompt_membership_trie::PromptTrieNode>>>
+    {
+        self.membership.root_child(first_hash)
+    }
 }
 
 #[cfg(test)]
