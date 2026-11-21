@@ -1,0 +1,106 @@
+{
+  "account": "111111111111",
+  "name": "example-router-test",
+  "stores": {
+    "homeRegion": "us-east-2",
+    "replicaRegions": [
+      "us-west-2"
+    ],
+    "affinityTableName": "example-global-affinity",
+    "discoveryTableName": "example-global-discovery"
+  },
+  "regions": [
+    {
+      "id": "east",
+      "global": {
+        "name": "gr",
+        "namespace": "global",
+        "cluster": {
+          "name": "example-us-east-2",
+          "region": "us-east-2",
+          "securityGroupId": "sg-00000000000000000",
+          "kubectlServiceToken": "arn:aws:lambda:us-east-2:111111111111:function:example-kubectl",
+          "oidcProviderArn": "arn:aws:iam::111111111111:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/EXAMPLE"
+        },
+        "frontendImage": "example.invalid/global-frontend:tested-revision",
+        "discoveryImage": "example.invalid/global-discovery-service:tested-revision",
+        "frontendReplicas": 2,
+        "discoveryReplicas": 2,
+        "discoveryMode": "registrations",
+        "ingress": {
+          "sourceCidrs": [
+            "10.44.0.0/16",
+            "10.45.0.0/16"
+          ]
+        }
+      },
+      "pools": [
+        {
+          "name": "blue",
+          "namespace": "pools",
+          "clusterId": "example-us-east-2",
+          "discoveryUrl": "http://gr-discovery.global.svc:8080",
+          "relayImage": "example.invalid/dynamo-runtime:tested-revision",
+          "relayReplicas": 2,
+          "frontendServiceName": "blue-frontend",
+          "discoveryMode": "registrations",
+          "workload": {
+            "image": "example.invalid/dynamo-runtime:tested-revision",
+            "model": "Qwen/Qwen3-0.6B",
+            "workers": 2,
+            "speedup": 1
+          },
+          "frontendUrls": [
+            "http://blue-frontend.east.example.invalid:8000"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "west",
+      "global": {
+        "name": "gr",
+        "namespace": "global",
+        "cluster": {
+          "name": "example-us-west-2",
+          "region": "us-west-2",
+          "securityGroupId": "sg-00000000000000000",
+          "kubectlServiceToken": "arn:aws:lambda:us-west-2:111111111111:function:example-kubectl",
+          "oidcProviderArn": "arn:aws:iam::111111111111:oidc-provider/oidc.eks.us-west-2.amazonaws.com/id/EXAMPLE"
+        },
+        "frontendImage": "example.invalid/global-frontend:tested-revision",
+        "discoveryImage": "example.invalid/global-discovery-service:tested-revision",
+        "frontendReplicas": 2,
+        "discoveryReplicas": 2,
+        "discoveryMode": "registrations",
+        "ingress": {
+          "sourceCidrs": [
+            "10.44.0.0/16",
+            "10.45.0.0/16"
+          ]
+        }
+      },
+      "pools": [
+        {
+          "name": "blue",
+          "namespace": "pools",
+          "clusterId": "example-us-west-2",
+          "discoveryUrl": "http://gr-discovery.global.svc:8080",
+          "relayImage": "example.invalid/dynamo-runtime:tested-revision",
+          "relayReplicas": 2,
+          "frontendServiceName": "blue-frontend",
+          "discoveryMode": "registrations",
+          "workload": {
+            "image": "example.invalid/dynamo-runtime:tested-revision",
+            "model": "Qwen/Qwen3-0.6B",
+            "workers": 2,
+            "speedup": 1
+          },
+          "frontendUrls": [
+            "http://blue-frontend.west.example.invalid:8000"
+          ]
+        }
+      ]
+    }
+  ]
+}

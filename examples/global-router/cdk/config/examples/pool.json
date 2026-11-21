@@ -1,0 +1,106 @@
+{
+  "account": "111111111111",
+  "stackName": "example-pool",
+  "config": {
+    "name": "blue",
+    "namespace": "pools",
+    "cluster": {
+      "name": "example-us-east-2",
+      "region": "us-east-2",
+      "securityGroupId": "sg-00000000000000000",
+      "kubectlServiceToken": "arn:aws:lambda:us-east-2:111111111111:function:example-kubectl",
+      "oidcProviderArn": "arn:aws:iam::111111111111:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/EXAMPLE"
+    },
+    "clusterId": "example-us-east-2",
+    "discoveryUrl": "http://gr-discovery.global.svc:8080",
+    "relayImage": "example.invalid/dynamo-runtime:tested-revision",
+    "relayReplicas": 2,
+    "frontendServiceName": "blue-frontend",
+    "discoveryMode": "registrations",
+    "dgdSpec": {
+      "components": [
+        {
+          "name": "Frontend",
+          "type": "frontend",
+          "replicas": 1,
+          "podTemplate": {
+            "spec": {
+              "containers": [
+                {
+                  "name": "main",
+                  "image": "example.invalid/dynamo-runtime:tested-revision",
+                  "command": [
+                    "python3"
+                  ],
+                  "args": [
+                    "-m",
+                    "dynamo.frontend"
+                  ],
+                  "env": [
+                    {
+                      "name": "DYN_DISCOVERY_BACKEND",
+                      "value": "kubernetes"
+                    },
+                    {
+                      "name": "DYN_KUBE_DISCOVERY_MODE",
+                      "value": "pod"
+                    },
+                    {
+                      "name": "DYN_SERVING_LOAD_PUBLISH",
+                      "value": "1"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "decode",
+          "type": "decode",
+          "replicas": 1,
+          "podTemplate": {
+            "spec": {
+              "containers": [
+                {
+                  "name": "main",
+                  "image": "example.invalid/dynamo-runtime:tested-revision",
+                  "command": [
+                    "python3"
+                  ],
+                  "args": [
+                    "-m",
+                    "dynamo.vllm",
+                    "--model",
+                    "Qwen/Qwen3-0.6B"
+                  ],
+                  "env": [
+                    {
+                      "name": "DYN_DISCOVERY_BACKEND",
+                      "value": "kubernetes"
+                    },
+                    {
+                      "name": "DYN_KUBE_DISCOVERY_MODE",
+                      "value": "pod"
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "nvidia.com/gpu": 1
+                    },
+                    "limits": {
+                      "nvidia.com/gpu": 1
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "frontendUrls": [
+      "http://blue-frontend.east.example.invalid:8000"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+# Local credentials and workstation files never belong in a source release.
+.DS_Store
+.env
+.env.*
+!.env.example
+.aws/
+.kube/
+*.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.kubeconfig

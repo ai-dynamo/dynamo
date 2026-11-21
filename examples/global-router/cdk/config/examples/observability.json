@@ -1,0 +1,59 @@
+{
+  "account": "123456789012",
+  "stackName": "example-observability",
+  "config": {
+    "cluster": {
+      "name": "example-cluster",
+      "region": "us-east-2",
+      "securityGroupId": "sg-0123456789abcdef0",
+      "kubectlServiceToken": "arn:aws:lambda:us-east-2:123456789012:function:existing-kubectl-provider",
+      "oidcProviderArn": "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/EXAMPLE"
+    },
+    "fleet": "example",
+    "globalNamespace": "gr-global",
+    "poolNamespace": "gr-pools",
+    "routerName": "gr-router",
+    "stores": {
+      "homeRegion": "us-east-2",
+      "replicaRegions": [
+        "us-west-2",
+        "ap-northeast-1",
+        "sa-east-1"
+      ],
+      "affinityTableName": "example-affinity",
+      "discoveryTableName": "example-discovery"
+    },
+    "collectorImage": "otel/opentelemetry-collector-contrib:0.140.1@sha256:5901567d6f684547bafee53f02403869b5655e13a4e0af65aa6ae9f6301075d9",
+    "addonVersion": "v7.0.1-eksbuild.1",
+    "globalDashboard": true,
+    "dashboardRegions": [
+      {
+        "region": "us-east-2",
+        "clusterName": "example-cluster",
+        "pool": "blue"
+      }
+    ],
+    "monitoredServices": [
+      {
+        "namespace": "gr-global",
+        "name": "gr-router",
+        "minimumPods": 2
+      },
+      {
+        "namespace": "gr-global",
+        "name": "gr-discovery",
+        "minimumPods": 2
+      },
+      {
+        "namespace": "gr-pools",
+        "name": "blue-frontend",
+        "minimumPods": 1
+      },
+      {
+        "namespace": "gr-pools",
+        "name": "blue-pool-relay",
+        "minimumPods": 2
+      }
+    ]
+  }
+}
