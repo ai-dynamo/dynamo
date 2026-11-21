@@ -3,14 +3,6 @@
 
 //! Normalize coding-agent extensions before typed Responses admission.
 
-use std::collections::{HashMap, HashSet};
-
-use dynamo_protocols::types::{
-    ChatCompletionRequestMessage as Message, ChatCompletionRequestMessageContentPartText,
-    ChatCompletionRequestToolMessageContent as ToolContent,
-    ChatCompletionRequestToolMessageContentPart as ToolPart, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContentPart as UserPart,
-};
 use serde_json::Value;
 
 use super::ResponsesConversionError;
@@ -89,115 +81,6 @@ pub(crate) fn body_affinity(body: &Value) -> Option<&str> {
     .find(|value| !value.is_empty())
 }
 
-/// Coalesce chunks for the same call without crossing a non-tool message.
-fn merge_split_tool_results(messages: Vec<Message>) -> Vec<Message> {
-    let mut merged = Vec::with_capacity(messages.len());
-    let mut run: HashMap<String, usize> = HashMap::new();
-    for message in messages {
-        if let Message::Tool(tool) = message {
-            if let Some(index) = run.get(&tool.tool_call_id).copied()
-                && let Message::Tool(first) = &mut merged[index]
-            {
-                merge_tool_content(&mut first.content, tool.content);
-                continue;
-            }
-            run.insert(tool.tool_call_id.clone(), merged.len());
-            merged.push(Message::Tool(tool));
-        } else {
-            run.clear();
-            merged.push(message);
-        }
-    }
-    merged
-}
-
-/// Positional renderers number results relative to the latest assistant batch.
-pub(super) fn positional_tool_history(messages: Vec<Message>) -> Vec<Message> {
-    if !messages
-        .iter()
-        .any(|message| matches!(message, Message::Tool(_)))
-    {
-        return messages;
-    }
-
-    let merged = merge_split_tool_results(messages);
-    let mut settled = Vec::with_capacity(merged.len());
-    let mut notes = Vec::new();
-    let mut calls = HashSet::new();
-    for message in merged {
-        if let Message::Tool(tool) = message {
-            if calls.contains(&tool.tool_call_id) {
-                settled.push(Message::Tool(tool));
-            } else {
-                let id = tool.tool_call_id;
-                let mut parts = vec![UserPart::Text(
-                    ChatCompletionRequestMessageContentPartText {
-                        text: format!(
-                            "[Output of tool call '{id}', which matches no tool call before it:]"
-                        ),
-                        prompt_cache_breakpoint: None,
-                    },
-                )];
-                parts.extend(tool_parts(tool.content).into_iter().map(|part| match part {
-                    ToolPart::Text(text) => UserPart::Text(text),
-                    ToolPart::ImageUrl(image) => UserPart::ImageUrl(image),
-                    ToolPart::VideoUrl(video) => UserPart::VideoUrl(video),
-                    ToolPart::AudioUrl(audio) => UserPart::AudioUrl(audio),
-                    ToolPart::Custom(custom) => UserPart::Custom(custom),
-                }));
-                notes.push(Message::User(ChatCompletionRequestUserMessage {
-                    content: parts.into(),
-                    name: None,
-                }));
-            }
-        } else {
-            settled.append(&mut notes);
-            calls.clear();
-            if let Message::Assistant(assistant) = &message {
-                calls.extend(
-                    assistant
-                        .tool_calls
-                        .iter()
-                        .flatten()
-                        .map(|call| call.id.clone()),
-                );
-            }
-            settled.push(message);
-        }
-    }
-    settled.append(&mut notes);
-    settled
-}
-
-fn merge_tool_content(first: &mut ToolContent, next: ToolContent) {
-    match (first, next) {
-        (ToolContent::Text(first), ToolContent::Text(next)) => {
-            if !first.is_empty() && !first.ends_with('\n') {
-                first.push('\n');
-            }
-            first.push_str(&next);
-        }
-        (ToolContent::Array(parts), next) => parts.extend(tool_parts(next)),
-        (first, next) => {
-            let mut parts = tool_parts(std::mem::take(first));
-            parts.extend(tool_parts(next));
-            *first = ToolContent::Array(parts);
-        }
-    }
-}
-
-fn tool_parts(content: ToolContent) -> Vec<ToolPart> {
-    match content {
-        ToolContent::Array(parts) => parts,
-        ToolContent::Text(text) => vec![ToolPart::Text(
-            ChatCompletionRequestMessageContentPartText {
-                text,
-                prompt_cache_breakpoint: None,
-            },
-        )],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,48 +106,6 @@ mod tests {
         let original = body.clone();
         assert!(hoist_additional_tools(&mut body).is_err());
         assert_eq!(body, original);
-    }
-
-    #[test]
-    fn kimi_split_results_do_not_shift_call_indices_or_lose_orphans() {
-        let messages: Vec<super::super::ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"assistant","content":null,"tool_calls":[
-                    {"type":"function","id":"a","function":{"name":"one","arguments":"{}"}},
-                    {"type":"function","id":"b","function":{"name":"two","arguments":"{}"}}
-                ]},
-                {"role":"tool","tool_call_id":"a","content":"first"},
-                {"role":"tool","tool_call_id":"missing","content":"orphan"},
-                {"role":"tool","tool_call_id":"b","content":"second"},
-                {"role":"tool","tool_call_id":"a","content":"continued"}
-            ]))
-            .unwrap();
-        let normalized = positional_tool_history(messages);
-        let value = serde_json::to_value(&normalized).unwrap();
-        assert_eq!(value.as_array().unwrap().len(), 4);
-        assert_eq!(value[1]["content"], "first\ncontinued");
-        assert_eq!(value[2]["tool_call_id"], "b");
-        assert_eq!(value[3]["role"], "user");
-        assert_eq!(value[3]["content"][1]["text"], "orphan");
-        assert_eq!(positional_tool_history(normalized.clone()), normalized);
-    }
-
-    #[test]
-    fn kimi_user_message_ends_the_tool_call_batch() {
-        let messages: Vec<super::super::ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"assistant","content":null,"tool_calls":[
-                    {"type":"function","id":"a","function":{"name":"one","arguments":"{}"}}
-                ]},
-                {"role":"user","content":"new turn"},
-                {"role":"tool","tool_call_id":"a","content":"late result"}
-            ]))
-            .unwrap();
-        let normalized = positional_tool_history(messages);
-        let value = serde_json::to_value(&normalized).unwrap();
-        assert_eq!(value[2]["role"], "user");
-        assert_eq!(value[2]["content"][1]["text"], "late result");
-        assert_eq!(positional_tool_history(normalized.clone()), normalized);
     }
 
     #[test]

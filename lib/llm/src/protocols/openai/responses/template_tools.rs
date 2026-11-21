@@ -7,7 +7,6 @@ use dynamo_protocols::types::responses::CustomToolParamFormat;
 
 use super::super::tools::custom_input_or_raw;
 use super::*;
-use crate::preprocessor::prompt::is_kimi_k3_prompt_hint;
 
 #[derive(Clone, Debug, Default)]
 pub struct ResponsesToolContext {
@@ -26,17 +25,13 @@ pub struct ResponsesToolContext {
     pub(super) selected_tools: Option<HashSet<(Option<String>, String)>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum ResponsesToolHistory {
-    #[default]
-    AsProvided,
-    Positional,
-}
+const BARE_TOOL_CALL_ID_PREFIX: &str = "dynamo_bare_tool_v2_";
+const LEGACY_BARE_TOOL_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v2_";
 
-const KIMI_BARE_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v2_";
-
-fn kimi_bare_item_id(call_id: &str) -> Option<&str> {
-    let item_id = call_id.strip_prefix(KIMI_BARE_CALL_ID_PREFIX)?;
+fn bare_tool_item_id(call_id: &str) -> Option<&str> {
+    let item_id = call_id
+        .strip_prefix(BARE_TOOL_CALL_ID_PREFIX)
+        .or_else(|| call_id.strip_prefix(LEGACY_BARE_TOOL_CALL_ID_PREFIX))?;
     let uuid = item_id.strip_prefix("fc_")?.as_bytes();
     // Only the compact lowercase UUIDv4 format emitted by Responses is reserved.
     (uuid.len() == 32
@@ -51,7 +46,7 @@ fn kimi_bare_item_id(call_id: &str) -> Option<&str> {
 #[derive(Clone, Debug)]
 pub(super) struct HistoricalToolCall {
     name: String,
-    kimi_bare: bool,
+    bare_name: bool,
 }
 
 pub(super) fn history_tool_calls(
@@ -91,8 +86,8 @@ pub(super) fn history_tool_calls(
             .or_default()
             .push(HistoricalToolCall {
                 name: names.encode(namespace, name),
-                kimi_bare: namespace.is_some()
-                    && kimi_bare_item_id(call_id)
+                bare_name: namespace.is_some()
+                    && bare_tool_item_id(call_id)
                         .is_some_and(|marked_id| item_id.is_none_or(|id| id == marked_id)),
             });
     }
@@ -398,13 +393,13 @@ impl NvCreateChatCompletionRequest {
     }
 
     pub(crate) fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
-        self.normalize_responses_tools_for_renderer(native, ResponsesToolHistory::AsProvided)
+        self.normalize_responses_tools_for_renderer(native, PromptToolHistory::AsProvided)
     }
 
     pub(crate) fn normalize_responses_tools_for_renderer(
         &mut self,
         native: bool,
-        history: ResponsesToolHistory,
+        history: PromptToolHistory,
     ) -> anyhow::Result<()> {
         // Parser capability selects phase replay independently of tool rendering.
         if let Some(context) = &mut self.responses_tools {
@@ -413,11 +408,6 @@ impl NvCreateChatCompletionRequest {
         let Some(context) = &self.responses_tools else {
             return Ok(());
         };
-        if history == ResponsesToolHistory::Positional {
-            self.inner.messages = super::request_compat::positional_tool_history(std::mem::take(
-                &mut self.inner.messages,
-            ));
-        }
         let inner: Vec<_> = context
             .tools
             .iter()
@@ -456,8 +446,8 @@ impl NvCreateChatCompletionRequest {
                     let original = historical
                         .map(|call| &call.name)
                         .unwrap_or(&call.function.name);
-                    call.function.name = if history == ResponsesToolHistory::Positional
-                        && historical.is_some_and(|call| call.kimi_bare)
+                    call.function.name = if history == PromptToolHistory::Positional
+                        && historical.is_some_and(|call| call.bare_name)
                     {
                         context.names.decode(original).1.to_string()
                     } else {
@@ -484,33 +474,13 @@ impl NvCreateChatCompletionRequest {
         runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
     ) -> Result<serde_json::Value, serde_json::Error> {
         let mut value = serde_json::to_value(self)?;
+        if let Some(history) = self
+            .python_positional_tool_history(runtime_config)
+            .map_err(serde::ser::Error::custom)?
+        {
+            value["positional_tool_history"] = serde_json::to_value(history)?;
+        }
         if let Some(context) = &self.responses_tools {
-            // Python selects the renderer at request time. Prepare an alternate
-            // view only for deployments that can select the positional encoder.
-            let can_select_positional_encoder = [
-                Some(self.inner.model.as_str()),
-                runtime_config.tool_call_parser.as_deref(),
-                runtime_config.reasoning_parser.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .any(is_kimi_k3_prompt_hint);
-            if can_select_positional_encoder
-                && (!context.history_tool_calls.is_empty()
-                    || self
-                        .inner
-                        .messages
-                        .iter()
-                        .any(|message| matches!(message, ChatCompletionRequestMessage::Tool(_))))
-            {
-                let mut positional = self.clone();
-                positional
-                    .normalize_responses_tools_for_renderer(false, ResponsesToolHistory::Positional)
-                    .map_err(serde::ser::Error::custom)?;
-                value["responses_positional_tool_history"] =
-                    serde_json::to_value(positional.inner.messages)?;
-            }
-
             if let Some(template_tools) = self.native_template_tools() {
                 // This catalog is renderer-only: Python chooses it after resolving
                 // the active template. Keep worker serialization unchanged and
@@ -706,11 +676,13 @@ impl ResponseParams {
         }
         let (name, namespace, custom) = self.tool_identity(emitted);
         let call_id = match namespace {
+            // Positional tool replay needs the exact spelling emitted by the model.
+            // Only synthesize IDs for deployments that opt into spelling preservation.
             Some(_) if self.preserve_tool_spelling && emitted == name => {
-                format!("{KIMI_BARE_CALL_ID_PREFIX}{item_id}")
+                format!("{BARE_TOOL_CALL_ID_PREFIX}{item_id}")
             }
             // Derive the replacement from the item so all SSE snapshots agree.
-            Some(_) if kimi_bare_item_id(&call_id).is_some() => format!("call_{item_id}"),
+            Some(_) if bare_tool_item_id(&call_id).is_some() => format!("call_{item_id}"),
             _ => call_id,
         };
         if custom {

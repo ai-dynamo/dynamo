@@ -791,7 +791,7 @@ def preprocess_chat_request(
     prompt_renderer = resolve_prompt_renderer(prompt_renderer, request)
     kimi_k3_bridge = isinstance(prompt_renderer, KimiK3PromptRenderer)
     positional_tool_history = (
-        request.get("responses_positional_tool_history") if kimi_k3_bridge else None
+        request.get("positional_tool_history") if kimi_k3_bridge else None
     )
     history = (
         positional_tool_history

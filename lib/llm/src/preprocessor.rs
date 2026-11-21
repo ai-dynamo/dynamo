@@ -111,13 +111,12 @@ use crate::protocols::{
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-        responses::ResponsesToolHistory,
     },
 };
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+    MediaRequestExt, PromptToolHistory, apply_continue_final_message, prompt_formatter_from_mdc,
     prompt_formatter_with_history_from_mdc,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
@@ -2096,7 +2095,7 @@ impl EmbeddingTokenizerState {
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
-    responses_tool_history: ResponsesToolHistory,
+    prompt_tool_history: PromptToolHistory,
     tokenizer: Arc<dyn Tokenizer>,
     /// Present only for token-input embedding pipelines. The two tokenizer
     /// variants are initialized independently on demand.
@@ -2999,13 +2998,13 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         speculative_prefill_cancel: Option<CancellationToken>,
     ) -> Result<Arc<Self>> {
-        let (PromptFormatter::OAI(formatter), responses_tool_history) =
+        let (PromptFormatter::OAI(formatter), prompt_tool_history) =
             prompt_formatter_with_history_from_mdc(&mdc)?;
         Self::new_with_parts_inner(
             mdc,
             formatter,
             tokenizer,
-            responses_tool_history,
+            prompt_tool_history,
             None,
             speculative_prefill_cancel,
             true,
@@ -3025,7 +3024,7 @@ impl OpenAIPreprocessor {
             mdc,
             formatter,
             tokenizer,
-            ResponsesToolHistory::AsProvided,
+            PromptToolHistory::AsProvided,
             Some(embedding_tokenizers),
             None,
             false,
@@ -3041,7 +3040,7 @@ impl OpenAIPreprocessor {
             mdc,
             formatter,
             tokenizer,
-            ResponsesToolHistory::AsProvided,
+            PromptToolHistory::AsProvided,
             None,
             None,
             false,
@@ -3067,7 +3066,7 @@ impl OpenAIPreprocessor {
             mdc,
             formatter,
             tokenizer,
-            ResponsesToolHistory::AsProvided,
+            PromptToolHistory::AsProvided,
             None,
             speculative_prefill_cancel,
             true,
@@ -3078,7 +3077,7 @@ impl OpenAIPreprocessor {
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
-        responses_tool_history: ResponsesToolHistory,
+        prompt_tool_history: PromptToolHistory,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
         validate_chat_parsers: bool,
@@ -3494,7 +3493,7 @@ impl OpenAIPreprocessor {
 
         Ok(Arc::new(Self {
             formatter,
-            responses_tool_history,
+            prompt_tool_history,
             tokenizer,
             embedding_tokenizers,
             model_info,
@@ -8853,9 +8852,10 @@ impl
         request
             .normalize_responses_tools_for_renderer(
                 self.formatter.supports_native_tools(&request),
-                self.responses_tool_history,
+                self.prompt_tool_history,
             )
             .map_err(|error| invalid_argument_error(error.to_string()))?;
+        self.prompt_tool_history.prepare_request(&mut request);
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
