@@ -1670,6 +1670,19 @@ pub trait Discovery: Send + Sync {
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
 
+    /// Look up one endpoint instance. Storage backends should use a point read.
+    async fn get_endpoint(&self, id: &EndpointInstanceId) -> Result<Option<DiscoveryInstance>> {
+        Ok(self
+            .list(DiscoveryQuery::Endpoint {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.endpoint.clone(),
+            })
+            .await?
+            .into_iter()
+            .find(|instance| instance.id() == DiscoveryInstanceId::Endpoint(id.clone())))
+    }
+
     /// Returns a list of currently registered instances for the given discovery query
     /// This is a one-time snapshot without watching for changes
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>>;
