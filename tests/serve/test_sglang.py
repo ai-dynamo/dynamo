@@ -62,7 +62,11 @@ from tests.utils.payloads import (
     SGLangSpecDecodeMetricsPayload,
     VideoGenerationPayload,
 )
-from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    deallocate_ports,
+    reserved_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1232,9 +1236,33 @@ def sglang_config_test(request):
     return sglang_configs[request.param]
 
 
+# Launch scripts that pass DYN_NCCL_PORT{i} to worker i as --nccl-port.
+# Without it, SGLang picks a random free rendezvous port in 22000-29999,
+# which can take a port reserved for a listener that has not bound yet.
+_NCCL_PORT_WORKERS = {"agg.sh": 1, "disagg.sh": 2, "agg_router.sh": 2}
+
+
 @pytest.fixture
 def sglang_config_with_dist_ports(sglang_config_test):
-    """Give each DP-attention process a disjoint SGLang port block."""
+    """Give SGLang workers reserved rendezvous ports, and each DP-attention
+    process a disjoint SGLang port block."""
+    nccl_workers = 0
+    if sglang_config_test.directory == sglang_dir:
+        nccl_workers = _NCCL_PORT_WORKERS.get(sglang_config_test.script_name, 0)
+    if nccl_workers:
+        with reserved_ports(nccl_workers, DynamoPortRange.NCCL.value) as ports:
+            yield dataclasses.replace(
+                sglang_config_test,
+                env={
+                    **sglang_config_test.env,
+                    **{
+                        f"DYN_NCCL_PORT{idx}": str(port)
+                        for idx, port in enumerate(ports, start=1)
+                    },
+                },
+            )
+        return
+
     if sglang_config_test.name != "disaggregated_dp_attention":
         yield sglang_config_test
         return

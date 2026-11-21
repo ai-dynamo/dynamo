@@ -50,6 +50,8 @@ while [[ $# -gt 0 ]]; do
             echo "  SGLANG_PREFILL_GRPC_PORT                Prefill gRPC port (default: 30010)"
             echo "  SGLANG_DECODE_HTTP_PORT                 Decode HTTP port (default: 30020)"
             echo "  SGLANG_DECODE_GRPC_PORT                 Decode gRPC port (default: 30030)"
+            echo "  DYN_NCCL_PORT1                          Prefill rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
+            echo "  DYN_NCCL_PORT2                          Decode rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
             echo "  SGLANG_BOOTSTRAP_HOST                   Advertised bootstrap host (default: 127.0.0.1)"
             echo "  MAX_MODEL_LEN                           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS                     Maximum concurrent sequences per engine (default: 2)"
@@ -74,6 +76,16 @@ SGLANG_PREFILL_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_PREFILL_HTT
 SGLANG_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_PREFILL_GRPC_PORT:-30010}")
 SGLANG_DECODE_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${SGLANG_DECODE_HTTP_PORT:-30020}")
 SGLANG_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${SGLANG_DECODE_GRPC_PORT:-30030}")
+# Without --nccl-port, SGLang picks a random free rendezvous port in 22000-29999,
+# which can take a port the test harness reserved for a listener that has not bound yet.
+SGLANG_PREFILL_NCCL_ARGS=()
+SGLANG_DECODE_NCCL_ARGS=()
+if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+    SGLANG_PREFILL_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 1 "")
+    SGLANG_DECODE_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 2 "")
+    SGLANG_PREFILL_NCCL_ARGS=(--nccl-port "$SGLANG_PREFILL_NCCL_PORT")
+    SGLANG_DECODE_NCCL_ARGS=(--nccl-port "$SGLANG_DECODE_NCCL_PORT")
+fi
 SGLANG_LISTENERS=$(sglang_listener_count "${EXTRA_ARGS[@]}")
 sglang_check_listener_ports "$SGLANG_PREFILL_HTTP_PORT" "$SGLANG_PREFILL_GRPC_PORT" "$SGLANG_LISTENERS"
 sglang_check_listener_ports "$SGLANG_DECODE_HTTP_PORT" "$SGLANG_DECODE_GRPC_PORT" "$SGLANG_LISTENERS"
@@ -100,6 +112,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL_HTTP_PORT" \
     --grpc-port "$SGLANG_PREFILL_GRPC_PORT" \
+    "${SGLANG_PREFILL_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl \
@@ -115,6 +128,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE_HTTP_PORT" \
     --grpc-port "$SGLANG_DECODE_GRPC_PORT" \
+    "${SGLANG_DECODE_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl \

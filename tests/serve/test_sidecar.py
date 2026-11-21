@@ -264,6 +264,9 @@ sidecar_configs = {
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
+        port_env={
+            "DYN_NCCL_PORT1": (1, DynamoPortRange.NCCL),
+        },
         script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
@@ -467,6 +470,10 @@ sidecar_configs = {
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
         gpu_env=_on_first_gpu("SGLANG_PREFILL_GPU", "SGLANG_DECODE_GPU"),
+        port_env={
+            "DYN_NCCL_PORT1": (1, DynamoPortRange.NCCL),
+            "DYN_NCCL_PORT2": (1, DynamoPortRange.NCCL),
+        },
         script_args=[
             "--disable-cuda-graph",
             "--enable-metrics",
@@ -521,6 +528,10 @@ sidecar_configs = {
         directory=sglang_sidecar_dir,
         script_name="agg_kv_router.sh",
         gpu_env=_on_first_gpu("SGLANG_WORKER1_GPU", "SGLANG_WORKER2_GPU"),
+        port_env={
+            "DYN_NCCL_PORT1": (1, DynamoPortRange.NCCL),
+            "DYN_NCCL_PORT2": (1, DynamoPortRange.NCCL),
+        },
         script_args=[*SGLANG_KV_ROUTING_ARGS],
         marks=[
             pytest.mark.sglang,
@@ -579,6 +590,12 @@ sidecar_configs = {
             "SGLANG_DECODE1_GPU",
             "SGLANG_DECODE2_GPU",
         ),
+        port_env={
+            "DYN_NCCL_PORT1": (1, DynamoPortRange.NCCL),
+            "DYN_NCCL_PORT2": (1, DynamoPortRange.NCCL),
+            "DYN_NCCL_PORT3": (1, DynamoPortRange.NCCL),
+            "DYN_NCCL_PORT4": (1, DynamoPortRange.NCCL),
+        },
         script_args=[*SGLANG_KV_ROUTING_ARGS, "--enable-metrics"],
         marks=[
             pytest.mark.sglang,

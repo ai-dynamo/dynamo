@@ -50,6 +50,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  SGLANG_HTTP_PORT        SGLang HTTP port (default: 30000)"
             echo "  SGLANG_GRPC_PORT        SGLang gRPC port (default: 30010)"
+            echo "  DYN_NCCL_PORT1          SGLang rendezvous port under DYN_MANAGED_PORTS (default: chosen by SGLang)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             exit 0
@@ -69,6 +70,13 @@ SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
 SGLANG_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_HTTP_PORT:-30000}")
 SGLANG_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_GRPC_PORT:-30010}")
+# Without --nccl-port, SGLang picks a random free rendezvous port in 22000-29999,
+# which can take a port the test harness reserved for a listener that has not bound yet.
+SGLANG_NCCL_ARGS=()
+if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+    SGLANG_NCCL_PORT=$(dyn_port DYN_NCCL_PORT 1 "")
+    SGLANG_NCCL_ARGS=(--nccl-port "$SGLANG_NCCL_PORT")
+fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -92,6 +100,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_HTTP_PORT" \
     --grpc-port "$SGLANG_GRPC_PORT" \
+    "${SGLANG_NCCL_ARGS[@]}" \
     --incremental-streaming-output \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \

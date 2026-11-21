@@ -57,6 +57,15 @@ fi
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
+# Under the test harness, DYN_NCCL_PORT{i} reserves worker i's rendezvous port.
+# Without --nccl-port, SGLang picks a random free one in 22000-29999, which can
+# take a port the harness reserved for a listener that has not bound yet.
+NCCL_ARGS=()
+if [[ -n "${DYN_NCCL_PORT1:-}" ]]; then
+    NCCL_PORT=$(dyn_port DYN_NCCL_PORT 1 "")
+    NCCL_ARGS=(--nccl-port "$NCCL_PORT")
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
 
@@ -76,6 +85,7 @@ python3 -m "$WORKER_MODULE" \
   --trust-remote-code \
   --enable-metrics \
   --disable-piecewise-cuda-graph \
+  "${NCCL_ARGS[@]}" \
   $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
