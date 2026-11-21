@@ -57,7 +57,6 @@ show_node_topology() {
 if [ -n "${NODE}" ]; then
   show_node_topology "${NODE}"
 else
-  # All nodes that have GPU ResourceSlices
   NODES=$(kubectl get resourceslices -o json | \
     jq -r '.items[] | select(.spec.driver=="gpu.nvidia.com") | .spec.nodeName' | \
     sort -u)

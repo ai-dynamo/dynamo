@@ -120,6 +120,14 @@ By default the chart's DaemonSet tolerates only the `CriticalAddonsOnly` taint
 matching toleration through the chart's `tolerations` value.
 </Info>
 
+<Info>
+If the EFA device plugin is also installed on these nodes, keep DRANET workloads on DRA
+claims only. The device plugin and DRANET are separate allocators that do not coordinate
+with each other, so do not run pods that request `vpc.amazonaws.com/efa` on the same
+nodes as pods that claim EFAs through DRA. Both were installed side by side on the
+cluster used to validate this guide, with workloads using only DRA claims.
+</Info>
+
 Wait for the DaemonSet to be ready on all GPU nodes:
 
 ```bash
