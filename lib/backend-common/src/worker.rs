@@ -1152,16 +1152,22 @@ impl Worker {
                 // the adapter directly, outside admission.
                 let admission_gate = self.admission_gate.get()?;
                 admission_gate.record_model_card(local_model.card());
-                let ingress = Ingress::for_engine_with_lifecycle_role(
-                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
-                    lifecycle_role,
-                )
-                .map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("ingress: {e}"),
-                    )
-                })?;
+                let admitted_engine = if self.config.disaggregation_mode.is_encode() {
+                    AdmissionEngine::new_with_cleanup(admission_gate, engine_adapter.clone(), {
+                        let engine = engine.clone();
+                        move |request| engine.is_cleanup_request(request)
+                    })
+                } else {
+                    AdmissionEngine::new(admission_gate, engine_adapter.clone())
+                };
+                let ingress =
+                    Ingress::for_engine_with_lifecycle_role(admitted_engine, lifecycle_role)
+                        .map_err(|e| {
+                            err(
+                                ErrorType::Backend(BackendError::Unknown),
+                                format!("ingress: {e}"),
+                            )
+                        })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }

@@ -20,7 +20,10 @@ use futures::{FutureExt, StreamExt};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
+use crate::{
+    model_card::ModelDeploymentCard, namespace::NamespaceFilter,
+    protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+};
 
 use super::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 
@@ -71,20 +74,75 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Identifies a cohort's active video contract without changing its MDC checksum.
-fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
-    match video_contract {
-        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
-        None => mdc_checksum.to_string(),
+/// Strictest handoff requirement among a pipeline's admitted consumers.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum EncoderPolicy {
+    #[default]
+    InlineAllowed,
+    EncoderRequired,
+}
+
+impl EncoderPolicy {
+    pub(crate) fn from_card(card: &ModelDeploymentCard) -> Self {
+        let enabled = |key| {
+            card.runtime_config
+                .runtime_data
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        if enabled(REQUIRES_ENCODER_RESULT) {
+            Self::EncoderRequired
+        } else {
+            Self::InlineAllowed
+        }
+    }
+
+    pub(crate) fn project(self, card: &mut ModelDeploymentCard) {
+        card.runtime_config.runtime_data.insert(
+            REQUIRES_ENCODER_RESULT.into(),
+            (self == Self::EncoderRequired).into(),
+        );
     }
 }
 
-/// Splits a fingerprint back into the MDC checksum and video contract it carries.
-fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
-    match fingerprint.split_once("\0video_contract\0") {
+fn cohort_encoder_policy(members: &[DesiredInstance]) -> EncoderPolicy {
+    members
+        .iter()
+        .map(|member| EncoderPolicy::from_card(&member.card))
+        .max()
+        .unwrap_or_default()
+}
+
+/// Identifies the cohort's serving contract without changing its MDC checksum.
+fn cohort_fingerprint(
+    mdc_checksum: &str,
+    video_contract: Option<&str>,
+    policy: EncoderPolicy,
+) -> String {
+    let mdc_checksum = match policy {
+        EncoderPolicy::InlineAllowed => mdc_checksum.to_string(),
+        EncoderPolicy::EncoderRequired => format!("{mdc_checksum}\0encoder_required"),
+    };
+    match video_contract {
+        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
+        None => mdc_checksum,
+    }
+}
+
+/// Recovers the canonical checksum and generation's serving contract.
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>, EncoderPolicy) {
+    let (checksum_policy, video_contract) = match fingerprint.split_once("\0video_contract\0") {
         Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
         None => (fingerprint, None),
-    }
+    };
+    let (checksum, policy) =
+        if let Some(checksum) = checksum_policy.strip_suffix("\0encoder_required") {
+            (checksum, EncoderPolicy::EncoderRequired)
+        } else {
+            (checksum_policy, EncoderPolicy::InlineAllowed)
+        };
+    (checksum, video_contract, policy)
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +154,7 @@ pub(crate) struct GroupSpec {
     pub(crate) representative: DesiredInstance,
     /// Contract shared by the cohort, if any.
     pub(crate) video_contract: Option<String>,
+    pub(crate) encoder_policy: EncoderPolicy,
 }
 
 #[async_trait]
@@ -198,6 +257,7 @@ struct RetainedPipeline {
     /// pending, so it is the only record of what the retained workers must publish.
     /// `None` means it was built without exact video routing.
     contract: Option<String>,
+    encoder_policy: EncoderPolicy,
 }
 
 struct DesiredGroup {
@@ -432,6 +492,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && EncoderPolicy::from_card(&existing.card)
+                    == EncoderPolicy::from_card(&instance.card)
                 && super::image_edits::advertised_limit(&existing.card)
                     == super::image_edits::advertised_limit(&instance.card)
             {
@@ -607,8 +669,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint =
-            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint = cohort_fingerprint(
+            &mdc_checksum,
+            cohort_video_contract(&members).as_deref(),
+            cohort_encoder_policy(&members),
+        );
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
@@ -621,13 +686,22 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .1
                 .map(str::to_string),
         };
+        let committed_policy = match &group.retained {
+            Some(retained) => retained.encoder_policy,
+            None => fingerprint_parts(status_checksum(&old_status).unwrap_or_default()).2,
+        };
         if fingerprint_changed {
             retained_commit = retained_commit.and_then(|committed_members| {
-                let (previous_checksum, _) = fingerprint_parts(status_checksum(&old_status)?);
+                let (previous_checksum, _, _) = fingerprint_parts(status_checksum(&old_status)?);
                 if previous_checksum != mdc_checksum {
                     return None;
                 }
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_policy,
+                )
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
@@ -640,6 +714,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.retained.get_or_insert_with(|| RetainedPipeline {
                     admission_tx: previous_tx,
                     contract: committed_contract,
+                    encoder_policy: committed_policy,
                 });
             } else {
                 group.admission_tx.send_replace(Vec::new());
@@ -662,7 +737,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // one keeps receiving requests expanded with the contract it dropped.
             let had_commit = retained_commit.is_some();
             retained_commit = retained_commit.and_then(|committed_members| {
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_policy,
+                )
             });
             if had_commit && retained_commit.is_none() {
                 self.host.remove_group(key);
@@ -906,7 +986,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let video_contract = cohort_video_contract(&members);
-            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
+            let encoder_policy = cohort_encoder_policy(&members);
+            let fingerprint =
+                cohort_fingerprint(&mdc_checksum, video_contract.as_deref(), encoder_policy);
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -918,6 +1000,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 representative,
                 video_contract,
+                encoder_policy,
             };
             group.status = GroupStatus::Building {
                 mdc_checksum: fingerprint,
@@ -991,6 +1074,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     cohort_fingerprint(
                         &result.spec.mdc_checksum,
                         cohort_video_contract(&self.members(member_keys)).as_deref(),
+                        cohort_encoder_policy(&self.members(member_keys)),
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
@@ -1249,11 +1333,13 @@ fn cancel_build(status: &GroupStatus) {
 }
 
 /// The committed workers that may keep serving: those still present, provided they
-/// all still publish `contract`. `None` withdraws the commit.
+/// all still publish `contract` and require no stricter encoder policy.
+/// `None` withdraws the commit.
 fn surviving_commit(
     members: &[DesiredInstance],
     committed_members: &BTreeSet<String>,
     contract: Option<&str>,
+    encoder_policy: EncoderPolicy,
 ) -> Option<BTreeSet<String>> {
     // Keep serving the committed workers that are still here rather than demanding
     // the whole membership, so dropping the last worker of a rolling upgrade does
@@ -1261,6 +1347,7 @@ fn surviving_commit(
     let surviving = members
         .iter()
         .filter(|member| committed_members.contains(&member.key))
+        .filter(|member| EncoderPolicy::from_card(&member.card) <= encoder_policy)
         .collect::<Vec<_>>();
     if surviving.is_empty() {
         return None;
@@ -1703,6 +1790,143 @@ mod tests {
         controller.apply_build_result(result);
     }
 
+    fn encoder_consumer(id: u64, checksum: &str, required: bool) -> DesiredInstance {
+        let mut worker = instance(id, checksum);
+        let original_checksum = worker.card.mdcsum().to_owned();
+        worker
+            .card
+            .runtime_config
+            .runtime_data
+            .insert("requires_encoder_result".into(), required.into());
+        let uncached: ModelDeploymentCard =
+            serde_json::from_value(serde_json::to_value(&worker.card).unwrap()).unwrap();
+        assert_eq!(uncached.mdcsum(), original_checksum);
+        worker
+    }
+
+    #[tokio::test]
+    async fn encoder_policy_uses_only_selected_cohort_and_keeps_reserved_card() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let optional = instance(1, "same");
+        controller.apply_added(optional.clone());
+        controller.apply_added(encoder_consumer(2, "same", true));
+        controller.apply_added(encoder_consumer(3, "rejected", true));
+        controller.start_queued_builds();
+        let spec = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.encoder_policy, EncoderPolicy::EncoderRequired);
+        assert_eq!(
+            spec.representative
+                .card
+                .runtime_config
+                .runtime_data
+                .get("requires_encoder_result"),
+            None
+        );
+        assert_eq!(spec.representative.mdc_checksum, optional.mdc_checksum);
+        assert_eq!(
+            host.admissions.lock().unwrap()[0].borrow().as_slice(),
+            &[1, 2]
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.inventory.snapshot().pop().unwrap().1.committed,
+            HashSet::from([1, 2])
+        );
+
+        // Updating a rejected cohort cannot rebuild or relax the selected pipeline.
+        controller.apply_added(encoder_consumer(3, "rejected", false));
+        controller.start_queued_builds();
+        assert!(starts.try_recv().is_err());
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stricter_same_id_consumers_leave_retained_permissive_admission_immediately() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        for id in 1..=3 {
+            controller.apply_added(instance(id, "same"));
+        }
+        controller.start_queued_builds();
+        let initial = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let old_admission = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(old_admission.borrow().as_slice(), &[1, 2, 3]);
+
+        assert!(controller.apply_added(encoder_consumer(1, "same", true)));
+        assert_eq!(old_admission.borrow().as_slice(), &[2, 3]);
+        assert_eq!(
+            host.inventory.snapshot().pop().unwrap().1.committed,
+            HashSet::from([2, 3])
+        );
+        controller.start_queued_builds();
+        let replacement = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(replacement.generation, initial.generation);
+        assert_ne!(replacement.fingerprint, initial.fingerprint);
+
+        // The replacement is already strict: this update leaves its fingerprint
+        // unchanged, but worker 2 must still leave the old permissive channel.
+        assert!(controller.apply_added(encoder_consumer(2, "same", true)));
+        assert_eq!(old_admission.borrow().as_slice(), &[3]);
+        controller.start_queued_builds();
+        assert!(starts.try_recv().is_err());
+        controller.apply_removed(&instance(3, "same").key);
+        assert!(old_admission.borrow().is_empty());
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([instance(1, "same").key, instance(2, "same").key])
+        );
+        assert_eq!(
+            host.admissions.lock().unwrap()[1].borrow().as_slice(),
+            &[1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_consumers_can_keep_using_retained_strict_generation() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        controller.apply_added(encoder_consumer(1, "same", true));
+        controller.apply_added(instance(2, "same"));
+        controller.start_queued_builds();
+        let strict = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let old_admission = host.admissions.lock().unwrap()[0].clone();
+
+        controller.apply_added(instance(1, "same"));
+        assert_eq!(old_admission.borrow().as_slice(), &[1, 2]);
+        controller.start_queued_builds();
+        let relaxed = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(strict.generation, relaxed.generation);
+        assert_eq!(relaxed.fingerprint, relaxed.mdc_checksum);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn contract_agreement_drives_the_fingerprint_and_survives_a_rolling_upgrade() {
         let (host, mut starts) = FakeHost::new();
@@ -1757,7 +1981,8 @@ mod tests {
             upgraded_spec.fingerprint,
             cohort_fingerprint(
                 &upgraded_spec.mdc_checksum,
-                Some(&contract_digest("round_ties_even"))
+                Some(&contract_digest("round_ties_even")),
+                EncoderPolicy::InlineAllowed
             )
         );
         host.release.add_permits(1);

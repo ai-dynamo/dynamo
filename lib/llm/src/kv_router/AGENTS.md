@@ -40,6 +40,7 @@ and the booking lifecycle these rules protect.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.
   - `query.rs`: `reserve_prefill_worker`, the prefill-only booking used by the Runtime EPP.
 - `encoder_router.rs`: `EncoderRouter`, the optional encode hop for multimodal inputs.
+  - `encoder_router/cleanup.rs`: releases unused outputs at their original encoder.
 - `plugins.rs`: installs the linked router plugin registry.
 - `shared_cache.rs`: the HiCache shared KV cache client (SGLang + Mooncake).
 

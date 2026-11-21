@@ -20,6 +20,7 @@ use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
+use super::controller::EncoderPolicy;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
@@ -2746,15 +2747,25 @@ impl ModelManager {
             .collect::<Vec<_>>();
         let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
         let capable_prefill = (prefill_providers.len() == 1)
-            && worker_sets.iter().any(|worker_set| {
-                worker_set.card().worker_type == Some(WorkerType::Prefill)
-                    && Self::supports_encoder_result_handoff(worker_set.card())
-            });
+            && Self::supports_encoder_result_handoff(&prefill_providers[0].card);
+        let required_prefill = (!prefill_providers.is_empty()).then(|| {
+            prefill_providers
+                .iter()
+                .any(|target| Self::requires_encoder_result(&target.card))
+        });
 
         for worker_set in &worker_sets {
             let Some(router) = &worker_set.encoder_router else {
                 continue;
             };
+            // Consumer policy remains authoritative even without an Encode
+            // endpoint. Vision-disabled consumers cannot fall back inline.
+            router.set_required(
+                Self::requires_encoder_result(worker_set.card())
+                    || (worker_set.card().worker_type == Some(WorkerType::Decode)
+                        // A missing Prefill group does not revoke its policy.
+                        && required_prefill.unwrap_or_else(|| router.is_required())),
+            );
             let routing_enabled = match worker_set.card().worker_type {
                 Some(WorkerType::Decode) => capable_prefill && decode_consumers.len() == 1,
                 Some(WorkerType::Prefill) => false,
@@ -2769,6 +2780,10 @@ impl ModelManager {
                     .map(super::WorkerSetTarget::Committed),
             );
         }
+    }
+
+    pub(crate) fn requires_encoder_result(card: &ModelDeploymentCard) -> bool {
+        EncoderPolicy::from_card(card) == EncoderPolicy::EncoderRequired
     }
 
     // -- Worker monitoring --
@@ -4518,20 +4533,26 @@ mod tests {
             card.runtime_config
                 .set_engine_specific("encoder_result_handoff", true)
                 .unwrap();
+            card.runtime_config
+                .set_engine_specific(
+                    crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                    true,
+                )
+                .unwrap();
         }
         card
     }
 
     fn topology_worker_set(
         manager: Arc<ModelManager>,
-        role: WorkerType,
+        card: ModelDeploymentCard,
         endpoint: Endpoint,
     ) -> (
         WorkerSet,
         Option<Arc<crate::kv_router::PrefillRouter>>,
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
-        let card = topology_card(role);
+        let role = card.worker_type.unwrap();
         let mut worker_set = WorkerSet::new(
             endpoint.id().namespace,
             card.mdcsum().to_string(),
@@ -4573,6 +4594,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topology_uses_serving_policy_instead_of_optional_representative() {
+        use crate::discovery::controller::EncoderPolicy;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let component = distributed
+            .namespace("mixed-policy")
+            .unwrap()
+            .component("workers")
+            .unwrap();
+        let mut representative = topology_card(WorkerType::Prefill);
+        representative
+            .runtime_config
+            .set_engine_specific(
+                crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                false,
+            )
+            .unwrap();
+        let checksum = representative.mdcsum().to_string();
+        let mut serving = representative.clone();
+        EncoderPolicy::EncoderRequired.project(&mut serving);
+        assert_eq!(serving.mdcsum(), checksum);
+        let (prefill, _, _) =
+            topology_worker_set(manager.clone(), serving, component.endpoint("prefill"));
+        manager
+            .commit_discovery_group(
+                "prefill",
+                "prefill",
+                prefill,
+                vec![("optional-representative".into(), representative)],
+                Vec::new(),
+            )
+            .unwrap();
+        let card = topology_card(WorkerType::Decode);
+        let (decode, _, encoder) =
+            topology_worker_set(manager.clone(), card.clone(), component.endpoint("decode"));
+        manager
+            .commit_discovery_group(
+                "decode",
+                "decode",
+                decode,
+                vec![("decode".into(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+        let encoder = encoder.unwrap();
+        assert!(encoder.is_required());
+        assert_eq!(encoder.target_endpoint_id(), None);
+        manager.remove_discovery_group("prefill").unwrap();
+        assert!(encoder.is_required());
+        manager.remove_discovery_group("decode").unwrap();
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn aggregated_encoder_requirement_survives_missing_encoder_target() {
+        let manager = ModelManager::new();
+        let mut card = ModelDeploymentCard::with_name_only("required-encoder-model");
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.model_type = crate::model_type::ModelType::Chat;
+        card.runtime_config
+            .set_engine_specific("encoder_result_handoff", true)
+            .unwrap();
+        card.runtime_config
+            .set_engine_specific(
+                crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                true,
+            )
+            .unwrap();
+        let router = crate::kv_router::EncoderRouter::disabled();
+        let mut workers = WorkerSet::new(
+            "required-encoder".into(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        workers.encoder_router = Some(router.clone());
+        manager
+            .commit_discovery_group(
+                "required-consumer",
+                "required-consumer",
+                workers,
+                vec![("required-consumer".into(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(router.is_required());
+        assert_eq!(router.target_endpoint_id(), None);
+        manager.remove_discovery_group("required-consumer").unwrap();
+        // An older pipeline snapshot must retain fail-closed policy after removal.
+        assert!(router.is_required());
+    }
+
+    #[tokio::test]
     async fn committed_topology_converges_for_every_epd_startup_order() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
@@ -4610,7 +4728,7 @@ mod tests {
                     WorkerType::Aggregated => unreachable!(),
                 };
                 let (worker_set, prefill, encoder) =
-                    topology_worker_set(manager.clone(), role, endpoint);
+                    topology_worker_set(manager.clone(), topology_card(role), endpoint);
                 prefill_router = prefill.or(prefill_router);
                 encoder_router = encoder.or(encoder_router);
                 let card = worker_set.card().clone();
@@ -4623,6 +4741,13 @@ mod tests {
                         Vec::new(),
                     )
                     .unwrap();
+                if let Some(router) = &encoder_router {
+                    assert_eq!(
+                        router.is_required(),
+                        order[..=step].contains(&WorkerType::Prefill),
+                        "Prefill consumer policy must be enforced even before Encode discovery"
+                    );
+                }
                 if step < 2 {
                     assert!(
                         !manager
@@ -4654,9 +4779,19 @@ mod tests {
 
             if index < 2 {
                 let duplicate_endpoint = component.endpoint("prefill-duplicate".to_string());
+                let mut duplicate_card = topology_card(WorkerType::Prefill);
+                if index == 1 {
+                    duplicate_card
+                        .runtime_config
+                        .set_engine_specific(
+                            crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                            false,
+                        )
+                        .unwrap();
+                }
                 let (duplicate, _, _) = topology_worker_set(
                     manager.clone(),
-                    WorkerType::Prefill,
+                    duplicate_card,
                     duplicate_endpoint.clone(),
                 );
                 let duplicate_card = duplicate.card().clone();
@@ -4677,6 +4812,8 @@ mod tests {
                         .ready
                 );
                 assert_eq!(prefill_router.target_endpoint_id(), None);
+                assert!(encoder_router.is_required());
+                assert_eq!(encoder_router.target_endpoint_id(), None);
 
                 let removed_group = if index == 0 {
                     format!("{namespace}-prefill-duplicate")
@@ -4697,6 +4834,17 @@ mod tests {
                         .ready
                 );
                 assert_eq!(prefill_router.target_endpoint_id(), Some(expected));
+                assert_eq!(encoder_router.is_required(), index == 0);
+
+                let remaining = if index == 0 {
+                    format!("{namespace}-Prefill")
+                } else {
+                    format!("{namespace}-prefill-duplicate")
+                };
+                manager.remove_discovery_group(&remaining).unwrap();
+                assert_eq!(prefill_router.target_endpoint_id(), None);
+                assert_eq!(encoder_router.target_endpoint_id(), None);
+                assert_eq!(encoder_router.is_required(), index == 0);
             }
         }
         runtime.shutdown();

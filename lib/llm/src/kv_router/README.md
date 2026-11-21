@@ -27,7 +27,8 @@ operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `
 the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
 through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
 decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
-round-robin `PushRouter`.
+round-robin `PushRouter`. `prefill_router/conditional_bypass.rs` plans conditional admission;
+`prefill_router/mod.rs` handles the Prefill hop and Decode continuation.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 
@@ -66,7 +67,7 @@ What a KV request does in `RoutingHost::generate` (call order):
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```
 
-A query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
+On the KV plane, a query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
 step 3 without acquiring it, selects with `Query` admission in step 4 so nothing is booked, and
 returns the selection instead of steps 5–7.
 
@@ -101,6 +102,10 @@ disabled one that always passes requests through. Prefill worker sets, and Encod
 that serve no model type of their own, build no pipeline: they are reached only through these
 hops.
 
+Native Encode validates media against the configured E/P pairing. Failed Encode or
+downstream attempts try bounded disposal of unconsumed exports before retry or
+inline fallback. Successful consumption adds no cleanup wait.
+
 ## Per-stage roles
 
 | Stage | Router | Selection | Books | Notes |
@@ -108,7 +113,7 @@ hops.
 | Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
 | Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
 | Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
-| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | On failure, falls back to inline encoding downstream. |
+| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | Optional consumers fall back inline; consumers declaring `requires_encoder_result` fail closed. |
 
 ### Prefill hop
 
@@ -140,6 +145,19 @@ hops.
    admission and pinned to it), and `dispatch_kv_plan` sends the request with the bypass
    annotation. Otherwise the request takes the remote prefill path.
 
+An encoder handoff to a prefill set declaring `requires_encoder_result` always takes
+remote prefill. Raw media left after optional Encode failure follows the same restriction:
+the Prefill handoff policy does not establish that Decode can encode inline. This conservatively
+disables bypass for those media requests; text and compatible releasable handoffs can still bypass.
+When a Prefill pool is active, handoffs without producer release support always take remote
+Prefill, including cache-hot requests. Their independent consumption survives caller cancellation;
+paired KV cancellation support does not enable disposal of another producer's encoder allocation.
+If a binding change invalidates a conditional media plan, the router releases the decode
+booking, aborts its classifier lifecycle, and returns retryable `WorkerUnavailable`.
+A late untargeted fallback
+restores the request's prior phase before forwarding. Releasable handoffs can fail before Prefill
+on caller cancellation; staged-KV cleanup always reaches its worker.
+
 A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
 errors, which return to the client.
 
@@ -157,8 +175,12 @@ errors, which return to the client.
 | Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
+| Encoder handoff / mandatory prefill | `PreprocessedRequest::encoder_result` and `requires_encoder_result` from the admitted prefill card |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
 | Decode progress (experimental picker input) | Original streamed-output observations in this frontend's native bookings; enabled by the policy's `DECODE_PROGRESS` declaration, independent of output-block accounting. The standalone EPP has no producer and supplies none. |
+
+The frontend's prefill operator owns the handoff bypass decision. Runtime EPP query and
+reservation inputs are unchanged.
 
 The token-only Runtime EPP selection API has no output options and retains its existing cache
 behavior. Worker sampling options are unaffected by this conservative accounting rule.
@@ -214,6 +236,18 @@ newer booking that reused the same request id and worker.
   that the staged blocks will sit until they expire.
 - A request that took the conditional bypass reached decode without staged KV, so it cancels
   normally.
+- Encoder handoffs retain the original downstream request context. When the producer advertises
+  `encoder_result_release` on its terminal output, the encoder hop owns a cleanup guard. It sends
+  a separate `release_encoder_result` request with the unchanged opaque payload back to that
+  exact producer after dispatch failure, an unsuccessful stream, or abandonment.
+  Tokens or successful completion (EOS, stop, or length) prove consumption and disarm release.
+  Error/cancelled terminals and uncertain failures retain cleanup. Error and fallback paths
+  await release for up to two seconds; dropping a pending request schedules release in the
+  background. Cleanup uses a fresh controller and never reselects another encoder
+  or carries generation sampling constraints or KV state. The resolved transport is retained at
+  Encode dispatch, so a live producer remains reachable after leaving admission or discovery;
+  an old allocation is never redirected to a replacement worker. Producer release is idempotent after
+  consumption. Backends that do not advertise this extension retain their existing behavior.
 
 ## Prefill activation
 
@@ -222,10 +256,21 @@ newer booking that reused the same request id and worker.
 - **Active**: run the prefill hop.
 - **Pending**: a target is set but its binding is still being built. Fail closed with a
   retryable error; a decode-only worker cannot run the request without the hop.
-- **Untargeted**: no prefill target. Pass through to the next stage.
+- **Untargeted**: no prefill target. Pass through unless an encoder handoff still
+  requires the retired prefill stage; reject that request with a retryable error.
 
 `ModelManager::reconcile_discovery_topology` sets the target only when the namespace has
 exactly one prefill worker set and one decode worker set. The encoder target follows the
 `encoder_result_handoff` rules there. In Direct mode the prefill hop requires
 `routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
 admission and succession.
+
+Encoder routing policy also comes from the committed consumer card. A consumer declaring
+`requires_encoder_result` cannot encode inline: media requests fail when the encoder is absent,
+activating, or returns an error. The encoder worker validates its supported modalities before
+allocation. Text requests bypass the encoder. Decode pipelines inherit this requirement from
+committed Prefill groups even when no unique target is available. Consumers without the declaration retain
+optional inline fallback, rechecking the current requirement after Encode failure. The strictest
+requirement in the selected checksum cohort defines each serving generation, including member
+updates and removals. A stricter member cannot remain admitted to a retained permissive pipeline;
+canonical MDC checksums and metadata cache identities are unchanged.

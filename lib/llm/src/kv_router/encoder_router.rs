@@ -4,7 +4,7 @@
 //! Optional multimodal encoder hop for token-serving pipelines.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
@@ -14,21 +14,28 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
-    engine::AsyncEngine,
+    engine::AsyncEngineContextProvider,
+    error::{DynamoError, ErrorClass},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
-        async_trait,
+        Context, ManyOut, Operator, PushRouter, ResponseStream, RouterMode, ServerStreamingEngine,
+        SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
+    FinishReason,
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    preprocessor::{MultimodalData, TraceLink},
+    preprocessor::{ENCODER_RESULT_RELEASE_SUPPORTED, MultimodalData, TraceLink},
 };
 
+mod cleanup;
+use cleanup::EncoderResultCleanup;
+
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+pub(crate) struct EncoderResultReleaseSupported(pub(crate) bool);
 
 struct EncoderBinding {
     target_id: WorkerSetTargetId,
@@ -66,8 +73,10 @@ pub struct EncoderRouter {
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     cancel_token: CancellationToken,
     lifecycle: AtomicU8,
+    required: AtomicBool,
     model_name: String,
     namespace: String,
+    router_mode: RouterMode,
 }
 
 impl Drop for EncoderRouter {
@@ -135,27 +144,31 @@ impl EncoderRouter {
             target_tx: None,
             cancel_token: CancellationToken::new(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            required: AtomicBool::new(false),
             model_name: String::new(),
             namespace: String::new(),
+            router_mode: RouterMode::KV,
         })
     }
 
-    /// Create a router whose endpoint is driven by committed discovery topology.
+    /// Create a discovery-driven router with KV query-only semantics.
     pub fn new(model_name: String, namespace: String) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, None)
+        Self::new_inner(model_name, namespace, RouterMode::KV, None)
     }
 
     pub(crate) fn new_with_task_guard(
         model_name: String,
         namespace: String,
+        router_mode: RouterMode,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, Some(task_guard))
+        Self::new_inner(model_name, namespace, router_mode, Some(task_guard))
     }
 
     fn new_inner(
         model_name: String,
         namespace: String,
+        router_mode: RouterMode,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
@@ -166,8 +179,10 @@ impl EncoderRouter {
             target_tx: Some(target_tx),
             cancel_token: cancel_token.clone(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            required: AtomicBool::new(false),
             model_name,
             namespace,
+            router_mode,
         });
 
         let router_weak = Arc::downgrade(&router);
@@ -303,6 +318,25 @@ impl EncoderRouter {
         EncoderLifecycleState::load(self.lifecycle.load(Ordering::Acquire))
     }
 
+    pub(crate) fn set_required(&self, required: bool) {
+        self.required.store(required, Ordering::Release);
+    }
+
+    pub(crate) fn is_required(&self) -> bool {
+        self.required.load(Ordering::Acquire)
+    }
+
+    fn unavailable(&self, message: &str) -> anyhow::Error {
+        DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .message(format!(
+                "Required encoder for model {} in namespace {}: {message}",
+                self.model_name, self.namespace
+            ))
+            .build()
+            .into()
+    }
+
     /// Update the desired Encode endpoint. Clearing is synchronous so requests
     /// holding an older catalog snapshot stop using a removed endpoint before
     /// the new catalog is published.
@@ -339,8 +373,10 @@ impl EncoderRouter {
             .and_then(|tx| tx.borrow().as_ref().map(|target| target.endpoint().id()))
     }
 
-    fn should_encode(request: &PreprocessedRequest) -> bool {
-        !request.is_probe
+    fn should_encode(&self, request: &PreprocessedRequest) -> bool {
+        !(request.is_probe
+            || (self.router_mode.is_kv_routing()
+                && request.get_annotation_value("query_instance_id").is_some()))
             && request.encoder_result.is_none()
             && request.multi_modal_data.as_ref().is_some_and(|media| {
                 media.values().any(|items| !items.is_empty())
@@ -353,6 +389,7 @@ impl EncoderRouter {
 
     async fn consume_encode_stream(
         mut response: ManyOut<Annotated<LLMEngineOutput>>,
+        mut cleanup: Option<(&mut EncoderResultCleanup, &str)>,
     ) -> Result<(serde_json::Value, Option<TraceLink>)> {
         let mut terminal = None;
         while let Some(item) = response.next().await {
@@ -363,6 +400,9 @@ impl EncoderRouter {
                 continue;
             };
             if output.finish_reason.is_some() {
+                if let Some((cleanup, model)) = cleanup.as_mut() {
+                    cleanup.observe(model, &output)?;
+                }
                 terminal = Some(output);
             }
         }
@@ -391,54 +431,123 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        let (mut request, context) = request.into_parts();
-        if self.lifecycle_state() != EncoderLifecycleState::Active || !Self::should_encode(&request)
-        {
+        let (mut request, mut context) = request.into_parts();
+        if !self.should_encode(&request) {
             return next.generate(context.map(|_| request)).await;
         }
+        let required = self.is_required();
+        if self.lifecycle_state() != EncoderLifecycleState::Active {
+            if required {
+                return Err(self.unavailable("no active encoder is available"));
+            }
+            return next.generate(context.map(|_| request)).await;
+        }
+        let binding = self.binding.load_full();
         crate::routing_policy::check_stage(
             &request,
             crate::routing_policy::ExecutionStage::Encoder,
         )?;
-
+        let mut encode_request = request.clone();
+        if let Some(routing) = &mut encode_request.routing {
+            routing.backend_instance_id = None;
+            routing.prefill_worker_id = None;
+            routing.decode_worker_id = None;
+            routing.dp_rank = None;
+            routing.prefill_dp_rank = None;
+        }
         let encode_context = Context::with_id_and_metadata(
-            request.clone(),
+            encode_request,
             context.id().to_string(),
             context.metadata().clone(),
         );
         let encode_result = async {
-            let binding = self
-                .binding
-                .load_full()
-                .context("Encoder router is active but not initialized")?;
-            let response = binding.router.generate(encode_context).await?;
-            Self::consume_encode_stream(response).await
+            let binding = binding
+                .ok_or_else(|| self.unavailable("encoder binding changed during activation"))?;
+            let (route, response) = binding
+                .router
+                .select_and_dispatch_with_cleanup(encode_context)
+                .await?;
+            let mut cleanup = EncoderResultCleanup {
+                route,
+                request: None,
+            };
+            let (result, link) =
+                match Self::consume_encode_stream(response, Some((&mut cleanup, &request.model)))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        cleanup.release().await;
+                        return Err(error);
+                    }
+                };
+            Ok::<_, anyhow::Error>((result, link, cleanup))
         }
         .await;
 
-        match encode_result {
-            Ok((encoder_result, worker_link)) => {
-                // Once the Encode worker has emitted a transfer handle, always hand it
-                // to the downstream worker even if the caller disconnected. The
-                // receiver owns transfer completion and buffer release.
+        let mut cleanup = match encode_result {
+            Ok((encoder_result, worker_link, cleanup)) => {
+                context.insert(
+                    ENCODER_RESULT_RELEASE_SUPPORTED,
+                    EncoderResultReleaseSupported(cleanup.request.is_some()),
+                );
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
+                cleanup
             }
             Err(error) => {
+                if self.is_required() {
+                    return Err(error.context("Required encoder hop failed"));
+                }
                 tracing::error!(
                     %error,
                     model = %self.model_name,
                     namespace = %self.namespace,
                     "Encoder hop failed; falling back to downstream inline encoding"
                 );
+                return next.generate(context.map(|_| request)).await;
             }
-        }
-        next.generate(context.map(|_| request)).await
+        };
+        let mut response = match next.generate(context.map(|_| request)).await {
+            Ok(response) => response,
+            Err(error) => {
+                cleanup.release().await;
+                return Err(error);
+            }
+        };
+        let response_context = response.context();
+        let stream = async_stream::stream! {
+            let mut cleanup = cleanup;
+            while cleanup.request.is_some() {
+                let Some(item) = response.next().await else {
+                    return;
+                };
+                if item.data.as_ref().is_some_and(|output| {
+                    !output.token_ids.is_empty()
+                        || matches!(output.finish_reason, Some(FinishReason::EoS | FinishReason::Length | FinishReason::Stop))
+                }) {
+                    // Tokens or successful completion prove the consumer claimed the handoff.
+                    cleanup.request = None;
+                }
+                if item.err().is_some() || item.data.as_ref().is_some_and(|output| {
+                    matches!(output.finish_reason, Some(FinishReason::Error(_) | FinishReason::Cancelled))
+                }) {
+                    cleanup.release().await;
+                }
+                yield item;
+            }
+            while let Some(item) = response.next().await {
+                yield item;
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(stream), response_context))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod epd;
+
     use std::{
         collections::{HashMap, HashSet},
         sync::{Mutex, atomic::AtomicUsize},
@@ -452,7 +561,7 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::EventTransportKind,
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-        engine::AsyncEngineContextProvider,
+        engine::{AsyncEngine, AsyncEngineContextProvider},
         pipeline::{Error, ResponseStream, context::Controller, network::Ingress},
         storage::kv,
     };
@@ -498,12 +607,12 @@ mod tests {
     #[test]
     fn opaque_json_skips_the_encoder_even_when_mixed_with_media() {
         let mut request = multimodal_request();
-        assert!(EncoderRouter::should_encode(&request));
+        assert!(EncoderRouter::disabled().should_encode(&request));
         request.multi_modal_data.as_mut().unwrap().insert(
             "chemistry".into(),
             vec![MultimodalData::Json(serde_json::json!({"atoms":["C"]}))],
         );
-        assert!(!EncoderRouter::should_encode(&request));
+        assert!(!EncoderRouter::disabled().should_encode(&request));
     }
 
     fn multimodal_request() -> PreprocessedRequest {
@@ -966,18 +1075,21 @@ mod tests {
         let output = LLMEngineOutput::encode_terminal(
             json!({"schema_version": 1}).as_object().unwrap().clone(),
         );
-        let (result, _) =
-            EncoderRouter::consume_encode_stream(stream_of(vec![Annotated::from_data(output)]))
-                .await
-                .unwrap();
+        let (result, _) = EncoderRouter::consume_encode_stream(
+            stream_of(vec![Annotated::from_data(output)]),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, json!({"schema_version": 1}));
     }
 
     #[tokio::test]
     async fn rejects_terminal_without_encoder_result() {
-        let result = EncoderRouter::consume_encode_stream(stream_of(vec![Annotated::from_data(
-            LLMEngineOutput::stop(),
-        )]))
+        let result = EncoderRouter::consume_encode_stream(
+            stream_of(vec![Annotated::from_data(LLMEngineOutput::stop())]),
+            None,
+        )
         .await;
         assert!(result.is_err());
     }

@@ -439,6 +439,10 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        // Project only onto this generation's serving card after metadata resolution.
+        // The reserved representative and canonical MDC/cache identity stay unchanged.
+        spec.encoder_policy.project(card);
+
         validate_card_parser_version(card, self.chat_engine_factory.is_some())?;
 
         validate_policy_worker_role(card, &self.plugins)?;
@@ -711,6 +715,7 @@ impl ModelWatcher {
                 Some(EncoderRouter::new_with_task_guard(
                     model_name.clone(),
                     namespace.clone(),
+                    router_config.router_mode,
                     allocator_trim.clone(),
                 ))
             } else {
@@ -2701,6 +2706,9 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                encoder_policy: crate::discovery::controller::EncoderPolicy::from_card(
+                    &desired.card,
+                ),
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -2857,6 +2865,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            encoder_policy: crate::discovery::controller::EncoderPolicy::from_card(&desired.card),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2952,6 +2961,9 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                encoder_policy: crate::discovery::controller::EncoderPolicy::from_card(
+                    &desired.card,
+                ),
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -3109,6 +3121,92 @@ request_classifier:
     }
 
     #[tokio::test]
+    async fn encoder_policy_projection_is_local_to_each_prepared_generation() {
+        use crate::discovery::controller::EncoderPolicy;
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        let mut card = ModelDeploymentCard::with_name_only("projected-prefill");
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::empty();
+        card.worker_type = Some(WorkerType::Prefill);
+        let DiscoveryEvent::Added(discovery) = discovered_card("projected-prefill", 1, &card)
+        else {
+            unreachable!()
+        };
+        let desired = watcher
+            .normalize(discovery, &NamespaceFilter::Global)
+            .unwrap()
+            .unwrap();
+        let checksum = desired.mdc_checksum.clone();
+        let mut prepared_generations = Vec::new();
+        for (index, policy) in [EncoderPolicy::InlineAllowed, EncoderPolicy::EncoderRequired]
+            .into_iter()
+            .enumerate()
+        {
+            let spec = GroupSpec {
+                key: desired.group_key.clone(),
+                mdc_checksum: checksum.clone(),
+                fingerprint: format!("projection-{index}"),
+                generation: index as u64 + 1,
+                representative: desired.clone(),
+                video_contract: None,
+                encoder_policy: policy,
+            };
+            let (_tx, rx) = tokio::sync::watch::channel(vec![1]);
+            let prepared = tokio::time::timeout(
+                Duration::from_secs(5),
+                watcher.prepare_worker_set(&spec, rx, runtime.child_token()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let workers = prepared.worker_set.as_ref().unwrap();
+            assert_eq!(workers.mdcsum(), checksum);
+            assert_eq!(workers.card().mdcsum(), checksum);
+            assert_eq!(EncoderPolicy::from_card(workers.card()), policy);
+            assert_eq!(
+                EncoderPolicy::from_card(&workers.topology_target().unwrap().card),
+                policy
+            );
+            assert!(
+                !spec
+                    .representative
+                    .card
+                    .runtime_config
+                    .runtime_data
+                    .contains_key("requires_encoder_result")
+            );
+            prepared_generations.push(prepared);
+        }
+        // Later generations with the same metadata cache must not mutate earlier cards.
+        for (prepared, expected) in prepared_generations
+            .iter()
+            .zip([EncoderPolicy::InlineAllowed, EncoderPolicy::EncoderRequired])
+        {
+            assert_eq!(
+                EncoderPolicy::from_card(prepared.worker_set.as_ref().unwrap().card()),
+                expected
+            );
+        }
+        drop(prepared_generations);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn surface_encode_worker_builds_kv_load_context_without_load_monitoring() {
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
 
@@ -3175,6 +3273,7 @@ request_classifier:
             mdc_checksum: desired.mdc_checksum.clone(),
             fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
+            encoder_policy: crate::discovery::controller::EncoderPolicy::from_card(&desired.card),
             representative: desired,
             video_contract: None,
         };
@@ -3906,6 +4005,9 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                encoder_policy: crate::discovery::controller::EncoderPolicy::from_card(
+                    &desired.card,
+                ),
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

@@ -265,6 +265,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let is_release = request
+            .extra_args
+            .as_ref()
+            .and_then(|args| {
+                args.get(dynamo_llm::protocols::common::preprocessor::RELEASE_ENCODER_RESULT)
+            })
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if is_release && (!self.mode.is_encode() || !self.engine.is_cleanup_request(&request)) {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported or malformed encoder result release")
+                .build()
+                .into());
+        }
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -340,10 +355,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             link
         };
 
-        // Decode workers defer engine.abort() until first-token to protect
-        // in-flight NIXL transfers. The Sender goes to the engine (via
-        // GenerateContext + the stream wrapper's auto-fire); the Receiver
-        // gates the monitor's abort call.
+        // Decode must receive staged KV before it can be aborted.
+        let is_encoder_control = self.mode.is_encode() && (request.is_probe || is_release);
         let (ft_tx, mut ft_rx) = if self.mode.is_decode() {
             let (tx, rx) = watch::channel(false);
             (Some(tx), Some(rx))
@@ -444,7 +457,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         });
 
         #[cfg(debug_assertions)]
-        let chunks = crate::validate::wrap(chunks, self.mode);
+        let chunks = crate::validate::wrap(
+            chunks,
+            if is_encoder_control {
+                // Probes and releases acknowledge completion without exporting a handoff.
+                DisaggregationMode::Aggregated
+            } else {
+                self.mode
+            },
+        );
         let guard = CancelMonitorGuard {
             stream: Some(chunks),
             drop_tx: Some(drop_tx),
@@ -457,7 +478,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // their handoff payload (disaggregated_params and encoder_result
         // respectively), so both need the worker_trace_link stamped on
         // the terminal even when the chunk has no tokens.
-        let is_handoff_terminal_mode = self.mode.is_prefill() || self.mode.is_encode();
+        let is_handoff_terminal_mode =
+            self.mode.is_prefill() || (self.mode.is_encode() && !is_encoder_control);
         let finalizer_span = span.clone();
         let engine_cleanup = self.engine_cleanup.clone();
         let mapped = async_stream::stream! {
@@ -781,6 +803,10 @@ mod tests {
     impl LLMEngine for MockEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
+        }
+
+        fn is_cleanup_request(&self, request: &PreprocessedRequest) -> bool {
+            request.is_encoder_result_release()
         }
 
         async fn generate(
@@ -1308,61 +1334,59 @@ mod tests {
         );
     }
 
-    /// Aggregated-mode fires `engine.abort()` immediately — only decode
-    /// opts into deferral.
     #[tokio::test(start_paused = true)]
-    async fn aggregated_fires_abort_immediately() {
-        let (engine, release, abort_calls) = ParkedEngine::new();
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+    async fn non_decode_modes_abort_immediately() {
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            let (engine, release, abort_calls) = ParkedEngine::new();
+            let adapter = EngineAdapter::new(engine, mode);
+            let input = Context::new(make_request(vec![1]));
+            let ctrl = input.context();
+            let mut stream = adapter.generate(input).await.unwrap();
 
-        let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
-        let ctrl = input.context();
-        let mut stream = adapter.generate(input).await.unwrap();
-
-        ctrl.stop_generating();
-        tokio::time::advance(std::time::Duration::from_millis(100)).await;
-        assert_eq!(
-            abort_calls.load(Ordering::SeqCst),
-            1,
-            "aggregated worker must fire abort immediately on cancellation"
-        );
-
-        release.notify_one();
-        while stream.next().await.is_some() {}
+            ctrl.stop_generating();
+            tokio::time::advance(Duration::from_millis(100)).await;
+            assert_eq!(abort_calls.load(Ordering::SeqCst), 1, "{mode:?}");
+            release.notify_one();
+            while stream.next().await.is_some() {}
+            tokio::time::advance(Duration::from_millis(100)).await;
+            assert_eq!(abort_calls.load(Ordering::SeqCst), 1, "{mode:?}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancellation_followed_by_stream_drop_still_aborts() {
-        const REQUESTS: usize = 64;
-        let (engine, _release, abort_calls) = ParkedEngine::new();
-        let engine_lifetime = Arc::downgrade(&engine);
-        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Encode] {
+            const REQUESTS: usize = 64;
+            let (engine, _release, abort_calls) = ParkedEngine::new();
+            let engine_lifetime = Arc::downgrade(&engine);
+            let adapter = EngineAdapter::new(engine, mode);
 
-        // Exercise the monitor's randomized select order with both signals ready.
-        for _ in 0..REQUESTS {
-            let input = Context::new(make_request(vec![1]));
-            let ctrl = input.context();
-            let mut stream = adapter.generate(input).await.unwrap();
-            assert!(futures::poll!(stream.next()).is_pending());
-            tokio::task::yield_now().await;
-
-            ctrl.stop_generating();
-            drop(stream);
-        }
-        drop(adapter);
-
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while engine_lifetime.strong_count() != 0 {
+            // Exercise the monitor's randomized select order with both signals ready.
+            for _ in 0..REQUESTS {
+                let input = Context::new(make_request(vec![1]));
+                let ctrl = input.context();
+                let mut stream = adapter.generate(input).await.unwrap();
+                assert!(futures::poll!(stream.next()).is_pending());
                 tokio::task::yield_now().await;
+
+                ctrl.stop_generating();
+                drop(stream);
             }
-        })
-        .await
-        .expect("cancellation monitors did not finish");
-        assert_eq!(
-            abort_calls.load(Ordering::SeqCst),
-            REQUESTS,
-            "every cancelled request must call engine.abort despite stream teardown"
-        );
+            drop(adapter);
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while engine_lifetime.strong_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancellation monitors did not finish");
+            assert_eq!(
+                abort_calls.load(Ordering::SeqCst),
+                REQUESTS,
+                "every cancelled request must call engine.abort despite stream teardown"
+            );
+        }
     }
 
     /// Engine that fires the side-channel first-token notify on entry and
@@ -2043,6 +2067,78 @@ mod tests {
             .expect("prefill terminal with no tokens must be stamped via fallback");
         assert_eq!(link.trace_id, trace_id);
         assert_eq!(link.span_id, span_id);
+    }
+
+    #[tokio::test]
+    async fn encode_release_acknowledges_without_a_handoff_or_trace_link() {
+        let (_guard, _, _) = install_trace_context_injection();
+        let (engine, _) = MockEngine::new(vec![LLMEngineOutput::stop()]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let mut request = make_request(Vec::new());
+        request.encoder_result = Some(serde_json::json!({"opaque": "encoder-cache"}));
+        request.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+        let stream = adapter.generate(Context::new(request)).await.unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(chunks.len(), 1);
+        let ack = chunks[0]
+            .data
+            .as_ref()
+            .expect("successful release acknowledgement");
+        assert_eq!(ack.finish_reason, Some(FinishReason::Stop));
+        assert!(ack.token_ids.is_empty());
+        assert!(ack.encoder_result.is_none());
+        assert!(ack.worker_trace_link.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_encoder_release_cannot_run_as_inference() {
+        let (engine, _) = MockEngine::new(Vec::new());
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let mut request = make_request(vec![1]);
+        request.encoder_result = Some(serde_json::json!({"ref": "original"}));
+        request.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+        let error = adapter.generate(Context::new(request)).await.err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[tokio::test]
+    async fn encoder_release_is_rejected_by_backends_without_cleanup_support() {
+        let (engine, _, _) = ParkedEngine::new();
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let mut request = make_request(Vec::new());
+        request.encoder_result = Some(serde_json::json!({"ref": "original"}));
+        request.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+        let error = adapter.generate(Context::new(request)).await.err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_health_probe_acknowledges_without_a_handoff_or_trace_link() {
+        let (_guard, _, _) = install_trace_context_injection();
+        let (engine, _) = MockEngine::new(vec![LLMEngineOutput::stop()]);
+        let adapter = Arc::new(EngineAdapter::new(engine, DisaggregationMode::Encode));
+        let probe = JsonProbeAdapter::new(adapter);
+        let stream = probe
+            .generate(Context::new(serde_json::json!({
+                "token_ids": [1], "_HEALTH_CHECK": true,
+                "multi_modal_data": {"image": [{"Url": "https://example.com/image.png"}]}
+            })))
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+        assert_eq!(chunks.len(), 1);
+        assert!(!chunks[0].is_error());
+        let ack: LLMEngineOutput = serde_json::from_value(chunks[0].data.clone().unwrap()).unwrap();
+        assert_eq!(ack.finish_reason, Some(FinishReason::Stop));
+        assert!(ack.encoder_result.is_none());
+        assert!(ack.worker_trace_link.is_none());
     }
 
     /// Encode terminal with no token chunks (handoff via

@@ -8,7 +8,7 @@ use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{BookingHandle, RoutingConstraints};
 
-use super::{PrefillError, PrefillLifecycleState, PrefillRouter};
+use super::{PrefillError, PrefillRouter};
 
 /// A prefill booking that owns cleanup of the exact scheduler attempt it admitted.
 ///
@@ -67,13 +67,9 @@ impl PrefillRouter {
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
-        if self.lifecycle_state() != PrefillLifecycleState::Active {
+        let super::ActivationSnapshot::Active(binding) = self.activation_snapshot() else {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
-        }
-        let binding = self
-            .binding
-            .load_full()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+        };
         let router = &binding.router;
         let Some(chooser) = router.kv_router_if_enabled() else {
             let worker_id = router
@@ -258,8 +254,7 @@ mod tests {
     /// The advisory builtin-host peek used by `reserve_prefill_worker`'s non-KV arm.
     fn query_worker(router: &PrefillRouter) -> u64 {
         router
-            .binding
-            .load_full()
+            .binding()
             .unwrap()
             .router
             .peek_next_worker()
@@ -346,7 +341,7 @@ mod tests {
                 .unwrap(),
         );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
-        prefill.binding.store(Some(Arc::new(
+        prefill.set_test_binding(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
                 target_id: crate::discovery::WorkerSetTargetId::Legacy(
                     dynamo_runtime::protocols::EndpointId {
@@ -362,12 +357,9 @@ mod tests {
                 },
                 router: shared.clone(),
                 prefill_router_mode: mode,
+                encoder_result_requires_prefill: false,
             },
         )));
-        prefill.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
-            std::sync::atomic::Ordering::Release,
-        );
         worker_runtimes.push(router_runtime);
         (shared, prefill, worker_runtimes, workers)
     }
@@ -431,6 +423,7 @@ mod tests {
             endpoint_id,
             router: Arc::new(router),
             prefill_router_mode: RouterMode::KV,
+            encoder_result_requires_prefill: false,
         });
         (binding, chooser)
     }
@@ -438,11 +431,7 @@ mod tests {
     async fn tracked_prefill_router() -> (Arc<PrefillRouter>, Arc<KvRouter>) {
         let (binding, chooser) = tracked_binding("primary").await;
         let router = PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None);
-        router.binding.store(Some(binding));
-        router.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
-            std::sync::atomic::Ordering::Release,
-        );
+        router.set_test_binding(Some(binding));
         (router, chooser)
     }
 
@@ -466,17 +455,14 @@ mod tests {
         other.name = "other".into();
         assert!(router.available_worker_ids_for("legacy", &other).is_none());
         router.lifecycle.store(
-            PrefillLifecycleState::Unavailable as u8,
+            super::super::PrefillLifecycleState::Unavailable as u8,
             std::sync::atomic::Ordering::Release,
         );
         assert_eq!(
             router.available_worker_ids_for("legacy", &endpoint),
             Some(HashSet::new())
         );
-        router.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
-            std::sync::atomic::Ordering::Release,
-        );
+        router.set_test_binding(Some(router.binding().unwrap()));
         router.cancel_token.cancel();
         assert_eq!(
             router.available_worker_ids_for("legacy", &endpoint),
@@ -512,9 +498,13 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
         *target = Some(replacement.target_id.clone());
+        router.required.store(
+            replacement.encoder_result_requires_prefill,
+            std::sync::atomic::Ordering::Release,
+        );
         router.binding.store(Some(replacement));
         router.lifecycle.store(
-            PrefillLifecycleState::Active as u8,
+            super::super::PrefillLifecycleState::Active as u8,
             std::sync::atomic::Ordering::Release,
         );
         drop(target);
@@ -571,7 +561,7 @@ mod tests {
         );
 
         let (replacement, _) = tracked_binding("replacement").await;
-        router.binding.store(Some(replacement));
+        router.set_test_binding(Some(replacement));
         reservation.release().await.unwrap();
 
         drop(dropped_reservation);
