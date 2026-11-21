@@ -3409,6 +3409,7 @@ func newLPXTestReconciler(
 	kubeClient := newLPXTestClient(t, seed...)
 	return &graphReconciler{
 		Client:        kubeClient,
+		apiReader:     kubeClient,
 		recorder:      recorder,
 		runtimeConfig: runtimeConfig,
 		modelRegistry: registry,

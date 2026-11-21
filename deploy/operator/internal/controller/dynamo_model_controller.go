@@ -68,6 +68,7 @@ const (
 // DynamoModelReconciler reconciles a DynamoModel object
 type DynamoModelReconciler struct {
 	client.Client
+	PodReader      client.Reader
 	Recorder       events.EventRecorder
 	EndpointClient *modelendpoint.Client
 	Config         *configv1alpha1.OperatorConfiguration
@@ -454,7 +455,8 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 	if model.IsLoRA() && len(candidates) > 0 {
 		for i := range candidates {
 			pod := &corev1.Pod{}
-			if err := r.Get(ctx, client.ObjectKey{Namespace: model.Namespace, Name: candidates[i].PodName}, pod); err != nil {
+			// EndpointSlices can reference arbitrary Pods excluded from the workload cache.
+			if err := r.PodReader.Get(ctx, client.ObjectKey{Namespace: model.Namespace, Name: candidates[i].PodName}, pod); err != nil {
 				if k8serrors.IsNotFound(err) {
 					candidates[i].KubernetesReady = false
 					continue
