@@ -20,6 +20,10 @@ import torch
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
+# Metadata keys under this prefix are not tensors (e.g. the vLLM integration's
+# load-diff descriptor); tensor loading skips them.
+RESERVED_METADATA_PREFIX = "__gms__."
+
 
 # =============================================================================
 # Tensor Creation from CUDA Pointer
@@ -201,7 +205,7 @@ class GMSTensorSpec:
     def load_all(
         cls, gms_client_memory_manager: "GMSClientMemoryManager"
     ) -> Dict[str, "GMSTensorSpec"]:
-        """Load all metadata entries.
+        """Load all tensor metadata entries (reserved keys are skipped).
 
         Returns:
             Mapping of tensor name -> GMSTensorSpec.
@@ -209,6 +213,8 @@ class GMSTensorSpec:
         specs: Dict[str, GMSTensorSpec] = {}
 
         for key in gms_client_memory_manager.metadata_list():
+            if key.startswith(RESERVED_METADATA_PREFIX):
+                continue
             got = gms_client_memory_manager.metadata_get(key)
             if got is None:
                 raise RuntimeError(f"Metadata key disappeared: {key}")
