@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -21,6 +21,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.fault_tolerance,
 ]
 
 
@@ -43,7 +44,55 @@ def _make_handler() -> _TestWorkerHandler:
     )
     handler._pause_controller = VllmEnginePauseController(handler.engine_client)
     handler._pause_lock = asyncio.Lock()
+    handler._paused = False
+    handler.engine_monitor = SimpleNamespace(failed=False, request_shutdown=MagicMock())
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state", ["serving", "transition", "paused", "sleeping", "recovering"]
+)
+async def test_health_check_respects_handler_lifecycle(state):
+    handler = _make_handler()
+    if state == "transition":
+        await handler._pause_lock.acquire()
+    elif state == "paused":
+        handler._paused = True
+    elif state == "sleeping":
+        await handler._pause_controller.pause(1)
+    elif state == "recovering":
+        handler._pause_controller._generation_paused = True
+
+    assert handler._engine_health_check_is_busy() == (state != "serving")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_during_registration", [False, True])
+async def test_fatal_worker_cannot_rejoin_discovery(failure_during_registration):
+    handler = _make_handler()
+    await handler._pause_controller.pause(1)
+    if failure_during_registration:
+
+        async def fail_during_registration():
+            handler.engine_monitor.failed = True
+
+        handler.generate_endpoint.register_endpoint_instance.side_effect = (
+            fail_during_registration
+        )
+    else:
+        handler.engine_monitor.failed = True
+
+    result = await handler.wake_up({})
+
+    assert result["status"] == "error"
+    assert handler._pause_controller.is_paused
+    assert handler.generate_endpoint.register_endpoint_instance.await_count == int(
+        failure_during_registration
+    )
+    assert handler.generate_endpoint.unregister_endpoint_instance.await_count == int(
+        failure_during_registration
+    )
 
 
 @pytest.mark.asyncio

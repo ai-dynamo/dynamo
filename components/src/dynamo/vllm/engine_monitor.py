@@ -3,10 +3,9 @@
 
 import asyncio
 import logging
-import math
 import os
-import signal
 import traceback
+from collections.abc import Callable
 
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -14,6 +13,8 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.process_monitor import LocalEngineProcesses
+from dynamo.vllm.shutdown_watchdog import ShutdownWatchdog
 
 configure_dynamo_logging
 logger = logging.getLogger(__name__)
@@ -29,6 +30,9 @@ class VllmEngineMonitor:
         runtime: DistributedRuntime,
         engine_client: AsyncLLM,
         shutdown_event: asyncio.Event | None = None,
+        *,
+        generate_endpoint=None,
+        is_busy: Callable[[], bool] = lambda: False,
     ):
         if not isinstance(runtime, DistributedRuntime):
             raise ValueError(
@@ -42,8 +46,14 @@ class VllmEngineMonitor:
         self.runtime = runtime
         self.engine_client = engine_client
         self.shutdown_event = shutdown_event
+        self.generate_endpoint = generate_endpoint
+        self.is_busy = is_busy
+        self.failed = False
+        self._fatal_task = None
         self.health_config = EngineHealthMonitorConfig.from_env()
+        self.processes = LocalEngineProcesses(engine_client)
         self._monitor_task = asyncio.create_task(self._check_engine_health())
+        self._process_task = asyncio.create_task(self._check_engine_processes())
         self._stats_task = asyncio.create_task(self._periodic_log_stats())
 
         logger.info(
@@ -51,41 +61,76 @@ class VllmEngineMonitor:
         )
 
     def __del__(self):
-        self._monitor_task.cancel()
-        self._stats_task.cancel()
+        for name in ("_monitor_task", "_stats_task", "_process_task"):
+            task = getattr(self, name, None)
+            if task is not None:
+                task.cancel()
 
     def _shutdown_engine(self):
         """
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
 
-        # Has timeout protection via SIGALRM
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Engine shutdown timed out")
-
-        previous_handler = None
-        if self.health_config.shutdown_timeout > 0:
-            previous_handler = signal.getsignal(signal.SIGALRM)
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(math.ceil(self.health_config.shutdown_timeout))
-
         try:
             self.engine_client.shutdown()
         except Exception as e:
             logger.warning(f"vLLM engine shutdown failed: {e}")
-        finally:
+
+    def request_shutdown(self):
+        if not self.failed:
+            self.failed = True
+            self._fatal_task = asyncio.create_task(self._shutdown_worker())
+        return self._fatal_task
+
+    async def _shutdown_worker(self):
+        """Withdraw discovery before cleanup, with an independent exit deadline."""
+        watchdog = None
+        try:
             if self.health_config.shutdown_timeout > 0:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, previous_handler)
+                watchdog = ShutdownWatchdog(self.health_config.shutdown_timeout)
+            if self.generate_endpoint is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.generate_endpoint.unregister_endpoint_instance(),
+                        timeout=self.health_config.check_timeout or None,
+                    )
+                except Exception:
+                    logger.exception("Failed to withdraw vLLM endpoint from discovery")
+            self._shutdown_engine()
+            self.runtime.shutdown()
+        except Exception:
+            logger.exception("Dynamo Runtime shutdown failed")
+        finally:
+            try:
+                os._exit(1)
+            finally:
+                if watchdog is not None:
+                    watchdog.close()
+
+    async def _check_engine_processes(self):
+        while not self.failed:
+            if self.shutdown_event and self.shutdown_event.is_set():
+                return
+            try:
+                self.processes.check()
+                if self.engine_client.errored:
+                    raise EngineDeadError()
+            except Exception:
+                if self.shutdown_event and self.shutdown_event.is_set():
+                    return
+                logger.exception("Independent vLLM process health check failed")
+                self.request_shutdown()
+                return
+            await asyncio.sleep(self.health_config.interval)
 
     async def _check_engine_health(self):
         """
         Continuously check engine health until:
-        1. Engine dies (EngineDeadError) - initiate shutdown
+        1. Engine or worker health check fails or times out - initiate shutdown
         2. Shutdown event is triggered - stop monitoring gracefully
         3. Task is cancelled - cleanup
         """
-        while True:
+        while not self.failed:
             try:
                 # Check if shutdown event was triggered - stop monitoring
                 if self.shutdown_event and self.shutdown_event.is_set():
@@ -115,7 +160,7 @@ class VllmEngineMonitor:
                     # No shutdown event, just sleep normally
                     await asyncio.sleep(self.health_config.interval)
 
-            except (EngineDeadError, asyncio.TimeoutError) as e:
+            except Exception as e:
                 if self.shutdown_event and self.shutdown_event.is_set():
                     logger.warning(
                         "%s: %s while worker shutdown is in progress; "
@@ -127,20 +172,26 @@ class VllmEngineMonitor:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
-                self._shutdown_engine()
-                self.runtime.shutdown()
-                os._exit(1)
+                self.request_shutdown()
+                return
             except asyncio.CancelledError:
                 logger.debug(f"{self.__class__.__name__}: Health check task cancelled.")
                 break
 
     async def _run_health_check(self):
+        if self.is_busy():
+            return
         health_check = self.engine_client.check_health()
-        if self.health_config.check_timeout > 0:
-            return await asyncio.wait_for(
-                health_check, timeout=self.health_config.check_timeout
-            )
-        return await health_check
+        try:
+            if self.health_config.check_timeout > 0:
+                return await asyncio.wait_for(
+                    health_check, timeout=self.health_config.check_timeout
+                )
+            return await health_check
+        except asyncio.TimeoutError:
+            if self.is_busy():
+                return
+            raise
 
     async def _periodic_log_stats(self):
         """Periodically flush vLLM engine stats (throughput, cache usage, etc.)."""
