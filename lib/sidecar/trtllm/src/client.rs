@@ -28,6 +28,7 @@ pub(crate) use dynamo_sidecar_common::{
 
 use crate::proto as pb;
 use crate::proto::control_client::ControlClient;
+use crate::proto::encoder_client::EncoderClient;
 use crate::proto::inference_client::InferenceClient;
 
 /// Deadline for the one-shot `Control.Abort`, so a connected-but-unresponsive
@@ -128,6 +129,12 @@ impl TrtllmClient {
 
     fn inference(&self) -> InferenceClient<Channel> {
         InferenceClient::new(self.pool.next_channel())
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+    }
+
+    fn encoder(&self) -> EncoderClient<Channel> {
+        EncoderClient::new(self.pool.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
@@ -407,7 +414,7 @@ impl TrtllmClient {
         &self,
         request: pb::EncodeRequest,
     ) -> Result<pb::EncodeResponse, DynamoError> {
-        self.inference()
+        self.encoder()
             .encode(request)
             .await
             .map(tonic::Response::into_inner)
@@ -420,7 +427,7 @@ impl TrtllmClient {
     ) -> Result<(), DynamoError> {
         tokio::time::timeout(
             RPC_TIMEOUT,
-            self.control()
+            self.encoder()
                 .release_encoded_media(pb::ReleaseEncodedMediaRequest {
                     encoded_media: Some(handoff),
                 }),

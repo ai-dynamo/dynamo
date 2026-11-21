@@ -90,13 +90,6 @@ fn wants_logprobs(request: &pb::GenerateRequest) -> bool {
 impl pb::inference_server::Inference for FakeTrtllm {
     type GenerateStream = Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send>>;
 
-    async fn encode(
-        &self,
-        _: Request<pb::EncodeRequest>,
-    ) -> Result<Response<pb::EncodeResponse>, Status> {
-        Err(Status::unimplemented("Encode is tested in sidecar testkit"))
-    }
-
     async fn generate(
         &self,
         request: Request<pb::GenerateRequest>,
@@ -253,15 +246,6 @@ impl pb::control_server::Control for FakeTrtllm {
             supports_multimodal: Some(false),
             ..Default::default()
         }))
-    }
-
-    async fn release_encoded_media(
-        &self,
-        _: Request<pb::ReleaseEncodedMediaRequest>,
-    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
-        Err(Status::unimplemented(
-            "ReleaseEncodedMedia is tested in sidecar testkit",
-        ))
     }
 
     async fn abort(

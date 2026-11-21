@@ -6,13 +6,14 @@ SPDX-License-Identifier: Apache-2.0
 # Vendored OpenEngine protocol
 
 This is an exact snapshot of the native encoded-media contract at published
-[OpenEngine source commit 59f1d5a](https://github.com/ai-dynamo/openengine/tree/59f1d5a7062629cf8c47031391a67a716b80b1ff/proto/openengine/v1).
+[OpenEngine source commit 2a442e0](https://github.com/ai-dynamo/openengine/tree/2a442e03912d6c98cdb81b73ab67e05b69d9ea75/proto/openengine/v1).
 It is not yet a released protocol/runtime. Matching TRT-LLM bindings are required;
 EPD startup checks the engine schema release against `REVISION`.
 
-The contract separates unary Encode, streaming Generate, and idempotent output
-release. Framework-native references stay opaque to the sidecar. It adds no
-encoder-specific capability discovery. Tensor transfer remains engine-owned.
+The optional Encoder service provides unary Encode and idempotent output release,
+separately from streaming Inference.Generate and Control. Framework-native
+references stay opaque to the sidecar. It adds no encoder-specific capability
+discovery. Tensor transfer remains engine-owned.
 
 SHA-256:
 
@@ -26,7 +27,7 @@ SHA-256:
 | `openengine/v1/lifecycle.proto` | `a0ce097480a929c6acf5e0e145bfdb1bb8998e4c7ee95ec316ce481e2558a379` |
 | `openengine/v1/lora.proto` | `c1aa58fca3ab1b40f7c75dbbd17280b2b52ee295256479b6b0fc74f924047ef9` |
 | `openengine/v1/model.proto` | `5166cdcdaa260b1f5de2fa8d170dacbab1595af9413e73f09c6902b25f553284` |
-| `openengine/v1/openengine.proto` | `f15b5bca590c68aafa85fb7b104b0da2c4b03b93782e85862e34aec908ed5db4` |
+| `openengine/v1/openengine.proto` | `6a9fe99dfde89ccc1d3dbf5558ca1c067e2805c3f230b1d034c8ef8fe636f659` |
 | `openengine/v1/server.proto` | `a6ce9934a3f4ff508ec7c9b8fefdb69bd8025a63812c42b2e1ac0d8765ce0db8` |
 
 Update REVISION, schema files and checksums together. Update build.rs's PROTOS

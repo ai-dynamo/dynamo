@@ -17,6 +17,7 @@ use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto::{
     self as pb,
     control_server::{Control, ControlServer},
+    encoder_server::{Encoder, EncoderServer},
     inference_server::{Inference, InferenceServer},
 };
 use futures::stream::BoxStream;
@@ -201,7 +202,6 @@ impl SidecarFixture for Fixture {
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let encoder = Arc::new(EncoderControls::default());
         let controlled = ControlledInference {
-            encoder: encoder.clone(),
             scripted: scripted.clone(),
             inner: service.clone(),
             control,
@@ -213,6 +213,9 @@ impl SidecarFixture for Fixture {
             encoder: encoder.clone(),
             is_encoder: config.disaggregation_mode.is_encode(),
         };
+        let encoder_service = ControlledEncoder {
+            encoder: encoder.clone(),
+        };
         let (health, health_service) = tonic_health::server::health_reporter();
         health
             .set_service_status("liveness", tonic_health::ServingStatus::Serving)
@@ -222,6 +225,7 @@ impl SidecarFixture for Fixture {
                 .add_service(health_service)
                 .add_service(InferenceServer::new(controlled))
                 .add_service(ControlServer::new(control_service))
+                .add_service(EncoderServer::new(encoder_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown.await;
                 })
@@ -354,24 +358,6 @@ impl Control for ControlledControl {
         request: Request<pb::HealthRequest>,
     ) -> Result<Response<pb::HealthResponse>, Status> {
         self.inner.health(request).await
-    }
-    async fn release_encoded_media(
-        &self,
-        request: Request<pb::ReleaseEncodedMediaRequest>,
-    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
-        let key = self
-            .encoder
-            .release_sequence
-            .fetch_add(1, Ordering::SeqCst)
-            .to_string();
-        let request = ReleaseRequest {
-            key,
-            native: request.into_inner(),
-        };
-        let opened = self.encoder.release.open(&request).await?;
-        Ok(Response::new(
-            opened.finish(pb::ReleaseEncodedMediaResponse {}),
-        ))
     }
 
     async fn abort(
@@ -530,17 +516,12 @@ impl WireFixture for Fixture {
 }
 
 #[derive(Clone)]
-struct ControlledInference {
+struct ControlledEncoder {
     encoder: Arc<EncoderControls>,
-    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
-    inner: TrtllmMockerService,
-    control: Controller<Adapter>,
 }
 
 #[tonic::async_trait]
-impl Inference for ControlledInference {
-    type GenerateStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
-
+impl Encoder for ControlledEncoder {
     async fn encode(
         &self,
         request: Request<pb::EncodeRequest>,
@@ -560,6 +541,37 @@ impl Inference for ControlledInference {
             });
         Ok(Response::new(opened.finish(response)))
     }
+
+    async fn release_encoded_media(
+        &self,
+        request: Request<pb::ReleaseEncodedMediaRequest>,
+    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
+        let key = self
+            .encoder
+            .release_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string();
+        let request = ReleaseRequest {
+            key,
+            native: request.into_inner(),
+        };
+        let opened = self.encoder.release.open(&request).await?;
+        Ok(Response::new(
+            opened.finish(pb::ReleaseEncodedMediaResponse {}),
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct ControlledInference {
+    scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    inner: TrtllmMockerService,
+    control: Controller<Adapter>,
+}
+
+#[tonic::async_trait]
+impl Inference for ControlledInference {
+    type GenerateStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
 
     async fn generate(
         &self,

@@ -210,13 +210,6 @@ struct ControlledService {
 
 #[tonic::async_trait]
 impl Inference for ControlledService {
-    async fn encode(
-        &self,
-        request: Request<pb::EncodeRequest>,
-    ) -> Result<Response<pb::EncodeResponse>, Status> {
-        self.inner.encode(request).await
-    }
-
     type GenerateStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
 
     async fn generate(
@@ -237,13 +230,6 @@ impl Inference for ControlledService {
 
 #[tonic::async_trait]
 impl Control for ControlledService {
-    async fn release_encoded_media(
-        &self,
-        request: Request<pb::ReleaseEncodedMediaRequest>,
-    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
-        self.inner.release_encoded_media(request).await
-    }
-
     async fn shutdown(
         &self,
         _request: Request<pb::ShutdownRequest>,

@@ -514,13 +514,6 @@ impl pb::inference_server::Inference for TrtllmMockerService {
     type GenerateStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send + 'static>>;
 
-    async fn encode(
-        &self,
-        _request: Request<pb::EncodeRequest>,
-    ) -> Result<Response<pb::EncodeResponse>, Status> {
-        Err(Status::unimplemented("media encoding is not simulated"))
-    }
-
     async fn generate(
         &self,
         request: Request<pb::GenerateRequest>,
@@ -738,13 +731,6 @@ impl pb::control_server::Control for TrtllmMockerService {
             state: pb::HealthState::Ready as i32,
             checks: vec![check("grpc"), check("scheduler"), check("model")],
         }))
-    }
-
-    async fn release_encoded_media(
-        &self,
-        _request: Request<pb::ReleaseEncodedMediaRequest>,
-    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
-        Err(Status::unimplemented("media encoding is not simulated"))
     }
 
     async fn abort(
