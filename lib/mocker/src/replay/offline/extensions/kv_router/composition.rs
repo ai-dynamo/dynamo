@@ -301,10 +301,10 @@ impl<O: ReplayEngineObservation<Batch = RouterEventBatch>> ReplayComposition
         let router_config = self.router_config.take();
         let prefill = KvRouterPlacement::new_with_selector_seed(
             prefill_args,
-            Some(derive_prefill_router_config(
-                prefill_args,
-                router_config.clone(),
-            )),
+            Some(
+                derive_prefill_router_config(prefill_args, router_config.clone())
+                    .context("deriving prefill KV Router config")?,
+            ),
             self.prefill_load_estimator.take(),
             &prefill_topology,
             self.determinism.selector_seed(),
@@ -436,13 +436,19 @@ fn base_router_config(
     config
 }
 
+/// The prefill hop does not track decode load, as in `role_routing::without_block_tracking`.
+/// The policy file's router settings resolve first, so none can turn tracking back on.
 pub(in crate::replay) fn derive_prefill_router_config(
     args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
+) -> Result<KvRouterConfig> {
     let mut config = base_router_config(args, router_config);
-    config.router_track_active_blocks = false;
     config
+        .finalize_policy_config()
+        .map_err(anyhow::Error::msg)?;
+    config.router_track_active_blocks = false;
+    config.router_track_output_blocks = false;
+    Ok(config)
 }
 
 pub(in crate::replay) fn derive_decode_router_config(
@@ -699,6 +705,66 @@ mod tests {
             .unwrap();
         assert_eq!(prefill.router.kv_event_lag_ms, 25.0);
         assert_eq!(decode.router.kv_event_lag_ms, 25.0);
+    }
+
+    #[test]
+    fn prefill_replay_never_tracks_output_blocks() {
+        let topology = || {
+            vec![WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![0],
+                router_hint: false,
+            }]
+        };
+        let by_flag = KvRouterConfig {
+            use_kv_events: false,
+            router_track_output_blocks: true,
+            ..KvRouterConfig::default()
+        };
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        // Not applied here: prefill must resolve the policy file itself.
+        let by_policy_file = KvRouterConfig {
+            use_kv_events: false,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        // A later apply of the policy file cannot turn output tracking back on.
+        let mut prefill =
+            derive_prefill_router_config(&MockerConfig::default(), Some(by_policy_file.clone()))
+                .unwrap();
+        prefill.apply_policy_config().unwrap();
+        assert!(!prefill.router_track_output_blocks);
+
+        // Decode keeps the output tracking it inherits.
+        for (case, router_config, decode_tracks_output) in [
+            ("set by flag", by_flag, true),
+            ("set in the policy file", by_policy_file, false),
+        ] {
+            let mut composition = KvReplayComposition::disaggregated(
+                MockerConfig::default(),
+                MockerConfig::default(),
+                1,
+                1,
+                Some(router_config),
+                None,
+                None,
+            );
+            let (prefill, decode) = composition
+                .create_disaggregated_placements(1, topology(), 1, topology())
+                .unwrap_or_else(|error| panic!("{case}: {error:#}"));
+            assert!(!prefill.router.config.router_track_active_blocks, "{case}");
+            assert!(!prefill.router.config.router_track_output_blocks, "{case}");
+            assert!(decode.router.config.router_track_active_blocks, "{case}");
+            assert_eq!(
+                decode.router.config.router_track_output_blocks, decode_tracks_output,
+                "{case}"
+            );
+        }
     }
 
     #[test]
