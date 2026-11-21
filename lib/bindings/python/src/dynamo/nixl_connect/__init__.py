@@ -169,6 +169,7 @@ class AbstractOperation(ABC):
         self._connection: Connection = connection
         self._operation_kind: OperationKind = operation_kind
         self._local_desc_list: Descriptor | list[Descriptor] = local_descriptors
+        self._local_registrations: list[tuple[Descriptor, Any]] = []
         self._local_desc_tlist: Optional[list[tuple[int, int, int]]] = None
         self._local_device_kind: DeviceKind = DeviceKind.UNSPECIFIED
         self._remote_desc_list: Optional[Descriptor | list[Descriptor]] = (
@@ -177,18 +178,21 @@ class AbstractOperation(ABC):
         self._remote_desc_tlist: Optional[list[tuple[int, int, int]]] = None
         self._remote_device_kind: DeviceKind = DeviceKind.UNSPECIFIED
 
-        # Register local descriptors with NIXL.
-        # Note: Only local descriptors should be registered with NIXL,
-        if isinstance(local_descriptors, list):
-            for d in local_descriptors:
-                d.register_with_connector(self._connection)
-                logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {d} with connector {self._connection}."
-                )
-        else:
-            local_descriptors.register_with_connector(self._connection)
+        # Keep each registration separate from the descriptor's mutable current
+        # registration: a descriptor may be reused after this operation closes.
+        descriptors = (
+            local_descriptors
+            if isinstance(local_descriptors, list)
+            else [local_descriptors]
+        )
+        registered_descriptors: set[int] = set()
+        for descriptor in descriptors:
+            descriptor.register_with_connector(self._connection)
+            if id(descriptor) not in registered_descriptors:
+                self._local_registrations.append((descriptor, descriptor._nixl_hndl))
+                registered_descriptors.add(id(descriptor))
             logger.debug(
-                f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {local_descriptors} with connector {self._connection}."
+                f"dynamo.nixl_connect.{self.__class__.__name__}: Registered descriptor {descriptor} with connector {self._connection}."
             )
 
         # Record local descriptors.
@@ -215,22 +219,26 @@ class AbstractOperation(ABC):
         """
         Private method to release resources.
         """
-        # Deregister local descriptors from NIXL, allowing them to reused by a future operation.
-        if isinstance(self._local_desc_list, list):
-            for d in self._local_desc_list:
-                if d.is_registered:
-                    d.deregister_with_connector(self._connection)
-                else:
-                    logger.debug(
-                        f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {d} was not registered, skipping deregistration."
-                    )
-        else:
-            if self._local_desc_list.is_registered:
-                self._local_desc_list.deregister_with_connector(self._connection)
-            else:
-                logger.debug(
-                    f"dynamo.nixl_connect.{self.__class__.__name__}: Descriptor {self._local_desc_list} was not registered, skipping deregistration."
-                )
+        # Consume ownership before native calls. A later __del__ must not retry
+        # against a descriptor that another operation has already reused, even
+        # when this release raised. Descriptor retains any failed registration
+        # for cleanup at the end of its own lifetime.
+        registrations, self._local_registrations = self._local_registrations, []
+        error: Optional[Exception] = None
+        for descriptor, registration in registrations:
+            if (
+                descriptor._connection is not self._connection
+                or descriptor._nixl_hndl is not registration
+            ):
+                continue
+            try:
+                descriptor.deregister_with_connector(self._connection)
+            except Exception as exc:
+                logger.error("Failed to release descriptor %s: %s", descriptor, exc)
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
     @property
     def connection(self) -> Connection:
