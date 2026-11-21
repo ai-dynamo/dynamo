@@ -1878,8 +1878,12 @@ async fn completions_batch(
         // Remap choice indices: choice.index += prompt_idx * n
         let prompt_idx_u32 = prompt_idx as u32;
         let n_u32 = n as u32;
+        // One id per response: every chunk carries the request id, like the
+        // aggregated usage chunk, not the per-prompt context id.
+        let completion_id = format!("cmpl-{request_id}");
         let remapped_stream = stream.map(move |mut response| {
             if let Some(ref mut data) = response.data {
+                data.inner.id.clone_from(&completion_id);
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
