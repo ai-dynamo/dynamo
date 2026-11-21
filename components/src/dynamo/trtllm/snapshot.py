@@ -22,7 +22,7 @@ def _create_runtime(
     discovery_backend: str,
     request_plane: str,
     event_plane: str | None,
-    response_plane: str = "tcp",
+    response_plane: str | None = None,
 ) -> tuple[Any, Any]:
     from dynamo.common.utils.runtime import create_runtime as _create_runtime
 
