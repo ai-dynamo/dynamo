@@ -5,7 +5,7 @@
 
 use std::{
     cell::RefCell,
-    collections::VecDeque,
+    collections::{VecDeque, hash_map::Entry},
     rc::{Rc, Weak},
 };
 
@@ -560,10 +560,9 @@ impl RadixTree {
             suffix
         };
 
-        // Removal does not invalidate descendants, so a detached node can keep bits
-        // for a worker whose lookup no longer names it: the worker stored those
-        // blocks again on the live path, or its lookup was cleared. Move only the
-        // entries that still name the split node.
+        // A worker's lookup may not name this node for every hash it covers here:
+        // the worker can hold the same hash on another node, or its lookup may have
+        // been cleared. Move only the entries that still name the split node.
         let suffix_ref = suffix.borrow();
         let edge_len = suffix_ref.state.edge.len();
         let full = suffix_ref
@@ -694,17 +693,21 @@ impl RadixTree {
                 (min_pos, min_hash)
             };
 
-            let outcome = {
+            let (outcome, lost_full_edge) = {
                 let mut node_ref = node.borrow_mut();
-                // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
-                // subtree when a mid-edge removal leaves the node alive for another
-                // worker. Otherwise stale descendants can be reused as store parents,
-                // reactivated by restoring only the removed block, or emitted by dumps
-                // without a valid worker-specific parent.
-                node_ref
+                let was_full = node_ref.state.full_edge_workers.contains(&worker);
+                let outcome = node_ref
                     .state
-                    .remove_worker_at_pos(worker, min_pos, min_hash)
+                    .remove_worker_at_pos(worker, min_pos, min_hash);
+                let lost_full_edge =
+                    was_full && !node_ref.state.full_edge_workers.contains(&worker);
+                (outcome, lost_full_edge)
             };
+            // A worker covers a node only if it covers the whole path above it, so
+            // losing the end of this edge also ends its coverage of every descendant.
+            if lost_full_edge {
+                Self::invalidate_descendants(&node, worker, lookup, &mut eagerly_removed);
+            }
             RadixBlock::prune_unreachable(&node);
             for &stale_hash in &outcome.stale_hashes {
                 lookup.remove(&stale_hash);
@@ -713,6 +716,59 @@ impl RadixTree {
         }
 
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Drops `worker` from every node below `node` and from the lookup entries that
+    /// name those nodes, appending the dropped hashes to `stale_hashes`.
+    ///
+    /// Only nodes the worker fully covers are descended into: a worker with partial
+    /// or no coverage of a node covers nothing below it. Every block visited is
+    /// removed from the index, so the walk costs no more than storing those blocks
+    /// did, plus a check of each child of the nodes the worker fully covered.
+    fn invalidate_descendants(
+        node: &SharedRadixBlock,
+        worker: WorkerWithDpRank,
+        lookup: &mut WorkerLookup,
+        stale_hashes: &mut Vec<ExternalSequenceBlockHash>,
+    ) {
+        // Push only covered children: a shared node can have many children from
+        // other workers, and those need a check but no clone or allocation.
+        let push_covered = |stack: &mut Vec<SharedRadixBlock>,
+                            children: &FxHashMap<_, SharedRadixBlock>| {
+            stack.extend(
+                children
+                    .values()
+                    .filter(|child| child.borrow().state.current_cutoff(worker) > 0)
+                    .cloned(),
+            );
+        };
+        let mut stack = Vec::new();
+        push_covered(&mut stack, &node.borrow().children);
+        let mut touched = Vec::new();
+        while let Some(child) = stack.pop() {
+            {
+                let mut child_ref = child.borrow_mut();
+                let cutoff = child_ref.state.current_cutoff(worker);
+                if cutoff == child_ref.state.edge.len() {
+                    push_covered(&mut stack, &child_ref.children);
+                }
+                for &(_, hash) in &child_ref.state.edge[..cutoff] {
+                    // The worker may hold the same hash on another node; keep that entry.
+                    if let Entry::Occupied(entry) = lookup.entry(hash)
+                        && Rc::ptr_eq(entry.get(), &child)
+                    {
+                        entry.remove();
+                        stale_hashes.push(hash);
+                    }
+                }
+                child_ref.state.drop_worker(worker);
+            }
+            touched.push(child);
+        }
+        // Prune deepest first, so a parent sees its children already detached.
+        for child in touched.iter().rev() {
+            RadixBlock::prune_unreachable(child);
+        }
     }
 
     fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
@@ -1063,7 +1119,9 @@ mod tests {
     }
 
     #[test]
-    fn removing_detached_node_preserves_replacement() {
+    fn removing_parent_block_releases_descendant_branches() {
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let worker2 = WorkerWithDpRank::new(2, 0);
         let mut tree = RadixTree::new();
         for blocks in [vec![1, 2, 3, 4], vec![1, 2, 3, 9]] {
             tree.apply_event(create_store_event(2, 0, blocks, None))
@@ -1071,16 +1129,15 @@ mod tests {
         }
         tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
             .unwrap();
-        let old_branch = Rc::downgrade(
-            &tree.lookup[&WorkerWithDpRank::new(2, 0)][&ExternalSequenceBlockHash(400)],
-        );
+        let old_branch = Rc::downgrade(&tree.lookup[&worker2][&ExternalSequenceBlockHash(400)]);
         for worker in [1, 2] {
             tree.apply_event(create_remove_event(worker, 1, vec![3]))
                 .unwrap();
         }
-        // The existing descendant-invalidation gap leaves worker 2's old node
-        // in its lookup after the parent has disconnected it.
-        assert!(old_branch.upgrade().is_some());
+        // Losing block 3 ends worker 2's coverage of both branches below it.
+        assert!(old_branch.upgrade().is_none());
+        assert_eq!(tree.tree_size_for_worker(worker2), Some(2));
+
         tree.apply_event(create_store_event(
             1,
             2,
@@ -1095,12 +1152,15 @@ mod tests {
             Some(ExternalSequenceBlockHash(300)),
         ))
         .unwrap();
-        tree.apply_event(create_remove_event(2, 3, vec![4]))
-            .unwrap();
+        // Worker 2's block 4 was already dropped with its parent.
+        assert!(matches!(
+            tree.apply_event(create_remove_event(2, 3, vec![4])),
+            Err(KvCacheEventError::BlockNotFound)
+        ));
 
-        assert!(old_branch.upgrade().is_none());
         let scores = tree.find_matches((1..=4).map(LocalBlockHash).collect(), false);
-        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&4));
+        assert_eq!(scores.scores.get(&worker1), Some(&4));
+        assert_eq!(scores.scores.get(&worker2), Some(&2));
     }
 
     #[test]
@@ -1393,6 +1453,119 @@ mod tests {
         );
     }
 
+    /// Worker 1 holds `[1, 2, 3]` on a node it shares with worker 2, plus a child
+    /// `[4, 5]` that only worker 1 holds; worker 2 also holds a child `[7]`. Removing block 2 for worker 1 leaves the
+    /// shared node alive for worker 2.
+    fn tree_after_mid_edge_removal_above_child() -> RadixTree {
+        let mut tree = RadixTree::new();
+        tree.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
+        tree.apply_event(make_store_event(2, &[1, 2, 3])).unwrap();
+        // Worker 2's branch makes `[1, 2, 3]` internal, so `[4, 5]` becomes a child
+        // node instead of extending the leaf.
+        tree.apply_event(make_store_event_with_parent(2, &[1, 2, 3], &[7]))
+            .unwrap();
+        tree.apply_event(make_store_event_with_parent(1, &[1, 2, 3], &[4, 5]))
+            .unwrap();
+        tree.apply_event(remove_event(1, 3, 0, vec![seq_hash(&[1, 2])]))
+            .unwrap();
+        tree
+    }
+
+    #[test]
+    fn mid_edge_removal_invalidates_descendants_for_that_worker() {
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let worker2 = WorkerWithDpRank::new(2, 0);
+        let mut tree = tree_after_mid_edge_removal_above_child();
+
+        assert_eq!(tree.tree_size_for_worker(worker1), Some(1));
+        assert_eq!(tree.tree_size_for_worker(worker2), Some(4));
+        let scores = tree.find_matches((1..=5).map(LocalBlockHash).collect(), false);
+        assert_eq!(scores.scores.get(&worker1), Some(&1));
+        assert_eq!(scores.scores.get(&worker2), Some(&3));
+
+        // A block below the removed one is no longer a valid store parent.
+        assert!(matches!(
+            tree.apply_event(make_store_event_with_parent(1, &[1, 2, 3, 4, 5], &[6])),
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+
+        // Restoring only the removed blocks must not bring back `[4, 5]`.
+        tree.apply_event(make_store_event_with_parent(1, &[1], &[2, 3]))
+            .unwrap();
+        let scores = tree.find_matches((1..=5).map(LocalBlockHash).collect(), false);
+        assert_eq!(scores.scores.get(&worker1), Some(&3));
+        assert_eq!(tree.tree_size_for_worker(worker1), Some(3));
+    }
+
+    #[test]
+    fn mid_edge_removal_dump_has_worker_specific_parents_and_replays() {
+        let tree = tree_after_mid_edge_removal_above_child();
+        let events = tree.dump_tree_as_events();
+
+        let mut seen = HashSet::new();
+        for event in &events {
+            let KvCacheEventData::Stored(store) = &event.event.data else {
+                panic!("tree dumps must contain only stored events");
+            };
+            if let Some(parent_hash) = store.parent_hash {
+                assert!(
+                    seen.contains(&(event.worker_id, event.event.dp_rank, parent_hash)),
+                    "dump emitted {event:?} without its worker-specific parent"
+                );
+            }
+            for block in &store.blocks {
+                seen.insert((event.worker_id, event.event.dp_rank, block.block_hash));
+            }
+        }
+
+        // The replay may compress edges differently, so compare what it indexes.
+        let mut restored = RadixTree::new();
+        for event in events {
+            restored.apply_event(event).unwrap();
+        }
+        for worker in [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)] {
+            assert_eq!(
+                restored.tree_size_for_worker(worker),
+                tree.tree_size_for_worker(worker)
+            );
+        }
+        for query in [vec![1, 2, 3, 4, 5], vec![1, 2, 3, 7]] {
+            let query = query.into_iter().map(LocalBlockHash).collect::<Vec<_>>();
+            assert_eq!(
+                restored.find_matches(query.clone(), false).scores,
+                tree.find_matches(query, false).scores
+            );
+        }
+    }
+
+    #[test]
+    fn mid_edge_removal_in_one_event_skips_invalidated_descendant_hashes() {
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let mut tree = RadixTree::new();
+        tree.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
+        tree.apply_event(make_store_event(2, &[1, 2, 3])).unwrap();
+        // Worker 2's branch makes `[1, 2, 3]` internal, so `[4, 5]` becomes a child
+        // node instead of extending the leaf.
+        tree.apply_event(make_store_event_with_parent(2, &[1, 2, 3], &[7]))
+            .unwrap();
+        tree.apply_event(make_store_event_with_parent(1, &[1, 2, 3], &[4, 5]))
+            .unwrap();
+
+        // Engines may report a parent before its descendants in one remove event.
+        tree.apply_event(remove_event(
+            1,
+            3,
+            0,
+            vec![
+                seq_hash(&[1, 2]),
+                seq_hash(&[1, 2, 3, 4]),
+                seq_hash(&[1, 2, 3, 4, 5]),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(tree.tree_size_for_worker(worker1), Some(1));
+    }
+
     #[test]
     fn split_keeps_lookup_entries_that_name_another_node() {
         let mut tree = ReferenceTree::default();
@@ -1573,7 +1746,50 @@ mod tests {
                         panic!("seed {seed} step {step}: {overcount}");
                     }
                 }
+                if step % 50 == 0 {
+                    assert_dump_replays(
+                        &tree.tree,
+                        &workers,
+                        &docs,
+                        &format!("seed {seed} step {step}"),
+                    );
+                }
             }
+        }
+    }
+
+    /// Replays `tree`'s dump into a new tree and checks that every event has its
+    /// worker-specific parent and that the replay indexes the same blocks.
+    fn assert_dump_replays(
+        tree: &RadixTree,
+        workers: &[WorkerWithDpRank],
+        queries: &[Vec<u64>],
+        context: &str,
+    ) {
+        let mut restored = RadixTree::new();
+        for event in tree.dump_tree_as_events() {
+            if let Err(error) = restored.apply_event(event.clone()) {
+                panic!("{context}: replaying {event:?} failed with {error:?}");
+            }
+        }
+        for &worker in workers {
+            assert_eq!(
+                restored.tree_size_for_worker(worker).unwrap_or(0),
+                tree.tree_size_for_worker(worker).unwrap_or(0),
+                "{context}: {worker:?} indexes a different number of blocks after replay"
+            );
+        }
+        for query in queries {
+            let query = query
+                .iter()
+                .copied()
+                .map(LocalBlockHash)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                restored.find_matches(query.clone(), false).scores,
+                tree.find_matches(query, false).scores,
+                "{context}: scores differ after replay"
+            );
         }
     }
 }
