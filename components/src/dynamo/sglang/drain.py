@@ -70,9 +70,9 @@ class WorkerDrain:
     def withdrawn(self) -> bool:
         return self._is_stopping() or self._admission_deadline is not None
 
-    async def close(self) -> None:
+    async def close(self, *, unregister: bool = True) -> None:
         if self._close_task is None:
-            self._close_task = asyncio.create_task(self._close())
+            self._close_task = asyncio.create_task(self._close(unregister))
             self._close_task.add_done_callback(self._operation_finished)
         try:
             await asyncio.shield(self._close_task)
@@ -80,7 +80,7 @@ class WorkerDrain:
             await asyncio.shield(self._close_task)
             raise
 
-    async def _close(self) -> None:
+    async def _close(self, unregister: bool) -> None:
         self._shutdown_event.set()
         tasks = set(self._operations)
         for task in tasks:
@@ -89,6 +89,9 @@ class WorkerDrain:
             _, pending = await asyncio.wait(tasks, timeout=5)
             if pending:
                 raise RuntimeError("worker drain controls did not stop before cleanup")
+        # The shared SIGTERM coordinator has already withdrawn every served endpoint.
+        if not unregister:
+            return
         try:
             async with asyncio.timeout(5):
                 await self._endpoint.unregister_endpoint_instance()

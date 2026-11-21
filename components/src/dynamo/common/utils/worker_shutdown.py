@@ -484,6 +484,8 @@ async def serve_endpoint(
         if shutdown.started:
             await shutdown.shutdown_event.wait()
             return
+        if endpoint not in shutdown.endpoints:
+            shutdown.endpoints.append(endpoint)
         if shutdown._metrics is None:
             shutdown._metrics = endpoint.metrics.shutdown_metrics()
         handler = shutdown.wrap(handler)

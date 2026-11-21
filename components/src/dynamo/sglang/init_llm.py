@@ -435,7 +435,9 @@ async def init_decode(
             try:
                 if drain is not None:
                     unregister_worker_drain_controls(handler, runtime)
-                    await drain.close()
+                    await drain.close(
+                        unregister=shutdown is None or not shutdown.started
+                    )
             finally:
                 try:
                     await state_agent.close()
@@ -645,7 +647,9 @@ async def init_prefill(
             try:
                 if drain is not None:
                     unregister_worker_drain_controls(handler, runtime)
-                    await drain.close()
+                    await drain.close(
+                        unregister=shutdown is None or not shutdown.started
+                    )
             finally:
                 try:
                     await state_agent.close()

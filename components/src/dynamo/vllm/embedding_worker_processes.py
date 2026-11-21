@@ -412,6 +412,13 @@ class EmbeddingWorkerProcessGroup:
         ):
             self._monitor_thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
+        for index, child in self.children:
+            if child.returncode != 0:
+                raise RuntimeError(
+                    f"embedding child index={index} pid={child.pid} "
+                    f"did not shut down cleanly (status={child.returncode})"
+                )
+
 
 class EmbeddingEngineCleanupResource:
     """Expose the existing ``cleanup()`` resource contract to WorkerFactory."""

@@ -316,7 +316,17 @@ async def gateway_probe():
                 assert await asyncio.to_thread(child.stdout.readline) == "CHILD_READY\n"
                 assert os.getpgrp() == os.getpid()
                 os.killpg(os.getpgrp(), signal.SIGTERM)
-                await serving
+                if sys.argv[1] == "gateway-wedged":
+                    try:
+                        await serving
+                    except RuntimeError as error:
+                        assert "did not shut down cleanly" in str(error), error
+                    else:
+                        raise AssertionError(
+                            "gateway reported success after killing its child"
+                        )
+                else:
+                    await serving
                 expected = -signal.SIGKILL if sys.argv[1] == "gateway-wedged" else 0
                 assert child.returncode == expected, child.returncode
                 assert unlinked == [True]

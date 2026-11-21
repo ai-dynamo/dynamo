@@ -411,3 +411,9 @@ async def serve_via_gateway_children(
                 shm.unlink()
             except FileNotFoundError:
                 pass
+        for proc in procs:
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"gateway child pid={proc.pid} did not shut down cleanly "
+                    f"(status={proc.returncode})"
+                )

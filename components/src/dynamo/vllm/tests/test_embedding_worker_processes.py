@@ -163,7 +163,7 @@ def test_stat_loggers_are_precreated_on_calling_thread():
 
 
 def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
-    child = Mock(pid=101)
+    child = Mock(pid=101, returncode=0)
     child.poll.side_effect = [None, 0, 0]
     engine_manager = Mock()
     rpc_directory = Mock(name="rpc_directory")
@@ -239,7 +239,7 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     children = []
 
     def create_child(*_args, **_kwargs):
-        child = Mock(pid=200 + len(children))
+        child = Mock(pid=200 + len(children), returncode=0)
         child.poll.side_effect = [None, 0, 0]
         children.append(child)
         return child
