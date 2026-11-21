@@ -104,6 +104,7 @@ class SuiteEntry:
 
     case: str
     hardware: str
+    automatic: bool = False
     status: SuiteException | None = None
     exceptions: dict[str, dict[str, SuiteException]] | None = None
 
@@ -194,6 +195,27 @@ def _dgd_name(case_name: str) -> str:
     digest = hashlib.sha1(case_name.encode(), usedforsecurity=False).hexdigest()[:8]
     prefix = case_name[: _MAX_DGDR_NAME_LENGTH - len(digest) - 1].rstrip("-")
     return f"{prefix}-{digest}"
+
+
+def _normalize_profiler_dgd(rendered: str, case: ComparisonCase) -> str:
+    document = yaml.safe_load(rendered)
+    if not isinstance(document, dict):
+        raise TypeError("profiler output must contain one YAML mapping")
+    metadata = document.get("metadata")
+    if not isinstance(metadata, dict):
+        raise TypeError("profiler output must contain metadata")
+    generated_name = metadata.get("name")
+    if not isinstance(generated_name, str):
+        raise TypeError("profiler output metadata.name must be a string")
+    match = re.fullmatch(r"(?P<prefix>.+)-[0-9a-f]{8}", generated_name)
+    if match is None:
+        raise ValueError(
+            f"profiler output metadata.name has unexpected format: {generated_name}"
+        )
+    row = f"{case.hardware.name}/{case.name}"
+    digest = hashlib.sha1(row.encode(), usedforsecurity=False).hexdigest()[:8]
+    metadata["name"] = f"{match.group('prefix')}-{digest}"
+    return yaml.safe_dump(document, sort_keys=False)
 
 
 def _case_path(name: str) -> Path:
@@ -532,7 +554,16 @@ def load_suite(path: Path) -> list[SuiteEntry]:
         field = f"tests[{index}]"
         unknown = sorted(
             set(item)
-            - {"case", "hardware", "status", "reason", "links", "match", "exceptions"}
+            - {
+                "case",
+                "hardware",
+                "automatic",
+                "status",
+                "reason",
+                "links",
+                "match",
+                "exceptions",
+            }
         )
         if unknown:
             raise ValueError(
@@ -546,12 +577,16 @@ def load_suite(path: Path) -> list[SuiteEntry]:
             raise ValueError(
                 f"{path}: {field} cannot combine case-wide status with exceptions"
             )
+        automatic = item.get("automatic", False)
+        if not isinstance(automatic, bool):
+            raise TypeError(f"{path}: {field}.automatic must be a boolean")
         entries.append(
             SuiteEntry(
                 case=_required_name(item.get("case"), field=f"{field}.case", path=path),
                 hardware=_required_name(
                     item.get("hardware"), field=f"{field}.hardware", path=path
                 ),
+                automatic=automatic,
                 status=status,
                 exceptions=exceptions or None,
             )
@@ -656,7 +691,9 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
             raise RuntimeError(
                 f"v1beta1 profiler succeeded without writing {final_config}"
             )
-        _write_generated_dgd(output_path, final_config.read_text())
+        _write_generated_dgd(
+            output_path, _normalize_profiler_dgd(final_config.read_text(), case)
+        )
 
 
 def _candidate_document(candidate: Any) -> dict[str, Any]:

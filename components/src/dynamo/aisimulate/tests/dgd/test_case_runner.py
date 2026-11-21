@@ -8,8 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-
-from dynamo.aisimulate.tests.dgd.comparison import run_cases
+from comparison import run_cases
 
 pytestmark = [
     pytest.mark.unit,
@@ -223,13 +222,19 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
         yaml.safe_dump(
             {
                 "source": "https://github.com/ai-dynamo/dynamo/issues/8469",
-                "tests": [{"case": "qwen", "hardware": "h200-sxm-8gpu"}],
+                "tests": [
+                    {
+                        "case": "qwen",
+                        "hardware": "h200-sxm-8gpu",
+                        "automatic": True,
+                    }
+                ],
             }
         )
     )
 
     assert run_cases.load_suite(suite) == [
-        run_cases.SuiteEntry(case="qwen", hardware="h200-sxm-8gpu")
+        run_cases.SuiteEntry(case="qwen", hardware="h200-sxm-8gpu", automatic=True)
     ]
     assert run_cases.default_suite_output_root(suite) == (
         run_cases._DEFAULT_OUTPUT_ROOT / "suite"
@@ -384,7 +389,8 @@ def test_profiler_forwards_progress_before_child_exit(
         "if not ready or sys.stdin.readline() != 'continue\\n':\n"
         "    raise RuntimeError('Progress was not forwarded before profiler exit')\n"
         "output = Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
-        "(output / 'final_config.yaml').write_text('kind: DynamoGraphDeployment\\n')\n",
+        "(output / 'final_config.yaml').write_text("
+        "'kind: DynamoGraphDeployment\\nmetadata:\\n  name: vllm-agg-deadbeef\\n')\n",
         stdin=subprocess.PIPE,
     )
     observed = []
@@ -404,7 +410,31 @@ def test_profiler_forwards_progress_before_child_exit(
     run_cases._run_v1_profiler(case)
 
     assert observed == ["Profiler progress\n"]
-    assert (case.generated_dir / "dgd-profiler-v1beta1.yaml").is_file()
+    generated = yaml.safe_load(
+        (case.generated_dir / "dgd-profiler-v1beta1.yaml").read_text()
+    )
+    assert generated["metadata"]["name"] == "vllm-agg-144884bd"
+
+
+def test_normalize_profiler_dgd_stabilizes_generated_name() -> None:
+    case = SimpleNamespace(
+        name="qwen",
+        hardware=SimpleNamespace(name="h200-sxm-8gpu"),
+    )
+
+    normalized = yaml.safe_load(
+        run_cases._normalize_profiler_dgd(
+            "kind: DynamoGraphDeployment\n"
+            "metadata:\n"
+            "  name: vllm-agg-deadbeef\n"
+            "spec:\n"
+            "  components: []\n",
+            case,
+        )
+    )
+
+    assert normalized["metadata"]["name"] == "vllm-agg-144884bd"
+    assert normalized["spec"] == {"components": []}
 
 
 @pytest.mark.timeout(10)

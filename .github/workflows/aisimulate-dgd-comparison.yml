@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AI Simulate DGD comparison
+
+on:
+  workflow_dispatch:
+    inputs:
+      selection:
+        description: Run the comparison suite or selected cases
+        type: choice
+        options:
+          - suite
+          - cases
+        default: suite
+      suite:
+        description: Repository-relative comparison suite used in suite mode
+        type: string
+        default: components/src/dynamo/aisimulate/tests/dgd/comparison/testsuite-issue-8469.yaml
+      hardware:
+        description: Hardware profile used in cases mode
+        type: string
+        default: h100-sxm-2gpu
+      cases:
+        description: Space-separated case names used in cases mode
+        type: string
+        default: qwen3-32b-fp8-trtllm-agg
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-source:
+    runs-on: prod-tester-amd-v2
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 100
+          persist-credentials: false
+      - name: Resolve source with a planner test image
+        id: resolve
+        env:
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            mapfile -t candidates < <(git rev-list --first-parent --max-count=100 origin/main)
+          else
+            candidates=("${GITHUB_SHA}")
+          fi
+          for source_sha in "${candidates[@]}"; do
+            image_tag="${source_sha}-dynamo-planner-test"
+            if aws ecr describe-images \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-ids "imageTag=${image_tag}" >/dev/null 2>&1; then
+              echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+              echo "Using ${ECR_REPOSITORY}:${image_tag}"
+              exit 0
+            fi
+          done
+          echo "No planner test image exists for the selected ref." >&2
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Wait for this commit's Planner image build, then dispatch again." >&2
+          fi
+          exit 2
+
+  compare:
+    needs: resolve-source
+    runs-on: prod-tester-amd-v2
+    timeout-minutes: 120
+    container:
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source.outputs.source_sha }}-dynamo-planner-test
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        PYTHONPATH: ${{ github.workspace }}/components/src:${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+          persist-credentials: false
+      - name: Generate DGD comparisons
+        env:
+          CASES: ${{ inputs.cases }}
+          HARDWARE: ${{ inputs.hardware }}
+          OUTPUT_DIR: components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}
+          SELECTION: ${{ inputs.selection }}
+          SUITE: ${{ inputs.suite }}
+        shell: sh
+        run: |
+          set -efu
+          mkdir -p "${OUTPUT_DIR}"
+          if [ "${SELECTION}" = "suite" ]; then
+            python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+              --suite "${SUITE}" \
+              --output-dir "${OUTPUT_DIR}"
+          else
+            set -- ${CASES}
+            if [ "$#" -eq 0 ]; then
+              echo "At least one case is required in cases mode." >&2
+              exit 2
+            fi
+            python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+              --hardware "${HARDWARE}" \
+              --output-dir "${OUTPUT_DIR}" \
+              "$@"
+          fi
+      - name: Upload generated DGDs and diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aisimulate-dgd-comparison-${{ github.run_id }}
+          path: |
+            components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}/
+            !components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}/**/.cache/**
+          if-no-files-found: warn
+          retention-days: 14

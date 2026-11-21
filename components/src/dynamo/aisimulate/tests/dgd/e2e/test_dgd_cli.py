@@ -4,16 +4,16 @@
 from __future__ import annotations
 
 import json
-import shlex
 import subprocess
 import sys
-from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 from aisim.sweeper.result import SweepResult
+
+from dynamo.aisimulate.tests.dgd.golden import assert_yaml_golden
 
 pytestmark = [
     pytest.mark.e2e,
@@ -29,49 +29,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[7]
 _CASES = tuple(sorted((_E2E_ROOT / "configs").glob("*.yaml")))
 assert _CASES, f"no Recommend-to-DGD cases found under {_E2E_ROOT / 'configs'}"
 _DGD_GOLDEN_CASES = {"aggregated", "disaggregated"}
-
-
-def _assert_dgd_golden(golden: Path, manifests: list[dict[str, Any]]) -> None:
-    expected = golden.read_text() if golden.exists() else None
-    if expected is not None and list(yaml.safe_load_all(expected)) == manifests:
-        return
-
-    proposal = golden.with_name(f"{golden.stem}.new{golden.suffix}")
-    proposal.parent.mkdir(parents=True, exist_ok=True)
-    proposal.write_text(
-        "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
-        "# SPDX-License-Identifier: Apache-2.0\n\n"
-        + yaml.safe_dump_all(manifests, sort_keys=False)
-    )
-    paths = [golden, proposal]
-    golden_arg, proposal_arg = (
-        shlex.quote(
-            str(
-                path.relative_to(_REPO_ROOT)
-                if path.is_relative_to(_REPO_ROOT)
-                else path
-            )
-        )
-        for path in paths
-    )
-    review_source = golden_arg if expected is not None else "/dev/null"
-    diff = "\n".join(
-        unified_diff(
-            (expected or "").splitlines(),
-            proposal.read_text().splitlines(),
-            fromfile=review_source,
-            tofile=proposal_arg,
-            lineterm="",
-        )
-    )
-    pytest.fail(
-        f"DGD golden is missing or differs: {golden}\n"
-        f"Actual CLI output was written to {proposal}; the golden was not changed.\n"
-        f"Review this proposal: diff -u {review_source} {proposal_arg}\n"
-        f"Accept only after reviewing this file: mv {proposal_arg} {golden_arg}\n"
-        f"Then rerun this case.\n\n{diff}",
-        pytrace=False,
-    )
 
 
 def _assert_dgd_outputs(
@@ -107,7 +64,12 @@ def _assert_dgd_outputs(
 
     if config_path.stem in _DGD_GOLDEN_CASES:
         golden = _E2E_ROOT / "goldens" / config_path.name
-        _assert_dgd_golden(golden, manifests)
+        assert_yaml_golden(
+            golden,
+            "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
+            "# SPDX-License-Identifier: Apache-2.0\n\n"
+            + yaml.safe_dump_all(manifests, sort_keys=False),
+        )
 
     for index, (candidate, dgd) in enumerate(zip(selected, manifests, strict=True)):
         assert dgd["apiVersion"] == "nvidia.com/v1beta1"

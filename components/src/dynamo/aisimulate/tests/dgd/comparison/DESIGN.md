@@ -283,13 +283,19 @@ Composed inputs and Candidates are useful for explaining a diff, but are not sta
 goldens. No custom report schema is defined; process output and the test framework carry execution
 status.
 
-Exact Sweeper goldens require reproducible search inputs and search ordering. Until that is proven,
-CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
-a stochastic search an exact-diff gate.
+Rows marked `automatic: true` are exact-diff gates. Their case inputs explicitly pin the search
+algorithm and seed, while the Planner test image pins AISimulate's model metadata, performance
+inputs, sampler, and renderers. Each pytest case writes to `tmp_path`, compares parsed YAML against
+the owning suite's checked-in goldens, and leaves those goldens unchanged. A missing or changed
+golden produces an adjacent `.new.yaml` proposal plus a unified diff and acceptance command in the
+failure output.
 
-The comparison runner is a manual corpus-generation tool. Its unit tests cover composition and
-failure isolation. The automatic public Recommend-to-DGD coverage lives in the
-[DGD CLI E2E table](../e2e/test_dgd_cli.py), using small fixed searches.
+The full comparison runner remains available for manual corpus generation, including rows whose
+historical search is not yet stable enough for an exact gate. Its unit tests cover composition and
+failure isolation. The automatic model corpus complements the public
+[DGD CLI E2E table](../e2e/test_dgd_cli.py), which uses tiny fixed searches. DGDR v1beta2 Request,
+Run, Candidate, and Job orchestration is covered separately by
+`tests/deploy/test_dgdr_v1beta2.py`.
 
 ## Non-goals
 

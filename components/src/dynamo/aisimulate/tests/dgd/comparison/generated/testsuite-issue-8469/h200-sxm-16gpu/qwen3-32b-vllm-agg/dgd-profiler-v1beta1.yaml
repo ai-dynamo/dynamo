@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-9a07dd18
+  name: vllm-agg-a089825c
 spec:
   components:
   - name: Frontend
@@ -23,7 +23,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmDecodeWorker
+  - name: worker
     type: worker
     replicas: 3
     podTemplate:
@@ -44,17 +44,15 @@ spec:
           - --data-parallel-size
           - '1'
           - --kv-cache-dtype
-          - auto
+          - bfloat16
           - --max-num-seqs
           - '512'
           - --max-num-batched-tokens
-          - '3036'
+          - '3072'
           - --model
           - Qwen/Qwen3-32B
           - --served-model-name
           - Qwen/Qwen3-32B
-          - --max-model-len
-          - '3548'
           resources:
             limits:
               nvidia.com/gpu: '2'
