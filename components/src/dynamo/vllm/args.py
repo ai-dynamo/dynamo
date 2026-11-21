@@ -9,6 +9,7 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
+from vllm.config import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import (
     AsyncEngineArgs,
@@ -287,6 +288,66 @@ def configure_rl_logprobs_mode(config: Config) -> None:
         )
 
 
+def validate_gms_graph_archive(
+    dynamo_config: Config, engine_config: AsyncEngineArgs
+) -> None:
+    """Refuse configurations a graph-archive engine cannot run."""
+    if not dynamo_config.gms_graph_archive:
+        if dynamo_config.gms_graph_archive_config:
+            raise ValueError("--gms-graph-archive-config requires --gms-graph-archive")
+        return
+    for refused, reason in (
+        (engine_config.load_format != "gms", "requires --load-format gms"),
+        (not dynamo_config.gms_shadow_mode, "requires --gms-shadow-mode"),
+        (
+            engine_config.num_gpu_blocks_override is None,
+            "requires --num-gpu-blocks-override: the engine that saves and the "
+            "engines that load must allocate the same KV cache",
+        ),
+        (
+            engine_config.enforce_eager
+            or engine_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE,
+            "has no CUDA graphs to archive with --enforce-eager or cudagraph_mode NONE",
+        ),
+        (
+            engine_config.compilation_config.mode != CompilationMode.NONE,
+            "requires torch.compile off (--compilation-config '{\"mode\": 0}'): "
+            "a loaded archive cannot rebuild compiled code",
+        ),
+        (
+            engine_config.tensor_parallel_size > 1
+            and not engine_config.disable_custom_all_reduce,
+            "requires --disable-custom-all-reduce with tensor parallelism: custom "
+            "all-reduce registers its buffers when a capture ends, and a load does "
+            "not capture",
+        ),
+        (
+            engine_config.data_parallel_size != 1,
+            "does not support data parallelism yet",
+        ),
+        (
+            engine_config.pipeline_parallel_size != 1,
+            "does not support pipeline parallelism",
+        ),
+        (
+            engine_config.enable_dbo,
+            "does not support dual-batch overlap (--enable-dbo)",
+        ),
+        (
+            engine_config.speculative_config is not None
+            or engine_config.spec_method is not None,
+            "does not support speculative decoding",
+        ),
+        (
+            dynamo_config.headless,
+            "does not support --headless (multi-node) engines yet",
+        ),
+        (dynamo_config.embedding_worker, "does not support embedding workers"),
+    ):
+        if refused:
+            raise ValueError(f"--gms-graph-archive {reason}")
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
@@ -305,6 +366,7 @@ def cross_validate_config(
             "--gms-shadow-mode requires --load-format gms. "
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
+    validate_gms_graph_archive(dynamo_config, engine_config)
 
     if dynamo_config.embedding_worker_processes > 1:
         if engine_config.data_parallel_size != 1:

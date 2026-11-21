@@ -648,3 +648,50 @@ To bound how long a restored engine waits for the published weights layout befor
 ```
 
 The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.
+
+To map every allocation of a tag at a fixed address, pass `gms_fixed_va_windows`: a `[base, size]` window in bytes per tag (integers or `"0x..."` strings, both multiples of the device's VMM granularity):
+
+```bash
+--model-loader-extra-config '{"gms_fixed_va_windows": {"weights": ["0x420000000000", 549755813888], "kv_cache": ["0x4a0000000000", 274877906944]}}'
+```
+
+Each tag's manager is created with that window (see [Fixed-VA windows](#fixed-va-windows)), so an attached allocation has the same address in every engine, and device pointers recorded by one engine (for example in CUDA graphs) are valid in another. Only the vLLM worker reads the option. With scratch KV (shadow mode), the `kv_cache` window is reserved when the worker initializes its device, before any kernel runs; without scratch KV it is reserved when the KV cache is created, which the driver may not honor.
+
+### CUDA Graph Archive (vLLM)
+
+`dynamo.vllm --gms-graph-archive DIR` lets shadow engines keep a [Foundry](https://github.com/foundry-org/foundry) CUDA-graph archive in `DIR`, a directory shared by the engine containers of one failover pod (for example a pod-local `emptyDir` mounted into both). A replacement shadow then rebuilds its graphs from the archive instead of capturing each size next to the engine that is serving. It needs a Foundry build with the vLLM plugin (the `foundry` entry point in `vllm.general_plugins`), which also writes the completion and refusal records named below; `dynamo.vllm` refuses the flag without it. `integrations/vllm/graph_archive.py` decides per engine:
+
+| Engine | Mode |
+|---|---|
+| Attaches read-only, no archive yet, none saved before for this identity | **save**: Foundry captures and writes the graphs to `DIR/.staging/<key>.<token>/`; once the engine started and every rank finished, the directory is renamed to `DIR/<key>/` |
+| Any engine, archive committed for its identity | **load**: Foundry rebuilds the graphs from `DIR/<key>/` |
+| May write the weights (the first engine) and no archive yet, or another engine is saving, or the archive was set aside | **native** capture, Foundry off |
+
+- The key is a digest of the engine arguments that decide which graphs exist, the GMS loader options, the Foundry settings, the package versions and the ranks. It only names the directory: Foundry's own identity check at load is what refuses a mismatched archive.
+- An archive Foundry refuses is set aside: Foundry writes `rank_<r>/load_refused.json` when a rank refuses to load and `rank_<r>/save_refused.json` when it refuses to save, and the engine fails to start. A record, `DIR/.quarantine/<key>.<token>/reason.json`, holds each refusing rank's reason and the engine's error; later engines capture natively, and no new save is attempted for that identity. A refused save's staging directory becomes that `.quarantine` directory. A committed archive stays in place, because another engine may be loading it.
+- A start in load or save mode that fails without a refusal (or an engine that dies while loading or saving) keeps the archive, since the failure may have nothing to do with it; a failed save's partial directory is dropped so the next engine saves again. After 3 such failures in a row the archive is set aside anyway, with the list of failures in `reason.json`, so a crash loop does not retry it forever. The count is kept in `DIR/.failures/` and reset by any engine that starts in load or save mode; an engine found dead by an engine whose own load then succeeds died before that start and is not counted.
+- A set-aside lasts as long as the directory, so with the operator's `emptyDir` until the pod is recreated. To start over in a directory you manage, delete `DIR/<key>/` and `DIR/.quarantine/<key>.*`.
+- Archive engines attach read-only, with load diff (`gms_reconstruction_mode: "load_diff"`) and fixed-VA windows (`gms_fixed_va_windows`; by default below Foundry's default region at `0x600000000000`: weights `0x420000000000` + 512 GiB, KV cache `0x4a0000000000` + 256 GiB). An archive engine that is granted the write lock instead (no published weights, e.g. after a GMS server restart) refuses to start, and its next start captures natively, so it can publish the weights. The same applies to an engine that may write the weights and dies while loading.
+- Engines coordinate through `flock` on files in `DIR`, so `DIR` must be writable and on a filesystem whose locks the engine containers share (an `emptyDir` is), and the engines must run as the same user, because the lock files are created for their owner only. An engine that cannot write `DIR` or open its lock files captures natively. Engines in different pods do not share a pod-local `DIR`, so each pod keeps its own archive.
+- Archive engines run with torch.compile off and, with tensor parallelism, vLLM's custom all-reduce off; the serving engine needs the same arguments as its shadows. The effect of that on steady-state throughput has not been measured.
+
+#### Foundry Settings for GLM-5.2
+
+`--gms-graph-archive-config` is one Foundry TOML for every engine, so SAVE and LOAD always use the same switches (Foundry refuses a LOAD whose switches differ from the SAVE). Measured with GLM-5.2 NVFP4, TP4 + expert parallelism, on 4 GB200 GPUs, vLLM 0.33, through `dynamo.vllm` (time from engine start to a parked shadow; each value is one start):
+
+| Foundry switches | SAVE | LOAD | Native read-only shadow |
+|---|---|---|---|
+| defaults | 103.4 s, 106.4 s | 85.2 s, 87.2 s | 87.3 s, 89.3 s |
+| `skip_cudagraph_memory_profile = true` | 92.6 s | **76.2 s** | (no Foundry) |
+
+- **Set `skip_cudagraph_memory_profile = true`.** At Foundry's defaults a loading engine still runs the CUDA-graph memory estimate, and LOAD is only about 2 s faster than native capture. With the switch, LOAD parks 11–13 s sooner than a native shadow; vLLM's engine initialization takes 11.8 s instead of 24.6–25.0 s. It needs `--num-gpu-blocks-override`, which `--gms-graph-archive` requires anyway.
+- **Keep `skip_capture_warmup` off (the default) for GLM-5.2.** Without the warm-up forwards, the sparse-attention indexer allocates about 124 MiB lazily inside a graph break during capture, and Foundry refuses the SAVE (`changed the allocator state while capturing`) on every rank. The archive is then set aside and every shadow captures natively.
+
+Example:
+
+```toml
+base_addr = 0x600000000000
+region_size = "512GB"
+scratch_space_size = "2GB"
+skip_cudagraph_memory_profile = true
+```

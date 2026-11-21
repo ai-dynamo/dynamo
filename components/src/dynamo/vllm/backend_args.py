@@ -366,6 +366,31 @@ class DynamoVllmArgGroup(ArgGroup):
                 "Requires --load-format=gms."
             ),
         )
+        add_argument(
+            g,
+            flag_name="--gms-graph-archive",
+            env_var="DYN_VLLM_GMS_GRAPH_ARCHIVE",
+            default=None,
+            help=(
+                "Directory, shared by the engines of one deployment, where GMS "
+                "shadow engines keep a Foundry CUDA-graph archive. The first "
+                "read-only shadow saves its graphs there; later shadows rebuild "
+                "them from it instead of capturing. Requires --gms-shadow-mode, "
+                "Foundry in the image, --num-gpu-blocks-override and torch.compile "
+                "off."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--gms-graph-archive-config",
+            env_var="DYN_VLLM_GMS_GRAPH_ARCHIVE_CONFIG",
+            default=None,
+            help=(
+                "Foundry settings file (TOML) for --gms-graph-archive, without "
+                "mode and workspace_root, which are set per engine. Default: "
+                "Foundry's defaults."
+            ),
+        )
 
         # Benchmark / self-profiling
         add_argument(
@@ -661,6 +686,8 @@ class DynamoVllmConfig(ConfigBase):
 
     # GMS shadow mode
     gms_shadow_mode: bool = False
+    gms_graph_archive: Optional[str] = None
+    gms_graph_archive_config: Optional[str] = None
 
     # Extra served names beyond the primary, parsed from --served-model-name.
     # None (not []) since ConfigBase copies class defaults by reference.

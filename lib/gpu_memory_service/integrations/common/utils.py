@@ -66,6 +66,26 @@ def get_gms_ro_connect_timeout_ms(extra_config: dict) -> int | None:
     return timeout_ms
 
 
+# model_loader_extra_config key: {"<tag>": [base, size], ...}. Every mapping of
+# that tag is placed in one fixed address window, so device pointers captured
+# in one engine (e.g. into CUDA graphs) are valid in another.
+FIXED_VA_WINDOWS_OPTION = "gms_fixed_va_windows"
+
+
+def get_gms_fixed_va_window(extra_config: dict, tag: str) -> tuple[int, int] | None:
+    """``(base, size)`` for ``tag`` from the loader options, or None (driver-chosen
+    addresses). Values may be integers or strings such as ``"0x420000000000"``."""
+    window = (extra_config.get(FIXED_VA_WINDOWS_OPTION) or {}).get(tag)
+    if window is None:
+        return None
+    if len(window) != 2:
+        raise ValueError(
+            f"{FIXED_VA_WINDOWS_OPTION}[{tag!r}] must be [base, size], got {window!r}"
+        )
+    base, size = (int(v, 0) if isinstance(v, str) else int(v) for v in window)
+    return base, size
+
+
 def strip_gms_model_loader_config(load_config, load_format: str):
     """Copy a loader config with GMS-only keys removed for backend loaders."""
     extra_config = getattr(load_config, "model_loader_extra_config", {}) or {}
