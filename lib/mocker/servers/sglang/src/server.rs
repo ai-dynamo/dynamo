@@ -64,6 +64,9 @@ impl fmt::Display for ServerMode {
     }
 }
 
+/// SGLang release this mocker matches, checked by `tests/sidecar.rs::parity_with_live_engine`.
+pub const ENGINE_VERSION: &str = "0.5.23";
+
 /// Discovery metadata and deterministic generation settings for the service.
 #[derive(Clone, Debug)]
 pub struct MockerServerConfig {
@@ -308,7 +311,7 @@ impl SglangMockerService {
             max_context_length: config.context_length,
             max_total_num_tokens: Some(to_u64(discovery.max_total_num_tokens)),
             num_reserved_tokens: 0,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: ENGINE_VERSION.to_string(),
             internal_states: Vec::new(),
             host: config.bootstrap_host.clone(),
             // The Mocker serves no native HTTP API.

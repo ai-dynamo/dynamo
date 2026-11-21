@@ -5,4 +5,4 @@
 
 mod server;
 
-pub use server::{MockerServerConfig, ServerMode, TrtllmMockerService};
+pub use server::{ENGINE_VERSION, MockerServerConfig, ServerMode, TrtllmMockerService};

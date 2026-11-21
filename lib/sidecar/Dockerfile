@@ -272,6 +272,18 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
 FROM scratch AS sidecar-trtllm-image-tests
 COPY --from=trtllm-image-test-builder /out/tests/ /
 
+# ---- CI-only: mocker parity tests --------------------------------------------
+# Each binary runs inside its engine's upstream image; see
+# lib/mocker/servers/parity/run.py.
+FROM builder-base AS mocker-parity-test-builder
+ARG TARGETARCH
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    bash lib/mocker/servers/parity/build.sh
+
+FROM scratch AS mocker-parity-tests
+COPY --from=mocker-parity-test-builder /out/tests/ /
+
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime
 
