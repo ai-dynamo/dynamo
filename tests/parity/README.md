@@ -5,27 +5,56 @@ SPDX-License-Identifier: Apache-2.0
 
 # Parser parity / conformance moved to frontend-crates
 
-The cross-implementation parity harness and the HTML table generator that used to live here (`generate_parity_table.py`, the engine adapters, fixtures, and the `tests/parity/**` Python tests) have moved to the standalone **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)** repo, under `conformance/`. Dynamo now consumes the published `dynamo-parsers` crate instead of an in-tree `lib/parsers`, so parser conformance is owned and run there. Nothing in this directory is generated or run from dynamo anymore.
+The cross-implementation parity harness, fixture authoring and HTML table generator are owned by **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**, under `conformance/`. Dynamo consumes the parser crates and checks their external conformance integration through the standalone consumer in [`unified/`](unified/Cargo.toml).
 
-See `conformance/README.md` in frontend-crates for the full layout. Quick reference:
+## Verify the external Rust runner
 
-## Rendering the tables (from a frontend-crates checkout)
+The consumer pins both dependencies to commit `cb366dae149aa72abcd9f26aafab07699beee26f` from [frontend-crates PR #532](https://github.com/ai-dynamo/frontend-crates/pull/532):
 
-- **v1 parity HTML** (the old Dynamo parity table — v1 parser code + v1 Dynamo-synced fixtures): `conformance/utils/render_table_v1.sh` — writes `conformance/utils/.stage/tests/parity/PARITY_v1.html`.
-- **v2 conformance HTML** (bridge table: `TC batch (v1)` + reasoning tabs use v1 parser code; `TC batch-on-stream (v2)` + `TC stream (v2)` use the parser-v2 code): `conformance/utils/render_table_v2.sh` — writes `conformance/CONFORMANCE.html` (accepts `--output PATH`). No engines needed.
+| Crate | Version |
+| --- | --- |
+| `dynamo-conformance-fixtures-v2` | `0.1.0` |
+| `dynamo-parsers-v2` | `0.10.7` |
 
-## Running the conformance tests (from a frontend-crates checkout)
+The runner and parser candidate are taken from the same immutable Git revision and a committed lockfile. Parser version `0.10.7` identifies this unpublished candidate; it does not change the root workspace parser pin. This independent Cargo workspace reads the authored corpus from Cargo dependency checkout and keeps the serving dependency graph separate.
 
-Use the repo's pinned toolchain (Rust 1.96.1 via rustup):
+Run the integration tests from the Dynamo root:
 
 ```bash
-# v1 batch tool-calling parity, all families:
-cargo test --locked -p dynamo-conformance-fixtures-v2 --test parity_toolcalling
-# v2 batch-on-stream and stream:
-cargo test --locked -p dynamo-conformance-fixtures-v2 --test parity_toolcalling_batch_via_stream
-cargo test --locked -p dynamo-conformance-fixtures-v2 --test parity_toolcalling_stream
-# whole workspace (what frontend-crates CI runs):
-cargo test --workspace
+cargo test --locked --manifest-path tests/parity/unified/Cargo.toml --all-targets -- --nocapture
 ```
 
-These run pure-Rust against the fixtures (no vLLM/SGLang engine launch). The dynamo-side parser tests that consume the crate still live in dynamo at `lib/llm/tests/` (`test_jail.rs`, `test_reasoning_parser.rs`, `test_streaming_tool_parsers.rs`, etc.).
+The native test runs eight existing Qwen3 cases covering reasoning, visible text, one and two tool calls, guided output, and prefilled reasoning. The runner compares authored GOLDEN, every valid UTF-8 two-chunk split, stream/batch output, and seven adjacent stream pairs. A second test checks explicit unsupported reporting for generation constraints. A separate test process registers a parser implemented here that returns tool syntax as visible text and requires the runner to report a GOLDEN mismatch with failure status.
+
+The root Rust test job in `.github/workflows/pre-merge.yml` runs this consumer's formatting, Clippy and tests. These are selected integration cases; see frontend-crates' `conformance/README.md` for the complete corpus, capture and report workflows.
+
+## Select families from the command line
+
+Use the [command wrapper](unified/run.sh) from the Dynamo root:
+
+```bash
+./tests/parity/unified/run.sh list-v2-parsers
+./tests/parity/unified/run.sh qwen3
+./tests/parity/unified/run.sh glm
+./tests/parity/unified/run.sh all
+```
+
+The wrapper builds and invokes the local `dynamo-conformance` binary using the pinned external runner. It works from another directory when invoked by its absolute path. The equivalent direct Cargo command is:
+
+```bash
+cargo run --release --locked --manifest-path tests/parity/unified/Cargo.toml --bin dynamo-conformance -- all
+```
+
+`list-v2-parsers` lists built-in Unified v2 families and aliases directly from the parser registry. `glm` selects `glm47`; registry aliases such as `qwen3_coder`, `nemotron3` and `harmony` select their canonical family's corpus. `all` runs every canonical built-in Unified family once and continues after a family error. It does not include legacy tool-only or reasoning-only parsers. Missing or unreadable corpora are errors, never silently skipped.
+
+A family selection runs every active authored case with default split, stream/batch and stream isolation checks. This is broader than the eight-case Qwen3 integration test. The command prints counts per family, individual failures and unsupported cases, and a final family summary. Exit status is 0 for a passing run, help or listing; 1 for conformance failures or missing coverage; and 2 for invalid arguments. Unsupported cases are a separate verdict by default; `--fail-on-unsupported` makes them blocking. Cargo build failures retain Cargo's exit status.
+
+With this pin, `all` selects 4,516 authored cases across 15 canonical Unified families: 4,373 pass, 10 are unsupported, and 133 GOLDEN failures occur across 14 case IDs. The isolation checks report zero failures; two families pass all selected cases and 13 fail. The failures include quoted control-marker cases and argument representation mismatches. The runner reports them without changing authored GOLDEN expectations, and `all` returns status 1. Passing the small integration tests certifies only their selected cases.
+
+Structural-tag generation constraints are unsupported by the upstream runner. To fail on those explicit unsupported records as well as parser mismatches and corpus errors, use:
+
+```bash
+./tests/parity/unified/run.sh all --fail-on-unsupported
+```
+
+The compatibility spelling `--allow-unsupported` retains the default policy; it does not make unsupported cases pass. These commands use local fixtures and need no model server or GPU. This Rust family selector does not implement a Python parser adapter, external Rust adapter loading, or JUnit output. `cargo test` itself accepts test-name filters; family selection belongs to this command.
