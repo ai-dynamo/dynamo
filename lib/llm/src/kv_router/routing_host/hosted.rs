@@ -12,11 +12,10 @@ pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRe
 }
 
 /// `ids`, the workers free to take a request, without those that lack the taints it
-/// requires. `eligible` is `None` for a request that requires none. When none is left the
-/// request fails as on a KV router: as overloaded when a routable worker has the taints and
-/// is busy, with no endpoint otherwise.
+/// requires. `eligible` is `None` for a request that requires none. The caller has checked
+/// that a routable worker has the taints, so when none is left those workers are busy and
+/// the request is refused as overloaded, as on a KV router.
 pub(super) fn with_required_taints<'a>(
-    router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ids: &'a [u64],
     eligible: Option<&HashSet<u64>>,
 ) -> Result<Cow<'a, [u64]>, Error> {
@@ -28,21 +27,12 @@ pub(super) fn with_required_taints<'a>(
         .copied()
         .filter(|worker_id| eligible.contains(worker_id))
         .collect();
-    if !free.is_empty() {
-        return Ok(Cow::Owned(free));
-    }
-    let routable = router.client.instance_ids_avail();
-    if routable
-        .iter()
-        .any(|worker_id| eligible.contains(worker_id))
-    {
+    if free.is_empty() {
         return Err(crate::kv_router::map_scheduler_error(
             KvSchedulerError::AllEligibleWorkersOverloaded,
         ));
     }
-    Err(required_taints_error(format_args!(
-        "no routable worker advertises"
-    )))
+    Ok(Cow::Owned(free))
 }
 
 /// The error a KV router returns when no worker has the taints a request requires.
@@ -153,8 +143,7 @@ impl RoutingHost {
                             if let Some(worker_id) = preferred_worker {
                                 return Ok(worker_id);
                             }
-                            let candidates =
-                                with_required_taints(&self.inner, ids, taint_eligible)?;
+                            let candidates = with_required_taints(ids, taint_eligible)?;
                             picker
                                 .select(&candidates, None, &hosted_request(request.content()))
                                 .map_err(|failure| Error::new(KvSchedulerError::from(failure)))
@@ -220,9 +209,18 @@ impl RoutingHost {
         // Set for a request that requires taints under a policy that honors them. Such a
         // request is selected among these workers only, and dispatched to no other.
         let taint_eligible = self.workers_with_required_taints(request.content());
-        if taint_eligible.as_ref().is_some_and(HashSet::is_empty) {
+        // Tested here, not where the free workers are filtered: with no worker free the
+        // client reports all workers busy before that filter runs.
+        if let Some(eligible) = &taint_eligible
+            && !self
+                .inner
+                .client
+                .instance_ids_avail()
+                .iter()
+                .any(|worker_id| eligible.contains(worker_id))
+        {
             return Err(required_taints_error(format_args!(
-                "no {phase} worker advertises"
+                "no routable {phase} worker advertises"
             )));
         }
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();

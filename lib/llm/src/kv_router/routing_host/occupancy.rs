@@ -46,7 +46,7 @@ impl HostedOccupancy {
 
         let request = super::hosted::hosted_request(request);
         let candidates = router.with_selectable_worker_ids(|ids| {
-            super::hosted::with_required_taints(router, ids, taint_eligible).map(Cow::into_owned)
+            super::hosted::with_required_taints(ids, taint_eligible).map(Cow::into_owned)
         })??;
         let selection = self
             .state
