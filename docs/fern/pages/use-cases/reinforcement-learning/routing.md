@@ -55,10 +55,28 @@ python -m dynamo.frontend \
 
 Treat `5` seconds as a starting value. Tune it against the observed gap between routing and usable KV events. Confirm that equivalent prompts use the same model, tokenizer, cache salt, LoRA identity, and token sequence; the router cannot recover reuse hidden by the request representation.
 
-If one cache-rich worker receives too much work, compare overlap-credit decay or a lower overlap credit while holding the request schedule fixed. Use `--load-aware` as the control that accounts for active load without crediting prefix reuse:
+If one cache-rich worker receives too much work, compare overlap-credit decay or a lower overlap credit while holding the request schedule fixed. Use [load-only routing](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset) as the control that accounts for active load without crediting prefix reuse. Save this policy as `load-only.yaml`; for disaggregated serving, give `prefill` and `decode` the same entry as `aggregated`:
+
+```yaml
+router:
+  use_kv_events: false
+  router_track_active_blocks: true
+  router_track_prefill_tokens: true
+  router_assume_kv_reuse: false
+  use_remote_indexer: false
+  serve_indexer: false
+  shared_cache_type: none
+  router_predicted_ttl_secs: null
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    parameters:
+      overlap_score_credit: 0
+      shared_cache_multiplier: 0
+```
 
 ```bash
-python -m dynamo.frontend --load-aware
+python -m dynamo.frontend --router-policy-config load-only.yaml
 ```
 
 ## Map the Setting to the Framework

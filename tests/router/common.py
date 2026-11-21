@@ -1673,9 +1673,7 @@ def _test_router_overload_529(
     frontend_port: int,
     test_payload: dict,
     blocks_threshold: float | str | None = 0.2,
-    tokens_threshold: int | str | None = None,
     tokens_threshold_frac: float | str | None = None,
-    router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
 ):
     """Test that 529 is returned when all workers are busy, and verify rejection metrics.
@@ -1695,9 +1693,7 @@ def _test_router_overload_529(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         blocks_threshold: Active decode blocks threshold for the router (default 0.2)
-        tokens_threshold: Active prefill tokens threshold for the router
         tokens_threshold_frac: Fractional active prefill tokens threshold for the router
-        router_queue_threshold: Router queue threshold, or "None" to disable queueing
         max_tokens: Output token count for generated overload requests
 
     Raises:
@@ -1713,9 +1709,7 @@ def _test_router_overload_529(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold=blocks_threshold,
-        tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
-        router_queue_threshold=router_queue_threshold,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -1740,9 +1734,7 @@ def _test_disagg_router_overload_529(
     frontend_port: int,
     test_payload: dict,
     blocks_threshold: float | str | None = None,
-    tokens_threshold: int | str | None = None,
     tokens_threshold_frac: float | str | None = None,
-    router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
     store_backend: str = "etcd",
     request_plane: str = "nats",
@@ -1757,7 +1749,7 @@ def _test_disagg_router_overload_529(
 
     Two configurations exercise the two pools (driven by the thresholds the
     caller passes):
-    - Prefill rejection: low ``tokens_threshold`` (active-prefill-tokens),
+    - Prefill rejection: low ``tokens_threshold_frac`` (active-prefill-tokens),
       decode threshold disabled. Gates the prefill pool — the path that was
       previously a silent no-op.
     - Decode rejection: low ``blocks_threshold`` (active-decode-blocks), prefill
@@ -1777,9 +1769,7 @@ def _test_disagg_router_overload_529(
         namespace=decode_workers.namespace,
         store_backend=store_backend,
         blocks_threshold=blocks_threshold,
-        tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
-        router_queue_threshold=router_queue_threshold,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
     ):
@@ -1819,7 +1809,7 @@ def _test_router_threshold_none_disables_rejection(
     """Test that explicit CLI "None" thresholds disable busy-based rejection end to end.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
-    Starts the frontend with literal CLI "None" values for all three threshold knobs,
+    Starts the frontend with literal CLI "None" values for both threshold flags,
     verifies the /busy_threshold API reports nulls, then sends overload-shaped traffic and
     confirms no request is rejected with 529 and the frontend rejection metric stays at 0.
 
@@ -1845,7 +1835,6 @@ def _test_router_threshold_none_disables_rejection(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold="None",
-        tokens_threshold="None",
         tokens_threshold_frac="None",
         extra_env={
             "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
@@ -3602,7 +3591,7 @@ def _test_busy_threshold_endpoint(
     """
     # Initial thresholds - we need to start with these so the monitor is created
     initial_active_decode_blocks_threshold = 0.9
-    initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
+    initial_active_prefill_tokens_threshold_frac = 0.5
 
     with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request,
@@ -3611,7 +3600,7 @@ def _test_busy_threshold_endpoint(
         engine_workers.namespace,
         store_backend,
         blocks_threshold=initial_active_decode_blocks_threshold,
-        tokens_threshold=initial_active_prefill_tokens_threshold,
+        tokens_threshold_frac=initial_active_prefill_tokens_threshold_frac,
         request_plane=request_plane,
         extra_env={
             "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
@@ -3670,9 +3659,9 @@ def _test_busy_threshold_endpoint(
                         == initial_active_decode_blocks_threshold
                     ), f"Expected initial active_decode_blocks_threshold={initial_active_decode_blocks_threshold}: {data}"
                     assert (
-                        data.get("active_prefill_tokens_threshold")
-                        == initial_active_prefill_tokens_threshold
-                    ), f"Expected initial active_prefill_tokens_threshold={initial_active_prefill_tokens_threshold}: {data}"
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == initial_active_prefill_tokens_threshold_frac
+                    ), f"Expected initial active_prefill_tokens_threshold_frac={initial_active_prefill_tokens_threshold_frac}: {data}"
                     logger.info(
                         f"POST /busy_threshold (get) response: status={response.status}, data={data}"
                     )

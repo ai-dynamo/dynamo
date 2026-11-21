@@ -64,10 +64,20 @@ python -m dynamo.frontend \
   --http-port 8000 \
   --router-mode kv \
   --router-host-cache-hit-weight 1.0 \
-  --router-prefill-load-scale 10
+  --router-policy-config router-policy.yaml
 ```
 
-The router tuning flags are optional; see [Configuration](#configuration).
+`router-policy.yaml` sets the prefill load scale of the default cost function:
+
+```yaml
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    parameters:
+      prefill_load_scale: 10
+```
+
+The router tuning settings are optional; see [Configuration](#configuration).
 
 > [!NOTE]
 > The `--kv-transfer-config` and `--kv-events-config` JSON is vLLM-native — Dynamo passes engine flags through unchanged. `cpu_bytes_to_use` (16 GiB in this example) is the total pinned host memory for the CPU tier, shared across the engine's workers rather than per rank.
@@ -88,10 +98,10 @@ connector options, see
 
 **Frontend side (Dynamo router):**
 
-| Flag | Env var | Default | Description |
-| --- | --- | --- | --- |
-| `--router-host-cache-hit-weight` | `DYN_ROUTER_HOST_CACHE_HIT_WEIGHT` | `0.75` | Credit for CPU-tier prefix overlap relative to GPU overlap. |
-| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | How strongly cache overlap affects worker selection. |
+| Setting | Default | Description |
+| --- | --- | --- |
+| `--router-host-cache-hit-weight` (`DYN_ROUTER_HOST_CACHE_HIT_WEIGHT`) | `0.75` | Credit for CPU-tier prefix overlap relative to GPU overlap. |
+| `prefill_load_scale` [policy parameter](../../router/configuration-and-tuning.md#configure-the-default-policy) | `1.0` | How strongly cache overlap affects worker selection. |
 
 Tune these values for your workload only after [verifying](#verification) that
 CPU-tier events reach the router. See

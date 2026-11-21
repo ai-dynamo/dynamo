@@ -290,13 +290,22 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 
 #### Prerequisites: tune the priority queue
 
-The router queue is disabled by default. To make priority effects visible under benchmark load, set `--router-queue-threshold`; `0.0` is the most sensitive value and queues once all eligible workers have active prefill tokens.
+The router queue is disabled by default. To make priority effects visible under benchmark load, give the router one policy class with a prefill busy threshold; `prefill_busy_threshold_frac: 0.0` is the most sensitive value and queues once all eligible workers have active prefill tokens. The `fcfs` queue policy lets `priority` reorder waiting requests.
+
+```yaml
+# priority-queue.yaml
+policy_classes:
+  - name: default
+    queue_policy: fcfs
+    quantum: 1
+    prefill_busy_threshold_frac: 0.0
+```
 
 ```bash
 # Launch the router with a sensitive priority queue threshold.
 python -m dynamo.frontend \
     --router-mode kv \
-    --router-queue-threshold 0.0
+    --router-policy-config priority-queue.yaml
 ```
 
 #### Running the benchmark

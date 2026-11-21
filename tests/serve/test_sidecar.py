@@ -149,7 +149,6 @@ KV_ROUTING_ENV = {
     "DYN_ENDPOINT": "generate",
     "DYN_ROUTER_USE_KV_EVENTS": "true",
     "DYN_ROUTER_MODE": "kv",
-    "DYN_ROUTER_TEMPERATURE": "0",
     "DYN_ROUTER_MIN_INITIAL_WORKERS": "2",
     "DYN_REQUEST_PLANE": "tcp",
     "MAX_MODEL_LEN": "2048",

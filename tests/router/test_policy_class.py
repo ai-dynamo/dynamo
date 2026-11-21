@@ -186,7 +186,6 @@ def _run_case(
         mocker.namespace,
         "--discovery-backend",
         "etcd",
-        "--load-aware",
         "--router-policy-config",
         str(config_path),
         "--router-min-initial-workers",
