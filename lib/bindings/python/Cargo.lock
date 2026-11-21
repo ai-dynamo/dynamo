@@ -2637,15 +2637,17 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "10.4.1"
+version = "10.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4966b8af6e83e8a320406a394fdb14cbb7450d3c76d4a3fd723bf804fb4351a9"
+checksum = "f19978746d8472c58fb380960e51c72aa963d30e0b441227f9d8d15961854eb7"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "chrono",
  "dynamo-protocols 10.0.1",
  "dynamo-tokenizers",
  "either",
+ "memchr",
  "minijinja",
  "minijinja-contrib",
  "serde",
@@ -2923,9 +2925,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "4.3.0"
+version = "4.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e739aa01c02ecd4c2fdea59eb4b3367bd5da6e35f82c1cd36854ce886f543b62"
+checksum = "3a733cf7d77e9ce3c12e38b514ef50ffdcb68f0e7c54b2ea6d384a88338e8b14"
 dependencies = [
  "aho-corasick",
  "anyhow",
