@@ -14,6 +14,7 @@ from tests.deploy.dgdr_utils import (
     ManagedDGDR,
     build_dgdr,
     kubectl,
+    kubectl_read,
     run_lifecycle,
     total_worker_gpus,
     unique_name,
@@ -160,7 +161,7 @@ async def test_dgdr_validation_crd_registers_shortname(
 ) -> None:
     crd = await dgdr_manager.get_crd()
     assert "dgdr" in (crd.spec.names.short_names or [])
-    result = kubectl(
+    result = kubectl_read(
         "get", "dgdr", "-n", dgdr_manager.config.namespace, "--ignore-not-found"
     )
     assert result.returncode == 0, result.stderr
