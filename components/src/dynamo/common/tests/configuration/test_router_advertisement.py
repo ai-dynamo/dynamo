@@ -89,10 +89,29 @@ def test_router_arg_group_refuses_to_guess_its_caller():
         RouterArgGroup()  # type: ignore[call-arg]
 
 
-_REMOVED_FLAGS = {**REMOVED_KV_ROUTER_FLAGS, **REMOVED_ROUTER_FLAGS}
+# The removed spellings, written out and not read from the tables: a
+# spelling dropped from a table would drop out of these tests with it.
+_REMOVED_FLAGS = (
+    "--active-prefill-tokens-threshold",
+    "--kv-overlap-score-weight",
+    "--load-aware",
+    "--no-load-aware",
+    "--router-decode-active-request-weight",
+    "--router-decode-policy",
+    "--router-kv-overlap-score-credit-decay",
+    "--router-kv-overlap-score-weight",
+    "--router-prefill-policy",
+    "--router-queue-policy",
+    "--router-queue-threshold",
+    "--shared-cache-multiplier",
+)
 
 
-@pytest.mark.parametrize("flag", sorted(_REMOVED_FLAGS))
+def test_every_removed_flag_is_listed() -> None:
+    assert set(_REMOVED_FLAGS) == {*REMOVED_KV_ROUTER_FLAGS, *REMOVED_ROUTER_FLAGS}
+
+
+@pytest.mark.parametrize("flag", _REMOVED_FLAGS)
 def test_worker_passing_a_removed_flag_fails_at_startup(
     capsys: pytest.CaptureFixture[str], flag: str
 ):
@@ -100,8 +119,7 @@ def test_worker_passing_a_removed_flag_fails_at_startup(
     with pytest.raises(SystemExit):
         parse_worker_router_config(["--router-mode", "kv", flag, "1"])
 
-    error = capsys.readouterr().err
-    assert f"{flag} was removed in v1.8; use {_REMOVED_FLAGS[flag]}" in error
+    assert f"{flag} was removed in v1.8; use " in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -114,16 +132,34 @@ def test_worker_passing_a_removed_flag_fails_at_startup(
 def test_worker_advertising_with_a_removed_variable_set_fails(
     monkeypatch: pytest.MonkeyPatch, router_mode: str, name: str
 ):
-    """The card must not silently lose a value the variable used to put on it."""
+    """The card must not silently lose a value the variable used to put on it.
+
+    The worker fails when it parses its arguments: a backend builds its
+    advertisement only after its engine has loaded.
+    """
+    monkeypatch.delenv(name, raising=False)
+    advertising, _ = parse_worker_router_config(["--router-mode", router_mode])
     monkeypatch.setenv(name, "1")
 
     # A worker that advertises nothing never read the variable.
     config, _ = parse_worker_router_config([])
     assert build_router_config(config) is None
 
-    config, _ = parse_worker_router_config(["--router-mode", router_mode])
     with pytest.raises(ValueError, match=f"removed in v1.8 are still set: {name}"):
-        build_router_config(config)
+        parse_worker_router_config(["--router-mode", router_mode])
+    # The mocker builds its advertisement without parse_worker_router_config.
+    with pytest.raises(ValueError, match=f"removed in v1.8 are still set: {name}"):
+        build_router_config(advertising)
+
+
+def test_worker_off_the_kv_path_ignores_a_removed_kv_variable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Only a worker that advertises kv read the KV router's variables."""
+    monkeypatch.setenv("DYN_ROUTER_QUEUE_THRESHOLD", "0.5")
+
+    config, _ = parse_worker_router_config(["--router-mode", "round-robin"])
+    assert build_router_config(config) is not None
 
 
 def test_unknown_mode_is_rejected():

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional, Protocol, Sequence
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.groups.kv_router_args import (
+    REMOVED_KV_ROUTER_ENV_VARS,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
@@ -48,8 +49,8 @@ _ROUTER_FIELDS: tuple[str, ...] = (
 DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
 
 # Removed in v1.8. The flag fails when parsed. The variable fails startup when
-# it is still set: in the frontend's validation, and when a worker builds its
-# advertisement.
+# it is still set: in the frontend's validation, and when a worker parses its
+# arguments or builds its advertisement.
 # TODO(v1.9): Remove the variable's check. Keep the flag's entry while
 # --active-prefill-tokens-threshold-frac exists: without it argparse reads
 # the removed flag as an abbreviation of that one.
@@ -447,7 +448,15 @@ def parse_worker_router_config(
     parser = argparse.ArgumentParser(add_help=False)
     add_worker_router_arguments(parser)
     namespace, remainder = parser.parse_known_args(list(argv))
-    return WorkerRouterConfig.from_cli_args(namespace), remainder
+    config = WorkerRouterConfig.from_cli_args(namespace)
+    # The variables build_router_config rejects, checked here as well: a
+    # backend builds its advertisement only after its engine has loaded.
+    if config.router_mode is not None:
+        removed = dict(REMOVED_ROUTER_ENV_VARS)
+        if config.router_mode == "kv":
+            removed.update(REMOVED_KV_ROUTER_ENV_VARS)
+        reject_removed_env_vars(removed, removed_in="v1.8")
+    return config, remainder
 
 
 def register_worker_router_help(parser: argparse.ArgumentParser) -> None:
