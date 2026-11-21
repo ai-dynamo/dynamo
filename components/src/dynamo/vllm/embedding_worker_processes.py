@@ -35,6 +35,7 @@ from vllm.v1.engine.utils import bind_engine_zmq_listeners, launch_core_engines
 from vllm.v1.executor import Executor
 
 from dynamo.common.utils.worker_shutdown import (
+    check_child_exit,
     child_shutdown_environment,
     child_shutdown_fds,
 )
@@ -365,13 +366,14 @@ class EmbeddingWorkerProcessGroup:
             deadline = time.monotonic() + timeout
             self.begin_shutdown()
             _terminate_processes(self.children, timeout / 2, signal_children=False)
+            engine_error = None
             if self.engine_manager is not None:
                 try:
                     self.engine_manager.shutdown(
                         timeout=max(0.0, deadline - time.monotonic())
                     )
-                except Exception:
-                    logger.exception("Failed to shut down shared embedding EngineCore")
+                except Exception as error:
+                    engine_error = error
 
             self.zmq_listeners.cleanup()
 
@@ -393,12 +395,17 @@ class EmbeddingWorkerProcessGroup:
         ):
             self._monitor_thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
-        for index, child in self.children:
-            if child.returncode != 0:
-                raise RuntimeError(
-                    f"embedding child index={index} pid={child.pid} "
-                    f"did not shut down cleanly (status={child.returncode})"
+        try:
+            if engine_error is not None:
+                active = sys.exception()
+                if active is None or isinstance(active, asyncio.CancelledError):
+                    raise engine_error
+                active.add_note(
+                    f"Shared embedding EngineCore shutdown failed: {engine_error!r}"
                 )
+        finally:
+            for _index, child in self.children:
+                check_child_exit(child)
 
 
 class EmbeddingEngineCleanupResource:

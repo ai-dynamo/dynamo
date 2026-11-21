@@ -32,27 +32,29 @@ extern "C" fn on_signal(sig: libc::c_int) {
     // Only async-signal-safe operations here. Forked engine processes inherit
     // the handler but must never write to the parent's watchdog.
     let saved_errno = errno::errno();
-    IN_HANDLER.fetch_add(1, SeqCst);
-    let fd = WRITE_FD.load(SeqCst);
-    if fd >= 0 && PID.load(SeqCst) == unsafe { libc::getpid() } {
-        let received = monotonic_ns();
-        if RECEIVED_NS.swap(received, SeqCst) != 0 {
-            unsafe { libc::_exit(70) }
-        }
-        // Only the first signal writes, into an otherwise empty socket.
-        let timestamp = received.to_ne_bytes();
-        let mut offset = 0;
-        while offset < timestamp.len() {
-            let bytes = &timestamp[offset..];
-            let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-            if count > 0 {
-                offset += count as usize;
-            } else if errno::errno().0 != libc::EINTR {
+    if PID.load(SeqCst) == unsafe { libc::getpid() } {
+        IN_HANDLER.fetch_add(1, SeqCst);
+        let fd = WRITE_FD.load(SeqCst);
+        if fd >= 0 {
+            let received = monotonic_ns();
+            if RECEIVED_NS.swap(received, SeqCst) != 0 {
                 unsafe { libc::_exit(70) }
             }
+            // Only the first signal writes, into an otherwise empty socket.
+            let timestamp = received.to_ne_bytes();
+            let mut offset = 0;
+            while offset < timestamp.len() {
+                let bytes = &timestamp[offset..];
+                let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+                if count > 0 {
+                    offset += count as usize;
+                } else if errno::errno().0 != libc::EINTR {
+                    unsafe { libc::_exit(70) }
+                }
+            }
         }
+        IN_HANDLER.fetch_sub(1, SeqCst);
     }
-    IN_HANDLER.fetch_sub(1, SeqCst);
     // Preserve CPython's normal callback dispatch and event-loop wakeup fd.
     unsafe { pyo3::ffi::PyErr_SetInterruptEx(sig) };
     errno::set_errno(saved_errno);

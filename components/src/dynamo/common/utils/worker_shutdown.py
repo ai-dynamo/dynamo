@@ -9,6 +9,8 @@ import math
 import os
 import signal
 import struct
+import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Coroutine
@@ -68,6 +70,17 @@ def _parent_deadline_fd() -> int | None:
     except ValueError:
         # Fail closed on receipt of a signal just as for a closed descriptor.
         return -1
+
+
+def check_child_exit(child: subprocess.Popen) -> None:
+    """Report a reaped child's failure without replacing a startup or serving error."""
+    if child.returncode == 0:
+        return
+    message = f"worker child pid={child.pid} did not shut down cleanly (status={child.returncode})"
+    error = sys.exception()
+    if error is None or isinstance(error, asyncio.CancelledError):
+        raise RuntimeError(message)
+    error.add_note(message)
 
 
 def child_shutdown_environment() -> dict[str, str]:

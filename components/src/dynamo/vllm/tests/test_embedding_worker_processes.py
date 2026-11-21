@@ -165,7 +165,8 @@ def test_stat_loggers_are_precreated_on_calling_thread():
     assert wrappers[0](_vllm_config(), 7) is logger
 
 
-def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
+@pytest.mark.parametrize("engine_fails", [False, True])
+def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch, engine_fails):
     child = Mock(pid=101, returncode=0)
     child.poll.side_effect = [None, 0, 0]
     engine_manager = Mock()
@@ -180,7 +181,12 @@ def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
         previous_rpc_base_path="/tmp/original-rpc",
         zmq_listeners=Mock(),
     )
-    group.cleanup(timeout=2.0)
+    if engine_fails:
+        engine_manager.shutdown.side_effect = RuntimeError("EngineCore stop failed")
+        with pytest.raises(RuntimeError, match="EngineCore stop failed"):
+            group.cleanup(timeout=2.0)
+    else:
+        group.cleanup(timeout=2.0)
     group.cleanup(timeout=2.0)
 
     child.terminate.assert_called_once()

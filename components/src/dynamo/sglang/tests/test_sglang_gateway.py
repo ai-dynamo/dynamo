@@ -349,7 +349,7 @@ class FakeProc:
 
     def terminate(self):
         self.terminated = True
-        self.returncode = -15
+        self.returncode = 0  # The child handles the forwarded signal and exits cleanly.
 
     def wait(self, timeout=None):
         self.waited = True

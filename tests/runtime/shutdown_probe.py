@@ -107,7 +107,7 @@ def embedding_processes():
         "vllm.usage.usage_lib": {"UsageContext": object},
         "vllm.v1.engine.async_llm": {"AsyncLLM": object},
         "vllm.v1.engine.utils": {
-            "get_engine_zmq_addresses": None,
+            "bind_engine_zmq_listeners": None,
             "launch_core_engines": None,
         },
         "vllm.v1.executor": {"Executor": object},
@@ -245,6 +245,7 @@ def embedding_probe():
                     engine_manager=None,
                     rpc_directory=resource,
                     previous_rpc_base_path=None,
+                    zmq_listeners=SimpleNamespace(cleanup=lambda: None),
                 )
                 group.start_monitor()
                 asyncio.run(python_probe(group))
