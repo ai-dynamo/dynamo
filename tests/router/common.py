@@ -738,21 +738,29 @@ def _test_session_affinity(
         asyncio.run(run_test())
 
 
+def _plain_log(frontend) -> str:
+    """The frontend's log without the color codes it writes."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", frontend.read_logs())
+
+
 def _test_router_mode_policy_type(
     worker_groups: list,
     block_size: int,
     request,
     frontend_port: int,
     test_payload: dict[str, Any],
-    policy_type: str,
+    policy_type: str | None,
     num_requests: int,
+    router_policy_config: str | None = None,
 ) -> tuple[list[dict[str, int]], str]:
     """Send one session's requests through ``--router-mode <policy_type>``.
 
-    ``worker_groups`` is the aggregated workers, or the prefill and the decode
-    workers of one namespace. The requests share no prompt prefix and run one
-    at a time, so neither cache overlap nor load prefers a worker. Returns the
-    workers that served each request, by role, and the frontend's log.
+    With ``router_policy_config`` and no ``policy_type``, the frontend takes
+    only the policy file. ``worker_groups`` is the aggregated workers, or the
+    prefill and the decode workers of one namespace. The requests share no
+    prompt prefix and run one at a time, so neither cache overlap nor load
+    prefers a worker. Returns the workers that served each request, by role,
+    and the frontend's log.
     """
     with FrontendRouterProcess(
         request,
@@ -761,6 +769,7 @@ def _test_router_mode_policy_type(
         worker_groups[-1].namespace,
         "etcd",
         router_mode=policy_type,
+        router_policy_config=router_policy_config,
         min_initial_workers=worker_groups[-1].num_workers,
     ) as frontend:
         frontend_url = f"http://localhost:{frontend_port}"
@@ -807,8 +816,7 @@ def _test_router_mode_policy_type(
             return worker_ids
 
         worker_ids = asyncio.run(send_requests())
-        # The frontend colors its log lines.
-        return worker_ids, re.sub(r"\x1b\[[0-9;]*m", "", frontend.read_logs())
+        return worker_ids, _plain_log(frontend)
 
 
 def _test_remote_indexer_decisions(
@@ -1751,6 +1759,7 @@ def _test_router_overload_529(
     tokens_threshold_frac: float | str | None = None,
     router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
+    router_policy_config: str | None = None,
 ):
     """Test that 529 is returned when all workers are busy, and verify rejection metrics.
 
@@ -1773,6 +1782,7 @@ def _test_router_overload_529(
         tokens_threshold_frac: Fractional active prefill tokens threshold for the router
         router_queue_threshold: Router queue threshold, or "None" to disable queueing
         max_tokens: Output token count for generated overload requests
+        router_policy_config: Policy file that selects each role's policy
 
     Raises:
         AssertionError: If success/rejection counts or metrics don't meet expectations
@@ -1790,6 +1800,7 @@ def _test_router_overload_529(
         tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
         router_queue_threshold=router_queue_threshold,
+        router_policy_config=router_policy_config,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -2746,6 +2757,7 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
     prefill_zone_b_id: int,
     shared_namespace: str,
     request_plane: str = "tcp",
+    router_policy_config: str | None = None,
 ):
     """Validate required topology constraints derived from pinned prefill workers."""
     with KVRouterProcess(
@@ -2754,6 +2766,7 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         frontend_port,
         namespace=decode_workers.namespace,
         request_plane=request_plane,
+        router_policy_config=router_policy_config,
         min_initial_workers=decode_workers.num_workers,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
@@ -4093,7 +4106,7 @@ def _test_disagg_per_role_router_modes(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     router_policy_config: str | None = None,
-):
+) -> str:
     """Validate that prefill and decode tiers can run different router modes.
 
     Without ``router_policy_config``, the prefill mockers advertise
@@ -4110,7 +4123,8 @@ def _test_disagg_per_role_router_modes(
        round-robin produces — KV routing would converge there too.
 
     Assertion 2 is the one that fails if the per-role override is ignored and
-    the whole pipeline silently runs in a single mode.
+    the whole pipeline silently runs in a single mode. Returns the frontend's
+    log.
     """
     num_requests = 4
 
@@ -4124,7 +4138,7 @@ def _test_disagg_per_role_router_modes(
         router_mode=None if router_policy_config is not None else "round-robin",
         router_policy_config=router_policy_config,
         min_initial_workers=decode_workers.num_workers,
-    ):
+    ) as frontend:
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
 
@@ -4242,6 +4256,7 @@ def _test_disagg_per_role_router_modes(
             f"{set(converged)} (KV) while decode spread across "
             f"{set(decode_ids)} (round-robin)"
         )
+        return _plain_log(frontend)
 
 
 def _test_disagg_per_role_session_affinity(

@@ -5259,6 +5259,13 @@ async fn builtin_host_with_recorded_dispatch(
     namespace: &str,
     mode: RouterMode,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    host_with_recorded_dispatch(namespace, non_kv_policy(mode)).await
+}
+
+async fn host_with_recorded_dispatch(
+    namespace: &str,
+    policy: RoutingPolicy,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -5274,13 +5281,70 @@ async fn builtin_host_with_recorded_dispatch(
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
-    let host = RoutingHost::builder(client, non_kv_policy(mode))
+    let host = RoutingHost::builder(client, policy)
         .load_context(load_context)
         .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
         .build()
         .await
         .unwrap();
     (host, dispatch, worker_id, runtime)
+}
+
+/// A role that runs hosted because of its policy would have had a KV router filter workers
+/// by the taints a request requires. It fails such a request; the router modes, which never
+/// filtered, still dispatch it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_role_hosted_by_its_policy_fails_a_request_that_requires_taints() {
+    let round_robin = || HostedPolicy::for_mode(RouterMode::RoundRobin).unwrap();
+    for (index, (policy, rejects)) in [
+        (round_robin(), false),
+        (round_robin().rejecting_required_taints(), true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (host, dispatch, worker_id, runtime) = host_with_recorded_dispatch(
+            &format!("hosted-required-taints-{index}"),
+            RoutingPolicy::Hosted(policy),
+        )
+        .await;
+        let mut input = request();
+        input.routing_mut().routing_constraints = Some(RoutingConstraints {
+            required_taints: HashSet::from(["dynamo.topology/zone=a".to_string()]),
+            ..Default::default()
+        });
+        let dispatched = match host.generate(Context::new(input)).await {
+            Ok(mut stream) => {
+                while stream.next().await.is_some() {}
+                vec![worker_id]
+            }
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.downcast_ref::<KvSchedulerError>(),
+                        Some(KvSchedulerError::NoEndpoints)
+                    ),
+                    "{error:#}"
+                );
+                Vec::new()
+            }
+        };
+        assert_eq!(dispatched.is_empty(), rejects);
+        assert_eq!(*dispatch.worker_ids.lock().unwrap(), dispatched);
+
+        // Preferred taints only bias a KV router's scores, so they are no reason to fail.
+        let mut input = request();
+        input.routing_mut().routing_constraints = Some(RoutingConstraints {
+            preferred_taints: HashMap::from([("dynamo.topology/zone=a".to_string(), 0.5)]),
+            ..Default::default()
+        });
+        let mut stream = host.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        drop(host);
+        runtime.shutdown();
+    }
 }
 
 /// A request in `phase` whose client has already gone away, ready to be handed

@@ -146,6 +146,21 @@ impl RoutingHost {
                 "worker ID required for {phase} request in Direct routing mode"
             )));
         }
+        if let RoutingPolicy::Hosted(hosted) = &self.policy
+            && hosted.rejects_required_taints()
+            && request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.routing_constraints.as_ref())
+                .is_some_and(|constraints| constraints.has_hard_constraints())
+        {
+            // The error a KV router returns when no worker has the taints.
+            return Err(Error::new(KvSchedulerError::NoEndpoints).context(format!(
+                "the request requires worker taints, which {} routing does not filter by; \
+                 select a worker-selection policy that scores workers for the {phase} role",
+                hosted.label()
+            )));
+        }
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         // Declared before worker selection because the session-affinity wait is
         // the first stage that can spend it.

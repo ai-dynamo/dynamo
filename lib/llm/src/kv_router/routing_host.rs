@@ -336,6 +336,9 @@ pub struct HostedPolicy {
     /// occupancy state, and it names the policy in the transport's logs. For a policy type
     /// it is a stand-in, least-loaded or round-robin.
     mode: RouterMode,
+    /// Fail a request that requires worker taints, which no hosted picker filters by. Set
+    /// for a role that runs hosted because of its policy; the router modes ignore taints.
+    rejects_required_taints: bool,
 }
 
 impl HostedPolicy {
@@ -346,6 +349,7 @@ impl HostedPolicy {
             fresh_picker: Arc::new(move || crate::kv_router::hosted_picker(mode)),
             policy_type: None,
             mode,
+            rejects_required_taints: false,
         })
     }
 
@@ -366,7 +370,17 @@ impl HostedPolicy {
             fresh_picker: Arc::new(fresh_picker),
             policy_type: Some(policy_type.into()),
             mode,
+            rejects_required_taints: false,
         }
+    }
+
+    pub(crate) fn rejecting_required_taints(mut self) -> Self {
+        self.rejects_required_taints = true;
+        self
+    }
+
+    pub(crate) fn rejects_required_taints(&self) -> bool {
+        self.rejects_required_taints
     }
 
     pub(crate) fn picker(&self) -> &HostedWorkerPicker {
