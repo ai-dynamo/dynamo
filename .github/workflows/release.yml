@@ -35,7 +35,7 @@ on:
         type: string
         default: ''
       containers:
-        description: 'Container subset to publish (all|none|csv of vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,sidecar). Partial rc re-publishes supported.'
+        description: 'Container subset to publish (all|none|csv of vllm-runtime,vllm-efa,vllm-enterprise,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,sidecar). Partial rc re-publishes supported.'
         required: false
         type: string
         default: all
@@ -278,7 +278,7 @@ jobs:
               esac
             done
           }
-          validate_subset containers "${CONTAINER_SUBSET:-all}" "vllm-runtime,vllm-efa,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,sidecar"
+          validate_subset containers "${CONTAINER_SUBSET:-all}" "vllm-runtime,vllm-efa,vllm-enterprise,sglang-runtime,sglang-efa,trtllm-runtime,trtllm-efa,frontend,operator,planner,sidecar"
           validate_subset wheels "${WHEEL_SUBSET:-all}" "ai-dynamo,ai-dynamo-runtime"
           validate_subset helm "${HELM_SUBSET:-all}" "platform"
           if [[ ! "${CRATE_SUBSET:-all}" =~ ^[A-Za-z0-9_,-]*$ ]]; then
@@ -549,9 +549,12 @@ jobs:
           sudo mv crane /usr/local/bin/
           crane version
 
+      # $/ loads the action from the workflow commit: older release branches ship a copy with different inputs.
       - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ env.ECR_REGISTRY }}
 
       - name: Login to NGC
         env:
@@ -591,6 +594,7 @@ jobs:
               "operator|${COMMIT_SHA}-operator"
               "planner|${COMMIT_SHA}-dynamo-planner"
               "sidecar|${COMMIT_SHA}-dynamo-sidecar"
+              "vllm-enterprise|${COMMIT_SHA}-vllm-runtime-enterprise"
             )
           fi
 
@@ -806,6 +810,30 @@ jobs:
               SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-dynamo-sidecar"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-sidecar:${NGC_VERSION_TAG}"
               copy_image "${SOURCE}" "${TARGET}" "dynamo-sidecar:${NGC_VERSION_TAG}" || true
+            fi
+
+            # ---- vLLM enterprise runtime (NIM base; enterprise-ci.yml builds it on
+            # release-branch pushes as <sha>-vllm-runtime-enterprise). Under "all" it
+            # is skipped when absent, because release branches cut before that build
+            # existed never produce it; an explicit selection still requires it. ----
+            if want vllm-enterprise; then
+              echo ""
+              echo "=== vLLM Enterprise Runtime Image ==="
+              SOURCE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${COMMIT_SHA}-vllm-runtime-enterprise"
+              ENT_SKIP=false
+              if [ "${SUBSET}" = "all" ] && ! crane manifest "${SOURCE}" >/dev/null 2>"${RUNNER_TEMP}/enterprise-manifest.err"; then
+                if grep -qE "MANIFEST_UNKNOWN|NAME_UNKNOWN" "${RUNNER_TEMP}/enterprise-manifest.err"; then
+                  ENT_SKIP=true
+                else
+                  echo "::warning::could not probe ${COMMIT_SHA}-vllm-runtime-enterprise ($(cat "${RUNNER_TEMP}/enterprise-manifest.err")); attempting the copy"
+                fi
+              fi
+              if [ "${ENT_SKIP}" = "true" ]; then
+                echo "skip vllm-runtime-enterprise: not built for ${COMMIT_SHA}"
+              else
+                TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime-enterprise:${NGC_VERSION_TAG}"
+                copy_image "${SOURCE}" "${TARGET}" "vllm-runtime-enterprise:${NGC_VERSION_TAG}" || true
+              fi
             fi
           else
             # Optional nightly images — operator, planner, frontend, sidecar and the
@@ -1653,10 +1681,16 @@ jobs:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
+      # $/ loads the action from the workflow commit: older release branches ship a copy with different inputs.
       - name: Login to ECR
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ env.ECR_REGISTRY }}
+
+      - name: Resolve crate build image
         run: |
           set -euo pipefail
-          aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
           # Nightly builds tag the toolchain image with the suffix BEFORE -test
           # (<sha>-dynamo-runtime-nightly-test, shared-build-image.yml); a missing
           # nightly build must not fall through to the post-merge image at the
@@ -1671,7 +1705,7 @@ jobs:
         run: |
           set -uo pipefail
           # Report-only: is the crate build image in ECR? Never fails (publish step errors if absent).
-          # Single source of truth: the tag the login step derived into ECR_IMAGE.
+          # Single source of truth: the tag the resolve step derived into ECR_IMAGE.
           TAG="${ECR_IMAGE##*:}"
           {
             echo "### Crate build image availability (ECR)"

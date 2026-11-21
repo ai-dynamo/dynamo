@@ -22,7 +22,7 @@ def _create_runtime(
     discovery_backend: str,
     request_plane: str,
     event_plane: str | None,
-    response_plane: str = "tcp",
+    response_plane: str | None = None,
 ) -> tuple[Any, Any]:
     from dynamo.common.utils.runtime import create_runtime as _create_runtime
 
@@ -171,7 +171,6 @@ def _validate_supported_snapshot_config(config: Any) -> None:
             ),
             (not config.encode_endpoint, "--encode-endpoint"),
             (not config.frontend_decoding, "--frontend-decoding"),
-            (not config.has_connector("kvbm"), "--connector kvbm"),
         )
         if not supported
     ]

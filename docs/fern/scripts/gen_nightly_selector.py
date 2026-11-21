@@ -77,7 +77,7 @@ MAX_TAGS = 120
 # be advertised.
 NIGHTLY_LEDGER_REQUIRED_PACKAGES = ["ai-dynamo", "ai-dynamo-runtime"]
 # Packages the ledger advertises when that night published them. Not required:
-# kvbm is deprecated with removal targeted for v1.7.0, and a package that stops
+# kvbm was removed in v1.8.0, and a package that stops
 # publishing must drop out of the Packages column rather than freeze the ledger.
 NIGHTLY_LEDGER_OPTIONAL_PACKAGES = ["kvbm"]
 # Every package the ledger can advertise, the required ones first.
@@ -97,20 +97,22 @@ class Framework:
     backend: str  # selector id, matches InstallBackend
     image: str  # NGC image stem
     key: str  # top-level container/context.yaml key
-    device: str  # sub-key holding runtime_image_tag
+    # Sub-keys that held runtime_image_tag, newest first. A CUDA move renames
+    # the key, and the nightlies built before the move still carry the old one.
+    devices: tuple[str, ...]
     version_re: "re.Pattern[str]"  # rejects pre-layout base-image tags
 
 
 FRAMEWORKS = [
-    Framework("sglang", "sglang", "sglang", "cuda13.0", re.compile(r"^v?\d+\.\d+")),
+    Framework("sglang", "sglang", "sglang", ("cuda13.0",), re.compile(r"^v?\d+\.\d+")),
     Framework(
         "trtllm",
         "tensorrtllm",
         "trtllm",
-        "cuda13.1",
+        ("cuda13.4", "cuda13.1"),
         re.compile(r"^\d+\.\d+\.\d+(rc\d+)?"),
     ),
-    Framework("vllm", "vllm", "vllm", "cuda13.0", re.compile(r"^v?\d+\.\d+\.\d+")),
+    Framework("vllm", "vllm", "vllm", ("cuda13.0",), re.compile(r"^v?\d+\.\d+\.\d+")),
 ]
 
 MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
@@ -150,8 +152,10 @@ def backend_version(doc: dict, fw: Framework) -> str | None:
     node = doc.get(fw.key)
     if not isinstance(node, dict):
         return None
-    device = node.get(fw.device)
-    if not isinstance(device, dict):
+    device = next(
+        (node[key] for key in fw.devices if isinstance(node.get(key), dict)), None
+    )
+    if device is None:
         return None
     tag = device.get("runtime_image_tag")
     if not isinstance(tag, str) or not fw.version_re.match(tag):
@@ -243,7 +247,7 @@ def published_nightly_packages() -> dict[str, set[str]] | None:
 
     A required package missing from the index would leave every ledger row
     unverifiable, so that fails the run. An optional package drops out of the
-    Packages column instead: kvbm's removal is targeted for v1.7.0, and its index
+    Packages column instead: kvbm was removed in v1.8.0, and its index
     going away must not stop every docs publish.
     """
     published: dict[str, set[str]] = {}

@@ -12,14 +12,27 @@ on:
   schedule:
     - cron: '0 9 * * *'  # Every day at 1:00 AM PST (09:00 UTC), after the main nightly
   workflow_dispatch:
+  # Release-branch pushes build <sha>-vllm-runtime-enterprise in ECR, so Stage
+  # Release RC can publish vllm-runtime-enterprise:<version>-rc.N from the same
+  # commit as the other rc images. The nightly NGC publish stays schedule/dispatch.
+  push:
+    branches:
+      - 'release/*.*.*'
+    paths-ignore:
+      - 'docs/**'
+      - 'fern/**'
+      - '**.md'
+      - '**.rst'
 
 permissions:
   contents: read
   # compliance-extract downloads the previous run's compliance artifact.
   actions: read
 
+# Release-branch pushes key on the SHA so each commit builds its own image in
+# parallel, as post-merge does; queued pushes would otherwise cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -83,8 +96,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
-      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       image_tag_suffix: '-enterprise'
       cuda_version: '["13.0"]'
@@ -106,8 +118,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       image_tag_suffix: '-enterprise'
       cuda_version: '["13.0"]'
@@ -126,8 +137,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: 4-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
-      amd_runner_labels: '["gpu-4","amd64","v2","us-west-2"]'
+      amd_runner_labels: '["gpu-4","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       image_tag_suffix: '-enterprise'
       cuda_version: '["13.0"]'

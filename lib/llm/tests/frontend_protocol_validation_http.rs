@@ -14,8 +14,8 @@ use dynamo_llm::{
 use dynamo_runtime::{
     config::environment_names::llm::{
         DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-        DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+        DYN_ENABLE_ANTHROPIC_API, DYN_ENABLE_STREAMING_TOOL_DISPATCH,
+        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
     },
     error::{DynamoError, ErrorType as DynamoErrorType},
 };
@@ -1540,6 +1540,192 @@ async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
         }
 
         assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+fn chat_allowed_tools_request(mode: &str, function: &str, stream: bool) -> Value {
+    json!({
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Look up the answer"}],
+        "tools": [
+            {"type": "function", "function": {"name": "lookup"}},
+            {"type": "function", "function": {"name": "delete"}}
+        ],
+        "tool_choice": {
+            "type": "allowed_tools",
+            "allowed_tools": {"mode": mode, "tools": [
+                {"type": "function", "function": {"name": function}}
+            ]}
+        },
+        "stream": stream
+    })
+}
+
+fn chat_allowed_tools_script(name: &str) -> Script {
+    [
+        (json!({"role": "assistant", "content": "Checking."}), None),
+        (
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "{"}}]}),
+            None,
+        ),
+        (
+            json!({"tool_calls": [{"index": 0, "id": "call-1", "type": "function",
+                "function": {"name": name, "arguments": "}"}}]}),
+            Some("tool_calls"),
+        ),
+    ]
+    .into_iter()
+    .map(|(delta, finish_reason)| {
+        Annotated::from_data(
+            serde_json::from_value(json!({
+                "id": "chat-allowed", "object": "chat.completion.chunk", "created": 1,
+                "model": MODEL, "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+            }))
+            .unwrap(),
+        )
+    })
+    .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_allowed_tools_preserves_catalog_and_limits_dispatched_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let text = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([text, chat_allowed_tools_script("lookup")]).await;
+        for (mode, stream) in [("auto", false), ("required", true)] {
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                chat_allowed_tools_request(mode, "lookup", stream),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            if stream {
+                let body = bounded(response.text()).await.unwrap();
+                let events = http_harness::parse_json_sse(&body).await.unwrap();
+                assert!(events.iter().all(|event| event.event != "error"), "{body}");
+                let calls: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| event.data["choices"][0]["delta"]["tool_calls"].as_array())
+                    .flatten()
+                    .collect();
+                assert_eq!(calls.len(), 1, "{body}");
+                assert_eq!(
+                    calls[0]["function"],
+                    json!({"name": "lookup", "arguments": "{}"})
+                );
+            } else {
+                let body: Value = bounded(response.json()).await.unwrap();
+                assert!(
+                    body["choices"][0]["message"]["content"].is_string(),
+                    "{body}"
+                );
+                assert!(
+                    body["choices"][0]["message"]["tool_calls"].is_null(),
+                    "{body}"
+                );
+            }
+            let dispatched = svc.engine.take_requests().await;
+            assert_eq!(dispatched.len(), 1);
+            let request = &dispatched[0];
+            let tool_names = |tools: &[dynamo_protocols::types::ChatCompletionTool]| {
+                tools
+                    .iter()
+                    .map(|tool| tool.function.name.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                tool_names(request.inner.tools.as_deref().unwrap()),
+                ["lookup"]
+            );
+            assert_eq!(
+                tool_names(request.chat_template_tools.as_deref().unwrap()),
+                ["lookup", "delete"]
+            );
+            let choice = serde_json::to_value(&request.inner.tool_choice).unwrap();
+            assert_eq!(choice, mode);
+        }
+
+        assert_openai_error(
+            post_json(
+                &svc,
+                "/v1/chat/completions",
+                chat_allowed_tools_request("required", "unknown", true),
+            )
+            .await,
+            ExpectedError::Validation,
+            "allowed_tools references unknown function",
+        )
+        .await;
+        let malformed_mode = chat_allowed_tools_request("bogus", "lookup", false);
+        let mut malformed_sampling = chat_allowed_tools_request("auto", "lookup", false);
+        malformed_sampling["top_p"] = json!("invalid_top_p");
+        let mut ordinary = chat_allowed_tools_request("auto", "lookup", false);
+        ordinary["tool_choice"] = json!("bogus");
+
+        for (request, message) in [
+            (malformed_mode, "unknown variant `bogus`"),
+            (malformed_sampling, "invalid type: string \"invalid_top_p\""),
+            (ordinary, "ChatCompletionToolChoiceOption"),
+        ] {
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", request).await,
+                ExpectedError::Validation,
+                message,
+            )
+            .await;
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_allowed_tools_blocks_disallowed_backend_calls() {
+    let env = [
+        BASE_ENV.as_slice(),
+        &[(DYN_ENABLE_STREAMING_TOOL_DISPATCH, Some("1"))],
+    ]
+    .concat();
+    temp_env::async_with_vars(env, async {
+        let script = chat_allowed_tools_script("delete");
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                chat_allowed_tools_request("auto", "lookup", stream),
+            )
+            .await;
+            if stream {
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let body = bounded(response.text()).await.unwrap();
+                let events = http_harness::parse_json_sse(&body).await.unwrap();
+                assert!(
+                    events.iter().any(|event| event.data["error"].is_object()),
+                    "{body}"
+                );
+                assert!(
+                    events.iter().all(|event| {
+                        event.event != "tool_call_dispatch"
+                            && event.data["choices"][0]["delta"]["tool_calls"].is_null()
+                    }),
+                    "{body}"
+                );
+            } else {
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                );
+                let body: Value = bounded(response.json()).await.unwrap();
+                assert!(body.get("choices").is_none(), "{body}");
+            }
+        }
         svc.shutdown().await;
     })
     .await;

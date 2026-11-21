@@ -21,6 +21,7 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
+pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
 pub(crate) mod tool_call_merge;
@@ -118,6 +119,11 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(skip)]
     #[schema(ignore)]
     pub responses_tools: Option<super::responses::ResponsesToolContext>,
+
+    /// Full catalog for rendering when Chat Completions limits callable tools.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub chat_template_tools: Option<std::sync::Arc<[dynamo_protocols::types::ChatCompletionTool]>>,
 
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
@@ -722,7 +728,12 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+        // `"stop": []` means no stop sequences.
+        self.inner
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.strings())
+            .filter(|v| !v.is_empty())
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {

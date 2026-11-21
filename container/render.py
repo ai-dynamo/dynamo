@@ -101,9 +101,9 @@ def parse_args():
         "--cuda-version",
         type=str,
         default="13.0",
-        choices=["13.0", "13.1"],
+        choices=["13.0", "13.4"],
         help=(
-            "CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].\n"
+            "CUDA version to use. [13.0 for vllm and sglang, 13.4 for trtllm].\n"
             "Not required for non-cuda devices.\n"
             "Not supported by Triton - CUDA version is predefined by its release image."
         ),
@@ -155,7 +155,7 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["13.1"],
+            "cuda_version": ["13.4"],
         },
         "sglang": {
             "device": ["cuda", "xpu"],
