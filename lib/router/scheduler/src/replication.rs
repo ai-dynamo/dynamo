@@ -176,7 +176,8 @@ impl ReplicaSyncConfig {
     }
 
     pub fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
-        event.router_id == self.process_id
+        event.origin == dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Router
+            && event.router_id == self.process_id
     }
 }
 
@@ -515,6 +516,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(1, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 42,
+                origin: Default::default(),
                 lora_name: None,
             },
         }
@@ -543,12 +545,13 @@ mod tests {
 
     #[test]
     fn previous_flat_replica_event_wire_schema_is_accepted() {
-        let previous = serde_json::json!({
+        let mut previous = serde_json::json!({
             "model_name": "model",
             "routing_group": "group",
             "block_size": 16,
             "event": event().event,
         });
+        previous["event"].as_object_mut().unwrap().remove("origin");
         let payload = rmp_serde::to_vec_named(&previous).unwrap();
 
         let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
@@ -557,6 +560,10 @@ mod tests {
             RoutingPartitionRef::new("model", "group")
         );
         assert_eq!(decoded.block_size, 16);
+        assert_eq!(
+            decoded.event.origin,
+            dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Router
+        );
     }
 
     #[test]
@@ -737,6 +744,7 @@ mod tests {
                         prefill_load_hint: None,
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 })
                 .expect("inbound channel has capacity");

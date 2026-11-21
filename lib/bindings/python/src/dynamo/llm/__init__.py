@@ -55,6 +55,9 @@ from dynamo._core import unregister_model as unregister_model
 from dynamo._core import update_model_taints as update_model_taints
 
 try:
+    from dynamo._core import (
+        ActiveSequenceEventPublisher as ActiveSequenceEventPublisher,
+    )
     from dynamo._core import SelectionService as SelectionService
 except ImportError:
     pass
