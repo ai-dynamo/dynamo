@@ -99,8 +99,8 @@ pub struct TrtllmSidecarEngine {
     supervision: RoutingSupervision,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
-    load_failed: CancellationToken,
-    /// Cancelled once TensorRT-LLM stops serving after `start`, with the reason set first.
+    /// Cancelled once TensorRT-LLM stops serving or its routing state goes
+    /// stale after `start`, with the reason set first.
     lost: CancellationToken,
     lost_reason: Arc<std::sync::OnceLock<String>>,
 }
@@ -125,7 +125,6 @@ impl TrtllmSidecarEngine {
             supervision: RoutingSupervision::PRODUCTION,
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
-            load_failed: CancellationToken::new(),
             lost: CancellationToken::new(),
             lost_reason: Arc::default(),
         }
@@ -136,30 +135,6 @@ impl TrtllmSidecarEngine {
     pub(crate) fn with_supervision(mut self, supervision: RoutingSupervision) -> Self {
         self.supervision = supervision;
         self
-    }
-
-    /// Fence a restarted native engine before continuing with stale discovery.
-    async fn monitor_routing(&self) -> anyhow::Result<()> {
-        tokio::select! {
-            _ = self.load_failed.cancelled() => {
-                anyhow::bail!(
-                    "Routing load remained unavailable for {} seconds; withdrawing worker",
-                    self.supervision.load_staleness_limit.as_secs_f64()
-                )
-            }
-            result = async {
-                let mut ticks = tokio::time::interval(self.supervision.metadata_poll_interval);
-                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    ticks.tick().await;
-                    if let (Some((client, _)), Some(routing)) = (self.connection.get(), self.routing.get())
-                        && let Some(node) = &routing.node
-                    {
-                        return crate::headless::monitor_engine(client, node, &routing.sources, self.supervision).await;
-                    }
-                }
-            } => result,
-        }
     }
 
     pub fn from_env() -> Result<(Self, WorkerConfig), DynamoError> {
@@ -470,6 +445,27 @@ impl LLMEngine for TrtllmSidecarEngine {
                 }
             }
         });
+        // Fence a restarted native engine before continuing with stale discovery.
+        if let Some(routing) = self.routing.get()
+            && let Some(node) = routing.node.clone()
+        {
+            let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+            let reason = Arc::clone(&self.lost_reason);
+            let (client, sources, supervision) =
+                (client.clone(), routing.sources.clone(), self.supervision);
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = stop.cancelled() => {}
+                    result = crate::headless::monitor_engine(&client, &node, &sources, supervision) => {
+                        let _ = reason.set(match result {
+                            Err(error) => format!("{error:#}"),
+                            Ok(()) => "routing supervision stopped".to_owned(),
+                        });
+                        lost.cancel();
+                    }
+                }
+            });
+        }
         Ok(config)
     }
 
@@ -662,16 +658,8 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn engine_lost(&self) -> DynamoError {
-        let reason = tokio::select! {
-            _ = self.lost.cancelled() => {
-                self.lost_reason.get().map_or("unknown", String::as_str).to_owned()
-            }
-            // Routing supervision only returns on a failure.
-            result = self.monitor_routing() => match result {
-                Err(error) => format!("{error:#}"),
-                Ok(()) => "routing supervision stopped".to_owned(),
-            },
-        };
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
         let instance_id = self
             .routing
             .get()
@@ -711,8 +699,15 @@ impl LLMEngine for TrtllmSidecarEngine {
         let initial = routing.initial_snapshots.clone();
         let cancel = self.cancel.clone();
         let task_slot = Arc::clone(&self.metrics_task);
-        let load_failed = self.load_failed.clone();
         let load_staleness_limit = self.supervision.load_staleness_limit;
+        let (lost, reason) = (self.lost.clone(), Arc::clone(&self.lost_reason));
+        let load_lost = move || {
+            let _ = reason.set(format!(
+                "Routing load remained unavailable for {} seconds; withdrawing worker",
+                load_staleness_limit.as_secs_f64()
+            ));
+            lost.cancel();
+        };
 
         let bindings = MetricsBindings {
             dp_ranks: (0..dp_size).collect(),
@@ -730,7 +725,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                             biased;
                             _ = cancel.cancelled() => break,
                             _ = tokio::time::sleep_until(deadline) => {
-                                load_failed.cancel();
+                                load_lost();
                                 break;
                             }
                             _ = interval.tick() => {
@@ -738,7 +733,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                     biased;
                                     _ = cancel.cancelled() => break,
                                     _ = tokio::time::sleep_until(deadline) => {
-                                        load_failed.cancel();
+                                        load_lost();
                                         break;
                                     }
                                     load = client.get_load(true) => load,

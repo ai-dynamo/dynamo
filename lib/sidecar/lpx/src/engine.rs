@@ -90,16 +90,6 @@ impl LpxSidecarEngine {
         }
     }
 
-    /// Resolves, with the error the sidecar exits with, once the engine's
-    /// load has stayed unavailable for [`load::STALENESS_LIMIT`].
-    pub(crate) async fn load_lost(&self) -> DynamoError {
-        self.load_lost.cancelled().await;
-        engine_shutdown(format!(
-            "Routing load remained unavailable for {} seconds; withdrawing worker",
-            load::STALENESS_LIMIT.as_secs_f64()
-        ))
-    }
-
     /// Parses the process arguments. A nonzero `--node-rank` selects standby;
     /// only rank 0 serves the engine. On rank 0, engine discovery runs once
     /// the shared sidecar runner has started its probes and connected the
@@ -436,6 +426,16 @@ impl LLMEngine for LpxSidecarEngine {
         }
         tracing::info!("LPX sidecar shutdown complete");
         Ok(())
+    }
+
+    /// Resolves once the engine's load has stayed unavailable for
+    /// [`load::STALENESS_LIMIT`].
+    async fn engine_lost(&self) -> DynamoError {
+        self.load_lost.cancelled().await;
+        engine_shutdown(format!(
+            "Routing load remained unavailable for {} seconds; withdrawing worker",
+            load::STALENESS_LIMIT.as_secs_f64()
+        ))
     }
 
     /// Polls the load of an engine that reported load at startup, publishing
