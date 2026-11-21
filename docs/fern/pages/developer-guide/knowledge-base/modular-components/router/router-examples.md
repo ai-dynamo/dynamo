@@ -156,7 +156,25 @@ See the comprehensive [KV Router A/B Benchmarking Guide](../../../../recipes/fea
 
 ### Example with Advanced Configuration
 
+Scoring parameters live in a policy file. Put the file in a `ConfigMap`, mount it on the Frontend, and
+point `DYN_ROUTER_POLICY_CONFIG` at it. A role the file does not name runs the default parameters;
+for disaggregated serving, give `prefill` and `decode` the same entry as `aggregated`:
+
 ```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-deployment-router-policy
+data:
+  router-policy.yaml: |
+    worker_selection:
+      aggregated:
+        type: dynamo-default-cost-fn
+        parameters:
+          router_temperature: 0.5    # Add some randomness to prevent worker saturation
+          overlap_score_credit: 1.0  # Prefer device-local KV cache reuse
+          prefill_load_scale: 1.5    # Prioritize TTFT over ITL
+---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -169,17 +187,20 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
-        - name: DYN_ROUTER_TEMPERATURE
-          value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
-          value: "1.0"  # Prefer device-local KV cache reuse
-        - name: DYN_ROUTER_PREFILL_LOAD_SCALE
-          value: "1.5"  # Prioritize TTFT over ITL
+        - name: DYN_ROUTER_POLICY_CONFIG
+          value: /etc/dynamo/router/router-policy.yaml
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
       extraPodSpec:
+        volumes:
+          - name: router-policy
+            configMap:
+              name: my-deployment-router-policy
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: ${RUNTIME_IMAGE}
+          volumeMounts:
+            - name: router-policy
+              mountPath: /etc/dynamo/router
 ```
 
 ### Alternative: Using Command Args in K8s
@@ -188,13 +209,20 @@ You can also pass CLI arguments directly in the container command:
 
 ```yaml
 extraPodSpec:
+  volumes:
+    - name: router-policy
+      configMap:
+        name: my-deployment-router-policy
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+    image: ${RUNTIME_IMAGE}
+    volumeMounts:
+      - name: router-policy
+        mountPath: /etc/dynamo/router
     command:
       - /bin/sh
       - -c
     args:
-      - "python3 -m dynamo.frontend --router-mode kv --router-temperature 0.5 --http-port 8000"
+      - "python3 -m dynamo.frontend --router-mode kv --router-policy-config /etc/dynamo/router/router-policy.yaml --http-port 8000"
 ```
 
 **Recommendation:** Use environment variables for easier configuration management and consistency with Dynamo's K8s patterns.

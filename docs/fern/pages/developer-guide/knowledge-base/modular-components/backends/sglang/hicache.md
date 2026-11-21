@@ -177,8 +177,7 @@ DYN_MOONCAKE_KV_EVENTS_ENDPOINT=tcp://mooncake-master.internal:5557 \
 python -m dynamo.frontend \
   --http-port 8000 \
   --router-mode kv \
-  --shared-cache-type hicache \
-  --shared-cache-multiplier 0.5
+  --shared-cache-type hicache
 ```
 
 ## Configuration

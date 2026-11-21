@@ -52,9 +52,7 @@ class FrontendRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         blocks_threshold: float | str | None = None,
-        tokens_threshold: int | str | None = None,
         tokens_threshold_frac: float | str | None = None,
-        router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
         router_mode: str | None = "kv",
         router_policy_config: str | None = None,
@@ -90,16 +88,10 @@ class FrontendRouterProcess(ManagedProcess):
         if blocks_threshold is not None:
             command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
 
-        if tokens_threshold is not None:
-            command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
-
         if tokens_threshold_frac is not None:
             command.extend(
                 ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
             )
-
-        if router_queue_threshold is not None:
-            command.extend(["--router-queue-threshold", str(router_queue_threshold)])
 
         if serve_indexer:
             command.append("--serve-indexer")

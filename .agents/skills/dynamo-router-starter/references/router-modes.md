@@ -24,12 +24,32 @@ Kubernetes frontend env equivalents:
 | --- | --- |
 | Enable KV router | `DYN_ROUTER_MODE=kv` |
 | Disable worker KV event consumption for approximate mode | `DYN_ROUTER_USE_KV_EVENTS=false` |
-| Enable load-aware behavior | `DYN_ROUTER_LOAD_AWARE=true` |
-| Set router randomness | `DYN_ROUTER_TEMPERATURE=<float>` |
 | Set KV cache block size | `DYN_KV_CACHE_BLOCK_SIZE=<size>` |
-| Tune KV overlap credit | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=<float>` |
-| Scale prefill load | `DYN_ROUTER_PREFILL_LOAD_SCALE=<float>` |
-| Set queue policy | `DYN_ROUTER_QUEUE_POLICY=fcfs\|wspt\|lcfs` |
+| Load a mounted router policy file | `DYN_ROUTER_POLICY_CONFIG=<path>` |
+
+Scoring and queueing are keys of the policy file (`--router-policy-config`), which the frontend
+reads from a mounted `ConfigMap`. A runtime image older than Dynamo 1.8 takes the deprecated
+variable in parentheses instead.
+
+| Purpose | Policy file key |
+| --- | --- |
+| Set router randomness | `router_temperature` (`DYN_ROUTER_TEMPERATURE`) |
+| Tune KV overlap credit | `overlap_score_credit` (`DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`) |
+| Scale prefill load | `prefill_load_scale` (`DYN_ROUTER_PREFILL_LOAD_SCALE`) |
+| Route on load only | `overlap_score_credit: 0` and `shared_cache_multiplier: 0`, with `use_kv_events: false` and `router_assume_kv_reuse: false` under `router` (`DYN_ROUTER_LOAD_AWARE=true`) |
+| Set queue policy | `policy_classes[].queue_policy: edf\|fcfs\|wspt` (`DYN_ROUTER_QUEUE_POLICY`) |
+
+The scoring keys go under a role's `parameters`. A role the file does not name runs the default
+parameters; for disaggregated serving, give `prefill` and `decode` the same entry as `aggregated`:
+
+```yaml
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    parameters:
+      overlap_score_credit: 1.0
+      router_temperature: 0.0
+```
 
 CLI equivalents:
 
