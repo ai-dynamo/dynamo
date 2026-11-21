@@ -1569,15 +1569,21 @@ async fn completions_single(
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
         let stream = stream
-            .filter(|r| {
-                // Drop empty chunks from multi-byte token assembly
-                futures::future::ready(
-                    !r.data
-                        .as_ref()
-                        .is_some_and(is_empty_completion_stream_response),
-                )
-            })
             .map(move |mut response| {
+                // Drop empty chunks from multi-byte token assembly, but observe
+                // their metrics first: the engine generated these tokens.
+                if response
+                    .data
+                    .as_ref()
+                    .is_some_and(is_empty_completion_stream_response)
+                {
+                    process_response_and_observe_metrics(
+                        &response,
+                        &mut response_collector,
+                        &mut http_queue_guard,
+                    );
+                    return Ok(None);
+                }
                 // Frontend-side SSE conversion for one chunk. The gaps between
                 // consecutive ranges cover both worker time and the frontend's
                 // own unannotated receive/decode path.
@@ -1949,15 +1955,21 @@ async fn completions_batch(
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
         let stream = merged_stream
-            .filter(|r| {
-                // Drop empty chunks from multi-byte token assembly
-                futures::future::ready(
-                    !r.data
-                        .as_ref()
-                        .is_some_and(is_empty_completion_stream_response),
-                )
-            })
             .map(move |mut response| {
+                // Drop empty chunks from multi-byte token assembly, but observe
+                // their metrics first: the engine generated these tokens.
+                if response
+                    .data
+                    .as_ref()
+                    .is_some_and(is_empty_completion_stream_response)
+                {
+                    process_response_and_observe_metrics(
+                        &response,
+                        &mut response_collector,
+                        &mut http_queue_guard,
+                    );
+                    return Ok(None);
+                }
                 // Frontend-side SSE conversion for one chunk of the merged stream.
                 let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
                 // `echo` rides the chunk as typed metadata up to this boundary.
