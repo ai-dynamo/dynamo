@@ -26,7 +26,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tokio::{signal, sync::Mutex};
+use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -38,7 +38,7 @@ const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
 const TEARDOWN_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ShutdownCompletion = Option<Result<(), String>>;
-type TeardownTask = tokio::sync::oneshot::Receiver<anyhow::Result<()>>;
+type TeardownTask = JoinHandle<anyhow::Result<()>>;
 
 pub(crate) fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
@@ -385,7 +385,13 @@ impl Runtime {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("runtime teardown has started"))?;
         let (guard, completed) = tokio::sync::oneshot::channel();
-        tasks.push(completed);
+        // The transport runtime that enrolls cleanup can exit during startup
+        // cancellation. Keep the receipt alive on the worker runtime.
+        tasks.push(self.primary().spawn(async move {
+            completed.await.map_err(|_| {
+                anyhow::anyhow!("Runtime teardown task exited without reporting cleanup completion")
+            })?
+        }));
         Ok(guard)
     }
 
@@ -614,11 +620,7 @@ impl Runtime {
                         )
                     })?;
                     for result in results {
-                        result.map_err(|_| {
-                            anyhow::anyhow!(
-                                "Runtime teardown task exited without reporting cleanup completion"
-                            )
-                        })??;
+                        result??;
                     }
                 }
                 Ok::<(), anyhow::Error>(())
