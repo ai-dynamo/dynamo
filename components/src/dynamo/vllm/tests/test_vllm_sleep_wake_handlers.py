@@ -177,45 +177,54 @@ async def test_wake_up_passes_explicit_tags_from_request():
 
 
 @pytest.mark.asyncio
-async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
+@pytest.mark.parametrize(
+    "cancel", [False, True], ids=["sleep-error", "sleep-cancelled"]
+)
+async def test_unknown_sleep_outcome_keeps_worker_out_of_discovery(cancel):
     handler = _make_handler()
-    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
-    failed_resume = AsyncMock(side_effect=RuntimeError("resume failed"))
-    handler.engine_client.resume_generation = failed_resume
+    sleep_entered = asyncio.Event()
 
-    sleep_result = await handler.sleep({"level": 1})
+    async def native_sleep(level):
+        sleep_entered.set()
+        if cancel:
+            await asyncio.Future()
+        raise RuntimeError("native sleep failed")
 
-    assert sleep_result["status"] == "error"
-    assert handler._pause_controller.is_paused is False
-    assert handler._pause_controller.needs_resume_recovery is True
-    failed_resume.assert_awaited_once()
+    handler.engine_client.sleep.side_effect = native_sleep
+    task = asyncio.create_task(handler.sleep({"level": 1}))
+    try:
+        await asyncio.wait_for(sleep_entered.wait(), timeout=2)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+        else:
+            result = await asyncio.wait_for(task, timeout=2)
+            assert result["status"] == "error"
+            assert "native sleep failed" in result["message"]
+            sleep_message = result["message"]
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+    handler.engine_client.resume_generation.assert_not_awaited()
 
-    handler.engine_client.resume_generation = AsyncMock()
-    wake_result = await handler.wake_up({})
+    if not cancel:
+        assert "restart the worker" in sleep_message
 
-    assert wake_result["status"] == "ok"
+    for operation in (handler.wake_up, handler.resume_generation, handler.sleep):
+        result = await operation({})
+        assert result["status"] == "error"
+        assert "restart the worker" in result["message"]
+
     handler.engine_client.wake_up.assert_not_awaited()
-    handler.engine_client.resume_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
-    assert handler._pause_controller.needs_resume_recovery is False
-
-
-@pytest.mark.asyncio
-async def test_sleep_reregisters_after_clean_pause_rollback():
-    handler = _make_handler()
-    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
-
-    result = await handler.sleep({"level": 1})
-
-    # Rollback resumed generation cleanly, so the engine is serving-safe again.
-    assert result["status"] == "error"
-    assert handler._pause_controller.is_paused is False
-    assert handler._pause_controller.needs_resume_recovery is False
-    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.engine_client.resume_generation.assert_not_awaited()
+    handler.engine_client.sleep.assert_awaited_once_with(1)
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
-    # The endpoint must rejoin the routing pool since wake_up will early-return.
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
 
 
 @pytest.mark.asyncio
