@@ -13,7 +13,10 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
-    kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
+    kv_router::indexer::{
+        preprocessed_multimodal_cache_key_alternatives, preprocessed_multimodal_cache_keys,
+        try_build_cache_indexer,
+    },
     kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -237,6 +240,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             .affinity_coordinator(affinity)
             .candidate_policy(candidate_policy)
             .multimodal_cache(embedding_cache_indexer.zip(cache_key_extractor))
+            .multimodal_cache_key_alternatives(preprocessed_multimodal_cache_key_alternatives)
             .build()
             .await?,
     );
