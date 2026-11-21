@@ -729,6 +729,7 @@ pub struct DynamoError {
     pub diagnostic: Option<Diagnostic>,
     /// Optional explicitly client-safe data. The producer remains responsible for ensuring every contained value is safe to expose.
     pub public: Option<PublicDetails>,
+    rejected_before_kv_receiver: bool,
     retry_hint: Option<RetryHint>,
 }
 
@@ -745,6 +746,7 @@ impl Serialize for DynamoError {
             ErrorClass::WorkerRankOverloaded(rank) => Some(rank),
             _ => None,
         };
+        let rejected_before_kv_receiver = self.rejected_before_kv_receiver();
         let caused_by = self
             .diagnostic
             .as_ref()
@@ -756,6 +758,7 @@ impl Serialize for DynamoError {
                 + usize::from(public.is_some())
                 + usize::from(dp_rank.is_some())
                 + usize::from(caused_by.is_some())
+                + usize::from(rejected_before_kv_receiver)
                 + usize::from(retry_hint.is_some()),
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
@@ -776,6 +779,9 @@ impl Serialize for DynamoError {
         }
         if let Some(caused_by) = caused_by {
             state.serialize_field("caused_by", caused_by)?;
+        }
+        if rejected_before_kv_receiver {
+            state.serialize_field("rejected_before_kv_receiver", &true)?;
         }
         state.end()
     }
@@ -806,6 +812,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             retry_hint: Option<RetryHint>,
             #[serde(default)]
             caused_by: Option<Box<DynamoError>>,
+            #[serde(default)]
+            rejected_before_kv_receiver: Option<serde_json::Value>,
         }
 
         let representation = Representation::deserialize(deserializer)?;
@@ -868,6 +876,9 @@ impl<'de> Deserialize<'de> for DynamoError {
             reason,
             diagnostic,
             public,
+            rejected_before_kv_receiver: valid_reason
+                && representation.rejected_before_kv_receiver
+                    == Some(serde_json::Value::Bool(true)),
             retry_hint: representation.retry_hint,
         })
     }
@@ -877,6 +888,21 @@ impl DynamoError {
     /// Create a builder for constructing a `DynamoError`.
     pub fn builder() -> DynamoErrorBuilder {
         DynamoErrorBuilder::default()
+    }
+
+    /// An explicit decode validation failure before the engine can create a KV receiver.
+    pub fn reject_before_kv_receiver(message: String) -> Self {
+        let mut error = Self::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message(message.clone())
+            .public_message(message)
+            .build();
+        error.rejected_before_kv_receiver = true;
+        error
+    }
+
+    pub fn rejected_before_kv_receiver(&self) -> bool {
+        self.rejected_before_kv_receiver && self.class() == ErrorClass::InvalidRequest
     }
 
     /// Shorthand to create an internal error with a private diagnostic.
@@ -1025,6 +1051,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 reason: ErrorReason::from_static("runtime.unclassified"),
                 diagnostic: Some(diagnostic),
                 public: None,
+                rejected_before_kv_receiver: false,
                 retry_hint: None,
             };
         };
@@ -1037,6 +1064,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
                 reason: source.reason().clone(),
                 diagnostic: Some(diagnostic),
                 public: source.public_details().cloned(),
+                rejected_before_kv_receiver: false,
                 retry_hint: source.retry_hint(),
             };
         }
@@ -1046,6 +1074,7 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
             reason: ErrorReason::from_static("runtime.unclassified"),
             diagnostic: Some(diagnostic),
             public: None,
+            rejected_before_kv_receiver: false,
             retry_hint: None,
         }
     }
@@ -1169,6 +1198,7 @@ impl DynamoErrorBuilder {
                 reason,
                 diagnostic: self.diagnostic,
                 public: self.public,
+                rejected_before_kv_receiver: false,
                 retry_hint: self.retry_hint,
             }
         } else {
@@ -1177,6 +1207,7 @@ impl DynamoErrorBuilder {
                 reason: ErrorReason::from_static("runtime.invalid_error"),
                 diagnostic: self.diagnostic,
                 public: None,
+                rejected_before_kv_receiver: false,
                 retry_hint: None,
             }
         }
@@ -1536,6 +1567,7 @@ mod tests {
                 limit: Some(10),
                 remaining: Some(0),
             }),
+            rejected_before_kv_receiver: false,
             retry_hint: None,
         };
 
@@ -1656,6 +1688,7 @@ mod tests {
             reason: ErrorReason::new("request.rate_limited").unwrap(),
             diagnostic: None,
             public: None,
+            rejected_before_kv_receiver: false,
             retry_hint: None,
         };
         assert_eq!(mismatched.error_type(), ErrorClass::Internal);
@@ -1807,6 +1840,24 @@ mod tests {
 
         let reserialized = serde_json::to_value(&err).unwrap();
         assert_eq!(reserialized["caused_by"]["error_type"], "InvalidArgument");
+    }
+
+    #[test]
+    fn rejection_before_kv_receiver_keeps_legacy_invalid_argument() {
+        let error = DynamoError::reject_before_kv_receiver("invalid sampling options".into());
+        let mut wire = serde_json::to_value(&error).unwrap();
+        let decoded: DynamoError = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded, error);
+        assert_eq!(
+            wire["error_type"],
+            serde_json::json!({"Backend": "InvalidArgument"})
+        );
+        wire.as_object_mut()
+            .unwrap()
+            .remove("rejected_before_kv_receiver");
+        let decoded: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.class(), ErrorClass::InvalidRequest);
+        assert!(!decoded.rejected_before_kv_receiver());
     }
 
     #[test]

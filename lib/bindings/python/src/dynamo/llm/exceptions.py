@@ -6,6 +6,9 @@ import logging
 from dynamo._core import Cancelled as Cancelled
 from dynamo._core import CannotConnect as CannotConnect
 from dynamo._core import ConnectionTimeout as ConnectionTimeout
+from dynamo._core import (
+    DecodeRejectedBeforeKvReceiver as DecodeRejectedBeforeKvReceiver,
+)
 from dynamo._core import Disconnected as Disconnected
 from dynamo._core import DynamoException as DynamoException
 from dynamo._core import EngineShutdown as EngineShutdown
