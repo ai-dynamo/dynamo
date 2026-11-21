@@ -10,6 +10,7 @@ use crate::request_trace::RequestReplayMetrics;
 use crate::request_trace::RequestTraceEventSource;
 use crate::request_trace::RequestTracePayload;
 
+use super::RequestRoutingHashes;
 use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
@@ -52,8 +53,69 @@ fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
         })
 }
 
+pub(super) fn request_start_record(
+    request_id: String,
+    x_request_id: Option<String>,
+    model: String,
+    tracker: &RequestTracker,
+    input_tokens: usize,
+    routing_hashes: RequestRoutingHashes,
+) -> RequestTraceRecord {
+    RequestTraceRecord {
+        schema: RequestTraceSchema::V1,
+        event_type: RequestTraceEventType::RequestStart,
+        event_time_unix_ms: unix_time_ms(),
+        event_source: None,
+        agent_context: None,
+        request: Some(RequestTraceMetrics {
+            request_id,
+            x_request_id,
+            model: Some(model),
+            input_tokens: Some(input_tokens as u64),
+            output_tokens: None,
+            cached_tokens: None,
+            request_received_ms: Some(tracker.request_received_epoch_ms()),
+            prefill_wait_time_ms: None,
+            prefill_time_ms: None,
+            ttft_ms: None,
+            total_time_ms: None,
+            avg_itl_ms: None,
+            kv_hit_rate: None,
+            kv_transfer_estimated_latency_ms: None,
+            queue_depth: None,
+            worker: None,
+            replay: None,
+            routing_hashes: Some(routing_hashes),
+            finish_reason_metadata: None,
+        }),
+        tool: None,
+        selection: None,
+        payload: None,
+    }
+}
+
+pub(crate) fn emit_request_start(
+    request_id: String,
+    x_request_id: Option<String>,
+    model: String,
+    tracker: &RequestTracker,
+    input_tokens: usize,
+    routing_hashes: RequestRoutingHashes,
+) {
+    publish(request_start_record(
+        request_id,
+        x_request_id,
+        model,
+        tracker,
+        input_tokens,
+        routing_hashes,
+    ));
+}
+
 pub(crate) fn emit_request_end(
     request_id: String,
+    x_request_id: Option<String>,
+    model: String,
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
@@ -74,8 +136,8 @@ pub(crate) fn emit_request_end(
 
     let mut request = RequestTraceMetrics {
         request_id,
-        x_request_id: None,
-        model: None,
+        x_request_id,
+        model: Some(model),
         input_tokens: tracker.isl_tokens().map(|v| v as u64),
         output_tokens: Some(tracker.osl_tokens()),
         cached_tokens: tracker.cached_tokens().map(|v| v as u64),
@@ -90,6 +152,7 @@ pub(crate) fn emit_request_end(
         queue_depth: timing.router_queue_depth.map(|v| v as u64),
         worker,
         replay: Some(replay),
+        routing_hashes: None,
         finish_reason_metadata: None,
     };
     sanitize_request(&mut request);
@@ -242,6 +305,8 @@ mod tests {
 
         emit_request_end(
             "req-1".to_string(),
+            Some("client-1".to_string()),
+            "test-model".to_string(),
             &tracker,
             RequestReplayMetrics {
                 trace_block_size: 2,
@@ -262,6 +327,8 @@ mod tests {
         };
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.request_id, "req-1");
+        assert_eq!(request.x_request_id.as_deref(), Some("client-1"));
+        assert_eq!(request.model.as_deref(), Some("test-model"));
         assert_eq!(request.input_tokens, Some(8));
         assert_eq!(request.output_tokens, Some(7));
         assert_eq!(request.cached_tokens, Some(4));
