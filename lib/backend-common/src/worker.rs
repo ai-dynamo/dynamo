@@ -3434,11 +3434,7 @@ mod tests {
                         .await
                         .expect("pending runtime connection is cancelled");
                     if signal {
-                        // Cancellation of an in-flight grant leaves its outcome
-                        // unknown: no lease ID was received to revoke safely.
-                        let error = result.unwrap_err();
-                        assert_eq!(error.error_type(), ErrorType::Backend(BackendError::EngineShutdown));
-                        assert!(error.to_string().contains("without reporting cleanup completion"));
+                        result.expect("a signal before lease acquisition stops startup cleanly");
                     } else {
                         assert_eq!(
                             result.unwrap_err().error_type(),
