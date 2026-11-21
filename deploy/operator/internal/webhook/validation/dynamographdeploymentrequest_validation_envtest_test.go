@@ -32,11 +32,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 const alternateAdmissionModel = "Qwen/Qwen3-8B"
 
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
+	overridesPath := field.NewPath("spec", "aisim", "inputOverrides")
+	const malformedNull = "$null must be the boolean true and the only object field"
 	const deprecatedV1beta1ComponentNames = `{
 		"apiVersion":"nvidia.com/v1beta1",
 		"kind":"DynamoGraphDeployment",
@@ -72,13 +75,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		discoveryErr error
 		beforeUpdate func(*testing.T)
 		// check inspects the object the API server returned.
-		check         func(*testing.T, *unstructured.Unstructured)
-		wantImage     string
-		wantSchemaErr string
-		wantCELErr    string
-		wantStatusErr string
-		wantWebhook   []string
-		wantWarnings  []string
+		check           func(*testing.T, *unstructured.Unstructured)
+		wantImage       string
+		wantSchemaErr   string
+		wantCELErr      string
+		wantStatusErr   string
+		wantWebhook     []string
+		wantFieldErrors field.ErrorList
+		wantWarnings    []string
 	}{
 		// Source-version schema, CEL, and conversion boundaries.
 		{
@@ -647,7 +651,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			request:    beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
 			discovered: discoveredH100,
 			wantWebhook: []string{
-				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][namespace]: Forbidden: is managed by the operator and cannot be overridden",
 				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
 			},
 		},
@@ -684,7 +688,41 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 			discovered: discoveredH100,
 			wantWebhook: []string{
-				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][namespace]: Forbidden: is managed by the operator and cannot be overridden",
+			},
+		},
+		{
+			name:               "v1beta2 unchanged malformed marker cannot bypass override validation",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other","settings":{"$null":false}}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other","settings":{"$null":false}}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			wantFieldErrors: field.ErrorList{
+				field.Invalid(overridesPath.Key("dgdr_run").Key("settings"), "<redacted>", malformedNull),
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("namespace"), "is managed by the operator and cannot be overridden"),
+			},
+		},
+		{
+			name:               "v1beta2 unchanged root marker remains invalid on metadata updates",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"$null":true}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"$null":true}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			wantFieldErrors: field.ErrorList{
+				field.Forbidden(overridesPath, "$null is not allowed at the document root"),
+			},
+		},
+		{
+			name:               "v1beta2 unchanged array marker remains invalid on metadata updates",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":[{"$null":true}]}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":[{"$null":true}]}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			wantFieldErrors: field.ErrorList{
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("settings").Index(0), "$null is not allowed inside arrays"),
 			},
 		},
 		{
@@ -759,6 +797,72 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		},
 
 		{
+			name:    "v1beta2 null sentinels survive admission and delete lowered fields",
+			request: beta2SchemaDGDRForAdmission(`{"engine":{"mode":"aggregated","workers":{"prefill":{"$null":true},"decode":{"$null":true}}},"traffic":{"stop":{"requests":{"$null":true},"requests_per_load_unit":10}}}`, nil),
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				for _, role := range []string{"prefill", "decode"} {
+					value, found, err := unstructured.NestedBool(result.Object, "spec", "aisim", "inputOverrides", "engine", "workers", role, "$null")
+					if err != nil || !found || !value {
+						t.Fatalf("stored %s sentinel = %v, found=%v err=%v", role, value, found, err)
+					}
+				}
+			},
+		},
+		{
+			name:    "v1beta2 rejects non-true null directives in opaque adapter input",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":{"$null":false}}}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Invalid(overridesPath.Key("dgdr_run").Key("settings"), "<redacted>", malformedNull),
+			},
+		},
+		{
+			name:    "v1beta2 rejects other fields alongside a null directive",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":{"$null":true,"other":1}}}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Invalid(overridesPath.Key("dgdr_run").Key("settings"), "<redacted>", malformedNull),
+			},
+		},
+		{
+			name:    "v1beta2 rejects a root null directive",
+			request: beta2SchemaDGDRForAdmission(`{"$null":true}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Forbidden(overridesPath, "$null is not allowed at the document root"),
+			},
+		},
+		{
+			name:    "v1beta2 rejects null directives anywhere inside an array",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":[{"nested":{"$null":true}}]}}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("settings").Index(0).Key("nested"), "$null is not allowed inside arrays"),
+			},
+		},
+		{
+			name:    "v1beta2 aggregates marker and reserved-field errors in deterministic order",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other","settings":{"z":{"$null":false},"a":[{"nested":{"$null":true}},{"$null":true}]}}}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("settings").Key("a").Index(0).Key("nested"), "$null is not allowed inside arrays"),
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("settings").Key("a").Index(1), "$null is not allowed inside arrays"),
+				field.Invalid(overridesPath.Key("dgdr_run").Key("settings").Key("z"), "<redacted>", malformedNull),
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("namespace"), "is managed by the operator and cannot be overridden"),
+			},
+		},
+		{
+			name:    "v1beta2 root marker does not hide independent nested errors",
+			request: beta2SchemaDGDRForAdmission(`{"$null":true,"dgdr_run":{"namespace":"other","settings":{"$null":false}}}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Forbidden(overridesPath, "$null is not allowed at the document root"),
+				field.Invalid(overridesPath.Key("dgdr_run").Key("settings"), "<redacted>", malformedNull),
+				field.Forbidden(overridesPath.Key("dgdr_run").Key("namespace"), "is managed by the operator and cannot be overridden"),
+			},
+		},
+		{
+			name:    "v1beta2 marker paths preserve punctuation in arbitrary map keys",
+			request: beta2SchemaDGDRForAdmission(`{"a.b":{"c/d":{"$null":"secret"}}}`, nil),
+			wantFieldErrors: field.ErrorList{
+				field.Invalid(overridesPath.Key("a.b").Key("c/d"), "<redacted>", malformedNull),
+			},
+		},
+		{
 			name: "v1beta2 public input overrides may configure non-reserved dgdr run fields",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": map[string]any{
@@ -791,14 +895,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisim.inputOverrides.dgdr_run.derive_runtime_images: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.max_candidates: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.name: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.num_gpus_per_node: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.runtime_image: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.runtime_version_override: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisim.inputOverrides.dgdr_run.snapshot_dir: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][derive_runtime_images]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][max_candidates]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][name]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][namespace]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][num_gpus_per_node]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][runtime_image]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][runtime_version_override]: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides[dgdr_run][snapshot_dir]: Forbidden: is managed by the operator and cannot be overridden",
 			},
 		},
 		{
@@ -809,7 +913,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides[dgdr_run]: Forbidden: must be an object because the operator owns required execution fields within it",
+			},
+		},
+		{
+			name:    "v1beta2 dgdr run input cannot be deleted by a null sentinel",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"$null":true}}`, nil),
+			wantWebhook: []string{
+				"spec.aisim.inputOverrides[dgdr_run]: Forbidden: must be an object because the operator owns required execution fields within it",
 			},
 		},
 		{
@@ -820,7 +931,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides[dgdr_run]: Forbidden: must be an object because the operator owns required execution fields within it",
 				`spec: Invalid value: "<redacted>": generated AISimulate input at /dgdr_run violates JSON Schema keyword type`,
 			},
 		},
@@ -832,7 +943,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides[dgdr_run]: Forbidden: must be an object because the operator owns required execution fields within it",
 				`spec: Invalid value: "<redacted>": generated AISimulate input at /dgdr_run violates JSON Schema keyword type`,
 			},
 		},
@@ -1237,6 +1348,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				wantCELError:       tt.wantCELErr,
 				wantStatusError:    tt.wantStatusErr,
 				wantWebhookErrors:  tt.wantWebhook,
+				wantFieldErrors:    tt.wantFieldErrors,
 				wantWarnings:       tt.wantWarnings,
 				beforeUpdate:       tt.beforeUpdate,
 			}
