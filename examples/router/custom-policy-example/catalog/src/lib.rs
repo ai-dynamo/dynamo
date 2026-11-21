@@ -9,6 +9,7 @@ use dynamo_kv_router::plugins::prelude::*;
 pub fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    hotspot_progress_policy::register(registry)?;
     soft_pin_repin_policy::register(registry)?;
     simple_filter_score_pick_policy::register(registry)?;
     disagg_filter_score_pick_policy::register(registry)?;
@@ -24,6 +25,10 @@ mod tests {
         let mut registry = RouterPluginRegistry::default();
         register(&mut registry).unwrap();
 
+        assert!(matches!(
+            hotspot_progress_policy::register(&mut registry),
+            Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "hotspot-progress"
+        ));
         assert!(matches!(
             soft_pin_repin_policy::register(&mut registry),
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "soft-pin-repin"
