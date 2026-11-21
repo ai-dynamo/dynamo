@@ -139,6 +139,10 @@
 # === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
 /components/src/dynamo/triton/**                                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
+# === sidecar  (@ai-dynamo/dynamo-sidecar-codeowners) ===
+/lib/sidecar/AGENTS.md                                                                                  @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/CLAUDE.md                                                                                  @ai-dynamo/dynamo-sidecar-codeowners
+
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===
 /lib/memory/                                                                                            @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/tokens/                                                                                            @ai-dynamo/dynamo-kv-memory-codeowners

@@ -23,6 +23,8 @@ import (
 	"sort"
 	"strings"
 
+	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -50,7 +52,7 @@ func newDisaggregatedSetReadinessResolver(reader client.Reader) *disaggregatedSe
 func (r *disaggregatedSetReadinessResolver) Resolve(
 	ctx context.Context,
 	ds *unstructured.Unstructured,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 ) (disaggregatedSetReadiness, error) {
 	children := &leaderworkersetv1.LeaderWorkerSetList{}
 	if err := r.reader.List(ctx, children, client.InNamespace(ds.GetNamespace())); err != nil {
@@ -65,8 +67,8 @@ func (r *disaggregatedSetReadinessResolver) Resolve(
 	targetByIdentity := make(map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet)
 	childrenByRole := make(map[string][]*leaderworkersetv1.LeaderWorkerSet)
 	sliceCount := int(disaggregatedSetSliceCount(ds))
-	expectedIdentityByName := make(map[string]disaggregatedSetChildIdentity, len(selection.componentToRole)*sliceCount)
-	for _, roleName := range selection.componentToRole {
+	expectedIdentityByName := make(map[string]disaggregatedSetChildIdentity, len(selection.ComponentToRole)*sliceCount)
+	for _, roleName := range selection.ComponentToRole {
 		for slice := range sliceCount {
 			identity := disaggregatedSetChildIdentity{slice: slice, role: roleName}
 			name := disaggregatedsetutils.GenerateName(ds.GetName(), slice, targetRevision, roleName)
@@ -110,13 +112,13 @@ func (r *disaggregatedSetReadinessResolver) Resolve(
 
 func checkDisaggregatedSetReadiness(
 	ds *unstructured.Unstructured,
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 	sliceCount := disaggregatedSetSliceCount(ds)
-	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.componentToRole))
+	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.ComponentToRole))
 	notReadyReasons := []string{}
-	for componentName, roleName := range selection.componentToRole {
-		desiredReplicas := selection.desiredReplicas[componentName] * sliceCount
+	for componentName, roleName := range selection.ComponentToRole {
+		desiredReplicas := selection.DesiredReplicas[componentName] * sliceCount
 		componentStatus := nvidiacomv1beta1.ComponentReplicaStatus{
 			ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
 		}
@@ -175,15 +177,15 @@ func disaggregatedSetSliceCount(ds *unstructured.Unstructured) int32 {
 }
 
 func checkDisaggregatedSetChildLWSReadiness(
-	selection disaggregatedSetSelection,
+	selection disaggregatedset.Selection,
 	sliceCount int,
 	targetByIdentity map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet,
 	childrenByRole map[string][]*leaderworkersetv1.LeaderWorkerSet,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
-	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.componentToRole))
+	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.ComponentToRole))
 	notReadyReasons := []string{}
-	for componentName, roleName := range selection.componentToRole {
-		desiredReplicas := selection.desiredReplicas[componentName]
+	for componentName, roleName := range selection.ComponentToRole {
+		desiredReplicas := selection.DesiredReplicas[componentName]
 		status := nvidiacomv1beta1.ComponentReplicaStatus{ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet}
 		children := childrenByRole[roleName]
 		sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
