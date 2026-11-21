@@ -220,8 +220,10 @@ class TestDiagnosticsRecorder:
         assert not recorder.enabled
 
     def test_no_periodic_report_without_interval_when_dashboard_enabled(self, tmp_path):
+        # The live dashboard is on by default; the recorder never binds the port.
+        default_port = PlannerConfig.model_fields["live_dashboard_port"].default
         cfg = _make_config(
-            str(tmp_path), report_interval_hours=None, live_dashboard_port=8080
+            str(tmp_path), report_interval_hours=None, live_dashboard_port=default_port
         )
         recorder = DiagnosticsRecorder(config=cfg)
         assert recorder.enabled
