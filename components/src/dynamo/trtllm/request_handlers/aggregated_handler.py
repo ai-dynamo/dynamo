@@ -14,7 +14,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
-from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
+from dynamo.trtllm.multimodal.embedding_fetcher import (
+    fetch_embeddings_from_encoder,
+    fetch_mm_items_from_encoder,
+)
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
@@ -57,7 +60,18 @@ class AggregatedHandler(HandlerBase):
                 image_urls,
                 _,
             ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
-            if image_urls:
+            if self.multimodal_processor.supports_mm_item_handoff:
+                # Media items, encoded on their own (images and videos)
+                media_urls = self.multimodal_processor.media_urls_by_modality(request)
+                if media_urls:
+                    embeddings = await fetch_mm_items_from_encoder(
+                        media_urls,
+                        request,
+                        self.encode_client,
+                        self._encoder_cache,
+                        trace_context=context,
+                    )
+            elif image_urls:
                 result = await fetch_embeddings_from_encoder(
                     image_urls,
                     request,

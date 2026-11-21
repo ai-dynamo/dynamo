@@ -256,6 +256,16 @@ In the full E/P/D flow:
 
 The encode worker uses TRT-LLM's `MultimodalEncoder` class (which inherits from `BaseLLM`) and only requires the model path and batch size - no KV cache configuration is needed since it only runs the vision encoder + projector.
 
+### Media Items Without the Prompt
+
+When the model's TensorRT-LLM input processor sets `supports_mm_item_handoff` (Qwen2.5-VL and the Qwen3-VL family, in TensorRT-LLM builds that have it), the prefill worker sends the encode worker only the media items, with no prompt:
+
+- Images and videos both go to the encode worker, one call per modality, so a request with images and a video keeps all of its media.
+- With `--multimodal-embedding-cache-capacity-gb`, each image or video is cached on its own, with the encoder's item metadata (grid, video timing, hash). The key has the modality, the URL and the processor overrides. On a partial hit, only the missed items are encoded.
+- The prefill worker gives TensorRT-LLM the request's prompt and every item, in prompt order. TensorRT-LLM builds the expanded prompt and the mRoPE positions from the item metadata.
+
+Other models and older TensorRT-LLM builds keep the full-prompt flow above.
+
 ### How to Launch
 
 ```bash

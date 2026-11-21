@@ -13,7 +13,10 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
-from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
+from dynamo.trtllm.multimodal.embedding_fetcher import (
+    fetch_embeddings_from_encoder,
+    fetch_mm_items_from_encoder,
+)
 from dynamo.trtllm.request_handlers.aggregated_handler import AggregatedHandler
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
@@ -185,6 +188,21 @@ class PrefillHandler(HandlerBase):
                         "PrefillHandler: no encode_client/connector; falling back to local embedding load"
                     )
 
+            # Media items, encoded on their own (images and videos)
+            elif (
+                self.encode_client
+                and self.multimodal_processor.supports_mm_item_handoff
+            ):
+                media_urls = self.multimodal_processor.media_urls_by_modality(request)
+                if media_urls:
+                    embeddings_tensor = await fetch_mm_items_from_encoder(
+                        media_urls,
+                        request,
+                        self.encode_client,
+                        self._encoder_cache,
+                        trace_context=context,
+                    )
+
             # Handle image URLs (full E-PD flow with MultimodalEncoder)
             elif image_urls:
                 if self.encode_client:
@@ -196,7 +214,7 @@ class PrefillHandler(HandlerBase):
                         trace_context=context,
                     )
                     if isinstance(result, list):
-                        # Cache path: got List[torch.Tensor]
+                        # Cache path: got one embedding per image
                         embeddings_tensor = result
                     else:
                         # No-cache path: got DisaggregatedParams
