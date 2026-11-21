@@ -331,7 +331,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 
 	// Validate the root provider fragment against the selected graph workload program.
-	if spec.ProviderOverride != nil && lpxComponentCount > 0 {
+	if lpxComponentCount > 0 && providerOverrideWritesGroveTopology(spec.ProviderOverride, opts.workloadProvider, provideroverride.ScopeRoot, nil) {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX does not support Grove topology overrides on the deployment"))
 	} else if spec.ProviderOverride != nil {
 		allErrs = append(allErrs, v.validateProviderOverride(

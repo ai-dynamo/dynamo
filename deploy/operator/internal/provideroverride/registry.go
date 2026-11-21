@@ -28,6 +28,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Scope identifies one stable DGD provider context. It deliberately does not
@@ -225,7 +226,7 @@ func WritesGroveTopology(target string, raw []byte) bool {
 }
 
 func validatePodCliqueSetValue(root map[string]json.RawMessage) []ValueError {
-	// Walk the sparse root fragment down to its topology-owning template.
+	// Keep root overrides inside the allowed provider template fields.
 	errs := rejectUnknown(root, "", "spec")
 	spec, valueErr := requiredObject(root, "spec", "spec")
 	if valueErr != nil {
@@ -236,17 +237,26 @@ func validatePodCliqueSetValue(root map[string]json.RawMessage) []ValueError {
 	if valueErr != nil {
 		return append(errs, *valueErr)
 	}
-	errs = append(errs, validateTopologyOwner(template, "spec.template")...)
-	return errs
-}
+	errs = append(errs, rejectUnknown(template, "spec.template", "topologyConstraint", "terminationDelay")...)
 
-func validateTopologyOwner(root map[string]json.RawMessage, path string) []ValueError {
-	// Permit only the provider-owned topology subtree at embedded targets.
-	errs := rejectUnknown(root, path, "topologyConstraint")
-	topologyPath := joinPath(path, "topologyConstraint")
-	_, valueErr := requiredObject(root, "topologyConstraint", topologyPath)
-	if valueErr != nil {
-		errs = append(errs, *valueErr)
+	// Each field is optional, but an override must supply at least one.
+	_, hasTopology := template["topologyConstraint"]
+	rawDelay, hasDelay := template["terminationDelay"]
+	if !hasTopology && !hasDelay {
+		errs = append(errs, ValueError{Path: "spec.template", Detail: "topologyConstraint or terminationDelay is required"})
+	}
+	if hasTopology {
+		if _, valueErr := requiredObject(template, "topologyConstraint", "spec.template.topologyConstraint"); valueErr != nil {
+			errs = append(errs, *valueErr)
+		}
+	}
+
+	// Match Grove's positive-duration requirement and reject explicit null.
+	if hasDelay {
+		var delay metav1.Duration
+		if err := json.Unmarshal(rawDelay, &delay); err != nil || delay.Duration <= 0 {
+			errs = append(errs, ValueError{Path: "spec.template.terminationDelay", Detail: "must be a positive duration"})
+		}
 	}
 	return errs
 }
