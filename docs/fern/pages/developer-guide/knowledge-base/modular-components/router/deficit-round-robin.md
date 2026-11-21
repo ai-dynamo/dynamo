@@ -246,7 +246,6 @@ policy configuration:
 
 ```bash
 python -m dynamo.frontend \
-    --router-mode kv \
     --load-aware \
     --router-policy-config ./policy-classes.yaml
 ```

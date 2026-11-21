@@ -213,6 +213,8 @@ core:
   - 'components/src/dynamo/tokenspeed/**'
   - 'examples/backends/tokenspeed/**'
   - 'components/src/dynamo/squeeze_evolve/**'
+  # Read by tests/router/test_router_e2e_with_mockers.py.
+  - 'examples/router/policies/**'
   - '*.toml'
   - '*.lock'
   - '*.py'

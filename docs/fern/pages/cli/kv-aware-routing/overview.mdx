@@ -99,9 +99,12 @@ Then point the frontend at it:
 
 ```bash
 python3 -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config worker-selection.yaml
 ```
+
+Since v1.8 the file selects each role's policy, so the frontend takes no `--router-mode`. On an
+earlier release, also pass `--router-mode kv`; without it the frontend ignores the file and routes
+round-robin.
 
 To compare against the built-in selector, restart with
 `DYN_ROUTER_WORKER_SELECTION_POLICY=default` — no config change needed.
