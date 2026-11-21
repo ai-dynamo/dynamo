@@ -70,8 +70,8 @@ since a policy edit can orphan any path.
        --areas .github/codeowners/areas.yaml --out CODEOWNERS
    ```
    The strict run must report 100% coverage.
-5. Commit `areas.yaml` and `CODEOWNERS` together (same commit), signed
-   (`git commit -s`).
+5. Commit `areas.yaml`, `CODEOWNERS` and the generated `CODEOWNERS.<team>` files
+   together, signed (`git commit -s`).
 
 Removals fail the stale-policy gate on the deleting PR itself: when your PR
 removes (or renames away) the final tracked file matched by a declared
@@ -86,10 +86,10 @@ ordinary PRs.
 
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
 `shared:` entry (multi-team co-ownership), or adjust `classify.filetype_rules`.
-Then regenerate exactly as in Flow 2 step 4 and commit both files. A routing
-PR auto-requests the ops team (which owns `.github/codeowners/`) and the
-process team (which owns the generated root `CODEOWNERS`); either review
-covers its half.
+Then regenerate exactly as in Flow 2 step 4 and commit the policy together with
+`CODEOWNERS` and the generated `CODEOWNERS.<team>` files. The existing `codeowners`
+action checks all outputs for drift. GitHub requires native reviews on the changed
+team files; root `CODEOWNERS` and `areas.yaml` delegate to those files.
 
 Semantics worth knowing before you file one:
 
@@ -130,7 +130,8 @@ contributors:
 
 Regeneration (Flow 2 step 4) appends the handle as a co-owner on every line
 the area's team owns and rebuilds `CONTRIBUTORS.md`. Commit all three files
-(`external_contributors.yaml`, `CODEOWNERS`, `CONTRIBUTORS.md`) together.
+(`external_contributors.yaml`, `CODEOWNERS`, `CONTRIBUTORS.md`) and the generated
+team files together.
 `level` is standing metadata shown in `CONTRIBUTORS.md`; routing is granted by
 `areas`.
 

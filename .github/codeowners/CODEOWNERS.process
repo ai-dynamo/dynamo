@@ -1,0 +1,46 @@
+/.ai/ @ai-dynamo/dynamo-process-codeowners
+/DCO.md @ai-dynamo/dynamo-process-codeowners
+/skills @ai-dynamo/dynamo-process-codeowners
+/LICENSE @ai-dynamo/dynamo-process-codeowners
+/.agents/ @ai-dynamo/dynamo-process-codeowners
+/.claude/ @ai-dynamo/dynamo-process-codeowners
+/AGENTS.md @ai-dynamo/dynamo-process-codeowners
+/CLAUDE.md @ai-dynamo/dynamo-process-codeowners
+/CODEOWNERS @ai-dynamo/dynamo-process-codeowners
+/SECURITY.md @ai-dynamo/dynamo-process-codeowners
+/CONTRIBUTING.md @ai-dynamo/dynamo-process-codeowners
+/CONTRIBUTORS.md @ai-dynamo/dynamo-process-codeowners
+/CODE_OF_CONDUCT.md @ai-dynamo/dynamo-process-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/.github/codeowners/areas.yaml @ai-dynamo/dynamo-process-codeowners
+/.github/codeowners/external_contributors.yaml @ai-dynamo/dynamo-process-codeowners
+/.codex/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agents/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/.agents/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agent-docs/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/.ai/metrics-review.md @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
+/.ai/metrics-guidelines.md @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
+/.github/codeowners/areas.yaml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-process-codeowners
+/.github/codeowners/areas.yaml
+/CODEOWNERS
+
+# Generator settings and ownership contracts:
+# classify:
+#   filetype_rules:
+#   - coowner: ops
+#     pattern: '*Dockerfile*'
+#   - coowner: ops
+#     pattern: pyproject.toml
+#   - coowner: ops
+#     pattern: requirements.txt
+# meta:
+#   catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
+# required_owners:
+# - glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
+#   owners:
+#   - operator
+# - glob: deploy/operator/
+#   owners:
+#   - operator

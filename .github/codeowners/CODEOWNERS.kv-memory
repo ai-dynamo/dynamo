@@ -1,0 +1,25 @@
+/lib/memory/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/tokens/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/kv-hashing/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/bin/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/tokens/docs/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/nixl/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/numa/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/pool/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/memory/src/nixl.rs @ai-dynamo/dynamo-kv-memory-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/tests/lmcache/ @ai-dynamo/dynamo-kv-memory-codeowners
+/deploy/pre-deployment/nixl/ @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/bindings/python/src/dynamo/nixl_connect/ @ai-dynamo/dynamo-kv-memory-codeowners
+/deploy/**/*lpx*
+/lib/kv-hashing/src/multimodal/ @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/vllm/main.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/llm/src/kv_router/shared_cache.rs @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/vllm/cache_info.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/sglang/publisher.py @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/trtllm/publisher.py @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/http/service/busy_threshold.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-epp-codeowners
+/components/src/dynamo/common/backend/publisher.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/vllm/kv_connector_protocols.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners

@@ -1,0 +1,10 @@
+/examples/backends/tokenspeed/ @ai-dynamo/dynamo-tokenspeed-codeowners
+/components/src/dynamo/tokenspeed/ @ai-dynamo/dynamo-tokenspeed-codeowners
+/components/src/dynamo/tokenspeed/tests/ @ai-dynamo/dynamo-tokenspeed-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/recipes/**/tokenspeed/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners
+/recipes/**/vllm/**/*xpu*
+/recipes/**/sglang/**/*Dockerfile*
+/recipes/**/tokenspeed/**/*Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-ops-codeowners

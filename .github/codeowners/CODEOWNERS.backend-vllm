@@ -1,0 +1,54 @@
+/lib/sidecar/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners
+/examples/backends/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/generate-formats/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/tests/ @ai-dynamo/dynamo-backend-vllm-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/components/src/dynamo/vllm/omni/
+/components/src/dynamo/artifacts/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/multimodal_utils/
+/components/src/dynamo/vllm/multimodal_handlers/
+/lib/sidecar/vllm/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/recipes/**/vllm/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.devcontainer/vllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/container/deps/vllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/recipes/**/sglang/**
+/recipes/**/trtllm/**
+/recipes/**/tokenspeed/**
+/recipes/**/vllm/**/*xpu* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/test_vllm.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/tests/serve/test_vllm_xpu.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.github/workflows/pr-xpu.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.github/workflows/xpu-ci.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/tests/serve/test_vllm_omni.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/examples/deployments/**/vllm/** @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/omni/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/examples/backends/vllm/**/xpu/** @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/examples/deployments/**/sglang/**
+/recipes/**/sglang/**/*Dockerfile*
+/components/src/dynamo/vllm/main.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/examples/global_planner/*vllm*xpu* @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/container/deps/requirements.vllm.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/sidecar.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/recipes/**/tokenspeed/**/*Dockerfile*
+/components/src/dynamo/vllm/snapshot.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/vllm/tests/omni/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/vllm/publisher.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/vllm/cache_info.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/sidecar/testkit/tests/support/vllm.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/components/src/dynamo/vllm/health_check.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/container/templates/vllm_runtime.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/tests/serve/multimodal_profiles/vllm_xpu.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/engine_monitor.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/vllm/multimodal_utils/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/tests/router/test_router_e2e_with_vllm_xpu.py @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/multimodal_handlers/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/deploy/operator/internal/dynamo/backend_vllm*.go @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/vllm/tests/multimodal_utils/ @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/deploy/operator/internal/dynamo/backend_sglang*.go
+/deploy/operator/internal/dynamo/backend_trtllm*.go
+/components/src/dynamo/vllm/instrumented_scheduler.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/vllm/kv_connector_protocols.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/vllm/tests/test_vllm_sleep_wake_handlers.py @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners

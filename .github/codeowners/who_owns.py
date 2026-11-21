@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import parse_codeowners, resolve_owners  # noqa: E402
+from codeowners_match import DELEGATED, parse_codeowners, resolve_owners  # noqa: E402
 
 
 def changed_files(repo: str, base: str) -> list[str]:
@@ -106,6 +106,8 @@ def main() -> int:
             if owners
             else "(no owner -- falls through; CI coverage gate should block this)"
         )
+        if not owners and f in DELEGATED:
+            owners_str = "(review through the affected CODEOWNERS.<team> files)"
         print(f"{f}\n    review: {owners_str}")
 
     if args.changed:

@@ -1,0 +1,208 @@
+/.cargo/ @ai-dynamo/dynamo-ops-codeowners
+/.github/ @ai-dynamo/dynamo-ops-codeowners
+/scripts/ @ai-dynamo/dynamo-ops-codeowners
+/deny.toml @ai-dynamo/dynamo-ops-codeowners
+/.gitignore @ai-dynamo/dynamo-ops-codeowners
+/Cargo.lock @ai-dynamo/dynamo-ops-codeowners
+/Cargo.toml @ai-dynamo/dynamo-ops-codeowners
+/.coveragerc @ai-dynamo/dynamo-ops-codeowners
+/conftest.py @ai-dynamo/dynamo-ops-codeowners
+/.clang-format @ai-dynamo/dynamo-ops-codeowners
+/.dockerignore @ai-dynamo/dynamo-ops-codeowners
+/.lycheeignore @ai-dynamo/dynamo-ops-codeowners
+/codespell.txt @ai-dynamo/dynamo-ops-codeowners
+/.devcontainer/ @ai-dynamo/dynamo-ops-codeowners
+/.gitattributes @ai-dynamo/dynamo-ops-codeowners
+/container/dev/ @ai-dynamo/dynamo-ops-codeowners
+/hatch_build.py @ai-dynamo/dynamo-ops-codeowners
+/pyproject.toml @ai-dynamo/dynamo-ops-codeowners
+/container/deps/ @ai-dynamo/dynamo-ops-codeowners
+/.coderabbit.yaml @ai-dynamo/dynamo-ops-codeowners
+/container/run.sh @ai-dynamo/dynamo-ops-codeowners
+/container/README.md @ai-dynamo/dynamo-ops-codeowners
+/container/render.py @ai-dynamo/dynamo-ops-codeowners
+/dev/sanity_check.py @ai-dynamo/dynamo-ops-codeowners
+/rust-toolchain.toml @ai-dynamo/dynamo-ops-codeowners
+/container/templates/ @ai-dynamo/dynamo-ops-codeowners
+/dev/nats-server.conf @ai-dynamo/dynamo-ops-codeowners
+/container/compliance/ @ai-dynamo/dynamo-ops-codeowners
+/dynamo.code-workspace @ai-dynamo/dynamo-ops-codeowners
+/container/context.yaml @ai-dynamo/dynamo-ops-codeowners
+/dev/docker-compose.yml @ai-dynamo/dynamo-ops-codeowners
+/.pre-commit-config.yaml @ai-dynamo/dynamo-ops-codeowners
+/container/use-sccache.sh @ai-dynamo/dynamo-ops-codeowners
+/container/Dockerfile.docs @ai-dynamo/dynamo-ops-codeowners
+/container/Dockerfile.test @ai-dynamo/dynamo-ops-codeowners
+/container/launch_message/ @ai-dynamo/dynamo-ops-codeowners
+/container/Dockerfile.template @ai-dynamo/dynamo-ops-codeowners
+*Dockerfile* @ai-dynamo/dynamo-ops-codeowners
+pyproject.toml @ai-dynamo/dynamo-ops-codeowners
+requirements.txt @ai-dynamo/dynamo-ops-codeowners
+/tests/rl/
+/tests/deploy/
+/tests/router/
+/tests/wheels/ @ai-dynamo/dynamo-ops-codeowners
+/tests/lmcache/
+/lib/lora/tests/
+/tests/frontend/
+/tests/mm_router/
+/lib/llm/src/grpc/
+/lib/llm/src/http/
+/lib/llm/src/lora/
+/tests/benchmarks/
+/lib/lora/src/routing/
+/lib/llm/src/kv_router/
+/lib/llm/src/protocols/
+/lib/llm/src/telemetry/
+/tests/fault_tolerance/
+/lib/llm/src/entrypoint/
+/lib/llm/src/pool_relay/
+/lib/runtime/src/metrics/
+/lib/llm/src/preprocessor/
+/tests/gpu_memory_service/
+/lib/mocker/servers/sglang/
+/lib/mocker/servers/trtllm/
+/tests/vllm_self_benchmark/
+/deploy/pre-deployment/nixl/
+/lib/llm/src/generate_format/
+/.github/codeowners/areas.yaml
+/.github/workflows/pr-xpu.yaml
+/.github/workflows/xpu-ci.yaml
+/deploy/operator/internal/gms/
+/components/src/dynamo/common/rl/
+/components/src/dynamo/vllm/omni/
+/components/src/dynamo/common/http/
+/lib/backend-common/examples/mocker/
+/deploy/operator/internal/checkpoint/
+/deploy/operator/internal/dynamo/lpx/
+/components/src/dynamo/artifacts/vllm/
+/components/src/dynamo/common/snapshot/
+/components/src/dynamo/common/protocols/
+/deploy/operator/internal/observability/
+/components/src/dynamo/common/multimodal/
+/components/src/dynamo/trtllm/multimodal/
+/deploy/operator/internal/controller/lpx/
+/components/src/dynamo/vllm/multimodal_utils/
+/lib/bindings/python/src/dynamo/nixl_connect/
+/.github/codeowners/external_contributors.yaml
+/components/src/dynamo/vllm/multimodal_handlers/
+/components/src/dynamo/common/tests/test_snapshot*
+/components/src/dynamo/trtllm/request_handlers/diffusion/
+/components/src/dynamo/sglang/request_handlers/image_diffusion/
+/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+/.codex/
+/agents/
+/.agents/
+/Cargo.lock @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/Cargo.toml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/agent-docs/
+/.lycheeignore @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
+/tests/deploy/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/deploy/**/*lpx*
+/lib/sidecar/lpx/
+/lib/sidecar/vllm/
+/benchmarks/router/
+/recipes/**/vllm/**
+/.devcontainer/vllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/deploy/power-agent/
+/lib/llm/src/mocker/
+/lib/mocker/servers/
+/lib/sidecar/common/
+/lib/sidecar/sglang/
+/lib/sidecar/trtllm/
+/tests/serve/trtllm/
+/container/deps/vllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/deploy/helm/**/*lpx*
+/dev/nats-server.conf @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/lib/bench/kv_router/
+/lib/sidecar/testkit/
+/recipes/**/sglang/**
+/recipes/**/trtllm/**
+/.devcontainer/sglang/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
+/.devcontainer/trtllm/ @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/dev/docker-compose.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/docs/fern/**/*sidecar*
+/lib/sidecar/Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/dev/observability/*xpu*
+/recipes/**/tokenspeed/**
+/recipes/**/vllm/**/*xpu*
+/deploy/operator/Dockerfile @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
+/lib/llm/src/request_trace/
+/benchmarks/multimodal/image/
+/benchmarks/multimodal/sweep/
+/.github/codeowners/areas.yaml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-process-codeowners
+/.github/workflows/pr-xpu.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.github/workflows/xpu-ci.yaml @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/deploy/power-agent/Dockerfile @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-ops-codeowners
+/examples/diffusers/Dockerfile @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-ops-codeowners
+/lib/kv-hashing/src/multimodal/
+/tests/test_kustomize_matrix.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
+/.github/workflows/fern-docs.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
+/examples/deployments/**/vllm/**
+/.github/review-prompts/README.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/deploy/operator/**/*podsnapshot*
+/deploy/operator/samples/**/*gms*
+/examples/backends/vllm/**/xpu/**
+/tests/serve/multimodal_profiles/
+/.github/review-prompts/runtime.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/docs/fern/pages/use-cases/agents/
+/examples/deployments/**/sglang/**
+/recipes/**/sglang/**/*Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-ops-codeowners
+/.github/review-prompts/frontend.md @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/benchmarks/frontend/dgd/templates/
+/deploy/inference-gateway/ext-proc/
+/examples/global_planner/*vllm*xpu*
+/container/deps/requirements.vllm.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/router/scheduler/src/selection/*
+/recipes/**/tokenspeed/**/*Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-ops-codeowners
+/tests/deploy/test_dynamocheckpoint.py @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/vllm/tests/omni/
+/container/deps/requirements.sglang.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
+/container/deps/requirements.trtllm.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/container/templates/planner.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
+/container/deps/requirements.planner.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
+/container/templates/frontend.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/recipes/nemotron-3-nano-omni/Dockerfile @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/container/deps/requirements.frontend.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/tests/test_generate_kustomize_openapi.py @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
+/container/deps/requirements.benchmark.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners
+/components/src/dynamo/thunderagent_router/
+/dev/observability/grafana_dashboards/*xpu*
+/examples/router/custom-policy-example/epp/
+/components/src/dynamo/aisimulate/tests/dgd/
+/container/templates/vllm_runtime.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/components/src/dynamo/aisimulate/output/dgd/
+/deploy/inference-gateway/ext-proc/Dockerfile @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-ops-codeowners
+/container/Dockerfile.global-discovery-service @ai-dynamo/dynamo-global-router-codeowners @ai-dynamo/dynamo-ops-codeowners
+/container/templates/sglang_runtime.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
+/container/templates/trtllm_runtime.Dockerfile @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/lib/router/kv-router/src/services/selection/*
+/components/src/dynamo/common/tests/multimodal/
+/components/src/dynamo/sglang/tests/*diffusion*
+/components/src/dynamo/trtllm/tests/*diffusion*
+/components/src/dynamo/trtllm/tests/multimodal/
+/lib/backend-common/examples/mocker/Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/.github/actions/setup-snapshot-agent/action.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/sglang/tests/*multimodal*
+/components/src/dynamo/trtllm/logits_processing/
+/components/src/dynamo/trtllm/tests/*multimodal*
+/.github/actions/setup-dynamo-operator/action.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/deploy/operator/internal/controller/*checkpoint*
+/deploy/operator/internal/dynamo/backend_vllm*.go
+/deploy/operator/internal/webhook/**/*checkpoint*
+/.github/actions/build-deploy-component/action.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-planner-codeowners
+/.github/actions/check-deploy-component/action.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/aisimulate/output/dgdr_run/
+/components/src/dynamo/common/tests/test_snapshot_*
+/components/src/dynamo/vllm/tests/multimodal_utils/
+/deploy/operator/internal/dynamo/backend_sglang*.go
+/deploy/operator/internal/dynamo/backend_trtllm*.go
+/.github/actions/teardown-dynamo-operator/action.yml @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/src/dynamo/common/backend/sample_diffusion_*
+/components/src/dynamo/sglang/request_handlers/multimodal/
+/components/src/dynamo/planner/environment/metrics_provider/
+/components/src/dynamo/sglang/request_handlers/video_generation/
+/components/src/dynamo/common/configuration/groups/*router_args.py
+/tests/fault_tolerance/hardware/fault_injection_service/**/Dockerfile @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/.github/codeowners/areas.yaml

@@ -1,0 +1,16 @@
+/examples/agents/ @ai-dynamo/dynamo-agents-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/.codex/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agents/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/.agents/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agent-docs/ @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/lib/llm/src/request_trace/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/llm/src/protocols/agents.rs @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/fern/pages/use-cases/agents/ @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
+/tests/frontend/agent_smoke_inputs.py @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
+/components/src/dynamo/thunderagent_router/ @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/fern/pages/blog/2026/agentic-harness-support.mdx @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/fern/pages/blog/2026/agentic-inference-optimizations.mdx @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners

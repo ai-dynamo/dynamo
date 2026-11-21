@@ -47,6 +47,12 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 from codeowners_match import ResolvedModel, anchor, compute_resolution  # noqa: E402
+from team_codeowners import (  # noqa: E402
+    DELEGATED,
+    render_team_files,
+    team_path,
+    write_team_file,
+)
 
 
 def _owners_str(label_to_team: dict[str, str], owners: list[str]) -> str:
@@ -273,6 +279,8 @@ def _render_codeowners(
         | {label_to_team.get(o, o) for fs in model.filetype_shared for o in fs.owners}
     )
 
+    team_owners = sorted(set(teams) | {_handle(_github(c)) for c in external or []})
+
     # Group base rules per area; cross-area carve-outs -> override tail.
     dir_rules = [(p, t) for p, t in base_rules if p.endswith("/")]
 
@@ -292,7 +300,10 @@ def _render_codeowners(
         lst.sort(key=lambda r: (len(r[0]), r[0]))
     overrides.sort(key=lambda r: (len(r[0]), r[0]))
 
-    all_paths = [p for p, _ in base_rules + shared_rules + ft_rules] or ["*"]
+    all_paths = [p for p, _ in base_rules + shared_rules + ft_rules] + [
+        anchor(team_path(owner)) for owner in team_owners
+    ]
+    all_paths = all_paths or ["*"]
     width = max(len(p) for p in all_paths) + 2
 
     def fmt(path: str, team: str) -> str:
@@ -356,6 +367,11 @@ def _render_codeowners(
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
+    lines += ["", "# Native review of each team's generated ownership entries."]
+    lines += [fmt(anchor(team_path(owner)), owner) for owner in team_owners]
+    lines += ["", "# Policy changes are reviewed through the affected team files."]
+    lines += [anchor(path) for path in sorted(DELEGATED)]
+
     stats = {
         "base": len(base_rules),
         "shared": len(shared_rules),
@@ -363,6 +379,7 @@ def _render_codeowners(
         "overrides": len(overrides),
         "teams": len(teams),
     }
+    stats["team_files"] = len(team_owners)
     return lines, stats
 
 
@@ -409,10 +426,13 @@ def main() -> int:
 
     lines, stats = _render_codeowners(model, group=not args.no_group, external=external)
     Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for path, value in render_team_files("\n".join(lines), spec).items():
+        write_team_file(Path(args.out).parent / path, value)
     total = (
         stats["base"]
         + stats["shared"]
         + stats["filetype"]
+        + stats["team_files"]
         + (1 if model.catch_all else 0)
     )
     print(

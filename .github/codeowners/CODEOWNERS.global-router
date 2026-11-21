@@ -1,0 +1,46 @@
+/lib/global-*/** @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-view-receiver/ @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-view-broadcaster/ @ai-dynamo/dynamo-global-router-codeowners
+/components/src/dynamo/pool_relay/ @ai-dynamo/dynamo-global-router-codeowners
+/container/global-discovery-service.yaml @ai-dynamo/dynamo-global-router-codeowners
+/lib/sidecar/vllm/
+/lib/generate-formats/vllm/
+/lib/sidecar/trtllm/
+/lib/sidecar/sglang/
+/lib/generate-formats/sglang/
+/lib/memory/
+/lib/tokens/
+/lib/kv-hashing/
+/lib/llm/
+/lib/error/
+/lib/truthy/
+/lib/runtime/
+/lib/bindings/
+/lib/backend-common/
+/lib/sidecar/common/
+/lib/sidecar/testkit/
+/lib/sidecar/lpx/
+/lib/gpu_memory_service/
+/lib/rl/
+/lib/bench/
+/lib/mocker/
+/lib/data-gen/
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/lib/lora/tests/
+/lib/lora/src/routing/
+/lib/llm/src/pool_relay/ @ai-dynamo/dynamo-global-router-codeowners
+/lib/llm/src/pool_relay.rs @ai-dynamo/dynamo-global-router-codeowners
+/tests/router/test_pool_relay_e2e.py @ai-dynamo/dynamo-global-router-codeowners
+/lib/bindings/python/rust/llm/pool_relay.rs @ai-dynamo/dynamo-global-router-codeowners
+/lib/llm/tests/fixtures/relay-sources-canonical.json @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/reference/components/pool-relay-configuration.md @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/reference/components/global-discovery-service-configuration.md @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md @ai-dynamo/dynamo-global-router-codeowners
+/lib/router/scheduler/src/selection/*
+/lib/bench/kv_router/dc_ckf_relay_bench.rs @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-global-router-codeowners
+/container/Dockerfile.global-discovery-service @ai-dynamo/dynamo-global-router-codeowners @ai-dynamo/dynamo-ops-codeowners
+/lib/router/kv-router/src/services/selection/*

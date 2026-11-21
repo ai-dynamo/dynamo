@@ -1,0 +1,84 @@
+/recipes/ @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/ @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/ @ai-dynamo/dynamo-performance-codeowners
+/lib/data-gen/ @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/tests/ @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/coding/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/README.md @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/router/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/kimi-k2.5/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/qwen3-32b/ @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/testdata/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/README.md @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/frontend/ @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/kv_router/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/deepseek-r1/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/deepseek-v4/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/glm-5-nvfp4/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/qwen3.6-35b/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/incluster/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/nat_trace/ @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/src/coding/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/gpt-oss-120b/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/qwen3-vl-30b/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/__init__.py @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/src/common/ @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/src/replay/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/gaie_checks.sh @ai-dynamo/dynamo-performance-codeowners
+/recipes/hf_hub_secret/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/qwen3-32b-fp8/ @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/src/loadgen/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/CONTRIBUTING.md @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/pyproject.toml @ai-dynamo/dynamo-performance-codeowners
+/examples/backends/mocker/ @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/src/scheduler/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/mocker/README.md @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/burstgpt_loadgen/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/qwen3-235b-a22b-fp8/ @ai-dynamo/dynamo-performance-codeowners
+/components/src/dynamo/mocker/ @ai-dynamo/dynamo-performance-codeowners
+/components/src/dynamo/replay/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/nemotron-3-nano-omni/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/nemotron-3-super-fp8/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/sin_load_generator/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/prefix_data_generator/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/request_trace/README.md @ai-dynamo/dynamo-performance-codeowners
+/components/src/dynamo/mocker/tests/ @ai-dynamo/dynamo-performance-codeowners
+/components/src/dynamo/mocker/utils/ @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/request_trace/__init__.py @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/mocker/bench_ais_concurrency.py @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/request_trace/convert_to_perfetto.py @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/request_trace/validate_convert_to_perfetto.py @ai-dynamo/dynamo-performance-codeowners
+*Dockerfile*
+pyproject.toml
+requirements.txt
+/tests/benchmarks/ @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/servers/sglang/
+/lib/mocker/servers/trtllm/
+/tests/vllm_self_benchmark/ @ai-dynamo/dynamo-performance-codeowners
+/tests/benchmarks/multimodal/
+/lib/backend-common/examples/mocker/ @ai-dynamo/dynamo-performance-codeowners
+/recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
+/recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json
+/benchmarks/router/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
+/recipes/**/vllm/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/llm/src/mocker/ @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/servers/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/bench/kv_router/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
+/recipes/**/sglang/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
+/recipes/**/trtllm/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/lib/runtime/src/nvtx.rs @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
+/recipes/**/tokenspeed/** @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners
+/recipes/**/vllm/**/*xpu* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/lib/mocker/servers/sglang/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/mocker/servers/trtllm/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/benchmarks/multimodal/image/ @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/multimodal/sweep/ @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
+/recipes/**/sglang/**/*Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-ops-codeowners
+/benchmarks/frontend/dgd/templates/ @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-operator-codeowners
+/recipes/**/tokenspeed/**/*Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-ops-codeowners
+/recipes/nemotron-3-nano-omni/Dockerfile @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/container/deps/requirements.benchmark.txt @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners
+/lib/bench/kv_router/dc_ckf_relay_bench.rs @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-global-router-codeowners
+/lib/backend-common/examples/mocker/Dockerfile* @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
+/benchmarks/frontend/scripts/sweep_k8s/metrics.py @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/mocker/utils/planner_profiler_perf_data_converter.py @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners
