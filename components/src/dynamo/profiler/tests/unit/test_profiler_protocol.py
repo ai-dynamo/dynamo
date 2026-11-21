@@ -124,7 +124,7 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     assert dgd_config["kind"] == "DynamoGraphDeployment"
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 @pytest.mark.parametrize(
     "args",
     [
@@ -144,7 +144,7 @@ def test_get_port_preserves_frontend_cli_port(backend: str, args: list[str]) -> 
     assert CONFIG_MODIFIERS[backend].get_port(config) == 9000
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 @pytest.mark.parametrize(
     "args",
     [
@@ -166,7 +166,7 @@ def test_get_port_defaults_when_port_is_unavailable(
     assert CONFIG_MODIFIERS[backend].get_port(config) == DYNAMO_RUN_DEFAULT_PORT
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 def test_get_port_defaults_when_frontend_has_no_main_container(backend: str) -> None:
     config = {
         "metadata": {"name": "test"},

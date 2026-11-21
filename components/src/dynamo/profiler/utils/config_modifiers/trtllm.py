@@ -13,6 +13,7 @@ from dynamo.profiler.utils.config import (
     Config,
     append_argument,
     break_arguments,
+    find_main_container,
     get_component_by_name,
     get_component_name_by_type,
     get_main_container,
@@ -129,6 +130,17 @@ def _get_shell_form_command(main_container: dict) -> str | None:
     ):
         return args[0]
     return None
+
+
+def _get_valued_arg(args: list[str], key: str) -> str | None:
+    """Return the value of the last ``key value`` or ``key=value`` occurrence."""
+    value = None
+    for i, arg in enumerate(args):
+        if arg == key:
+            value = args[i + 1] if i + 1 < len(args) else None
+        elif arg.startswith(f"{key}="):
+            value = arg.split("=", 1)[1]
+    return value
 
 
 def _trtllm_flags(overrides: dict) -> list[str]:
@@ -500,8 +512,31 @@ class TrtllmConfigModifier(BaseConfigModifier):
             )
             return DYNAMO_RUN_DEFAULT_PORT
 
-        # TRT-LLM frontend doesn't have args, it uses the default port
-        return DYNAMO_RUN_DEFAULT_PORT
+        main_container = find_main_container(frontend_component)
+        if main_container is None:
+            logger.warning(
+                "Frontend main container not found, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+        args = main_container.args
+        if not args:
+            logger.warning(
+                "No args found in Frontend configuration, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+        args = break_arguments(args)
+        try:
+            return int(_get_valued_arg(args, "--http-port") or "")
+        except ValueError:
+            logger.warning(
+                "Port not found in configuration args, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(
