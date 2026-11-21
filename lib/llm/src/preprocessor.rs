@@ -4921,11 +4921,14 @@ impl OpenAIPreprocessor {
                 let hex = |entry: &MmRoutingEntry| {
                     serde_json::Value::String(format!("{:016x}", entry.mm_hash()))
                 };
-                if mm_routing_entries
+                if self.runtime_config.supports_runtime_capability(
+                    crate::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2,
+                ) || mm_routing_entries
                     .iter()
                     .all(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
                 {
-                    // Preserve the legacy image-only worker protocol.
+                    // Native SGLang binds these per source in prompt order, including
+                    // videos which expand into multiple temporal segments on P and D.
                     extra_args["mm_hashes"] =
                         serde_json::Value::Array(mm_routing_entries.iter().map(hex).collect());
                 } else {

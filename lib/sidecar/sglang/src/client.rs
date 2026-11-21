@@ -19,7 +19,8 @@ use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
 
-use crate::discovery::{self, Discovery, EngineInfo};
+use crate::discovery::{self, Discovery};
+use crate::encoder::{self, NativeBackend};
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
 
@@ -234,15 +235,25 @@ pub(crate) async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
     bootstrap: bool,
-) -> Result<EngineInfo, DynamoError> {
+) -> Result<NativeBackend, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
-    let client = connect(endpoint, transport, deadline, bootstrap).await?;
+    let channel = connect_channel(endpoint, transport, deadline, bootstrap).await?;
+    let encoder = encoder::client(channel.clone());
+    let info = retry_unavailable(transport.retry_interval, deadline, || {
+        let mut encoder = encoder.clone();
+        async move { encoder::discover(&mut encoder, deadline).await }
+    })
+    .await?;
+    if let Some(info) = info {
+        return Ok(NativeBackend::Encoder(info));
+    }
+    let client = client_from_channel(channel);
     let discovery = retry_unavailable(transport.retry_interval, deadline, || {
         let mut client = client.clone();
         async move { discover(&mut client, deadline).await }
     })
     .await?;
-    discovery::engine_info(discovery)
+    discovery::engine_info(discovery).map(Into::into)
 }
 
 /// What one try of a startup wait found.
@@ -345,18 +356,29 @@ pub async fn connect(
     deadline: Instant,
     bootstrap: bool,
 ) -> Result<Client, DynamoError> {
+    Ok(client_from_channel(
+        connect_channel(uri, cfg, deadline, bootstrap).await?,
+    ))
+}
+
+pub(crate) async fn connect_channel(
+    uri: &GrpcEndpoint,
+    cfg: &GrpcTransportConfig,
+    deadline: Instant,
+    bootstrap: bool,
+) -> Result<Channel, DynamoError> {
     let cfg = GrpcTransportConfig {
         connections: NonZeroUsize::MIN,
         ..*cfg
     };
     let pool = connect_pool(uri, cfg, deadline, bootstrap).await?;
-    Ok(client_from_channel(pool.next_channel()))
+    Ok(pool.next_channel())
 }
 
 /// `GrpcChannelPool` starts its own deadline from `cfg.startup_deadline`;
 /// `deadline` also bounds it, because callers start their startup budget
 /// before connecting.
-async fn connect_pool(
+pub(crate) async fn connect_pool(
     uri: &GrpcEndpoint,
     cfg: GrpcTransportConfig,
     deadline: Instant,
@@ -489,25 +511,41 @@ const SERVING_POLL_FAILURES: u32 = 3;
 /// [`SERVING_POLL_FAILURES`] polls in a row fail otherwise or time out.
 /// SGLang answers GetModelInfo from static metadata. HealthCheck instead runs
 /// a probe generation, which also fails while the scheduler is paused.
-pub(crate) async fn watch_serving(mut client: Client, attempt_timeout: Duration) -> String {
+pub(crate) async fn watch_serving(client: Client, attempt_timeout: Duration) -> String {
+    watch_metadata("GetModelInfo", attempt_timeout, || {
+        let mut client = client.clone();
+        async move {
+            client
+                .get_model_info(pb::GetModelInfoRequest {})
+                .await
+                .map(|_| ())
+        }
+    })
+    .await
+}
+
+pub(crate) async fn watch_metadata<F: Future<Output = Result<(), tonic::Status>>>(
+    method: &str,
+    attempt_timeout: Duration,
+    mut poll: impl FnMut() -> F,
+) -> String {
     let poll_timeout = attempt_timeout.min(SERVING_POLL_TIMEOUT);
     let mut failures = 0;
     loop {
         tokio::time::sleep(SERVING_POLL_INTERVAL).await;
-        let request = client.get_model_info(pb::GetModelInfoRequest {});
-        let failure = match tokio::time::timeout(poll_timeout, request).await {
+        let failure = match tokio::time::timeout(poll_timeout, poll()).await {
             Ok(Ok(_)) => {
                 failures = 0;
                 continue;
             }
             Ok(Err(status)) if status.code() == tonic::Code::Unavailable => {
-                return format!("GetModelInfo: {} ({:?})", status.message(), status.code());
+                return format!("{method}: {} ({:?})", status.message(), status.code());
             }
-            Ok(Err(status)) => format!("GetModelInfo: {} ({:?})", status.message(), status.code()),
-            Err(_) => format!("GetModelInfo did not answer in {poll_timeout:?}"),
+            Ok(Err(status)) => format!("{method}: {} ({:?})", status.message(), status.code()),
+            Err(_) => format!("{method} did not answer in {poll_timeout:?}"),
         };
         failures += 1;
-        tracing::debug!(failures, %failure, "SGLang GetModelInfo poll failed");
+        tracing::debug!(failures, %failure, method, "SGLang metadata poll failed");
         if failures == SERVING_POLL_FAILURES {
             return format!("{failure}; {failures} polls in a row failed");
         }

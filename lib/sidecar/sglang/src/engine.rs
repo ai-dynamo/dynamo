@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo backend for SGLang's native `sglang.api.v1` gRPC server.
+//! Dynamo backend for SGLang's native language and encoder gRPC services.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::{self, AbortRpc, Client, GRPC_SERVICE, Pool, Retry, WORKER_GROUP_KEY};
 use crate::discovery::{self, EngineInfo, sglang_eagle_enabled};
+use crate::encoder::{self, Encoder, NativeBackend, StagedCapabilities};
 use crate::listeners::{Listener, NodeListeners};
 use crate::native_http::{self, NativeHttp};
 use crate::node::{self, NodeInfo, NodeTable};
@@ -39,9 +40,8 @@ pub struct SglangSidecarEngine {
     transport: GrpcTransportConfig,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
-    /// The node's listeners, as the endpoint's listener reported them at
-    /// bootstrap.
-    table: NodeTable,
+    service: NativeService,
+    route_to_encoder: bool,
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
@@ -50,8 +50,15 @@ pub struct SglangSidecarEngine {
     lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
+enum NativeService {
+    Language(NodeTable),
+    Encoder(Box<Encoder>),
+}
+
 struct StartedState {
     listeners: NodeListeners,
+    accepts_encoder_handoff: bool,
+    staged_capabilities: StagedCapabilities,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
 }
@@ -89,7 +96,6 @@ impl SglangSidecarEngine {
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
-        Self::validate_args(&args)?;
         Ok((
             args.sidecar.common.runtime.clone(),
             Self::from_parsed_async(args, false),
@@ -108,7 +114,6 @@ impl SglangSidecarEngine {
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        Self::validate_args(&args)?;
         Ok((
             args.sidecar.common.runtime.clone(),
             Self::from_parsed_async(args, false),
@@ -116,21 +121,11 @@ impl SglangSidecarEngine {
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::validate_args(&args)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
         runtime.block_on(Self::from_parsed_async(args, true))
-    }
-
-    pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
-        if args.sidecar.common.route_to_encoder {
-            return Err(client::invalid_arg(
-                "route-to-encoder is not supported by the SGLang sidecar",
-            ));
-        }
-        Ok(())
     }
 
     async fn from_parsed_async(
@@ -148,31 +143,74 @@ impl SglangSidecarEngine {
 
     pub(crate) fn from_discovered(
         args: Args,
-        discovery: EngineInfo,
+        discovery: impl Into<NativeBackend>,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::validate_args(&args)?;
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let disaggregation_mode = discovery.disaggregation_mode;
-        let bootstrap_host = if disaggregation_mode.is_prefill() {
-            resolve_bootstrap_host(
-                args.bootstrap_host.as_deref(),
-                endpoint.as_str(),
-                &discovery,
-            )?
-        } else {
-            None
+        let (
+            service,
+            disaggregation_mode,
+            tokenizer,
+            served_name,
+            reasoning,
+            tools,
+            bootstrap_host,
+        ) = match discovery.into() {
+            NativeBackend::Language(info) => {
+                if args.encoder_advertise_endpoint.is_some() {
+                    return Err(client::invalid_arg(
+                        "--encoder-advertise-endpoint requires a native SglangEncoder",
+                    ));
+                }
+                if args.sidecar.common.route_to_encoder && !info.accepts_encoder_handoff {
+                    return Err(client::invalid_arg(
+                        "--route-to-encoder requires native SGLang accepts_encoder_handoff",
+                    ));
+                }
+                let bootstrap_host = if info.disaggregation_mode.is_prefill() {
+                    discovery_bootstrap_port(&info)?;
+                    resolve_bootstrap_host(
+                        args.bootstrap_host.as_deref(),
+                        endpoint.as_str(),
+                        &info,
+                    )?
+                } else {
+                    None
+                };
+                (
+                    NativeService::Language(info.table),
+                    info.disaggregation_mode,
+                    info.tokenizer_path,
+                    info.served_model_name,
+                    info.reasoning_parser,
+                    info.tool_call_parser,
+                    bootstrap_host,
+                )
+            }
+            NativeBackend::Encoder(info) => {
+                let encoder =
+                    Encoder::new(info, &endpoint, args.encoder_advertise_endpoint.as_deref())?;
+                let tokenizer = encoder.tokenizer().to_owned();
+                let served = encoder.served_name();
+                (
+                    NativeService::Encoder(Box::new(encoder)),
+                    DisaggregationMode::Encode,
+                    tokenizer,
+                    served,
+                    None,
+                    None,
+                    None,
+                )
+            }
         };
-        if disaggregation_mode.is_prefill() {
-            discovery_bootstrap_port(&discovery)?;
+        let route_to_encoder = args.sidecar.common.route_to_encoder;
+        if route_to_encoder && (disaggregation_mode.is_encode() || disaggregation_mode.is_decode())
+        {
+            return Err(client::invalid_arg(
+                "--route-to-encoder requires an aggregated or prefill worker",
+            ));
         }
-        tracing::info!(
-            %endpoint,
-            mode = ?disaggregation_mode,
-            model = %discovery.model_path,
-            listeners = discovery.table.len(),
-            "sglang sidecar bootstrapped native gRPC discovery"
-        );
+        tracing::info!(%endpoint, mode = ?disaggregation_mode, model = %tokenizer, "discovered native SGLang service");
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
@@ -189,18 +227,14 @@ impl SglangSidecarEngine {
             endpoint_types: common.endpoint_types,
             custom_jinja_template: common.custom_jinja_template,
             disaggregation_mode,
-            model_name: discovery.tokenizer_path.clone(),
-            served_model_name: discovery.served_model_name.clone(),
+            model_name: tokenizer,
+            served_model_name: served_name,
             model_input: ModelInput::Tokens,
-            reasoning_parser: common
-                .dyn_reasoning_parser
-                .or_else(|| discovery.reasoning_parser.clone()),
-            tool_call_parser: common
-                .dyn_tool_call_parser
-                .or_else(|| discovery.tool_call_parser.clone()),
+            reasoning_parser: common.dyn_reasoning_parser.or(reasoning),
+            tool_call_parser: common.dyn_tool_call_parser.or(tools),
             structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
-            route_to_encoder: false,
+            route_to_encoder,
             enable_rl: common.enable_rl,
             ..Default::default()
         };
@@ -211,7 +245,8 @@ impl SglangSidecarEngine {
                 transport,
                 disaggregation_mode,
                 bootstrap_host,
-                table: discovery.table,
+                service,
+                route_to_encoder,
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
@@ -222,12 +257,27 @@ impl SglangSidecarEngine {
         ))
     }
 
+    fn monitor(&self, serving: impl Future<Output = String> + Send + 'static) {
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = serving => {
+                    let _ = reason.set(why);
+                    lost.cancel();
+                }
+            }
+        });
+    }
+
     /// Connect to the listener for `dp_rank` and wait until it is healthy,
     /// then discover it. Errors name the listener.
     async fn start_listener(
         &self,
         endpoint: &GrpcEndpoint,
         dp_rank: u32,
+        table: &NodeTable,
         deadline: Instant,
     ) -> Result<(Pool, EngineInfo), DynamoError> {
         async {
@@ -242,7 +292,7 @@ impl SglangSidecarEngine {
                     self.disaggregation_mode, info.disaggregation_mode
                 )));
             }
-            if info.dp_rank != dp_rank || info.table.listeners != self.table.listeners {
+            if info.dp_rank != dp_rank || info.table.listeners != table.listeners {
                 return Err(client::invalid_arg(
                     "SGLang's node listener table changed since bootstrap",
                 ));
@@ -336,7 +386,14 @@ impl LLMEngine for SglangSidecarEngine {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
         let mode = self.disaggregation_mode;
-        let table = &self.table;
+        let table = match &self.service {
+            NativeService::Language(table) => table,
+            NativeService::Encoder(encoder) => {
+                let config = encoder.start(&self.endpoint, &self.transport).await?;
+                self.monitor(encoder.watch_serving(self.transport.connect_attempt_timeout)?);
+                return Ok(config);
+            }
+        };
 
         // Every listener, concurrently, under one startup deadline: a node
         // registers only when all of its ranks can serve.
@@ -344,15 +401,17 @@ impl LLMEngine for SglangSidecarEngine {
         let endpoints = (0..table.len())
             .map(|index| node::listener_endpoint(&self.endpoint, table, index))
             .collect::<Result<Vec<_>, _>>()?;
-        let started = futures::future::try_join_all(
-            table
-                .listeners
-                .iter()
-                .zip(&endpoints)
-                .map(|(entry, endpoint)| self.start_listener(endpoint, entry.dp_rank, deadline)),
-        )
+        let started = futures::future::try_join_all(table.listeners.iter().zip(&endpoints).map(
+            |(entry, endpoint)| self.start_listener(endpoint, entry.dp_rank, table, deadline),
+        ))
         .await?;
         let infos: Vec<_> = started.iter().map(|(_, info)| info).collect();
+        let accepts_encoder_handoff = infos.iter().all(|info| info.accepts_encoder_handoff);
+        if self.route_to_encoder && !accepts_encoder_handoff {
+            return Err(client::invalid_arg(
+                "native SGLang handoff capability changed during startup",
+            ));
+        }
         let node = NodeInfo::from_listeners(table, &infos, mode)?;
 
         let mut config = build_engine_config(
@@ -365,6 +424,17 @@ impl LLMEngine for SglangSidecarEngine {
         // startup deadline: the worker group's DNS lookup needs some of it.
         let kv_event_sources = discover_kv_event_sources(&node, &mut config, deadline).await?;
         let native_http = self.native_http(&started, &endpoints, deadline).await?;
+        let staged_capabilities = if accepts_encoder_handoff {
+            StagedCapabilities {
+                images: node.engine.supports_staged_images,
+                video: infos.iter().all(|info| info.supports_staged_video),
+                native_model_type: node.engine.native_model_type.clone(),
+                audio_model_type: node.engine.staged_audio_model_type.clone(),
+            }
+        } else {
+            StagedCapabilities::default()
+        };
+        staged_capabilities.advertise(&mut config);
         if native_http.is_some() {
             config
                 .runtime_data
@@ -405,6 +475,8 @@ impl LLMEngine for SglangSidecarEngine {
         self.state
             .set(StartedState {
                 listeners,
+                accepts_encoder_handoff,
+                staged_capabilities,
                 kv_event_sources,
                 combined_token_limit,
             })
@@ -420,17 +492,7 @@ impl LLMEngine for SglangSidecarEngine {
             kv_event_sources = kv_event_source_count,
             "sglang sidecar started"
         );
-        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
-        let reason = Arc::clone(&self.lost_reason);
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = stop.cancelled() => {}
-                why = serving => {
-                    let _ = reason.set(why);
-                    lost.cancel();
-                }
-            }
-        });
+        self.monitor(serving);
         Ok(config)
     }
 
@@ -439,10 +501,26 @@ impl LLMEngine for SglangSidecarEngine {
         mut request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        if let NativeService::Encoder(encoder) = &self.service {
+            return encoder.stage(request, ctx, self.cancel.child_token());
+        }
         let state = self
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+        // Native external mode is required on D as well. D has no direct
+        // topology dependency on E, but shares P's layout and content hashes.
+        encoder::validate_consumer(
+            &request,
+            ctx.id(),
+            self.route_to_encoder || state.accepts_encoder_handoff,
+            &state.staged_capabilities,
+        )?;
+        if request.encoder_result.is_some() && !state.accepts_encoder_handoff {
+            return Err(client::invalid_request(
+                "native SGLang cannot consume encoder_result",
+            ));
+        }
         let mode = self.disaggregation_mode;
         let listeners = &state.listeners;
         let dispatch = listeners.select(&request, mode)?;
@@ -624,6 +702,9 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        if self.disaggregation_mode.is_encode() {
+            return Ok(Vec::new());
+        }
         let state = self
             .state
             .get()
@@ -1060,7 +1141,9 @@ mod tests {
             assert_eq!(engine.transport.retry_interval.as_secs(), 2);
             assert_eq!(engine.transport.startup_deadline.as_secs(), 11);
             assert!(engine.bootstrap_host.is_none());
-            assert_eq!(engine.table.len(), 1);
+            assert!(
+                matches!(&engine.service, super::NativeService::Language(table) if table.len() == 1)
+            );
             assert!(!engine.state.initialized());
         }
     }
@@ -1106,21 +1189,53 @@ mod tests {
     }
 
     #[test]
-    fn encoder_routing_is_rejected_before_discovery() {
+    fn native_encoder_metadata_registers_an_independent_encode_worker() {
+        let info = pb::encoder::GetEncoderInfoResponse {
+            model_path: "native-model".into(),
+            tokenizer_path: "native-tokenizer".into(),
+            served_model_name: "chat-model".into(),
+            supports_staged_video: false,
+            ..Default::default()
+        };
+        let (engine, config) =
+            SglangSidecarEngine::from_discovered(args(), super::NativeBackend::Encoder(info))
+                .unwrap();
+        assert!(matches!(engine.service, super::NativeService::Encoder(_)));
+        assert_eq!(config.disaggregation_mode, DisaggregationMode::Encode);
+        assert_eq!(config.component, "encode");
+        assert_eq!(config.model_name, "native-tokenizer");
+        assert_eq!(config.served_model_name.as_deref(), Some("chat-model"));
+        assert!(!config.route_to_encoder);
+    }
+
+    #[test]
+    fn older_language_workers_cannot_register_as_staged_consumers() {
         let mut args = args();
         args.sidecar.common.route_to_encoder = true;
-        let error = SglangSidecarEngine::from_parsed(args)
+        let error = SglangSidecarEngine::from_discovered(args, discovery(|_| {}))
             .err()
-            .expect("unsupported encoder routing");
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::InvalidArgument)
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("route-to-encoder is not supported")
-        );
+            .unwrap();
+        assert!(error.to_string().contains("accepts_encoder_handoff"));
+    }
+
+    #[test]
+    fn route_to_encoder_requires_a_language_consumer() {
+        for mode in ["aggregated", "prefill", "decode"] {
+            let mut args = args();
+            args.bootstrap_host = Some("prefill".into());
+            args.sidecar.common.route_to_encoder = true;
+            let info = discovery(|reported| {
+                reported.server.disaggregation_mode = mode.into();
+                reported.server.accepts_encoder_handoff = true;
+                reported.deployment.disaggregation_bootstrap_port = Some(4100);
+            });
+            let result = SglangSidecarEngine::from_discovered(args, info);
+            if mode == "decode" {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().1.route_to_encoder);
+            }
+        }
     }
 
     #[test]

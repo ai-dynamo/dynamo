@@ -45,10 +45,13 @@ use axum::response::IntoResponse;
 
 use crate::response_merge::{Assembler, RuleSet};
 use dynamo_llm::generate_format::{
-    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
+    Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
+use dynamo_llm::preprocessor::media::{MediaFetcher, max_data_url_bytes};
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use dynamo_llm::protocols::common::preprocessor::RoutingHints;
+use dynamo_llm::protocols::common::preprocessor::{
+    MultimodalData, MultimodalDataMap, RoutingHints,
+};
 use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use dynamo_llm::protocols::response_merge::prefill_annotations;
 
@@ -163,6 +166,86 @@ impl<C: ClientCodec> SglangFormat<C> {
     }
 }
 
+/// Project each modality in source order. The native token IDs preserve how
+/// media items are interleaved in the prompt.
+fn take_staged_media(
+    body: &mut Map<String, Value>,
+    worker: &Worker<'_>,
+) -> Result<Option<MultimodalDataMap>, ClientError> {
+    let nonempty = |key: &str| {
+        body.get(key)
+            .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|items| !items.is_empty()))
+    };
+    for (field, modality, supported) in [
+        ("image_data", "image", worker.sglang_staged_images),
+        ("video_data", "video", worker.sglang_staged_video),
+        ("audio_data", "audio", worker.sglang_staged_audio),
+    ] {
+        if nonempty(field) && !supported {
+            return Err(ClientError::new(format!(
+                "this SGLang worker does not support staged {modality}"
+            )));
+        }
+    }
+    if !nonempty("image_data") && !nonempty("video_data") && !nonempty("audio_data") {
+        return Ok(None);
+    }
+    for field in [
+        "images_config",
+        "videos_config",
+        "audio_config",
+        "mm_processor_kwargs",
+        "media_io_kwargs",
+        "modalities",
+    ] {
+        if body.get(field).is_some_and(|v| !v.is_null()) {
+            return Err(ClientError::new(format!(
+                "{field} is unsupported for staged SGLang media"
+            )));
+        }
+    }
+    let policy = MediaFetcher::from_env();
+    let mut media = MultimodalDataMap::new();
+    for (field, key) in [
+        ("image_data", "image_url"),
+        ("video_data", "video_url"),
+        ("audio_data", "audio_url"),
+    ] {
+        let sources = match body.remove(field) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Array(items)) if items.is_empty() => continue,
+            Some(Value::Array(items)) => items,
+            Some(source) => vec![source],
+        };
+        let mut items = Vec::with_capacity(sources.len());
+        for value in sources {
+            let Value::String(source) = value else {
+                return Err(ClientError::new(format!(
+                    "{field} must be a URL string or a flat list of URL strings for staged media"
+                )));
+            };
+            if source.starts_with("data:") {
+                if source.len() > max_data_url_bytes() {
+                    return Err(ClientError::new(format!(
+                        "{field} exceeds DYN_MM_MAX_DATA_URL_MB"
+                    )));
+                }
+                items.push(MultimodalData::RawUrl(source));
+            } else {
+                let url = source
+                    .parse()
+                    .map_err(|_| ClientError::new(format!("invalid URL in {field}")))?;
+                policy
+                    .check_if_url_allowed(&url)
+                    .map_err(|err| ClientError::new(err.to_string()))?;
+                items.push(MultimodalData::Url(url));
+            }
+        }
+        media.insert(key.to_owned(), items);
+    }
+    Ok(Some(media))
+}
+
 impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
     fn name(&self) -> &str {
         &self.name
@@ -202,7 +285,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let priority = request.priority.unwrap_or_default();
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
-        let (input_ids, body) = request.into_worker_envelope(&request_id);
+        let (input_ids, mut body) = request.into_worker_envelope(&request_id);
         let rules = self.rules.clone();
         let prefill_need = rules.prefill_need(&body);
         let codec = self.codec.clone();
@@ -213,9 +296,15 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             input_tokens,
             validation,
             bind: Box::new(move |worker| {
+                let media = if worker.sglang_staged_images || worker.sglang_staged_audio {
+                    take_staged_media(&mut body, worker)?
+                } else {
+                    None
+                };
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)
+                    .multi_modal_data(media)
                     .stop_conditions(limits?)
                     .sampling_options(SamplingOptions {
                         n: Some(1),

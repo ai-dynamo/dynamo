@@ -1544,6 +1544,27 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
                 }
 
+                // A v2 stage request sent to an older E could drop video_urls
+                // as an unknown protobuf field. Cohorts must agree on support.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::SGLANG_STAGED_VIDEO_V2,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0sglang_staged_video_v2\0true");
+                }
+
+                // A v3 descriptor is consumed by the advertised native processor.
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3,
+                );
+
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::SGLANG_STAGED_AUDIO_V4,
+                );
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -4124,22 +4145,62 @@ mod ownership_tests {
     }
 
     #[test]
-    fn json_capability_isolates_opted_in_workers_only() {
-        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
-        let capability = JSON_MULTIMODAL_CAPABILITY;
-        let missing = ModelDeploymentCard::with_name_only("model");
-        let mut disabled = ModelDeploymentCard::with_name_only("model");
-        disabled
-            .runtime_config
-            .runtime_data
-            .insert(capability.into(), false.into());
-        let mut enabled = ModelDeploymentCard::with_name_only("model");
-        enabled
-            .runtime_config
-            .runtime_data
-            .insert(capability.into(), true.into());
-        assert_eq!(missing.mdcsum(), disabled.mdcsum());
-        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    fn media_capabilities_isolate_opted_in_workers_only() {
+        use crate::local_model::runtime_config::{
+            JSON_MULTIMODAL_CAPABILITY, SGLANG_STAGED_VIDEO_V2,
+        };
+        for capability in [JSON_MULTIMODAL_CAPABILITY, SGLANG_STAGED_VIDEO_V2] {
+            let missing = ModelDeploymentCard::with_name_only("model");
+            let mut disabled = ModelDeploymentCard::with_name_only("model");
+            disabled
+                .runtime_config
+                .runtime_data
+                .insert(capability.into(), false.into());
+            let mut enabled = ModelDeploymentCard::with_name_only("model");
+            enabled
+                .runtime_config
+                .runtime_data
+                .insert(capability.into(), true.into());
+            assert_eq!(missing.mdcsum(), disabled.mdcsum());
+            assert_ne!(missing.mdcsum(), enabled.mdcsum());
+        }
+    }
+
+    #[test]
+    fn staged_native_processor_contract_isolates_worker_sets() {
+        use crate::local_model::runtime_config::SGLANG_STAGED_NATIVE_V3;
+        let card = |model_type: Option<&str>| {
+            let mut card = ModelDeploymentCard::with_name_only("vision");
+            if let Some(model_type) = model_type {
+                card.runtime_config
+                    .runtime_data
+                    .insert(SGLANG_STAGED_NATIVE_V3.into(), model_type.into());
+            }
+            card
+        };
+        let glm = card(Some("glm4v"));
+        assert_ne!(glm.mdcsum(), card(None).mdcsum());
+        assert_ne!(glm.mdcsum(), card(Some("kimi_vl")).mdcsum());
+    }
+
+    #[test]
+    fn staged_audio_worker_sets_require_the_same_native_contract() {
+        use crate::local_model::runtime_config::SGLANG_STAGED_AUDIO_V4;
+        let card = |model: &str, images: bool| {
+            let mut card = ModelDeploymentCard::with_name_only("audio");
+            card.runtime_config.runtime_data.insert(
+                SGLANG_STAGED_AUDIO_V4.into(),
+                serde_json::json!({"model_type":model,"supports_images":images}),
+            );
+            card
+        };
+        let audio = card("qwen2_audio", false);
+        let legacy = ModelDeploymentCard::with_name_only("audio");
+        assert!(audio.runtime_config.sglang_staged_audio());
+        assert!(!legacy.runtime_config.sglang_staged_audio());
+        assert_ne!(audio.mdcsum(), legacy.mdcsum());
+        assert_ne!(audio.mdcsum(), card("qwen2_audio", true).mdcsum());
+        assert_ne!(audio.mdcsum(), card("dots3_note", false).mdcsum());
     }
 
     #[test]

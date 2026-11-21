@@ -22,6 +22,8 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "--response-plane",
         "--event-plane",
         "--grpc-endpoint",
+        "--encoder-advertise-endpoint",
+        "--route-to-encoder",
         "DYN_SIDECAR_GRPC_ENDPOINT",
         "--grpc-connections",
         "DYN_SIDECAR_GRPC_CONNECTIONS",
@@ -60,7 +62,7 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     let output = command
         .args([
             "--grpc-endpoint",
-            "http://127.0.0.1:0",
+            "https://127.0.0.1:8000",
             "--route-to-encoder",
         ])
         .env("ETCD_ENDPOINTS", "://invalid")
@@ -69,7 +71,7 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("route-to-encoder is not supported"),
+        stderr.contains("TLS endpoints are not supported"),
         "{stderr}"
     );
 }

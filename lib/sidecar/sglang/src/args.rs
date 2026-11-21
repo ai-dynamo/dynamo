@@ -28,6 +28,11 @@ pub struct Args {
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
 
+    /// Address of this native encoder reachable from the language workers.
+    /// Defaults to --grpc-endpoint. Set it when the sidecar dials a local address.
+    #[arg(long, env = "SGLANG_ENCODER_ADVERTISE_ENDPOINT")]
+    pub encoder_advertise_endpoint: Option<String>,
+
     /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
     /// stream. Each in-flight request may buffer up to this much.
     #[arg(

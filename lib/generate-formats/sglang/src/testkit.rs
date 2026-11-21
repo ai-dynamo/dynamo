@@ -28,6 +28,9 @@ pub fn worker() -> Worker<'static> {
         kv_cache_block_size: 16,
         lora_name: None,
         tower_connector_lora_enabled: false,
+        sglang_staged_images: false,
+        sglang_staged_video: false,
+        sglang_staged_audio: false,
     }
 }
 
