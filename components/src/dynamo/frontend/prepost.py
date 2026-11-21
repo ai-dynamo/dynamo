@@ -56,6 +56,14 @@ from .thinking import (
 )
 from .utils import legacy_guided_decoding
 
+_MiniMaxM3ReasoningParser: type[ReasoningParser] | None
+try:
+    from vllm.reasoning import minimax_m3_reasoning_parser
+except ImportError:  # Older supported vLLM releases do not ship this parser.
+    _MiniMaxM3ReasoningParser = None
+else:
+    _MiniMaxM3ReasoningParser = minimax_m3_reasoning_parser.MiniMaxM3ReasoningParser
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
@@ -542,6 +550,17 @@ def _validate_chat_completion_request(
     return validated_request
 
 
+def _is_minimax_m3_reasoning_parser(
+    reasoning_parser_class: type[ReasoningParser] | None,
+) -> bool:
+    """Whether the configured reasoning parser is vLLM's MiniMax M3 parser."""
+    return (
+        _MiniMaxM3ReasoningParser is not None
+        and isinstance(reasoning_parser_class, type)
+        and issubclass(reasoning_parser_class, _MiniMaxM3ReasoningParser)
+    )
+
+
 def _reasoning_parser_enabled(
     reasoning_parser_class: type[ReasoningParser] | None,
     chat_template_kwargs: dict[str, Any],
@@ -562,9 +581,20 @@ def _reasoning_parser_enabled(
     GLM is exempt from that half: its template may still open ``<think>`` with
     the flag false, which is only known after render. The gate stays open and
     the rendered prompt decides (see _glm_prompt_reasoning_open).
+
+    MiniMax M3 is also exempt: its chat template may ignore the thinking
+    control and leave the prompt open, so the model can still write
+    ``<mm:think>...</mm:think>``. Only the rendered prompt can tell, and it does
+    not exist yet when the request is adjusted, so this gate stays open for M3.
+    vllm_processor._build_reasoning_parser_metadata makes the prompt-aware
+    decision (it mirrors reasoning_closed_by_prompt in the Rust preprocessor),
+    and StreamingPostProcessor drops the parser through response_reasoning_ended.
+    M3's adjust_request() is the base no-op, so the open gate does not change
+    the sampling request or its guidance.
     """
     return reasoning_parser_class is not None and (
         chat_template_kwargs.get("enable_thinking") is not False
+        or _is_minimax_m3_reasoning_parser(reasoning_parser_class)
         or issubclass(reasoning_parser_class, Glm47MoeParserReasoningAdapter)
     )
 
@@ -592,8 +622,32 @@ def _glm_prompt_reasoning_open(
     )
 
 
-# Enough trailing prompt tokens to contain any reasoning opener.
+# Enough trailing prompt tokens to contain any reasoning opener or closer.
 _REASONING_START_TAIL_TOKENS = 16
+
+
+def _prompt_tail_ends_with(
+    prompt_token_ids: Sequence[int],
+    marker: str,
+    *,
+    tokenizer: TokenizerLike,
+) -> bool:
+    """Whether the prompt, trailing whitespace ignored, ends with ``marker``."""
+    tail_tokens = _REASONING_START_TAIL_TOKENS
+    while True:
+        tail = tokenizer.decode(
+            list(prompt_token_ids[-tail_tokens:]),
+            skip_special_tokens=False,
+        ).rstrip()
+        if tail.endswith(marker):
+            return True
+        # Whitespace or a partial marker can fill the initial token window.
+        suffix = tail.lstrip("\ufffd")
+        if tail_tokens >= len(prompt_token_ids) or (
+            suffix and not marker.endswith(suffix)
+        ):
+            return False
+        tail_tokens *= 2
 
 
 def _prompt_leaves_reasoning_open(
@@ -632,11 +686,7 @@ def _prompt_leaves_reasoning_open(
     start = getattr(parser, "reasoning_start_str", None)
     if not isinstance(start, str) or not start:
         return False
-    tail = tokenizer.decode(
-        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
-        skip_special_tokens=False,
-    )
-    return tail.rstrip().endswith(start)
+    return _prompt_tail_ends_with(prompt_token_ids, start, tokenizer=tokenizer)
 
 
 def _prepare_request(
@@ -1077,6 +1127,8 @@ class StreamingPostProcessor:
         # `enable_thinking` is the convention adopted across the modern
         # reasoning-capable model families that vLLM supports; templates
         # that don't honor it simply leave it unset (no effect here).
+        # MiniMax M3 keeps this gate open; response_reasoning_ended carries its
+        # prompt-based decision (see _reasoning_parser_enabled).
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
