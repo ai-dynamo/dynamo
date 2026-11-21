@@ -20,7 +20,7 @@ use std::sync::Arc;
 use corpus::{Corpus, TraceFormat, WorkloadParams};
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use dynamo_kv_router::config::KvRouterConfig;
-use engine::{Action, Lifecycle, Limits, Mode, RunConfig};
+use engine::{Action, Lifecycle, Limits, Mode, RunConfig, held_back_ns};
 use host::{BenchHost, check_modeled, router_config};
 use kv_cache::{KvCaches, decode_block_hashes};
 
@@ -287,6 +287,15 @@ fn modes_reject_values_that_cannot_run() {
         .validate()
         .is_ok()
     );
+}
+
+#[test]
+fn a_bench_wait_counts_by_the_admission_slots_it_left_free() {
+    // Every slot taken: the router had its full load, so the wait held nothing back.
+    assert_eq!(held_back_ns(1_000, 512, 512), 0);
+    // No admission in flight: the whole wait.
+    assert_eq!(held_back_ns(1_000, 0, 512), 1_000);
+    assert_eq!(held_back_ns(1_000, 384, 512), 250);
 }
 
 #[test]

@@ -138,8 +138,9 @@ pub struct RunResult {
     /// Fixed mode: how late window requests and engine actions were issued, in ns.
     pub request_issue_lag_ns: Option<PercentileStats<u64>>,
     pub engine_issue_lag_ns: Option<PercentileStats<u64>>,
-    /// Saturation: the share of the window the request issuer waited on the bench's
-    /// own threads, prompt preparation and engine actions, rather than on the router.
+    /// Saturation: the share of the window the bench's own threads held the router
+    /// back: the request issuer's waits on prompt preparation and engine actions,
+    /// each counted by the share of the admission window it left free.
     pub harness_wait_share: Option<f64>,
     /// Saturation: how often every admission in the window waited on an engine
     /// action, as a queueing router's do, so trace time ran on until one finished.
@@ -512,7 +513,7 @@ fn replay(
 type PreparedPrompt = Result<(Vec<u32>, PromptBlocks)>;
 
 /// Issues each request at its arrival. Returns the window requests' issue lags
-/// (fixed mode) and the time they waited on the bench's own threads (saturation).
+/// (fixed mode) and the time the bench's own threads held them back (saturation).
 fn issue_requests(
     shared: &Arc<Shared>,
     prep: Vec<Receiver<PreparedPrompt>>,
@@ -539,7 +540,9 @@ fn issue_requests(
                     .fetch_max(request.arrival_us, Ordering::AcqRel);
                 wait_for_engines(shared, request.arrival_us)?;
                 if shared.in_window(request.arrival_us) {
-                    harness_wait_ns += shared.clock.now_ns() - waited_from;
+                    let waited_ns = shared.clock.now_ns() - waited_from;
+                    let outstanding = shared.outstanding.load(Ordering::Acquire);
+                    harness_wait_ns += held_back_ns(waited_ns, outstanding, admission_window);
                 }
                 wait_for_admission_slot(shared, admission_window)?;
             }
@@ -556,6 +559,15 @@ fn issue_requests(
             .spawn(admit(Arc::clone(shared), index, tokens, prompt));
     }
     Ok((lags, harness_wait_ns))
+}
+
+/// How much of a wait on the bench's own threads held the router back: the wait,
+/// by the share of the admission window that was free as it ended. With every slot
+/// taken the router had its full load and lost nothing. Nothing is issued during
+/// the wait, so the slots free at its end are the most that were free in it.
+pub fn held_back_ns(waited_ns: u64, outstanding: usize, admission_window: usize) -> u64 {
+    let free = admission_window.saturating_sub(outstanding);
+    waited_ns * free as u64 / admission_window as u64
 }
 
 /// Saturation: wait until the engine issuers have applied everything due more than
