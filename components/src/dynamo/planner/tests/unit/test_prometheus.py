@@ -29,6 +29,7 @@ from dynamo.planner.monitoring.traffic_metrics import (
     FrontendMetricContainer,
     Metrics,
     PrometheusAPIClient,
+    _escape_label_regex,
 )
 
 pytestmark = [
@@ -522,8 +523,7 @@ def test_vllm_spec_decode_accept_length_query_derives_from_counters():
     query = client.prom.custom_query.call_args.kwargs["query"]
     assert "vllm:spec_decode_num_accepted_tokens_total" in query
     assert "vllm:spec_decode_num_drafts_total" in query
-    assert 'dynamo_namespace="test-ns"' in query
-    assert 'dynamo_component="backend"' in query
+    assert 'dynamo_namespace=~"test-ns|test_ns"' in query
     assert 'model="Qwen/Qwen3"' in query
 
 
@@ -543,8 +543,52 @@ def test_spec_decode_accept_length_query_can_use_worker_runtime_namespace():
 
     assert result == 2.5
     query = client.prom.custom_query.call_args.kwargs["query"]
-    assert 'dynamo_namespace="base-ns-workerhash"' in query
-    assert 'dynamo_endpoint="serve"' in query
+    assert 'dynamo_namespace=~"base-ns-workerhash|base_ns_workerhash"' in query
+    assert "dynamo_endpoint" not in query
+    assert "dynamo_component=" not in query
+
+
+def test_engine_metric_filter_matches_sidecar_direct_scrape_series():
+    client = PrometheusAPIClient("http://localhost:9090", "my-app-a1b2c3")
+
+    selector = client._engine_metric_filter("worker", "Qwen/Qwen3")
+
+    assert selector == (
+        'dynamo_namespace=~"my-app-a1b2c3|my_app_a1b2c3",model="Qwen/Qwen3"'
+    )
+
+
+def test_engine_metric_filter_keeps_equality_for_single_namespace_form():
+    client = PrometheusAPIClient("http://localhost:9090", "my_app")
+
+    selector = client._engine_metric_filter("backend", None)
+
+    assert selector == 'dynamo_namespace="my_app"'
+
+
+def test_engine_metric_filter_quotes_regex_for_promql_string_layer():
+    client = PrometheusAPIClient("http://localhost:9090", "my.app-ns")
+
+    selector = client._engine_metric_filter(None, None)
+
+    assert selector == r'dynamo_namespace=~"my\\.app-ns|my\\.app_ns"'
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("plain", "plain"),
+        ("my-app-a1b2c3", "my-app-a1b2c3"),
+        ("my.ns", r"my\.ns"),
+        ("a|b", r"a\|b"),
+        ("a*b+c?(d)", r"a\*b\+c\?\(d\)"),
+        ("a^b$c", r"a\^b\$c"),
+        ("a\\b", r"a\\b"),
+        ('q"w', 'q"w'),
+    ],
+)
+def test_escape_label_regex_escapes_only_re2_metachars(value, expected):
+    assert _escape_label_regex(value) == expected
 
 
 def test_sglang_spec_decode_accept_length_query_uses_gauge():
