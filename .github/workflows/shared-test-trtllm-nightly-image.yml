@@ -77,10 +77,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [trtllm_image, trtllm_video, trtllm_audio, trtllm_image_routing]
+        config: [trtllm_image, trtllm_video, trtllm_audio, trtllm_image_routing, trtllm_image_e_pd, trtllm_image_e_p_d]
     needs: build
     runs-on: [gpu-1, amd64, runner-version-v1, gpu-generic, us-west-2]
-    timeout-minutes: 30
+    timeout-minutes: 45
     container:
       image: ${{ needs.build.outputs.image }}
       env:

@@ -86,6 +86,7 @@ pub(crate) fn build_generate_request(
             .and_then(|routing| routing.lora_name.clone())
             .unwrap_or_default(),
         extra: None,
+        ..Default::default()
     })
 }
 

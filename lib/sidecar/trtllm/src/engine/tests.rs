@@ -61,14 +61,17 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         assert_eq!(config.disaggregation_mode, mode);
     }
 
-    for rejected in [
-        vec!["--disaggregation-mode", "encode"],
-        vec!["--route-to-encoder"],
-    ] {
-        assert!(
-            parse(&rejected).is_err(),
-            "{rejected:?} is not supported by this sidecar"
-        );
+    let (_, encode) = parse(&["--disaggregation-mode", "encode"]).expect("encode parses");
+    assert_eq!(encode.component, "encode");
+    assert!(!encode.enable_kv_routing);
+    let (_, consumer) = parse(&["--route-to-encoder"]).expect("E+PD consumer parses");
+    assert!(consumer.route_to_encoder);
+    let (_, prefill) = parse(&["--disaggregation-mode", "prefill", "--route-to-encoder"])
+        .expect("E+P+D prefill consumer parses");
+    assert!(prefill.route_to_encoder);
+    assert_eq!(prefill.component, "prefill");
+    for mode in ["decode", "encode"] {
+        assert!(parse(&["--disaggregation-mode", mode, "--route-to-encoder"]).is_err());
     }
     assert!(
         TrtllmSidecarEngine::from_args(vec![

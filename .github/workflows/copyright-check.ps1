@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -84,7 +84,7 @@ $global:copyright_results = @{
 
 $ignored_files = @('.clang-format', '.gitattributes', '.gitignore', '.gitkeep', '.patch', 'Cargo.lock', 'LICENSE', 'uv.lock', 'rust-toolchain.toml', 'codespell.txt', 'exclusions.txt')
 write-debug "<copyright-check> ignored_files = ['$($ignored_files -join "','")']."
-$ignored_paths = @('.github', '.mypy_cache', '.pytest_cache', 'lib/llm/tests/data/sample-models', 'lib/llm/tests/data/deepseek-v3.2', 'lib/llm/tests/data/deepseek-v4', 'container/compliance/spdx_licenses', 'lib/sidecar/sglang/proto/sglang/')
+$ignored_paths = @('.github', '.mypy_cache', '.pytest_cache', 'lib/llm/tests/data/sample-models', 'lib/llm/tests/data/deepseek-v3.2', 'lib/llm/tests/data/deepseek-v4', 'container/compliance/spdx_licenses', 'lib/sidecar/sglang/proto/sglang/', 'lib/sidecar/trtllm/proto/openengine/')
 write-debug "<copyright-check> ignored_paths = ['$($ignored_paths -join "','")']."
 $ignored_types = @('.bat', '.gif', '.ico', '.ipynb', '.jpg', '.jpeg', '.patch', '.png', '.pyc', '.pyi', '.rst', '.zip', '.md', '.json')
 write-debug "<copyright-check> ignored_types = ['$($ignored_types -join "', '")']."

@@ -388,6 +388,13 @@ impl pb::control_server::Control for FakeTrtllm {
         Err(Status::unimplemented("ListLoras is not used"))
     }
 
+    async fn shutdown(
+        &self,
+        _: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,

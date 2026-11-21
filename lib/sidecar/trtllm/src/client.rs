@@ -28,6 +28,7 @@ pub(crate) use dynamo_sidecar_common::{
 
 use crate::proto as pb;
 use crate::proto::control_client::ControlClient;
+use crate::proto::encoder_client::EncoderClient;
 use crate::proto::inference_client::InferenceClient;
 
 /// Deadline for the one-shot `Control.Abort`, so a connected-but-unresponsive
@@ -128,6 +129,12 @@ impl TrtllmClient {
 
     fn inference(&self) -> InferenceClient<Channel> {
         InferenceClient::new(self.pool.next_channel())
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+    }
+
+    fn encoder(&self) -> EncoderClient<Channel> {
+        EncoderClient::new(self.pool.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
@@ -399,10 +406,43 @@ impl TrtllmClient {
     }
 
     pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::RequestId(request_id))
+            .await
+    }
+
+    pub(crate) async fn encode(
+        &self,
+        request: pb::EncodeRequest,
+    ) -> Result<pb::EncodeResponse, DynamoError> {
+        self.encoder()
+            .encode(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("Encode", status))
+    }
+
+    pub(crate) async fn release_encoder_handoff(
+        &self,
+        handoff: pb::EncodedMediaRef,
+    ) -> Result<(), DynamoError> {
+        tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.encoder()
+                .release_encoded_media(pb::ReleaseEncodedMediaRequest {
+                    encoded_media: Some(handoff),
+                }),
+        )
+        .await
+        .map_err(|_| connection_timeout("ReleaseEncodedMedia timed out"))?
+        .map_err(|status| status_to_dynamo("ReleaseEncodedMedia", status))?;
+        Ok(())
+    }
+
+    async fn abort_target(&self, target: pb::abort_request::Target) -> Result<(), DynamoError> {
         let response = tokio::time::timeout(
             RPC_TIMEOUT,
             self.control().abort(pb::AbortRequest {
-                target: Some(pb::abort_request::Target::RequestId(request_id)),
+                target: Some(target),
             }),
         )
         .await
