@@ -2985,9 +2985,11 @@ mod tests {
 
     /// A Mistral call whose closed body is not valid JSON streams to the client as a
     /// tool call. The non-streaming response must return the same calls: neither the
-    /// malformed call nor its valid sibling may be dropped.
+    /// malformed call nor its valid sibling may be dropped. A token-limit finish keeps
+    /// the confirmed calls too, drops a later call the limit cut off, and stays `Length`.
     #[tokio::test]
     async fn mistral_parser_confirmed_call_with_invalid_json_survives_aggregation() {
+        use dynamo_protocols::types::FinishReason;
         if crate::test_utils::run_isolated(
             concat!(
                 module_path!(),
@@ -3009,106 +3011,35 @@ mod tests {
             })),
             strict: None,
         };
-        let tools = vec![tool("cd", "folder"), tool("mkdir", "dir_name")];
-        let raw = create_test_delta(
-            0,
-            r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#,
-            Some(dynamo_protocols::types::Role::Assistant),
-            Some(dynamo_protocols::types::FinishReason::Stop),
-            None,
-            None,
-        );
-        let adapted = super::super::unified_parser::apply_stream(
-            stream::iter(vec![raw]),
-            Some(tools),
-            None,
-            false,
-            dynamo_parsers_v2::UnifiedParserStartingState::Response,
-            super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
-        );
-
-        let response = DeltaAggregator::apply_with_tool_terminal_policy(
-            adapted,
-            ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
-            true,
-        )
-        .await
-        .expect("aggregation should succeed");
-
-        let choice = &response.inner.choices[0];
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
-        );
-        let calls = choice
-            .message
-            .tool_calls
-            .as_ref()
-            .expect("the streamed calls must not be dropped");
-        let calls: Vec<_> = calls
-            .iter()
-            .map(|call| {
-                (
-                    call.function.name.as_str(),
-                    call.function.arguments.as_str(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            calls,
-            [
-                ("cd", r#"{"workspace"}"#),
-                ("mkdir", r#"{"dir_name": "Projects"}"#)
-            ]
-        );
-        assert!(choice.message.content.is_none());
-    }
-
-    /// A token-limit finish keeps the Mistral calls the parser confirmed, as streaming
-    /// does, even when a confirmed body is not valid JSON. A later call that the limit
-    /// cut off is still dropped, and the finish reason stays `Length`.
-    #[tokio::test]
-    async fn mistral_parser_confirmed_calls_survive_length_aggregation() {
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::mistral_parser_confirmed_calls_survive_length_aggregation"
-            ),
-            &[(
-                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
-                "2",
-            )],
-        ) {
-            return;
-        }
-        let tool = |name: &str, parameter: &str| dynamo_parsers::tool_calling::ToolDefinition {
-            name: name.to_string(),
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {parameter: {"type": "string"}},
-                "required": [parameter]
-            })),
-            strict: None,
-        };
-        let cases: [(&str, &[(&str, &str)]); 2] = [
+        let both =
+            r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#;
+        let cut_off = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_na"#;
+        let both_calls: &[(&str, &str)] = &[
+            ("cd", r#"{"workspace"}"#),
+            ("mkdir", r#"{"dir_name": "Projects"}"#),
+        ];
+        // (input finish, raw text, expected finish, expected calls)
+        let cases = [
             (
-                r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#,
-                &[
-                    ("cd", r#"{"workspace"}"#),
-                    ("mkdir", r#"{"dir_name": "Projects"}"#),
-                ],
+                FinishReason::Stop,
+                both,
+                FinishReason::ToolCalls,
+                both_calls,
             ),
+            (FinishReason::Length, both, FinishReason::Length, both_calls),
             (
-                r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_na"#,
+                FinishReason::Length,
+                cut_off,
+                FinishReason::Length,
                 &[("cd", r#"{"workspace"}"#)],
             ),
         ];
-        for (text, expected) in cases {
+        for (finish, text, expected_finish, expected_calls) in cases {
             let raw = create_test_delta(
                 0,
                 text,
                 Some(dynamo_protocols::types::Role::Assistant),
-                Some(dynamo_protocols::types::FinishReason::Length),
+                Some(finish),
                 None,
                 None,
             );
@@ -3132,8 +3063,8 @@ mod tests {
             let choice = &response.inner.choices[0];
             assert_eq!(
                 choice.finish_reason,
-                Some(dynamo_protocols::types::FinishReason::Length),
-                "{text}"
+                Some(expected_finish),
+                "{finish:?} {text}"
             );
             let calls: Vec<_> = choice
                 .message
@@ -3147,7 +3078,8 @@ mod tests {
                     )
                 })
                 .collect();
-            assert_eq!(calls, expected, "{text}");
+            assert_eq!(calls, expected_calls, "{finish:?} {text}");
+            assert!(choice.message.content.is_none(), "{finish:?} {text}");
         }
     }
 
