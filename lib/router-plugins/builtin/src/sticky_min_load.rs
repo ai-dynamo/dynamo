@@ -187,9 +187,8 @@ fn provider(
     parameters.validate()?;
 
     Ok(Arc::new(
-        move |config: &SelectionConfig, worker_type, _partition| {
+        move |_config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
                 Box::new(SharedStickyMinLoadPicker(Mutex::new(

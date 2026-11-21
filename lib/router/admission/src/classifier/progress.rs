@@ -20,7 +20,7 @@ pub struct RequestProgressUpdater {
 }
 
 impl RequestProgress {
-    pub fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
+    pub(crate) fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
         let context_tokens = Arc::new(AtomicUsize::new(initial_context_tokens));
         (
             Self {

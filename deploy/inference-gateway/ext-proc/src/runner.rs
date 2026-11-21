@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;

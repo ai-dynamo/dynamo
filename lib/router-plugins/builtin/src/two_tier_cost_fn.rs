@@ -171,9 +171,8 @@ fn provider(
     parameters.validate()?;
 
     Ok(Arc::new(
-        move |config: &SelectionConfig, worker_type, _partition| {
+        move |_config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
                 Box::new(TwoTierCostFnPicker { parameters }),
@@ -221,7 +220,6 @@ mod tests {
             );
         }
         let policy = WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(TwoTierCostFnPicker { parameters }),

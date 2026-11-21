@@ -132,7 +132,7 @@ fn provider(
     }
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |config, worker_type, _partition| {
+    Ok(Arc::new(move |_config, worker_type, _partition| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter {
                 min_device_overlap_blocks,
@@ -140,7 +140,6 @@ fn provider(
         ];
 
         WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
             worker_type.as_str(),
             filters,
             vec![Box::new(ActiveRequestsScorer)],

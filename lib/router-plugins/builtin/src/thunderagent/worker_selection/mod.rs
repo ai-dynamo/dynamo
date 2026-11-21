@@ -73,9 +73,8 @@ fn worker_selection_provider(
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     let _: ThunderAgentSelectionParameters = parameters.deserialize()?;
     Ok(Arc::new(
-        move |router, worker_type: WorkerType, _partition| {
+        move |_config, worker_type: WorkerType, _partition| {
             WorkerSelectionPolicy::new(
-                router.clone(),
                 worker_type.as_str(),
                 vec![Box::new(ThunderAgentScorer)],
                 Box::new(ThunderAgentPicker),
@@ -107,7 +106,6 @@ mod tests {
 
     fn policy() -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
             "test",
             vec![Box::new(ThunderAgentScorer)],
             Box::new(ThunderAgentPicker),

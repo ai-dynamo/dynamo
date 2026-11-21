@@ -207,7 +207,6 @@ fn each_component_can_only_read_its_own_inputs() {
                             calls: calls.clone(),
                         };
                         let policy = WorkerSelectionPolicy::new_with_filters(
-                            SelectionConfig::default(),
                             "test",
                             vec![
                                 Box::new(probe(filter_mask)),

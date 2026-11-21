@@ -1660,6 +1660,7 @@ mod tests {
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
     use crate::session_affinity::SessionAffinityMode;
+    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
     use dynamo_runtime::discovery::DiscoveryEvent;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::Error;

@@ -27,12 +27,14 @@ impl WorkerView for ClassifierRows {
 
     fn load(&self, row: usize) -> Option<WorkerLoadView> {
         self.with_row(row, |candidate| {
-            candidate.load().map(|load| WorkerLoadView {
-                available: load.is_available(),
-                active_prefill_tokens: load.active_prefill_tokens(),
-                active_decode_blocks: load.active_decode_blocks(),
-                decode_cost_blocks: load.decode_cost_blocks(),
-                active_requests: load.active_requests(),
+            candidate.load().map(|load| {
+                let mut view = WorkerLoadView::default();
+                view.available = load.is_available();
+                view.active_prefill_tokens = load.active_prefill_tokens();
+                view.active_decode_blocks = load.active_decode_blocks();
+                view.decode_cost_blocks = load.decode_cost_blocks();
+                view.active_requests = load.active_requests();
+                view
             })
         })
         .flatten()
@@ -43,13 +45,13 @@ impl WorkerView for ClassifierRows {
             candidate.cache().map(|cache| {
                 let (effective_overlap_blocks, estimated_cached_tokens) =
                     cache.accounting_cache_estimate();
-                WorkerCacheView {
-                    effective_overlap_blocks,
-                    estimated_cached_tokens,
-                    device_overlap_blocks: cache.device_overlap_blocks(),
-                    host_overlap_blocks: cache.host_overlap_blocks(),
-                    disk_overlap_blocks: cache.disk_overlap_blocks(),
-                }
+                let mut view = WorkerCacheView::default();
+                view.effective_overlap_blocks = effective_overlap_blocks;
+                view.estimated_cached_tokens = estimated_cached_tokens;
+                view.device_overlap_blocks = cache.device_overlap_blocks();
+                view.host_overlap_blocks = cache.host_overlap_blocks();
+                view.disk_overlap_blocks = cache.disk_overlap_blocks();
+                view
             })
         })
         .flatten()

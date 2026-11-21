@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt};
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_router_policies::router_modes;
 use dynamo_router_protocol::WorkerType;

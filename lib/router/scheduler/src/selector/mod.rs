@@ -30,6 +30,9 @@ use reference::{DefaultWorkerScorer, pick_default_worker};
 use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
+use dynamo_worker_selection::host::{
+    WorkerSelectionContextHostExt, WorkerSelectionPolicyHostExt, worker_copy_input,
+};
 use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
     WorkerCopyInput, WorkerInputRows,
@@ -398,9 +401,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
                 self.request.transfer_local_prefix_blocks_for(worker),
             )
         });
-        Some(WorkerCopyInput {
-            source_prefix_blocks: source.map(source_prefix_blocks),
-        })
+        Some(worker_copy_input(source.map(source_prefix_blocks)))
     }
 
     fn selected_kv_transfer_source(
@@ -796,14 +797,14 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
-        self.runtime_config()
+        WorkerSelectionPolicy::runtime_config(self)
     }
 
     fn update_runtime_config(
         &mut self,
         update: RuntimePolicyUpdate,
     ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
-        self.update_runtime_config(update)
+        WorkerSelectionPolicy::update_runtime_config(self, update)
     }
 
     fn uses_exclusive_affinity_target(&self) -> bool {
@@ -836,7 +837,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     }
 
     fn candidate_preparer(&self) -> Option<CandidatePreparer> {
-        WorkerSelectionPolicy::candidate_preparer(self)
+        WorkerSelectionPolicyHostExt::candidate_preparer(self)
     }
 
     fn select_worker_prepared(

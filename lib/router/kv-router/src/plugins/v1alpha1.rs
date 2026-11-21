@@ -30,9 +30,13 @@
 
 // Worker selection: the three traits a policy is built from, and the policy they assemble into.
 pub use crate::plugins::worker_selection::{
-    RuntimePolicyBuilder, RuntimePolicyError, SelectionConfig, SharedCacheType, WorkerFilter,
-    WorkerPicker, WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory,
+    SelectionConfig, SharedCacheType, WorkerFilter, WorkerPicker, WorkerScorer,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
+};
+
+// Worker selection: parameters a policy lets an operator change while it runs.
+pub use crate::plugins::worker_selection::{
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
 
 // Worker selection: the request a policy reads.

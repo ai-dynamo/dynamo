@@ -155,7 +155,6 @@ impl WorkerPicker for FirstPicker {
 
 fn selection(inputs: WorkerInputs) -> WorkerSelectionPolicy {
     WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
         "prefill",
         vec![Box::new(InputsScorer(inputs))],
         Box::new(FirstPicker),

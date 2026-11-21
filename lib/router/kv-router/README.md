@@ -59,7 +59,7 @@ a classifier written against it).
 |---|---|---|
 | `plugins::v1alpha1` | The plugin API | Alpha: can change in a minor release; each change is listed in the release's deprecation notes |
 | `plugins::experimental` | The dispatch gate, hint policies, resident block counts, decode progress; one submodule each, imported by name | None: can change or be removed in any release |
-| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
+| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, and `classify_request` and `request_progress` for classifier tests; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
 | `plugins::host` | What a routing host names to resolve and run plugins | Not for plugin crates |
 
 ## Features

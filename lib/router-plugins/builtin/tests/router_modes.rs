@@ -5,6 +5,7 @@ mod support;
 
 use std::collections::HashSet;
 
+use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, WorkerSelectionPolicyHostExt};
 use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_router_policies::router_modes::{LEAST_LOADED, RANDOM, ROUND_ROBIN};
 use dynamo_router_policies::{default_registry, register, with_defaults};

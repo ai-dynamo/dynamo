@@ -28,6 +28,8 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead,
 };
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::testing::classify_request;
 use dynamo_kv_router::plugins::v1alpha1::*;
 
 const BLOCK_SIZE: u32 = 64;
@@ -137,7 +139,7 @@ request_classifier:
 }
 
 fn classify(classifier: &mut dyn RequestClassifier, request_id: &str, session: &SessionContext) {
-    let request = ClassifyRequest::for_test(ISL, Some(request_id), Some(session.clone()));
+    let request = classify_request(ISL, Some(request_id), Some(session.clone()));
     classifier
         .classify(request, &NoWorkers)
         .expect("classification succeeds");

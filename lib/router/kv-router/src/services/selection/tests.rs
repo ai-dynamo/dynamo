@@ -379,7 +379,6 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
             worker_types.lock().unwrap().push(worker_type);
             rendezvous.wait_for_peer();
             WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
                 worker_type.as_str(),
                 vec![Box::new(RejectWorker(1))],
                 vec![Box::new(WorkerIdScorer)],
@@ -453,7 +452,6 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
         dynamo_router_protocol::WorkerType::Aggregated,
         |config, worker_type, _partition| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 worker_type.as_str(),
                 vec![Box::new(NonFiniteScorer)],
                 Box::new(LowestCostPicker),
@@ -487,12 +485,7 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
     let app = native_policy_app(
         dynamo_router_protocol::WorkerType::Aggregated,
         |config, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(InvalidRowPicker),
-            )
+            WorkerSelectionPolicy::new(worker_type.as_str(), Vec::new(), Box::new(InvalidRowPicker))
         },
     )
     .await;
@@ -523,7 +516,6 @@ async fn worker_selection_filter_returns_unavailable_without_booking() {
         dynamo_router_protocol::WorkerType::Aggregated,
         |config, worker_type, _partition| {
             WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
                 worker_type.as_str(),
                 vec![Box::new(RejectAllFilter)],
                 Vec::new(),

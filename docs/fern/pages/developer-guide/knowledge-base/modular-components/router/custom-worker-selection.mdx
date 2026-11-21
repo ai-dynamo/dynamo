@@ -253,13 +253,12 @@ fn provider(
     }
     let minimum_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |config, worker_type, _partition| {
+    Ok(Arc::new(move |_config, worker_type, _partition| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
         ];
         let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
         WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
             worker_type.as_str(),
             filters,
             scorers,
@@ -335,15 +334,42 @@ For prefill and decode, the selection order is the role-specific CLI or environm
 cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 ```
 
-Add one focused test for each policy decision and one registration test for every type name.
+Add one focused test for each policy decision and one registration test for every type name. `plugins::testing::SelectionCase` describes a request and its workers and runs the policy through the router's own selection path, so a test names no router type outside the plugin API. Enable the harness from the policy crate's `[dev-dependencies]`:
+
+```toml
+[dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["plugin-testing"] }
+```
+
+```rust
+use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
+
+#[test]
+fn prefers_the_worker_with_fewer_requests() {
+    let policy = WorkerSelectionPolicy::new(
+        "test",
+        vec![Box::new(ActiveRequestsScorer)],
+        Box::new(LowestCostPicker),
+    );
+    let selected = SelectionCase::new(160, 16)
+        .worker(29, CaseWorker::new().active_requests(4))
+        .worker(41, CaseWorker::new().active_requests(1))
+        .select(&policy)
+        .unwrap();
+    assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
+}
+```
+
+`SelectionCase::new` takes the prompt length in tokens and the block size. `CaseWorker` sets the cache overlap, load, and capacity a worker reports; a value a test does not set reads as zero or unreported. For a request classifier, `plugins::testing::classify_request` builds the request to classify and `plugins::testing::request_progress` a progress reading.
 
 ## Shared Plugin Construction
 
-The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
+The catalog registers plugin providers once. A host then calls `resolve_plugins`, which validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Resolution is a host action: it is on the `plugins::host::RouterPluginRegistryHostExt` trait, not on the registry a plugin's `register` receives. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
 
 Rust embedders start with the host registry, which includes the default policy, then register their catalog:
 
 ```rust
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_llm::entrypoint::input::http::HttpFrontend;
 use dynamo_llm::kv_router::plugins::router_plugin_registry;
 
@@ -448,7 +474,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
 | `CACHE` | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
-| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits`, `hits_beyond(prefix)` (every hit at or past `prefix`), and `loadable_beyond(prefix)` (the unbroken run starting at `prefix`, or zero when it is shorter than the engine loads) |
+| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits()`, `hits_beyond(prefix)` (every hit at or past `prefix`), and `loadable_beyond(prefix)` (the unbroken run starting at `prefix`, or zero when it is shorter than the engine loads) |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |

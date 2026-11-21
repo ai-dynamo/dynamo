@@ -10,9 +10,9 @@ use rustc_hash::FxHashSet;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[cfg(any(test, feature = "testing", feature = "bench"))]
-use crate::DefaultWorkerPicker;
+use crate::{DefaultWorkerPicker, SelectionConfig};
 use crate::{
-    HostedWorkerPicker, SelectionConfig, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
+    HostedWorkerPicker, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
     WorkerSelectionPolicyError,
 };
 
@@ -135,7 +135,9 @@ const ROW_BUFFERS: usize = 64;
 ///
 /// Routing hosts supply a policy factory. Both builtin and external policies compose
 /// scorers and a picker through [`Self::new`], with optional filters through [`Self::new_with_filters`].
-/// The kernel drives a policy through [`Self::select_rows`] over the rows its
+/// The kernel drives a policy through
+/// [`WorkerSelectionPolicyHostExt::select_rows`](crate::host::WorkerSelectionPolicyHostExt::select_rows)
+/// over the rows its
 /// [`CandidateRowSource`] yields.
 pub struct WorkerSelectionPolicy {
     worker_label: &'static str,
@@ -148,24 +150,22 @@ impl WorkerSelectionPolicy {
     /// Build a policy with no filters.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
-    /// passes [`dynamo_router_protocol::WorkerType::as_str`]. The config argument is retained for API compatibility;
-    /// policy parameters belong to the supplied scorers and picker and are not retained here.
+    /// passes [`dynamo_router_protocol::WorkerType::as_str`]. Policy parameters belong to the
+    /// supplied scorers and picker.
     pub fn new(
-        kv_router_config: SelectionConfig,
         worker_label: &'static str,
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
-        Self::new_with_filters(kv_router_config, worker_label, Vec::new(), scorers, picker)
+        Self::new_with_filters(worker_label, Vec::new(), scorers, picker)
     }
 
     /// Build a policy from ordered filters, additive scorers, and one picker.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
-    /// passes [`dynamo_router_protocol::WorkerType::as_str`]. The config argument is retained for API compatibility;
-    /// policy parameters belong to the supplied scorers and picker and are not retained here.
+    /// passes [`dynamo_router_protocol::WorkerType::as_str`]. Policy parameters belong to the
+    /// supplied scorers and picker.
     pub fn new_with_filters(
-        _kv_router_config: SelectionConfig,
         worker_label: &'static str,
         filters: Vec<Box<dyn WorkerFilter>>,
         scorers: Vec<Box<dyn WorkerScorer>>,
@@ -331,7 +331,7 @@ impl WorkerSelectionPolicy {
     /// A preparer for this policy's rows, when its rows depend only on the request and
     /// worker configuration until load inputs are filled. Filters are policy callbacks, so a
     /// policy with filters builds its rows at selection.
-    pub fn candidate_preparer(&self) -> Option<CandidatePreparer> {
+    pub(crate) fn candidate_preparer(&self) -> Option<CandidatePreparer> {
         match &self.state {
             #[cfg(any(test, feature = "testing", feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => None,
@@ -347,7 +347,7 @@ impl WorkerSelectionPolicy {
 
     /// Whether `prepared` rows are usable by this policy: built by one that would build the
     /// same rows, with the same inputs and without filters, which run as policy callbacks.
-    pub fn accepts_prepared(&self, prepared: &PreparedRows) -> bool {
+    pub(crate) fn accepts_prepared(&self, prepared: &PreparedRows) -> bool {
         match &self.state {
             #[cfg(any(test, feature = "testing", feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => false,
@@ -362,7 +362,7 @@ impl WorkerSelectionPolicy {
     /// reflects bookings since preparation; after [`PreparedRows::keep_filled_loads`]
     /// only the ranks it named are read from `source`. When `trace` is set, the pick
     /// carries the retained per-candidate costs.
-    pub fn select_rows<S: CandidateRowSource>(
+    pub(crate) fn select_rows<S: CandidateRowSource>(
         &self,
         context: &WorkerSelectionContext<'_>,
         source: &S,
@@ -422,7 +422,7 @@ impl WorkerSelectionPolicy {
         clippy::result_large_err,
         reason = "called once per role at startup, and the caller reuses the returned policy"
     )]
-    pub fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
+    pub(crate) fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
         if !self.can_run_hosted() {
             return Err(self);
         }
@@ -1272,7 +1272,6 @@ mod row_source_tests {
     #[test]
     fn empty_and_filtered_tables_are_distinct_failures() {
         let policy = WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
             "test",
             vec![Box::new(RejectWorker(WorkerWithDpRank::from_worker_id(0)))],
             vec![Box::new(DeviceOverlapScorer)],
@@ -1298,7 +1297,6 @@ mod row_source_tests {
     fn kept_rows_alone_reach_scorers_and_the_reuse_maximum() {
         let rejected = WorkerWithDpRank::from_worker_id(0);
         let policy = WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
             "test",
             vec![Box::new(RejectWorker(rejected))],
             vec![Box::new(DeviceOverlapScorer)],
@@ -1351,7 +1349,6 @@ mod row_source_tests {
         }
 
         let policy = WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
             "test",
             vec![Box::new(DeviceOverlapScorer)],
             Box::new(LeastLoaded),
@@ -1397,7 +1394,6 @@ mod row_source_tests {
         assert_eq!(table.rows_built.get(), rows_before);
 
         let filtered = WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
             "test",
             vec![Box::new(RejectWorker(WorkerWithDpRank::from_worker_id(0)))],
             Vec::new(),
@@ -1490,7 +1486,6 @@ mod row_source_tests {
             let context = WorkerSelectionContext::new(64, 16)
                 .with_decode_progress(has_source.then_some(&provider));
             let policy = WorkerSelectionPolicy::new_with_filters(
-                SelectionConfig::default(),
                 "test",
                 vec![Box::new(DeclaresProgress)],
                 vec![Box::new(DeclaresProgress)],
@@ -1521,12 +1516,7 @@ mod row_source_tests {
             }
         }
 
-        let policy = WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
-            "test",
-            Vec::new(),
-            Box::new(OutOfRange),
-        );
+        let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(OutOfRange));
         let table = Table::new(vec![rank(0, 0, 0.0)]);
 
         assert!(matches!(

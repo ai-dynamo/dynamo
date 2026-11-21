@@ -63,21 +63,7 @@ impl ClassifyRequest {
         Self::with_timing(input_tokens, initial_cached_tokens, Instant::now())
     }
 
-    /// A classification input for plugin tests and benchmarks: `input_tokens` with no cached
-    /// prefix, an optional request id, and an optional session.
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
-    pub fn for_test(
-        input_tokens: usize,
-        request_id: Option<&str>,
-        session_context: Option<SessionContext>,
-    ) -> Self {
-        let mut request = Self::with_timing(input_tokens, 0, Instant::now());
-        request.request_id = request_id.map(str::to_owned);
-        request.session_context = session_context;
-        request
-    }
-
-    pub fn with_timing(
+    pub(crate) fn with_timing(
         input_tokens: usize,
         initial_cached_tokens: usize,
         ingress_at: Instant,
@@ -98,41 +84,41 @@ impl ClassifyRequest {
         }
     }
 
-    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+    pub(crate) fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
     }
 
-    pub fn with_initial_policy_class(mut self, policy_class: impl Into<String>) -> Self {
+    pub(crate) fn with_initial_policy_class(mut self, policy_class: impl Into<String>) -> Self {
         self.policy_class = Some(policy_class.into());
         self
     }
 
-    pub fn with_session_context(mut self, session_context: SessionContext) -> Self {
+    pub(crate) fn with_session_context(mut self, session_context: SessionContext) -> Self {
         self.session_context = Some(session_context);
         self
     }
 
-    pub fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+    pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
         self.pinned_worker = pinned_worker;
         self
     }
 
     /// Copy tracking hashes into storage owned by this classification attempt.
-    pub fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
+    pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
         self
     }
 
     /// The router-wide busy thresholds read when classification started.
-    pub fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
+    pub(crate) fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
         self.reject_thresholds = Some(reject);
         self
     }
 
     /// Router-wide busy thresholds, read when classification started. Selection skips a
     /// worker past them and rejects the request when none remains.
-    pub fn reject_thresholds(&self) -> BusyThresholds {
+    pub(crate) fn reject_thresholds(&self) -> BusyThresholds {
         self.reject_thresholds.unwrap_or_default()
     }
 
@@ -246,7 +232,7 @@ impl ClassifyRequest {
     }
 
     /// The lane key set by [`Self::set_lane_key`], if any.
-    pub fn lane_key(&self) -> Option<LaneKey> {
+    pub(crate) fn lane_key(&self) -> Option<LaneKey> {
         self.overrides.lane_key
     }
 
@@ -259,7 +245,7 @@ impl ClassifyRequest {
     /// Only the explicit overrides feed the queue: cache eligibility is
     /// recomputed from the current workers at enqueue, because worker state
     /// may have changed while the classification was pending.
-    pub fn into_queue_inputs(self) -> ClassificationOverrides {
+    pub(crate) fn into_queue_inputs(self) -> ClassificationOverrides {
         self.overrides
     }
 }

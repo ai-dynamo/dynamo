@@ -32,7 +32,11 @@ pub trait WorkerView: Sync {
 }
 
 /// A rank's booked load as the classifier sees it.
+///
+/// Non-exhaustive, so a later release can add a value: build one from `Default` and assign
+/// the fields a test needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct WorkerLoadView {
     /// Whether the host observed a projection for this rank; false flags a default row.
     pub available: bool,
@@ -53,7 +57,11 @@ impl RankLoad for WorkerLoadView {
 }
 
 /// A rank's cache estimate for this request as the classifier sees it.
+///
+/// Non-exhaustive, so a later release can add a value: build one from `Default` and assign
+/// the fields a test needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct WorkerCacheView {
     pub effective_overlap_blocks: f64,
     pub estimated_cached_tokens: usize,

@@ -50,7 +50,7 @@ impl HostedSelectionRequest {
 }
 
 /// A role's picker, taken out of its policy by
-/// [`WorkerSelectionPolicy::into_hosted_picker`](crate::WorkerSelectionPolicy::into_hosted_picker).
+/// [`WorkerSelectionPolicyHostExt::into_hosted_picker`](crate::host::WorkerSelectionPolicyHostExt::into_hosted_picker).
 ///
 /// One instance serves every request for its role, called concurrently from the
 /// routing host's tasks. Selection builds no candidate table and takes no lock.
@@ -138,8 +138,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        RuntimePolicyError, SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter,
-        WorkerScorer, WorkerSelectionPolicy,
+        RuntimePolicyError, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerScorer,
+        WorkerSelectionPolicy,
     };
 
     const _: () = {
@@ -215,13 +215,7 @@ mod tests {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: impl WorkerPicker + 'static,
     ) -> WorkerSelectionPolicy {
-        WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
-            "test",
-            filters,
-            scorers,
-            Box::new(picker),
-        )
+        WorkerSelectionPolicy::new_with_filters("test", filters, scorers, Box::new(picker))
     }
 
     fn hosted(picker: impl WorkerPicker + 'static) -> HostedWorkerPicker {

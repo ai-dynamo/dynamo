@@ -232,7 +232,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         let overlap_credit_decay =
             if context.tracks_prefill_tokens() && weights.overlap_score_credit_decay > 0.0 {
                 let excess_active_prefill_blocks = load
-                    .active_prefill_tokens
+                    .active_prefill_tokens()
                     .saturating_sub(default_context.min_active_prefill_tokens)
                     as f64
                     / context.block_size() as f64;
@@ -249,9 +249,9 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
-        let decode_cost_blocks = load.decode_cost_blocks;
+        let decode_cost_blocks = load.decode_cost_blocks();
         let active_request_cost_blocks =
-            kv_router_config.decode_active_request_weight * load.active_requests as f64;
+            kv_router_config.decode_active_request_weight * load.active_requests() as f64;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
@@ -285,10 +285,10 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // Keep reference-only arithmetic out of public worker-input rows, including
         // benchmark builds: their layout must match the production plugin's inputs.
         let raw_prefill_tokens = if context.tracks_prefill_tokens() {
-            if load.available {
+            if load.is_available() {
                 let cached_tokens = cache.estimated_cached_tokens;
                 let uncached_tokens = context.isl_tokens().saturating_sub(cached_tokens);
-                (load.active_prefill_tokens + uncached_tokens).saturating_add(cached_tokens)
+                (load.active_prefill_tokens() + uncached_tokens).saturating_add(cached_tokens)
             } else {
                 context.isl_tokens()
             }

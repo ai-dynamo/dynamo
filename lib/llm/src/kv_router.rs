@@ -20,6 +20,7 @@ use dynamo_kv_indexer::host::{
 use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
 use dynamo_kv_router::plugins::check_role;
 use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
@@ -1556,7 +1557,7 @@ impl KvRouter {
                 let num_blocks = isl_tokens / self.block_size as usize;
                 if num_blocks > 0 {
                     m.shared_cache_hit_rate
-                        .observe(hits.total_hits as f64 / num_blocks as f64);
+                        .observe(hits.total_hits() as f64 / num_blocks as f64);
                 }
                 // What the scorer credits: the run past the worker's device, host and
                 // disk prefix. A multi-rank worker's snapshot holds its deepest rank.
@@ -2211,9 +2212,8 @@ mod tests {
         expected_shared_blocks: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> SelectionPolicySource {
-        SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
+        SelectionPolicySource::Factory(Arc::new(move |_config: &SelectionConfig, _, _| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 "decode",
                 Vec::new(),
                 Box::new(FixedPicker {
@@ -2227,8 +2227,8 @@ mod tests {
     fn picker_policy(
         picker: impl Fn() -> Box<dyn WorkerPicker> + Send + Sync + 'static,
     ) -> SelectionPolicySource {
-        SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
-            WorkerSelectionPolicy::new(config.clone(), "decode", Vec::new(), picker())
+        SelectionPolicySource::Factory(Arc::new(move |_config: &SelectionConfig, _, _| {
+            WorkerSelectionPolicy::new("decode", Vec::new(), picker())
         }))
     }
 
@@ -3397,10 +3397,9 @@ mod tests {
         let counting = {
             let constructions = Arc::clone(&constructions);
             let picked_tag = Arc::clone(&picked_tag);
-            SelectionPolicySource::Factory(Arc::new(move |config: &SelectionConfig, _, _| {
+            SelectionPolicySource::Factory(Arc::new(move |_config: &SelectionConfig, _, _| {
                 let tag = constructions.fetch_add(1, Ordering::SeqCst) + 1;
                 WorkerSelectionPolicy::new(
-                    config.clone(),
                     "decode",
                     Vec::new(),
                     Box::new(TaggedPicker {
@@ -3513,9 +3512,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_best_match_maps_filtered_workers_to_unavailable() {
-        let policy = SelectionPolicySource::Factory(Arc::new(|config: &SelectionConfig, _, _| {
+        let policy = SelectionPolicySource::Factory(Arc::new(|_config: &SelectionConfig, _, _| {
             WorkerSelectionPolicy::new_with_filters(
-                config.clone(),
                 "decode",
                 vec![Box::new(RejectAll)],
                 Vec::new(),

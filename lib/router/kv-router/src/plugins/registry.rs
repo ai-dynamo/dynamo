@@ -104,13 +104,13 @@ pub enum WorkerSelectionPolicyRegistryError {
 
 impl RouterPluginRegistry {
     /// Supply the host default while preserving registered custom plugin types.
-    pub fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
+    pub(crate) fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
         self.default_factory = Some(factory);
         self
     }
 
     /// Resolve every configured plugin once before constructing any routers.
-    pub fn resolve_plugins(
+    pub(crate) fn resolve_plugins(
         &self,
         config: &KvRouterConfig,
     ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
@@ -160,7 +160,7 @@ impl RouterPluginRegistry {
     }
 
     /// Resolve the configured request classifier once at frontend startup.
-    pub fn resolve_request_classifier(
+    pub(crate) fn resolve_request_classifier(
         &self,
         config: &KvRouterConfig,
     ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
@@ -173,7 +173,7 @@ impl RouterPluginRegistry {
     /// Any role may list the hint in its `worker_selection` entry's `hints`. A role whose entry
     /// lists no `hints` runs the hints whose hosts include its worker-selection type, directly or
     /// through [`HintHost::AnyWorkerSelection`]. A hint with no hosts runs only where a role lists
-    /// it. Hosts must be distinct, and [`Self::resolve_plugins`] rejects one that no linked plugin
+    /// it. Hosts must be distinct, and the host's `resolve_plugins` rejects one that no linked plugin
     /// registers.
     ///
     /// Default hints are passive: the router starts no resources for what they read, and a non-KV
@@ -190,7 +190,7 @@ impl RouterPluginRegistry {
 
     /// Resolve each role's hints once at startup, from its `worker_selection` entry. A role whose
     /// entry lists no `hints` runs the hints registered as on by default for its policy type.
-    pub fn resolve_hint_policies(
+    pub(crate) fn resolve_hint_policies(
         &self,
         config: &KvRouterConfig,
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
@@ -198,7 +198,7 @@ impl RouterPluginRegistry {
     }
 
     /// Whether this image has no linked router plugin types.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.providers.is_empty()
             && self.request_classifiers.is_empty()
             && self.hint_policies.is_empty()
@@ -208,7 +208,7 @@ impl RouterPluginRegistry {
     ///
     /// Aggregated, prefill, decode, and encode pools can select separate instances. The returned
     /// factory dispatches by the typed role that the host supplies for each worker pool.
-    pub fn resolve(
+    pub(crate) fn resolve(
         &self,
         config: &KvRouterConfig,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
@@ -223,7 +223,7 @@ impl RouterPluginRegistry {
     ///
     /// Single-pool hosts use this method to avoid loading policy types for worker pools that they
     /// do not construct.
-    pub fn resolve_for_worker_type(
+    pub(crate) fn resolve_for_worker_type(
         &self,
         config: &KvRouterConfig,
         worker_type: WorkerType,
@@ -374,7 +374,7 @@ impl RouterPluginRegistry {
 
     /// Build the factory for one registered policy type with default parameters, as a routing
     /// mode names it (for example `round-robin`) without a policy file.
-    pub fn resolve_type(
+    pub(crate) fn resolve_type(
         &self,
         policy_type: &str,
     ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
@@ -462,17 +462,12 @@ mod tests {
             let parameters: Parameters = parameters.deserialize()?;
             provider_calls.fetch_add(1, Ordering::Relaxed);
             let factory_calls = factory_calls.clone();
-            Ok(Arc::new(move |config, worker_type, _partition| {
+            Ok(Arc::new(move |_config, worker_type, _partition| {
                 factory_calls
                     .lock()
                     .unwrap()
                     .push((parameters.threshold, worker_type.to_string()));
-                WorkerSelectionPolicy::new(
-                    config.clone(),
-                    worker_type.as_str(),
-                    Vec::new(),
-                    Box::new(NeverPicker),
-                )
+                WorkerSelectionPolicy::new(worker_type.as_str(), Vec::new(), Box::new(NeverPicker))
             }))
         })
     }

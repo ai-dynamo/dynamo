@@ -270,6 +270,7 @@ mod tests {
     use dynamo_kv_router::plugins::experimental::dispatch_gate::{
         DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     };
+    use dynamo_kv_router::plugins::testing::classify_request;
     use dynamo_kv_router::plugins::v1alpha1::*;
 
     use super::*;
@@ -323,7 +324,7 @@ mod tests {
     }
 
     fn session_request(request_id: &str, session_id: &str, tokens: usize) -> ClassifyRequest {
-        ClassifyRequest::for_test(
+        classify_request(
             tokens,
             Some(request_id),
             Some(SessionContext::new(session_id.into(), None, None, None)),
@@ -381,7 +382,7 @@ mod tests {
         let wakes = attach_counter(gate.as_ref());
 
         // A request without a session passes through untouched.
-        let plain = ClassifyRequest::for_test(10, Some("plain"), None);
+        let plain = classify_request(10, Some("plain"), None);
         assert!(classifier.classify(plain, &NoWorkers).is_ok());
 
         let session_a = SessionContext::new("a".into(), None, None, None);
@@ -452,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn classification_requires_a_request_id_for_session_traffic() {
         let mut classifier = classifier(&[(1, 400)]);
-        let request = ClassifyRequest::for_test(
+        let request = classify_request(
             10,
             None,
             Some(SessionContext::new("a".into(), None, None, None)),

@@ -33,7 +33,6 @@
 //! }
 //!
 //! let policy = WorkerSelectionPolicy::new(
-//!     SelectionConfig::default(),
 //!     "test",
 //!     Vec::new(),
 //!     Box::new(FewestRequests),
@@ -46,10 +45,15 @@
 //! assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
 //! ```
 //!
+//! [`classify_request`] and [`request_progress`] build the inputs a request classifier's
+//! tests need.
+//!
 //! This module follows the stability of [`super::v1alpha1`].
 
 use std::collections::HashMap;
 
+use dynamo_admission::host::ClassifyRequestHostExt;
+use dynamo_admission::{ClassifyRequest, RequestProgress};
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{
@@ -296,4 +300,27 @@ impl SelectionCase {
                 other => SelectionCaseError::NoWorker(other.to_string()),
             })
     }
+}
+
+/// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
+/// cached prefix, arriving now, with the request ID and session a test gives it.
+pub fn classify_request(
+    isl_tokens: usize,
+    request_id: Option<&str>,
+    session_context: Option<SessionContext>,
+) -> ClassifyRequest {
+    let mut request = ClassifyRequest::with_timing(isl_tokens, 0, tokio::time::Instant::now());
+    if let Some(request_id) = request_id {
+        request = request.with_request_id(request_id);
+    }
+    if let Some(session_context) = session_context {
+        request = request.with_session_context(session_context);
+    }
+    request
+}
+
+/// A progress reading fixed at `context_tokens`, as `ClassifyRequest::progress` returns one
+/// for a request the router has not updated.
+pub fn request_progress(context_tokens: usize) -> RequestProgress {
+    dynamo_admission::host::request_progress(context_tokens).0
 }

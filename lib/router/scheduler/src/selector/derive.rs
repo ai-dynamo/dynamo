@@ -9,6 +9,7 @@ use rustc_hash::FxHashMap;
 use crate::protocols::WorkerConfigLike;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::host::worker_load_input;
 use dynamo_worker_selection::{WorkerCapacity, WorkerInfo, WorkerLoadInput};
 
 /// Reads a worker's advertised capacity from its runtime config.
@@ -62,13 +63,7 @@ pub trait WorkerLoadInputExt: Sized {
 
 impl WorkerLoadInputExt for WorkerLoadInput {
     fn from_projection(load: WorkerLoadProjection) -> Self {
-        Self {
-            available: true,
-            active_prefill_tokens: load.active_prefill_tokens,
-            active_decode_blocks: load.active_decode_blocks,
-            decode_cost_blocks: load.potential_decode_blocks() as f64,
-            active_requests: load.active_requests,
-        }
+        worker_load_input(load, true)
     }
 
     fn from_observed(
@@ -77,10 +72,7 @@ impl WorkerLoadInputExt for WorkerLoadInput {
     ) -> Self {
         match load {
             Some(load) => Self::from_projection(load),
-            None => Self {
-                available: false,
-                ..Self::from_projection(unobserved())
-            },
+            None => worker_load_input(unobserved(), false),
         }
     }
 }

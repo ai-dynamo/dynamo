@@ -5,6 +5,7 @@
 //! picker per model.
 
 use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_router_policies::router_modes;
 

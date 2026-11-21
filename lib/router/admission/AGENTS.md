@@ -1,6 +1,6 @@
 # lib/router/admission
 
-`dynamo-admission` is the admission stage: it decides whether a request is admitted, held in a per-class queue, or rejected, and it owns the request-classifier plugin API. Hosts outside `lib/router` import through `host` and classifier plugins through `dynamo_kv_router::plugins::v1alpha1`.
+`dynamo-admission` is the admission stage: it decides whether a request is admitted, held in a per-class queue, or rejected, and it owns the request-classifier plugin API. Hosts outside `lib/router` import through `host` and classifier plugins through `dynamo_kv_router::plugins::v1alpha1`. A method only the kernel or a host calls on a classifier contract type (building a `ClassifyRequest`, reading back what the classifier set, creating a `RequestProgress`) is `pub(crate)` on the type and public through `host` (`ClassifyRequestHostExt`, `request_progress`); a plugin does not name `host`, so do not re-export them from a plugin module.
 
 ## Policy queue: classes, order, and expiry
 

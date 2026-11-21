@@ -27,6 +27,8 @@ pub(super) fn register(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+
     #[test]
     fn registers_classifier_and_worker_selector() {
         let mut registry = crate::default_registry();

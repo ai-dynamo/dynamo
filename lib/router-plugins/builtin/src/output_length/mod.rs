@@ -188,6 +188,9 @@ impl RequestClassifier for OutputLengthClassifier {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+    use dynamo_kv_router::plugins::testing::classify_request;
+
     use super::*;
 
     const WORKER: WorkerWithDpRank = WorkerWithDpRank {
@@ -196,9 +199,11 @@ mod tests {
     };
 
     fn request(request_id: &str, session: &str, isl: usize) -> ClassifyRequest {
-        ClassifyRequest::with_timing(isl, 0, tokio::time::Instant::now())
-            .with_request_id(request_id)
-            .with_session_context(SessionContext::new(session.to_owned(), None, None, None))
+        classify_request(
+            isl,
+            Some(request_id),
+            Some(SessionContext::new(session.to_owned(), None, None, None)),
+        )
     }
 
     fn priority(
@@ -272,7 +277,7 @@ mod tests {
         priority(&mut classifier, "a1", "s", 1_000, now);
         complete(&mut classifier, "a1", Some(1_250), now);
 
-        let mut anonymous = ClassifyRequest::with_timing(2_000, 0, tokio::time::Instant::now());
+        let mut anonymous = classify_request(2_000, None, None);
         classifier.predict(&mut anonymous, now);
         assert_eq!(anonymous.backend_priority(), Some(-250));
         assert!(classifier.pending.is_empty());

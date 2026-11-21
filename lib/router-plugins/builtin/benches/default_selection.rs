@@ -213,7 +213,6 @@ fn stacked(c: &mut Criterion) {
                 })
                 .collect();
             let policy = dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicy::new(
-                SelectionConfig::default(),
                 "prefill",
                 scorers,
                 Box::new(MinimumPicker),

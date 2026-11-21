@@ -80,19 +80,12 @@ fn runtime_policy(
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
 ) -> WorkerSelectionPolicy {
     let initial = parameters.snapshot();
-    let policy = policy_with_rng(
-        config.clone(),
-        parameters,
-        preset,
-        worker_label,
-        rng.clone(),
-    );
+    let policy = policy_with_rng(parameters, preset, worker_label, rng.clone());
     policy.with_runtime_config(
         initial,
         Arc::new(move |values| {
             let parameters = PolicyParameters::from_runtime(values, &config)?;
             Ok(policy_with_rng(
-                config.clone(),
                 parameters,
                 preset,
                 worker_label,
@@ -103,7 +96,6 @@ fn runtime_policy(
 }
 
 fn policy_with_rng(
-    config: SelectionConfig,
     parameters: PolicyParameters,
     preset: Preset,
     worker_label: &'static str,
@@ -117,8 +109,7 @@ fn policy_with_rng(
         Preset::Default => scorer::build(&parameters, worker_label),
         Preset::Kvcr => kvcr::build(&parameters, worker_label),
     };
-    WorkerSelectionPolicy::new(config, worker_label, vec![scorer], picker)
-        .with_exclusive_affinity(true)
+    WorkerSelectionPolicy::new(worker_label, vec![scorer], picker).with_exclusive_affinity(true)
 }
 
 /// Factory installed by routing hosts, including hosts without a custom catalog.

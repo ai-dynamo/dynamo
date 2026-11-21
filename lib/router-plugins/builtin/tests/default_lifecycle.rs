@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::host::RuntimePolicyUpdate;
 use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_kv_router::services::indexer::backend::test_util::flush;
 use dynamo_kv_router::services::selection::{
@@ -189,9 +188,8 @@ async fn scoring_error_does_not_book_and_allows_retry() {
         1,
         Default::default(),
         SelectionCacheConfig::default(),
-        Arc::new(|config, role, _| {
+        Arc::new(|_config, role, _| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 role.default_selector_label(),
                 vec![Box::new(FailOnce(AtomicBool::new(true)))],
                 Box::new(First),

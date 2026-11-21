@@ -14,7 +14,8 @@ use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead,
 };
 use dynamo_kv_router::plugins::host::{
-    HostedSelectionRequest, HostedWorkerPicker, RouterPlugins, SelectionFailure,
+    HostedSelectionRequest, HostedWorkerPicker, RouterPluginRegistryHostExt, RouterPlugins,
+    SelectionFailure, WorkerSelectionPolicyHostExt,
 };
 use dynamo_kv_router::plugins::v1alpha1::*;
 
@@ -106,9 +107,8 @@ impl RequestClassifier for ContractClassifier {
 fn contract_provider(
     _parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-    Ok(Arc::new(|config, worker_type, _partition| {
+    Ok(Arc::new(|_config, worker_type, _partition| {
         WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
             worker_type.as_str(),
             vec![Box::new(ContractPolicy)],
             vec![Box::new(ContractPolicy)],
@@ -171,13 +171,10 @@ fn active_requests_pickers_select_through_the_hosted_api() {
     let alias = WorkerInputs::OCCUPANCY;
     assert_eq!(alias, WorkerInputs::ACTIVE_REQUESTS);
 
-    let Ok(picker) = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "decode",
-        Vec::new(),
-        Box::new(ActiveRequestsPicker),
-    )
-    .into_hosted_picker() else {
+    let Ok(picker) =
+        WorkerSelectionPolicy::new("decode", Vec::new(), Box::new(ActiveRequestsPicker))
+            .into_hosted_picker()
+    else {
         panic!("a picker-only ACTIVE_REQUESTS policy runs hosted");
     };
     let picker: HostedWorkerPicker = picker;

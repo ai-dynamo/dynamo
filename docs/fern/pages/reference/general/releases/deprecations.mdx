@@ -25,6 +25,21 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.
 
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the host-only methods and public fields of the Router plugin contract types** in the `dynamo-kv-router`, `dynamo-worker-selection`, and `dynamo-admission` Rust crates. These were callable on the types the Router hands a plugin, although only the Router and its hosts use them. They are now extension traits and functions in each crate's `host` module, which plugin crates do not import. A plugin that implements `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, or `RequestClassifier` and registers through `RouterPluginRegistry` is affected only by the last row.
+
+| Removed | Replacement |
+| :---- | :---- |
+| `RouterPluginRegistry::{resolve, resolve_plugins, resolve_for_worker_type, resolve_type, resolve_request_classifier, resolve_hint_policies, with_default_factory, is_empty}` | The same methods on `dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt` |
+| `WorkerSelectionPolicy::{select_rows, candidate_preparer, accepts_prepared, into_hosted_picker}` | The same methods on `dynamo_worker_selection::host::WorkerSelectionPolicyHostExt`, also re-exported from `dynamo_kv_router::plugins::host` |
+| `WorkerSelectionContext::new` and its `with_*` methods | The same methods on `dynamo_worker_selection::host::WorkerSelectionContextHostExt`. In a plugin's tests, `dynamo_kv_router::plugins::testing::SelectionCase` |
+| `ClassifyRequest::{with_timing, with_request_id, with_initial_policy_class, with_session_context, with_pinned_worker, with_sequence_hashes, with_busy_thresholds, reject_thresholds, lane_key, into_queue_inputs}` | The same methods on `dynamo_admission::host::ClassifyRequestHostExt`. In a plugin's tests, `dynamo_kv_router::plugins::testing::classify_request` |
+| `RequestProgress::new` | `dynamo_admission::host::request_progress`. In a plugin's tests, `dynamo_kv_router::plugins::testing::request_progress` |
+| Public fields of `WorkerLoadInput`, `WorkerCopyInput`, and `SharedCacheHits` | The accessor with the field's name (`is_available()` for `available`). A host builds rows with `dynamo_worker_selection::host::{worker_load_input, worker_copy_input}` |
+| Struct literals of `WorkerLoadView` and `WorkerCacheView` | Both are `#[non_exhaustive]`: start from `Default::default()` and assign the fields |
+| The leading `SelectionConfig` argument of `WorkerSelectionPolicy::new` and `WorkerSelectionPolicy::new_with_filters` | None. The argument was unused; delete it from each call |
+
+  > **Migrate:** Import the plugin API from `dynamo_kv_router::plugins::v1alpha1`, and each experimental API (the dispatch gate, hint policies, resident block counts, decode progress) by name from `dynamo_kv_router::plugins::experimental`. Delete the first argument of `WorkerSelectionPolicy::new` and `new_with_filters`. In tests, replace a hand-built `SchedulingRequest` with `plugins::testing::SelectionCase`, behind the `plugin-testing` feature of `dynamo-kv-router`. Code that hosts the Router imports the `host` trait named in the table. See [Custom Worker Selection](../../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#public-plugin-api-and-compatibility).
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
 
 | Old | New |

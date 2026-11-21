@@ -42,9 +42,8 @@ fn provider(
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
     Ok(Arc::new(
-        move |config: &SelectionConfig, worker_type, _partition| {
-            let policy = build_policy(config, worker_type.as_str(), min_device_overlap_blocks);
-            let config = config.clone();
+        move |_config: &SelectionConfig, worker_type, _partition| {
+            let policy = build_policy(worker_type.as_str(), min_device_overlap_blocks);
             policy.with_runtime_config(
                 [(
                     "min_device_overlap_blocks".into(),
@@ -62,7 +61,6 @@ fn provider(
                             RuntimePolicyError::InvalidParameters(error.to_string())
                         })?;
                     Ok(build_policy(
-                        &config,
                         worker_type.as_str(),
                         parameters.min_device_overlap_blocks,
                     ))
@@ -73,7 +71,6 @@ fn provider(
 }
 
 fn build_policy(
-    config: &SelectionConfig,
     worker_label: &'static str,
     min_device_overlap_blocks: f64,
 ) -> WorkerSelectionPolicy {
@@ -81,7 +78,6 @@ fn build_policy(
         min_device_overlap_blocks,
     })];
     WorkerSelectionPolicy::new_with_filters(
-        config.clone(),
         worker_label,
         filters,
         vec![Box::new(ActiveRequestsScorer)],

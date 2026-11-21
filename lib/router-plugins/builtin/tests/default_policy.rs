@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 mod support;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::host::RuntimePolicyUpdate;
+use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::v1alpha1::*;
 use dynamo_router_policies::{default_policy, default_policy_with_rng, default_registry};
 use dynamo_scheduler::host::WorkerIdSet;
@@ -719,14 +719,9 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
         .tier_overlap_blocks
         .disk
         .insert(WorkerWithDpRank::from_worker_id(999), 1);
-    WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        vec![],
-        Box::new(Inspect),
-    )
-    .select_worker(support::selection_input(&workers, &request, 16))
-    .unwrap();
+    WorkerSelectionPolicy::new("test", vec![], Box::new(Inspect))
+        .select_worker(support::selection_input(&workers, &request, 16))
+        .unwrap();
 }
 
 #[test]

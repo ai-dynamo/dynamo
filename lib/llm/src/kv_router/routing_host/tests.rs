@@ -1969,9 +1969,8 @@ async fn decode_progress_collection_follows_picker_declaration() {
             HashMap::from([(7, ModelRuntimeConfig::default())]),
             config,
             None::<RecordingClassifier>,
-            SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+            SelectionPolicySource::Factory(Arc::new(move |_config, role, _| {
                 WorkerSelectionPolicy::new(
-                    config.clone(),
                     role.as_str(),
                     Vec::new(),
                     Box::new(Probe {

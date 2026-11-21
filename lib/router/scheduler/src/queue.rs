@@ -37,6 +37,7 @@ use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 use dynamo_admission::QueueLane;
+use dynamo_admission::host::ClassifyRequestHostExt;
 use dynamo_admission::{
     BlockReason, ClassificationOverrides, ClassifyRequest, DispatchDecision, DispatchGate,
     DispatchHead, DispatchRecheck, LaneCheck, LaneKey, RecheckScope,
@@ -4515,7 +4516,6 @@ mod tests {
         let mut decode_blocks = Vec::new();
         for inputs in [WorkerInputs::LOAD, WorkerInputs::ACTIVE_REQUESTS] {
             let policy = dynamo_worker_selection::WorkerSelectionPolicy::new(
-                dynamo_worker_selection::SelectionConfig::default(),
                 "test",
                 vec![],
                 Box::new(PickWorker { inputs, target }),
@@ -4556,13 +4556,8 @@ mod tests {
         picker: Box<dyn dynamo_worker_selection::WorkerPicker>,
     ) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
-            inner: dynamo_worker_selection::WorkerSelectionPolicy::new(
-                dynamo_worker_selection::SelectionConfig::default(),
-                "test",
-                vec![],
-                picker,
-            )
-            .with_exclusive_affinity(exclusive_affinity),
+            inner: dynamo_worker_selection::WorkerSelectionPolicy::new("test", vec![], picker)
+                .with_exclusive_affinity(exclusive_affinity),
             prepared_selections: Arc::clone(prepared_selections),
         }
     }
@@ -5679,12 +5674,7 @@ mod tests {
         }
         let prepared_selections = Arc::new(AtomicUsize::new(0));
         let policy = || CountingPreparedPolicy {
-            inner: WorkerSelectionPolicy::new(
-                dynamo_worker_selection::SelectionConfig::default(),
-                "test",
-                vec![],
-                Box::new(ProgressPicker),
-            ),
+            inner: WorkerSelectionPolicy::new("test", vec![], Box::new(ProgressPicker)),
             prepared_selections: Arc::clone(&prepared_selections),
         };
         let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, None, policy());

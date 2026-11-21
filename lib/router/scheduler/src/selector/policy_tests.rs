@@ -113,12 +113,7 @@ fn custom_picker_counts_tracked_blocks_without_worker_projection() {
     let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
     let mut request = base_request(33);
     request.token_seq = Some(vec![0, 1]);
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(LoadPicker),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(LoadPicker));
 
     policy
         .select_worker(WorkerSelectionInput::configured(
@@ -179,7 +174,6 @@ fn selection_trace_is_captured_only_when_requested() {
         (0..8u64).map(|id| (WorkerWithDpRank::from_worker_id(id), id as usize)),
     ));
     let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(DecodeLoadScorer)],
         Box::new(HighestCostPicker),
@@ -247,12 +241,7 @@ fn custom_picker_receives_requested_cache_inputs() {
     ]);
     let mut request = base_request(16);
     request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(worker0, 1), (worker1, 3)]);
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(HighestOverlapPicker),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(HighestOverlapPicker));
 
     let selected = policy
         .select_worker(WorkerSelectionInput::configured(
@@ -360,7 +349,6 @@ fn components_read_fetchable_prefixes_only_when_declared() {
         request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
         request.kv_transfer_candidates = candidates;
         let policy = WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
             "test",
             vec![Box::new(TransferFilter)],
             vec![
@@ -473,7 +461,6 @@ fn worker_info_reaches_every_component_without_declaration() {
     ]);
     let request = base_request(16);
     let policy = WorkerSelectionPolicy::new_with_filters(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(ReportedKvFilter)],
         vec![Box::new(BatchBudgetScorer)],
@@ -579,7 +566,6 @@ fn prepared_candidates_select_like_rows_built_at_selection() {
         })
         .collect();
     let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(EveryInputScorer)],
         Box::new(FirstPicker),
@@ -704,7 +690,6 @@ fn preferred_taints_are_materialized_only_when_requested() {
     let mut request = base_request(16);
     request.routing_constraints.preferred_taints = HashMap::from([("preferred".to_string(), 0.5)]);
     let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(PreferenceScorer)],
         Box::new(PreferencePicker),
@@ -778,12 +763,7 @@ fn custom_policy_skips_undeclared_preferred_taints() {
     )]);
     let mut request = base_request(16);
     request.routing_constraints.preferred_taints = HashMap::from([("preferred".to_string(), 0.5)]);
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(NoPreferencePicker),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(NoPreferencePicker));
 
     policy
         .select_worker(WorkerSelectionInput::configured(
@@ -900,7 +880,6 @@ fn resident_blocks_reach_only_declaring_components() {
     };
     for picker_inputs in [WorkerInputs::RESIDENT_BLOCKS, WorkerInputs::NONE] {
         let policy = WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
             "test",
             probes()
                 .into_iter()
@@ -951,12 +930,7 @@ fn resident_blocks_are_none_without_published_counts() {
 
     let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
     let request = base_request(16);
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(ExpectNoCounts),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(ExpectNoCounts));
     let input = || WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16);
     // No counts lent, then counts with no tracked ranks yet.
     policy.select_worker(input()).unwrap();
@@ -998,12 +972,7 @@ fn custom_policy_does_not_receive_effective_overlap_as_device_overlap() {
     let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
     let mut request = base_request(16);
     request.overlap.effective_overlap_blocks.insert(worker, 3.5);
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(RawDeviceOverlapPicker),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(RawDeviceOverlapPicker));
 
     policy
         .select_worker(WorkerSelectionInput::configured(
@@ -1083,12 +1052,7 @@ fn custom_picker_receives_session_metadata() {
     request.expected_output_tokens = Some(128);
     request.priority_jump = 3.0;
     request.strict_priority = 2;
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(ContextPicker),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(ContextPicker));
 
     policy
         .select_worker(WorkerSelectionInput::configured(
@@ -1132,12 +1096,7 @@ fn custom_picker_receives_affinity_target_without_narrowing_candidates() {
     ]);
     let mut request = base_request(16);
     request.affinity_target = Some(worker1.into());
-    let policy = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(AffinityPicker),
-    );
+    let policy = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(AffinityPicker));
     assert!(!uses_exclusive_affinity(&policy));
 
     let selected = policy
@@ -1188,7 +1147,6 @@ fn rejected_filters_do_not_materialize_scorer_inputs() {
     let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
     let request = base_request(16);
     let policy = WorkerSelectionPolicy::new_with_filters(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(RejectWithoutSignals)],
         vec![Box::new(CacheScorer)],
@@ -1249,7 +1207,6 @@ fn best_eligible_cache_reuse_skips_filtered_workers() {
         .insert(rejected, 6);
     request.overlap.tier_overlap_blocks.device.insert(kept, 1);
     let policy = WorkerSelectionPolicy::new_with_filters(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(RejectWorker(rejected))],
         vec![Box::new(ZeroScorer)],
@@ -1271,7 +1228,6 @@ fn best_eligible_cache_reuse_skips_filtered_workers() {
     assert!(!<WorkerSelectionPolicy as WorkerSelector<
         TaintedWorkerConfig,
     >>::applies_worker_filters(&WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(ZeroScorer)],
         Box::new(FirstPicker),
@@ -1319,7 +1275,6 @@ fn policy_requirements_union_all_components() {
     }
 
     let policy = WorkerSelectionPolicy::new_with_filters(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(CacheFilter)],
         vec![Box::new(LoadScorer)],
@@ -1391,19 +1346,14 @@ fn kv_picker_reads_active_requests_from_load_projection_when_declared() {
         ),
     ]);
     let workers = active_requests_workers();
-    let selected = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(LeastActivePicker),
-    )
-    .select_worker(WorkerSelectionInput::configured(
-        &workers,
-        &request,
-        request.eligibility(),
-        16,
-    ))
-    .unwrap();
+    let selected = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(LeastActivePicker))
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        ))
+        .unwrap();
     assert_eq!(selected.worker, worker1);
 }
 
@@ -1439,19 +1389,14 @@ fn kv_active_requests_missing_projection_uses_unobserved_fallback() {
         },
     )]);
     let workers = active_requests_workers();
-    let selected = WorkerSelectionPolicy::new(
-        SelectionConfig::default(),
-        "test",
-        Vec::new(),
-        Box::new(UnobservedPicker),
-    )
-    .select_worker(WorkerSelectionInput::configured(
-        &workers,
-        &request,
-        request.eligibility(),
-        16,
-    ))
-    .unwrap();
+    let selected = WorkerSelectionPolicy::new("test", Vec::new(), Box::new(UnobservedPicker))
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        ))
+        .unwrap();
     assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(1));
 }
 
@@ -1505,7 +1450,6 @@ fn active_requests_declared_by_filters_and_scorers_is_stripped() {
     }
 
     let policy = WorkerSelectionPolicy::new_with_filters(
-        SelectionConfig::default(),
         "test",
         vec![Box::new(ActiveRequestsFilter)],
         vec![Box::new(ActiveRequestsScorer)],
@@ -1577,7 +1521,6 @@ fn hosted_rejected_kv_policies_select_through_the_kernel() {
                   scorers: Vec<Box<dyn WorkerScorer>>,
                   inputs: WorkerInputs| {
         WorkerSelectionPolicy::new_with_filters(
-            SelectionConfig::default(),
             "test",
             filters,
             scorers,
@@ -1609,7 +1552,9 @@ fn hosted_rejected_kv_policies_select_through_the_kernel() {
     let kv_request = base_request(32);
     for (case, policy) in cases {
         let inputs = WorkerSelector::<TaintedWorkerConfig>::required_worker_inputs(&policy);
-        let Err(policy) = policy.into_hosted_picker() else {
+        let Err(policy) =
+            dynamo_worker_selection::host::WorkerSelectionPolicyHostExt::into_hosted_picker(policy)
+        else {
             panic!("{case}: a KV policy must not run hosted");
         };
         assert_eq!(

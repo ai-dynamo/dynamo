@@ -90,9 +90,8 @@ fn provider(
     let max_active_requests = parameters.max_active_requests;
 
     Ok(Arc::new(
-        move |config: &SelectionConfig, worker_type, _partition| {
+        move |_config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
-                config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
                 Box::new(SoftPinRepinPicker {
@@ -142,7 +141,6 @@ mod tests {
 
     fn policy(max_active_requests: usize) -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(SoftPinRepinPicker {

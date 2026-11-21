@@ -14,6 +14,14 @@ const ALLOWED_PATHS: [&str; 2] = [
     "dynamo_kv_router::plugins::experimental",
 ];
 
+/// The one path outside the plugin API a plugin crate may name, and the file that names it:
+/// this crate's `default_registry` and `with_defaults` set the host's default policy, which
+/// is a host action.
+const HOST_EXCEPTION: (&str, &str) = (
+    "src/lib.rs",
+    "dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt",
+);
+
 /// Plugin crates, relative to this crate. The EPP example is a routing host, not a plugin.
 const PLUGIN_CRATES: [&str; 7] = [
     ".",
@@ -85,7 +93,10 @@ fn plugin_crates_name_only_the_plugin_api() {
                     let allowed = ALLOWED_PATHS.iter().any(|allowed| {
                         path == *allowed || path.starts_with(&format!("{allowed}::"))
                     });
-                    if !own_crate && !allowed {
+                    let excepted = plugin_crate == "."
+                        && source.ends_with(HOST_EXCEPTION.0)
+                        && path == HOST_EXCEPTION.1;
+                    if !own_crate && !allowed && !excepted {
                         violations.push(format!(
                             "{}:{} names {path}",
                             source.strip_prefix(root).unwrap_or(&source).display(),

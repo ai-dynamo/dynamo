@@ -164,9 +164,8 @@ fn core_with_copy_credit(
     workers: u64,
     copy_credit: f64,
 ) -> SelectionCore {
-    let policy: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+    let policy: WorkerSelectionPolicyFactory = Arc::new(move |_config, role, _| {
         WorkerSelectionPolicy::new(
-            config.clone(),
             role.as_str(),
             vec![Box::new(CopyCreditScorer { copy_credit })],
             Box::new(LowestCostPicker),
