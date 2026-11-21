@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Rendered by gen-dgd.sh. To change this manifest, edit gen-dgd.sh and re-render.
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-shared
+  namespace: default
+  annotations:
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-shared
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+    - name: qwen3-4b-01
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-shared
+            experiment.nvidia.com/role: worker
+            experiment.nvidia.com/model: qwen3-4b-01
+            kai.scheduler/queue: default-queue
+          annotations:
+            nvidia.com/container.main.gpu-compute.request: "0.5"
+            nvidia.com/container.main.gpu-memory.request: 19968Mi
+            nvidia.com/container.main.gpu-memory.limit: 19968Mi
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - qwen3-4b-01
+                - --gpu-memory-utilization
+                - "0.80"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 4Gi
+    - name: qwen3-4b-02
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-shared
+            experiment.nvidia.com/role: worker
+            experiment.nvidia.com/model: qwen3-4b-02
+            kai.scheduler/queue: default-queue
+          annotations:
+            nvidia.com/container.main.gpu-compute.request: "0.5"
+            nvidia.com/container.main.gpu-memory.request: 19968Mi
+            nvidia.com/container.main.gpu-memory.limit: 19968Mi
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - qwen3-4b-02
+                - --gpu-memory-utilization
+                - "0.80"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 4Gi
