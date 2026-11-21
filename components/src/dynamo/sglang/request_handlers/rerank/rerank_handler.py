@@ -87,12 +87,7 @@ class RerankWorkerHandler(BaseWorkerHandler):
             )
         return float(score)
 
-    async def generate(
-        self, request: dict[str, Any], context: Context
-    ) -> AsyncGenerator[list[dict[str, Any]], None]:
-        rerank_request = RerankRequest(**request)
-        self._validate(rerank_request)
-
+    async def _run_pairs(self, rerank_request: RerankRequest, context: Context) -> Any:
         tokenizer_manager = self.engine.tokenizer_manager
         pairs = [
             [rerank_request.query, document] for document in rerank_request.documents
@@ -112,7 +107,14 @@ class RerankWorkerHandler(BaseWorkerHandler):
             rid=request_ids,
         )
         responses = tokenizer_manager.generate_request(internal_request, None)
-        result = await anext(responses)
+        return await anext(responses)
+
+    async def generate(
+        self, request: dict[str, Any], context: Context
+    ) -> AsyncGenerator[list[dict[str, Any]], None]:
+        rerank_request = RerankRequest(**request)
+        self._validate(rerank_request)
+        result = await self._run_pairs(rerank_request, context)
         if not isinstance(result, list):
             result = [result]
         if len(result) != len(rerank_request.documents):
