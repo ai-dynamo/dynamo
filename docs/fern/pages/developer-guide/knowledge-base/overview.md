@@ -146,10 +146,10 @@ The diagram labels such as `PodClique A/B`, `ScalingGroup "Prefill"`, `ScalingGr
 
 The request plane can be exposed in two ways:
 
-- **Dynamo-native Frontend routing** -- the Dynamo Frontend is the request entry point and the integrated Dynamo Router selects workers using KV-aware scoring.
-- **Gateway API routing with GAIE** -- a Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP), then forwards to the selected worker's Frontend sidecar in `--router-mode direct`.
+- **Dynamo Frontend routing** -- requests reach the Frontend directly or through a Kubernetes Gateway, and the integrated Dynamo Router selects workers using KV-aware scoring.
+- **GAIE routing** -- a Kubernetes [Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP), then forwards to the selected worker's Frontend sidecar in `--router-mode direct`.
 
-Both topologies share the same control plane, event plane, and backend integrations; only the request entry point and routing boundary differ. See [Using GAIE with Dynamo](../../kubernetes/kv-aware-routing/gateway-api.mdx) for the component and request-flow details.
+Both topologies share the same control plane, event plane, and backend integrations, and both can sit behind a Kubernetes Gateway. They differ only in where worker selection happens and who connects to the selected worker. See [Using GAIE with Dynamo](../../kubernetes/kv-aware-routing/gateway-api.mdx) for the component and request-flow details.
 
 ## Fault Tolerance Architecture
 
