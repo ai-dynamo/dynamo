@@ -1097,7 +1097,14 @@ mod tests {
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
             let context = request.context();
             let worker_context = context.clone();
+            // Watch the context from its own task, as engine handlers do: on a
+            // kill the Velo response plane drops the stream without polling it.
+            let watched = context.clone();
             let cancelled = self.0.clone();
+            tokio::spawn(async move {
+                watched.stopped().await;
+                let _ = cancelled.send(watched.id().to_string());
+            });
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
                     disaggregated_params: Some(Box::new(serde_json::json!({
@@ -1106,7 +1113,6 @@ mod tests {
                     ..Default::default()
                 });
                 worker_context.stopped().await;
-                let _ = cancelled.send(worker_context.id().to_string());
             };
             Ok(ResponseStream::new(Box::pin(response), context))
         }

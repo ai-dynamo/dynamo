@@ -17,6 +17,14 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v190"></a>
+
+## v1.9.0 - Upcoming
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Velo is the default response plane** ([#19283](https://github.com/ai-dynamo/dynamo/pull/19283)). With `--response-plane` and `DYN_RESPONSE_PLANE` unset, workers stream responses to the frontend over Velo, which multiplexes and batches every stream between a worker and a frontend over a few persistent connections, instead of over one TCP connection per request. Frontends and workers connect to each other's Velo listeners (`DYN_VELO_RESPONSE_PORT`, OS-assigned when unset). Velo has no TLS, so a process with any `DYN_TCP_TLS_*` setting stays on `tcp`.
+
+  > **Migrate:** Set `DYN_RESPONSE_PLANE=tcp` on frontends and workers to keep the previous plane. Upgrading from v1.8.0 needs no change: during the rolling update, v1.8.0 and v1.9.0 pods serve each other's requests. From v1.7.0 or earlier, set `DYN_RESPONSE_PLANE=tcp` on the v1.9.0 pods until the upgrade finishes, then remove it. SGLang manual drain still requires `--response-plane tcp` on the worker and its frontend.
+
 <a id="v180"></a>
 
 ## v1.8.0 - Upcoming

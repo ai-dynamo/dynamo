@@ -259,7 +259,9 @@ worker-local routes.
 Send no body or an empty JSON object. Drain returns 202 while completion is
 pending. Status and a successful resume return 200. Conflicts return 409,
 and discovery RPC failures return 503.
-Manual drain requires the TCP response plane. Other response planes return 409.
+Manual drain requires the TCP response plane. The default is Velo, so start the
+worker and its frontend with `--response-plane tcp` (or `DYN_RESPONSE_PLANE=tcp`).
+Other response planes return 409.
 
 
 ### Drain and resume a worker
