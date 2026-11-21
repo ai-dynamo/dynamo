@@ -69,6 +69,10 @@ The fractional and absolute prefill checks can be enabled separately or together
 `--active-prefill-tokens-threshold-frac`. A worker is not excluded until all of its data-parallel ranks
 are busy, which avoids discarding capacity on ranks that can still admit work.
 
+Each worker role's pool has its own thresholds. A role's `busy_threshold` in the
+`--router-policy-config` file sets them, and replaces the frontend flags for that role; see
+[Busy Thresholds](../../modular-components/router/worker-filtering.md#busy-thresholds).
+
 Decode-block rejection depends on the KV router worker-load path. `--router-mode kv` initializes that
 path. `--router-track-output-blocks` adds generated output tokens to the router's observed active-block
 count; without it, long outputs can consume KV cache without appearing in the tracked load. The

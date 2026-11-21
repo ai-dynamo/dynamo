@@ -37,6 +37,7 @@ use crate::{
             videos::OpenAIVideosStreamingEngine,
         },
     },
+    worker_type::WorkerType,
 };
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
@@ -244,6 +245,10 @@ pub struct WorkerSet {
     /// The prefill pool's own handle, when this decode set fronts one.
     pub(crate) prefill_load_thresholds: Option<LoadThresholdHandle>,
 
+    /// The role of the pool `load_thresholds` gates. A LoRA adapter view keeps the base
+    /// set's, whatever its own card says.
+    serving_role: WorkerType,
+
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<dyn PrefillRouterLifecycle>>,
@@ -274,6 +279,7 @@ impl WorkerSet {
             endpoint_id: None,
             topology_target: None,
             mdcsum,
+            serving_role: card.effective_worker_type(),
             card,
             chat_engine: None,
             completions_engine: None,
@@ -331,11 +337,19 @@ impl WorkerSet {
         self.load_context.as_ref()
     }
 
-    /// Every threshold handle a `/busy_threshold` write must reach, serving pool first.
-    pub(crate) fn load_threshold_handles(&self) -> impl Iterator<Item = &LoadThresholdHandle> {
+    /// Every threshold handle a `/busy_threshold` write can reach, each with the role of the
+    /// pool it gates, serving pool first.
+    pub(crate) fn load_threshold_handles(
+        &self,
+    ) -> impl Iterator<Item = (WorkerType, &LoadThresholdHandle)> {
         self.load_thresholds
             .iter()
-            .chain(&self.prefill_load_thresholds)
+            .map(|handle| (self.serving_role, handle))
+            .chain(
+                self.prefill_load_thresholds
+                    .iter()
+                    .map(|handle| (WorkerType::Prefill, handle)),
+            )
     }
 
     pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
@@ -638,6 +652,7 @@ impl WorkerSet {
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),
             prefill_load_thresholds: self.prefill_load_thresholds.clone(),
+            serving_role: self.serving_role,
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),

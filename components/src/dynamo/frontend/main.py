@@ -484,7 +484,7 @@ async def async_main():
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. FrontendConfig.validate resolved the router mode,
     # so this never returns None.
-    router_config = build_router_config(config)
+    router_config = build_router_config(config, frontend=True)
 
     metrics_prefix = (
         config.metrics_prefix

@@ -414,7 +414,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         self.validate_rejection_thresholds()
         # Direct mode ignores the thresholds.
         if self.router_mode != "direct":
-            self.log_rejection_thresholds()
+            self.log_rejection_thresholds(
+                policy_file=self.router_policy_config is not None
+            )
 
 
 @register_encoder(FrontendConfig)

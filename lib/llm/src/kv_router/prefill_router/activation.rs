@@ -357,6 +357,7 @@ impl PrefillRouter {
             block_size = prefill_block_size,
             session_affinity = ?routing.session_affinity.spec,
             session_affinity_source = ?routing.session_affinity.source,
+            busy_thresholds = ?context.load_thresholds.get(),
             kv_tuning = ?routing.kv_router_config,
             "Activating prefill router"
         );

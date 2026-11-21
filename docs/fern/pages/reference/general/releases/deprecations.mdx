@@ -35,6 +35,18 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Add `session_affinity` to every role that should keep sessions on one worker, then remove the flags. `--router-mode kv --router-session-affinity-ttl-secs 300` becomes `--router-policy-config router.yaml` with `worker_selection: {aggregated: {type: default, session_affinity: true}}`; a disaggregated deployment sets the key on `prefill` and `decode` separately. See [Session Affinity](../../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
 
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the frontend's busy-threshold flags** in favor of a `busy_threshold` key on each role of `worker_selection` in the `--router-policy-config` file. Each role (`aggregated`, `prefill`, `decode`) now sets its own busy-worker rejection thresholds, so a prefill pool and a decode pool can have different limits. A role's entry is taken whole: a limit it omits is not checked. A role without the key still uses the thresholds its workers advertise, then the frontend flags. The flags and variables still work on the frontend, print one warning, and are scheduled for removal in v1.9.0. The worker-side flags are unchanged. A policy file cannot select `--router-mode device-aware-weighted` yet, so keep the flags with that mode.
+
+| Old (frontend) | New (per role, in the policy file) |
+| :---- | :---- |
+| `--active-decode-blocks-threshold F`, `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `busy_threshold: {active_decode_blocks: F}` |
+| `--active-prefill-tokens-threshold-frac F`, `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `busy_threshold: {active_prefill_tokens_frac: F}` |
+| `--active-prefill-tokens-threshold N`, `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` (deprecated earlier) | No key for an absolute count; use `active_prefill_tokens_frac` |
+
+The runtime API `POST /router_policy/busy_threshold` (and `POST /busy_threshold`) takes an optional `role`. Its field names are unchanged.
+
+  > **Migrate:** Add `busy_threshold` to every role that should reject requests when its workers are busy, then remove the flags. `--router-mode kv --active-decode-blocks-threshold 0.85` becomes `--router-policy-config router.yaml` with `worker_selection: {aggregated: {type: default, busy_threshold: {active_decode_blocks: 0.85}}}`. A disaggregated deployment sets `active_prefill_tokens_frac` on `prefill` and `active_decode_blocks` on `decode`. The flags gave both limits to both pools; to keep exactly that, set both keys on both roles. See [Busy Thresholds](../../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#busy-thresholds).
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
 
 | Old | New |

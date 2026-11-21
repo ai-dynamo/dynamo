@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import contextlib
 import warnings
 from pathlib import Path
 
@@ -701,6 +702,7 @@ def test_conditional_disagg_config_rejects_invalid_json(
 def test_frontend_rejection_thresholds_default_to_none(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
     _clear_rejection_threshold_env(monkeypatch)
     caplog.set_level("INFO")
@@ -724,27 +726,66 @@ def test_frontend_rejection_thresholds_default_to_none(
     }
     assert "busy-worker rejection disabled" in caplog.text
 
+    # A policy file can set each role's busy_threshold, which only the router reads.
+    caplog.clear()
+    policy = tmp_path / "policy.yaml"
+    policy.write_text("worker_selection:\n  decode: round-robin\n")
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-policy-config", str(policy)])
+    )
+    config.validate()
+    assert "busy-worker rejection disabled" not in caplog.text
+    assert "each role's busy_threshold in --router-policy-config" in caplog.text
+
+
+def _warns_busy_threshold_yaml(name: str, yaml_key: str | None):
+    """Expect the warning that names the YAML replacing a frontend threshold.
+
+    The absolute prefill threshold has no YAML key and keeps its older notice.
+    """
+    if yaml_key is None:
+        return contextlib.nullcontext()
+    return pytest.warns(
+        FutureWarning,
+        match=rf"{name} is deprecated and will be removed in v1\.9; use "
+        rf"busy_threshold: \{{{yaml_key}: FRACTION\}} on a role under "
+        r"worker_selection in --router-policy-config",
+    )
+
+
+@contextlib.contextmanager
+def _ignoring_busy_threshold_deprecation():
+    """For a test of a frontend threshold flag's value, not of its deprecation."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=".*use busy_threshold: ", category=FutureWarning
+        )
+        yield
+
 
 @pytest.mark.parametrize(
-    ("flag", "value", "field", "expected"),
+    ("flag", "value", "field", "expected", "yaml_key"),
     [
         (
             "--active-decode-blocks-threshold",
             "0.5",
             "active_decode_blocks_threshold",
             0.5,
+            "active_decode_blocks",
         ),
         (
             "--active-prefill-tokens-threshold",
             "1000",
             "active_prefill_tokens_threshold",
             1000,
+            None,
         ),
         (
             "--active-prefill-tokens-threshold-frac",
             "2.0",
             "active_prefill_tokens_threshold_frac",
             2.0,
+            "active_prefill_tokens_frac",
         ),
     ],
 )
@@ -755,13 +796,16 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
     value: str,
     field: str,
     expected: float | int,
+    yaml_key: str | None,
 ) -> None:
     _clear_rejection_threshold_env(monkeypatch)
     caplog.set_level("INFO")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    config = FrontendConfig.from_cli_args(parser.parse_args([flag, value]))
+    with _warns_busy_threshold_yaml(flag, yaml_key):
+        args = parser.parse_args([flag, value])
+    config = FrontendConfig.from_cli_args(args)
     config.validate()
 
     thresholds = {
@@ -775,30 +819,37 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
 
     # The deprecation notice is emitted where the frontend forwards the value,
     # the same path worker advertisements take, and exactly once per process.
-    build_router_config(config)
+    build_router_config(config, frontend=True)
     deprecated = field == "active_prefill_tokens_threshold"
     assert caplog.text.count("--active-prefill-tokens-threshold is deprecated") == int(
         deprecated
     )
+    # The frontend's fraction flag is deprecated too, so the notice names the file.
+    assert (
+        "use busy_threshold: {active_prefill_tokens_frac: FRACTION}" in caplog.text
+    ) == deprecated
 
 
 @pytest.mark.parametrize(
-    ("env_var", "field", "expected"),
+    ("env_var", "field", "expected", "yaml_key"),
     [
         (
             "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
             "active_decode_blocks_threshold",
             0.6,
+            "active_decode_blocks",
         ),
         (
             "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
             "active_prefill_tokens_threshold",
             2000,
+            None,
         ),
         (
             "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
             "active_prefill_tokens_threshold_frac",
             3.0,
+            "active_prefill_tokens_frac",
         ),
     ],
 )
@@ -807,11 +858,13 @@ def test_each_environment_rejection_threshold_is_independently_opt_in(
     env_var: str,
     field: str,
     expected: float | int,
+    yaml_key: str | None,
 ) -> None:
     _clear_rejection_threshold_env(monkeypatch)
     monkeypatch.setenv(env_var, str(expected))
     parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
+    with _warns_busy_threshold_yaml(env_var, yaml_key):
+        FrontendArgGroup().add_arguments(parser)
 
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
@@ -832,7 +885,12 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    with pytest.warns(FutureWarning, match="--router-queue-threshold is deprecated"):
+    # pytest re-raises a warning the pattern does not match.
+    deprecated_flags = (
+        "--(router-queue-threshold|active-decode-blocks-threshold|"
+        "active-prefill-tokens-threshold-frac) is deprecated"
+    )
+    with pytest.warns(FutureWarning, match=deprecated_flags):
         config = FrontendConfig.from_cli_args(
             parser.parse_args(
                 [
@@ -968,7 +1026,9 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    config = FrontendConfig.from_cli_args(parser.parse_args([flag, "None"]))
+    with _ignoring_busy_threshold_deprecation():
+        args = parser.parse_args([flag, "None"])
+    config = FrontendConfig.from_cli_args(args)
     config.validate()
 
     assert config.active_decode_blocks_threshold is None
@@ -996,7 +1056,9 @@ def test_rejection_threshold_validation_rejects_invalid_values(
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    config = FrontendConfig.from_cli_args(parser.parse_args([flag, value]))
+    with _ignoring_busy_threshold_deprecation():
+        args = parser.parse_args([flag, value])
+    config = FrontendConfig.from_cli_args(args)
     with pytest.raises(ValueError, match=flag):
         config.validate()
 
