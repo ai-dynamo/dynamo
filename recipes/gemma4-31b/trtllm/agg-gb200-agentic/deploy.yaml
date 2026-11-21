@@ -30,7 +30,6 @@ data:
     speculative_config:
       decoding_type: MTP
       max_draft_len: 3
-      mtp_eagle_one_model: true
       speculative_model: google/gemma-4-31B-it-assistant
 ---
 apiVersion: nvidia.com/v1beta1
@@ -172,6 +171,8 @@ spec:
                   value: /model-cache
                 - name: TRTLLM_ENABLE_PDL
                   value: "1"
+                - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+                  value: "300"
                 # Benchmark-only synthetic acceptance length for max_draft_len=3.
                 # - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
                 #   value: "2.88"

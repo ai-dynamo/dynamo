@@ -191,6 +191,8 @@ spec:
                   value: /model-cache
                 - name: TRTLLM_ENABLE_PDL
                   value: "1"
+                - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+                  value: "300"
               resources:
                 requests:
                   memory: 256Gi
