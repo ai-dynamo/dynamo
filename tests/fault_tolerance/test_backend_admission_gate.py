@@ -68,13 +68,12 @@ Observation is metrics-driven rather than sleep-driven: each step polls until
 the gauges show the state it needs, and counters are asserted as deltas from a
 baseline taken after readiness, never as process-global absolutes.
 
-Each scenario runs one mocker and one frontend of its own, on ports from
-`dynamo_dynamic_ports`, and shares only the session-scoped NATS and etcd, so the
-whole file is safe under xdist process parallelism; each mocker keeps its own
-generated discovery namespace. `MockerProcess` and `FrontendRouterProcess` both
-snapshot `os.environ` in their constructors, which is why the gate configuration
-is patched around construction alone — the parallelism here is between
-processes, never threads mutating one environment.
+Each scenario runs its own mocker and frontend on ports from
+`dynamo_dynamic_ports`. They share one temporary file discovery directory per
+test. Only cases that use the NATS request transport start a NATS server.
+`MockerProcess` and `FrontendRouterProcess` snapshot `os.environ` in their
+constructors. The test patches gate configuration only while constructing
+the mocker. xdist workers each have their own process environment.
 """
 
 import asyncio
@@ -113,6 +112,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = FAULT_TOLERANCE_MODEL_NAME
 BLOCK_SIZE = 16
+DISCOVERY_BACKEND = "file"
 
 # Every setting the gate reads. A scenario sets the ones it names and clears the
 # rest, so an ambient value can never decide what it is testing.
@@ -701,6 +701,7 @@ def _deployment(
             request,
             mocker_args=mocker_args,
             num_mockers=num_workers,
+            store_backend=DISCOVERY_BACKEND,
             request_plane=request_plane,
         )
 
@@ -710,6 +711,7 @@ def _deployment(
             BLOCK_SIZE,
             ports.frontend_port,
             mockers.namespace,
+            store_backend=DISCOVERY_BACKEND,
             request_plane=request_plane,
             router_mode="round-robin",
             extra_env={"DYN_SYSTEM_PORT": None, **FRONTEND_LOG_ENV},
@@ -725,6 +727,7 @@ async def _ready(
         frontend_url=f"http://localhost:{frontend_port}",
         expected_num_workers=mockers.num_workers,
         engine_workers=mockers,
+        store_backend=DISCOVERY_BACKEND,
         request_plane=request_plane,
         test_payload=_payload(1, False),
     )
@@ -776,6 +779,9 @@ pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.mocker,
     pytest.mark.model(MODEL_NAME),
+    pytest.mark.usefixtures("file_storage_backend", "runtime_services_dynamic_ports"),
+    pytest.mark.parametrize("discovery_backend", [DISCOVERY_BACKEND], indirect=True),
+    pytest.mark.parametrize("event_plane", ["zmq"], indirect=True),
     pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True),
 ]
 
@@ -788,7 +794,6 @@ WAITING_SCENARIO_QUEUE_LIMIT = 3
 @pytest.mark.timeout(90)
 def test_waiting_limit_holds_requests_until_a_first_response(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -925,7 +930,6 @@ def test_waiting_limit_holds_requests_until_a_first_response(
 @pytest.mark.timeout(60)
 def test_request_limit_holds_requests_until_one_finishes(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -995,7 +999,6 @@ def test_request_limit_holds_requests_until_one_finishes(
 )
 def test_unset_engine_limits_pass_every_request_to_the_engine(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1052,7 +1055,6 @@ def test_unset_engine_limits_pass_every_request_to_the_engine(
 @pytest.mark.timeout(90)
 def test_a_queue_limit_without_an_engine_limit_fails_worker_startup(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1083,7 +1085,7 @@ def test_a_queue_limit_without_an_engine_limit_fails_worker_startup(
         "--endpoint",
         f"dyn://test-namespace-{generate_random_suffix()}.mocker.generate",
         "--discovery-backend",
-        "etcd",
+        DISCOVERY_BACKEND,
         "--num-workers",
         "1",
     ]
@@ -1105,7 +1107,6 @@ def test_a_queue_limit_without_an_engine_limit_fails_worker_startup(
 @pytest.mark.timeout(60)
 def test_legacy_aliases_configure_the_request_and_queue_limits(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1140,7 +1141,6 @@ def test_legacy_aliases_configure_the_request_and_queue_limits(
 @pytest.mark.timeout(60)
 def test_the_former_waiting_limit_name_configures_the_waiting_limit(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1184,7 +1184,6 @@ def test_the_former_waiting_limit_name_configures_the_waiting_limit(
 @pytest.mark.timeout(120)
 def test_ranks_admit_and_queue_independently_and_share_the_aggregate(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1291,7 +1290,6 @@ def test_ranks_admit_and_queue_independently_and_share_the_aggregate(
 @pytest.mark.timeout(120)
 def test_a_full_rank_refuses_for_itself_and_its_idle_sibling_is_admitted_at_once(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1406,7 +1404,6 @@ async def _scraped_worker_ids(
 @pytest.mark.timeout(120)
 def test_workers_in_one_process_admit_through_their_own_gates(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1498,7 +1495,9 @@ def test_workers_in_one_process_admit_through_their_own_gates(
             url = f"http://localhost:{dynamo_dynamic_ports.frontend_port}/v1/chat/completions"
             # The workers' instance IDs, read from discovery: no engine traffic.
             mockers = deployment.mockers
-            with managed_runtime(request_plane=request_plane) as runtime:
+            with managed_runtime(
+                store_backend=DISCOVERY_BACKEND, request_plane=request_plane
+            ) as runtime:
                 endpoint = runtime.endpoint(
                     f"{mockers.namespace}.{mockers.component_name}.generate"
                 )
@@ -1536,7 +1535,6 @@ def test_workers_in_one_process_admit_through_their_own_gates(
 @pytest.mark.timeout(90)
 def test_a_caller_disconnecting_while_queued_frees_its_place_before_admission(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
@@ -1602,7 +1600,6 @@ def test_a_caller_disconnecting_while_queued_frees_its_place_before_admission(
 @pytest.mark.timeout(90)
 def test_a_failed_worker_is_still_reported_down(
     request,
-    runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
