@@ -10,7 +10,11 @@ materialization from committed GMS-backed weights.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
+import subprocess
+import sys
 import threading
 import time
 from typing import cast
@@ -62,7 +66,7 @@ from gpu_memory_service.client.torch.module import (
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.common.vmm import _reset_vmm_singleton
+from gpu_memory_service.common.vmm import _reset_vmm_singleton, get_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -73,7 +77,13 @@ pytestmark = [
     pytest.mark.xpu_1,
 ]
 
+requires_cuda = pytest.mark.skipif(HAS_XPU, reason="fixed-VA windows are CUDA-only")
+
 _SERVER_START_TIMEOUT_SECONDS = 5.0
+_CHILD_TIMEOUT_SECONDS = 60
+# In a fresh process: clear of the ranges the driver picks itself (around
+# 0x10000000000) and of the mmap area just below 0x800000000000.
+_WINDOW = (0x500000000000, 64 << 20)
 _SERVER_STOP_TIMEOUT_SECONDS = 15.0  # XPU: SYCL synchronize may take longer
 _POLL_INTERVAL_SECONDS = 0.01
 
@@ -428,6 +438,168 @@ def test_bulk_import_and_remap_map_each_allocation_at_its_own_address(
             _assert_exact_tensor_equal(source, tensors[allocation_id])
     finally:
         reader.close()
+
+
+# A fresh process that maps the committed layout into the fixed-VA window and
+# prints, per allocation, its address and the first values stored there.
+_FIXED_VA_READER = """
+import json, sys
+import torch
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+from gpu_memory_service.common.locks import RequestedLockType
+
+socket_path, window, ids, bulk = sys.argv[1:5]
+ids = json.loads(ids)
+manager = GMSClientMemoryManager(
+    socket_path, device=0, bulk_import=bulk == "bulk", fixed_va_window=tuple(json.loads(window))
+)
+manager.connect(RequestedLockType.RO)
+if bulk == "bulk":
+    manager.import_allocations(reversed(ids))
+seen = {}
+for allocation_id in ids:
+    va = manager.create_mapping(allocation_id=allocation_id)
+    seen[allocation_id] = [va, _tensor_from_pointer(va, [4], [1], torch.float32, 0).tolist()]
+manager.close()
+print(json.dumps(seen))
+"""
+
+
+def _driver_chosen_window(size: int) -> tuple[int, int]:
+    """A window where the driver just reserved and released ``size`` bytes.
+
+    This process has launched kernels by now, after which drivers with HMM
+    addressing honor a placement hint only for ranges they have handed out
+    before (see the fixed-VA section of the README).
+    """
+    vmm = get_vmm()
+    granularity = vmm.get_allocation_granularity(0)
+    base = vmm.address_reserve(size, granularity)
+    vmm.address_free(base, size)
+    return base, size
+
+
+@requires_cuda
+@pytest.mark.timeout(3 * _CHILD_TIMEOUT_SECONDS)
+def test_fixed_va_window_maps_each_allocation_at_one_address_in_two_processes(
+    running_gms,
+):
+    socket_path = running_gms
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    granularity = writer.granularity
+    # 4 KiB, a granule plus 4 KiB, and 1 MiB: 1, 2 and 1 granules once aligned.
+    values = {}
+    for value, nbytes in ((1.0, 4096), (2.0, granularity + 4096), (3.0, 1 << 20)):
+        source = torch.full((nbytes // 4,), value, device=_DEVICE)
+        allocation_id, writer_tensor = _make_gms_tensor(writer, source, tag="weights")
+        del writer_tensor
+        values[allocation_id] = value
+    assert writer.commit()
+    writer.close()
+    base = _WINDOW[0]
+    expected = {
+        allocation_id: [base + offset, [value] * 4]
+        for (allocation_id, value), offset in zip(
+            values.items(), (0, granularity, 3 * granularity)
+        )
+    }
+
+    # Each reader reserves the window before it loads any CUDA module.
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, sys.path)),
+        "CUDA_MODULE_LOADING": "LAZY",
+    }
+    for mode in ("one at a time", "bulk"):
+        reader = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _FIXED_VA_READER,
+                socket_path,
+                json.dumps(_WINDOW),
+                json.dumps(list(values)),
+                mode,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_CHILD_TIMEOUT_SECONDS,
+        )
+        assert reader.returncode == 0, reader.stderr
+        assert json.loads(reader.stdout.splitlines()[-1]) == expected, mode
+
+
+@requires_cuda
+@pytest.mark.timeout(_CHILD_TIMEOUT_SECONDS)
+def test_fixed_va_window_is_released_and_its_ranges_reused(running_gms, tmp_path):
+    socket_path = running_gms
+    window = _driver_chosen_window(64 << 20)
+    base, size = window
+    manager = GMSClientMemoryManager(
+        socket_path,
+        device=0,
+        tag="kv_cache",
+        scratch_size=2 << 20,
+        fixed_va_window=window,
+    )
+    try:
+        top = manager.create_scratch_mapping(4 << 20)
+        assert top == base + size - (4 << 20)
+        below = manager.create_scratch_mapping(2 << 20)
+        assert below == top - (2 << 20)
+        _tensor_from_pointer(top, [1 << 20], [1], torch.float32, 0).fill_(1.0)
+        _synchronize()
+        assert manager.destroy_scratch_mapping(top)
+        assert manager.create_scratch_mapping(4 << 20) == top
+    finally:
+        manager.close()
+
+    # Closed, or dropped after a failed first connect, a manager leaves the
+    # window free for the next one.
+    GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window).close()
+    dropped = GMSClientMemoryManager(
+        str(tmp_path / "no-server.sock"), device=0, fixed_va_window=window
+    )
+    with pytest.raises(ConnectionError):
+        dropped.connect(RequestedLockType.RO, timeout_ms=0)
+    GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window).close()
+
+
+@requires_cuda
+@pytest.mark.timeout(_CHILD_TIMEOUT_SECONDS)
+def test_fixed_va_window_that_is_taken_is_refused(running_gms):
+    socket_path = running_gms
+    window = _driver_chosen_window(64 << 20)
+    base, size = window
+    vmm = get_vmm()
+    holder = GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window)
+    granularity = holder.granularity
+    try:
+        with pytest.raises(RuntimeError, match="is not available") as refused:
+            GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window)
+    finally:
+        holder.close()
+    # The reservation the driver made elsewhere was returned.
+    match = re.search(r"returned 0x([0-9a-f]+)", str(refused.value))
+    assert match is not None
+    stray = int(match.group(1), 16)
+    assert stray != base
+    assert vmm.address_reserve(size, granularity, addr=stray) == stray
+    vmm.address_free(stray, size)
+
+    last_granule = vmm.address_reserve(
+        granularity, granularity, addr=base + size - granularity
+    )
+    try:
+        assert last_granule == base + size - granularity
+        with pytest.raises(RuntimeError, match="is not available"):
+            GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window)
+    finally:
+        vmm.address_free(last_granule, granularity)
+    GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window).close()
 
 
 def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):

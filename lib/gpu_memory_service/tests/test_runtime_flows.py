@@ -46,6 +46,7 @@ from gpu_memory_service.client.memory_manager import (
 )
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
+from gpu_memory_service.client.torch import allocator
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol import messages, wire
 from gpu_memory_service.common.protocol.messages import (
@@ -1281,6 +1282,13 @@ def test_content_commit_path_is_unchanged(gms_thread):
 
 # ---- bulk import ----
 
+_WINDOW_BASE = 0x500000000000
+_WINDOW = (_WINDOW_BASE, 1 << 30)
+
+
+def _window(fixed_va):
+    return _WINDOW if fixed_va else None
+
 
 def _publish(socket_path, sizes, tag="weights"):
     """Commit one layout with allocations of ``sizes``; return allocation ids by slot."""
@@ -1381,14 +1389,20 @@ def test_bulk_import_holds_at_most_one_chunk_of_exported_fds(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_bulk_remap_failure_leaves_the_manager_remappable(running_gms, monkeypatch):
+@pytest.mark.parametrize("fixed_va", [False, True])
+def test_bulk_remap_failure_leaves_the_manager_remappable(
+    running_gms, monkeypatch, fixed_va
+):
     _, socket_path = running_gms
     ids = _publish(socket_path, (4096, 4096, 4096))
     vmm = _fake_vmm()
-    reader = GMSClientMemoryManager(socket_path, device=0, bulk_import=True)
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, bulk_import=True, fixed_va_window=_window(fixed_va)
+    )
     try:
         reader.connect(RequestedLockType.RO)
         reader.import_allocations(ids)
+        vas = sorted(reader.mappings)
         reader.unmap_all_vas()
         reader.abort()
         reader.connect(RequestedLockType.RO)
@@ -1410,6 +1424,7 @@ def test_bulk_remap_failure_leaves_the_manager_remappable(running_gms, monkeypat
         monkeypatch.setattr(vmm, "map", real_map)
         reader.remap_all_vas()
         assert all(m.handle != 0 for m in reader.mappings.values())
+        assert sorted(reader.mappings) == vas
     finally:
         reader.close()
 
@@ -1454,7 +1469,7 @@ def _meta_module():
     return model
 
 
-def _attach(socket_path, monkeypatch, bulk_import):
+def _attach(socket_path, monkeypatch, bulk_import, fixed_va_window=None):
     """Run the read-only attach with GPU tensors faked by the pointer they
     alias. Returns (reader, model, per-tensor pointers, client RPC counts)."""
     pointers = {}
@@ -1466,7 +1481,11 @@ def _attach(socket_path, monkeypatch, bulk_import):
 
     monkeypatch.setattr(gms_tensor, "_tensor_from_pointer", fake_tensor)
     reader = GMSClientMemoryManager(
-        socket_path, device=0, tag="weights", bulk_import=bulk_import
+        socket_path,
+        device=0,
+        tag="weights",
+        bulk_import=bulk_import,
+        fixed_va_window=fixed_va_window,
     )
     reader.connect(RequestedLockType.RO)
     rpcs = {"get_handle_info": 0, "export_handle": 0, "metadata_get": 0}
@@ -1513,17 +1532,23 @@ def _attach_view(reader, by_name):
 
 @requires_torch
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_ro_attach_maps_the_same_with_bulk_import_on_and_off(running_gms, monkeypatch):
+@pytest.mark.parametrize("fixed_va", [False, True])
+def test_ro_attach_maps_the_same_with_bulk_import_on_and_off(
+    running_gms, monkeypatch, fixed_va
+):
     """With bulk import the attach issues no per-allocation handle-info request,
     and gives the same mappings, tensor placement, aliases and read-only access
     as one create_mapping per allocation. Either way it reads the metadata in
-    batches, not one request per tensor."""
+    batches, not one request per tensor. In a fixed-VA window both also give
+    the same addresses."""
     _, socket_path = running_gms
     ids = _publish_module_layout(socket_path)
     vmm = _fake_vmm()
-    views = {}
+    views, pointers = {}, {}
     for bulk in (False, True):
-        reader, model, by_name, rpcs = _attach(socket_path, monkeypatch, bulk)
+        reader, model, by_name, rpcs = _attach(
+            socket_path, monkeypatch, bulk, _window(fixed_va)
+        )
         try:
             # The allocation no tensor references stays unmapped on both paths.
             assert {m.allocation_id for m in reader.mappings.values()} == set(ids[:3])
@@ -1538,26 +1563,41 @@ def test_ro_attach_maps_the_same_with_bulk_import_on_and_off(running_gms, monkey
             assert not any(p.is_meta for p in model.parameters())
             assert not any(b.is_meta for b in model.buffers())
             views[bulk] = _attach_view(reader, by_name)
+            pointers[bulk] = by_name
         finally:
             reader.close()
     assert views[True] == views[False]
     _, placement = views[True]
     assert placement["a.bias"] == (ids[0], 4096)
     assert placement["b.extra"] == (ids[2], 64)
+    if fixed_va:
+        # Slots 0-2 are 2, 1 and 1 pages: offsets 0, 2 and 3 pages.
+        assert pointers[True] == pointers[False]
+        assert pointers[True]["a.bias"] == _WINDOW_BASE + 4096
+        assert pointers[True]["b.weight"] == _WINDOW_BASE + 2 * 4096
+        assert pointers[True]["b.extra"] == _WINDOW_BASE + 3 * 4096 + 64
 
 
 @requires_torch
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("fixed_va", [False, True])
 @pytest.mark.parametrize("fail_at", ["export", "import", "map", "set_access"])
-def test_bulk_attach_failure_is_all_or_nothing(running_gms, monkeypatch, fail_at):
+def test_bulk_attach_failure_is_all_or_nothing(
+    running_gms, monkeypatch, fail_at, fixed_va
+):
     """A failure partway through the bulk attach leaves no fd, reservation,
     handle or mapping behind and the model untouched; the same manager can
-    attach again afterwards."""
+    attach again afterwards, in a fixed-VA window at the same addresses."""
     _, socket_path = running_gms
     _publish_module_layout(socket_path)
     vmm = _fake_vmm()
+    before = dict(vmm.reservations)
     reader = GMSClientMemoryManager(
-        socket_path, device=0, tag="weights", bulk_import=True
+        socket_path,
+        device=0,
+        tag="weights",
+        bulk_import=True,
+        fixed_va_window=_window(fixed_va),
     )
     reader.connect(RequestedLockType.RO)
     reservations = dict(vmm.reservations)
@@ -1612,11 +1652,416 @@ def test_bulk_attach_failure_is_all_or_nothing(running_gms, monkeypatch, fail_at
         assert set(vmm.access) == set(reader.mappings)
         assert not any(p.is_meta for p in model.parameters())
         assert not any(b.is_meta for b in model.buffers())
+        if fixed_va:
+            assert sorted(reader.mappings) == [
+                _WINDOW_BASE + offset for offset in (0, 2 * 4096, 3 * 4096)
+            ]
     finally:
         for fd in decoy:
             os.close(fd)
         reader.close()
-    assert vmm.reservations == reservations
+    assert vmm.reservations == before
+
+
+# ---- fixed-VA window ----
+
+
+def _vas_by_allocation(manager):
+    return {m.allocation_id: va for va, m in manager.mappings.items()}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_imports_land_at_their_layout_slot_offset(running_gms):
+    """An import's address depends only on the committed layout: importing one
+    at a time, or in bulk in the opposite order, maps every allocation at the
+    same address, and a remap keeps it there."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 3 * 4096, 2 * 4096))
+    expected = dict(zip(ids, (_WINDOW_BASE + p * 4096 for p in (0, 1, 4))))
+
+    # Separate processes in practice. They share one fake VMM here, so each
+    # reader has to return the window before the next one takes it.
+    one = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", fixed_va_window=_WINDOW
+    )
+    with one:
+        one.connect(RequestedLockType.RO)
+        assert {i: one.create_mapping(allocation_id=i) for i in ids} == expected
+
+    bulk = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", bulk_import=True, fixed_va_window=_WINDOW
+    )
+    with bulk:
+        bulk.connect(RequestedLockType.RO)
+        bulk.import_allocations(reversed(ids))
+        assert _vas_by_allocation(bulk) == expected
+        bulk.unmap_all_vas()
+        bulk.remap_all_vas()
+        assert _vas_by_allocation(bulk) == expected
+        assert all(m.handle != 0 for m in bulk.mappings.values())
+    assert _fake_vmm().reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_window_that_is_taken_is_refused(running_gms):
+    """A hint that overlaps any reservation is placed elsewhere by the driver;
+    the manager frees that reservation and refuses to start."""
+    _, socket_path = running_gms
+    vmm = _fake_vmm()
+    first = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", fixed_va_window=_WINDOW
+    )
+    try:
+        held = dict(vmm.reservations)
+        with pytest.raises(RuntimeError, match="0x500000000000 .* is not available"):
+            GMSClientMemoryManager(
+                socket_path, device=0, tag="weights", fixed_va_window=_WINDOW
+            )
+        assert vmm.reservations == held
+    finally:
+        first.close()
+
+    last_page = _WINDOW_BASE + _WINDOW[1] - 4096
+    assert vmm.address_reserve(4096, 4096, addr=last_page) == last_page
+    with pytest.raises(RuntimeError, match="is not available"):
+        GMSClientMemoryManager(
+            socket_path, device=0, tag="weights", fixed_va_window=_WINDOW
+        )
+    assert vmm.reservations == {last_page: 4096}
+    vmm.address_free(last_page, 4096)
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "window",
+    [
+        (_WINDOW_BASE + 512, 1 << 30),
+        (_WINDOW_BASE, (1 << 30) + 512),
+        (0, 1 << 30),
+        (_WINDOW_BASE, 0),
+    ],
+)
+def test_fixed_va_window_must_be_aligned_and_non_empty(running_gms, window):
+    _, socket_path = running_gms
+    with pytest.raises(ValueError, match="aligned"):
+        GMSClientMemoryManager(socket_path, device=0, fixed_va_window=window)
+    assert _fake_vmm().reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_scratch_made_before_imports_stays_clear_of_them(running_gms):
+    """Scratch KV is created before the manager connects; it must not sit on
+    the slot offsets that later imports into the same window use."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 2 * 4096), tag="kv_cache")
+    manager = GMSClientMemoryManager(
+        socket_path,
+        device=0,
+        tag="kv_cache",
+        scratch_size=4 * 4096,
+        fixed_va_window=_WINDOW,
+    )
+    try:
+        scratch = manager.create_scratch_mapping(3 * 4096)
+        assert scratch == _WINDOW_BASE + _WINDOW[1] - 4 * 4096
+        manager.connect(RequestedLockType.RO)
+        vas = [manager.create_mapping(allocation_id=i) for i in ids]
+        assert vas == [_WINDOW_BASE, _WINDOW_BASE + 4096]
+    finally:
+        manager.close()
+    assert _fake_vmm().reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_reuses_released_client_ranges(running_gms):
+    """Scratch and writer allocations that come and go must not walk off the
+    end of the window."""
+    _, socket_path = running_gms
+    manager = GMSClientMemoryManager(
+        socket_path,
+        device=0,
+        tag="kv_cache",
+        scratch_size=4 * 4096,
+        fixed_va_window=(_WINDOW_BASE, 8 * 4096),
+    )
+    try:
+        first = manager.create_scratch_mapping(4 * 4096)
+        for _ in range(10):
+            assert manager.destroy_scratch_mapping(first)
+            assert manager.create_scratch_mapping(4 * 4096) == first
+        manager.connect(RequestedLockType.RW)
+        for _ in range(10):
+            va = manager.create_mapping(size=4 * 4096, tag="kv_cache")
+            assert va == _WINDOW_BASE
+            manager.destroy_mapping(va)
+        with pytest.raises(RuntimeError, match="no free"):
+            manager.create_scratch_mapping(5 * 4096)  # 4 + 8 > 8 pages
+    finally:
+        manager.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("path", ["allocate", "import"])
+def test_fixed_va_mapping_that_does_not_fit_leaves_nothing_behind(running_gms, path):
+    """A full window is an error with no fd left open and, for a writer, no
+    allocation left on the server that nothing maps: a commit would publish it."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4 * 4096,) * 3) if path == "import" else []
+    manager = GMSClientMemoryManager(
+        socket_path,
+        device=0,
+        tag="weights",
+        bulk_import=False,
+        fixed_va_window=(_WINDOW_BASE, 8 * 4096),
+    )
+
+    def create(i):
+        if path == "import":
+            return manager.create_mapping(allocation_id=ids[i])
+        return manager.create_mapping(size=4 * 4096, tag="weights")
+
+    try:
+        manager.connect(
+            RequestedLockType.RO if path == "import" else RequestedLockType.RW
+        )
+        vas = [create(0), create(1)]
+        # The server closes its copy of an exported fd before it reads the
+        # next request, so after a round trip only leaked fds remain.
+        manager.list_handles()
+        pipes = _open_pipe_count()
+        with pytest.raises(RuntimeError, match="no free|do not fit"):
+            create(2)
+        assert len(manager.list_handles()) == (3 if path == "import" else 2)
+        assert _open_pipe_count() == pipes
+        assert sorted(manager.mappings) == sorted(vas)
+    finally:
+        manager.close()
+    assert _fake_vmm().reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "fail_at", ["import_shareable_handle_close_fd", "map", "set_access"]
+)
+def test_fixed_va_import_can_be_retried_after_a_failed_map(
+    running_gms, monkeypatch, fail_at
+):
+    """A mapping that fails gives its range back. Otherwise the allocation's
+    slot stays taken and importing it again is refused."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 2 * 4096))
+    vmm = _fake_vmm()
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, bulk_import=False, fixed_va_window=_WINDOW
+    )
+
+    def failing(*args, **kwargs):
+        if fail_at == "import_shareable_handle_close_fd":
+            os.close(args[0])  # the import consumes the fd even when it fails
+        raise RuntimeError(f"injected {fail_at} failure")
+
+    try:
+        reader.connect(RequestedLockType.RO)
+        with monkeypatch.context() as patch:
+            patch.setattr(vmm, fail_at, failing)
+            with pytest.raises(RuntimeError, match="injected"):
+                reader.create_mapping(allocation_id=ids[1])
+        assert reader.mappings == {}
+        assert vmm.mapped == {} and vmm.imports == set()
+        assert reader.create_mapping(allocation_id=ids[1]) == _WINDOW_BASE + 4096
+    finally:
+        reader.close()
+    assert vmm.reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_window_is_released_when_connect_fails(running_gms, tmp_path):
+    """Callers drop a manager whose connect failed without closing it, so the
+    manager returns its empty window itself and a later one can take it. The
+    failed manager reserves the window again if it is used after all."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096,))
+    vmm = _fake_vmm()
+    doomed = GMSClientMemoryManager(
+        str(tmp_path / "no-server.sock"),
+        device=0,
+        fixed_va_window=_WINDOW,
+    )
+    with pytest.raises(ConnectionError):
+        doomed.connect(RequestedLockType.RO, timeout_ms=0)
+    assert vmm.reservations == {}
+
+    again = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", fixed_va_window=_WINDOW
+    )
+    assert vmm.reservations == {_WINDOW_BASE: _WINDOW[1]}
+    again.close()
+
+    doomed.socket_path = socket_path
+    try:
+        doomed.connect(RequestedLockType.RO)
+        assert doomed.create_mapping(allocation_id=ids[0]) == _WINDOW_BASE
+        assert vmm.reservations == {_WINDOW_BASE: _WINDOW[1]}
+    finally:
+        doomed.close()
+    assert vmm.reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_window_with_preserved_ranges_survives_a_failed_reconnect(
+    running_gms, tmp_path
+):
+    """Only an empty window is returned when a connect fails: the ranges of a
+    sleeping engine stay reserved, at the same addresses, for its wake."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 2 * 4096))
+    vmm = _fake_vmm()
+    reader = GMSClientMemoryManager(socket_path, device=0, fixed_va_window=_WINDOW)
+    try:
+        reader.connect(RequestedLockType.RO)
+        vas = [reader.create_mapping(allocation_id=i) for i in ids]
+        reader.unmap_all_vas()
+        reader.abort()
+        reader.socket_path = str(tmp_path / "no-server.sock")
+        with pytest.raises(ConnectionError):
+            reader.connect(RequestedLockType.RO, timeout_ms=0)
+        assert vmm.reservations == {_WINDOW_BASE: _WINDOW[1]}
+
+        reader.socket_path = socket_path
+        reader.connect(RequestedLockType.RO)
+        reader.remap_all_vas()
+        assert sorted(reader.mappings) == vas
+        assert all(m.handle != 0 for m in reader.mappings.values())
+    finally:
+        reader.close()
+    assert vmm.reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_fixed_va_slot_offsets_follow_a_new_layout(running_gms, monkeypatch):
+    """Once every import is released, the next import is placed by the layout
+    committed now, not by offsets cached from the previous one."""
+    _, socket_path = running_gms
+    old = _publish(socket_path, (4096, 4096))
+    # Reconnecting after abort re-derives the socket path from the GPU UUID.
+    monkeypatch.setattr(
+        "gpu_memory_service.common.utils.get_socket_path", lambda *_: socket_path
+    )
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", fixed_va_window=_WINDOW
+    )
+    try:
+        reader.connect(RequestedLockType.RO)
+        for i in old:
+            reader.create_mapping(allocation_id=i)
+        for va in list(reader.mappings):
+            reader.free_va(va)
+        reader.abort()
+        new = _publish(socket_path, (3 * 4096, 4096))
+        reader.connect(RequestedLockType.RO)
+        vas = [reader.create_mapping(allocation_id=i) for i in new]
+        assert vas == [_WINDOW_BASE, _WINDOW_BASE + 3 * 4096]
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_manager_factories_pass_the_fixed_va_window(running_gms, monkeypatch):
+    _, socket_path = running_gms
+    _publish(socket_path, (4096,))
+    # Which managers the factories build does not need the torch allocator.
+    monkeypatch.setattr(allocator, "_ensure_callbacks_initialized", lambda: None)
+    monkeypatch.setattr(allocator, "_create_mem_pool", lambda: None)
+    kv_window = (_WINDOW_BASE + _WINDOW[1], _WINDOW[1])
+    try:
+        weights = allocator.get_or_create_gms_client_memory_manager(
+            socket_path,
+            0,
+            RequestedLockType.RO,
+            tag="weights",
+            fixed_va_window=_WINDOW,
+        )
+        scratch = allocator.get_or_create_scratch_manager(
+            socket_path, 0, tag="kv_cache", fixed_va_window=kv_window
+        )
+        assert weights.fixed_va_window == _WINDOW
+        assert scratch.fixed_va_window == kv_window
+        assert (
+            allocator.get_or_create_gms_client_memory_manager(
+                socket_path,
+                0,
+                RequestedLockType.RO,
+                tag="weights",
+                fixed_va_window=_WINDOW,
+            )
+            is weights
+        )
+        with pytest.raises(RuntimeError, match="fixed_va_window"):
+            allocator.get_or_create_gms_client_memory_manager(
+                socket_path, 0, RequestedLockType.RO, tag="weights"
+            )
+        with pytest.raises(RuntimeError, match="fixed_va_window"):
+            allocator.get_or_create_scratch_manager(socket_path, 0, tag="kv_cache")
+
+        # A disconnected manager with nothing mapped is replaced; it has to
+        # hand its window over, or the replacement cannot reserve it.
+        weights.abort()
+        replacement = allocator.get_or_create_gms_client_memory_manager(
+            socket_path,
+            0,
+            RequestedLockType.RO,
+            tag="weights",
+            fixed_va_window=_WINDOW,
+        )
+        assert replacement is not weights
+        assert replacement.fixed_va_window == _WINDOW
+    finally:
+        for manager in allocator.get_gms_client_memory_managers():
+            manager.close()
+    assert _fake_vmm().reservations == {}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("factory", ["connected", "scratch"])
+def test_manager_factory_returns_the_fixed_va_window_when_the_mempool_fails(
+    running_gms, monkeypatch, factory
+):
+    """A manager whose torch mempool cannot be created is never registered, so
+    the factory returns its window, and its session with it: the next manager
+    for the tag gets the same addresses and the write lock."""
+    _, socket_path = running_gms
+
+    def create():
+        if factory == "scratch":
+            return allocator.get_or_create_scratch_manager(
+                socket_path, 0, tag="kv_cache", fixed_va_window=_WINDOW
+            )
+        return allocator.get_or_create_gms_client_memory_manager(
+            socket_path,
+            0,
+            RequestedLockType.RW,
+            tag="weights",
+            fixed_va_window=_WINDOW,
+        )
+
+    def no_extension():
+        raise ImportError("injected: the allocator extension is not built")
+
+    monkeypatch.setattr(allocator, "_ensure_callbacks_initialized", no_extension)
+    monkeypatch.setattr(allocator, "_create_mem_pool", lambda: None)
+    try:
+        with pytest.raises(ImportError, match="injected"):
+            create()
+        assert _fake_vmm().reservations == {}
+        assert allocator.get_gms_client_memory_managers() == ()
+
+        monkeypatch.setattr(allocator, "_ensure_callbacks_initialized", lambda: None)
+        assert create().fixed_va_window == _WINDOW
+        assert _fake_vmm().reservations == {_WINDOW_BASE: _WINDOW[1]}
+    finally:
+        for manager in allocator.get_gms_client_memory_managers():
+            manager.close()
+    assert _fake_vmm().reservations == {}
 
 
 # ---- batched metadata reads across old and new peers ----
