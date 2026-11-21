@@ -99,7 +99,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 # TODO: re-enable GPU-parallel scheduling with
                 # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
-                timeout_s=220,
+                # ~215s to /v1/models when this is the first FP8 engine in a fresh
+                # CI pod (cold torch.compile, DeepGEMM and FlashInfer caches);
+                # ~55s once warm.
+                timeout_s=360,
                 # agg_multimodal.sh's default, made explicit so the video
                 # decoder reservation below is added on top of it.
                 requested_vllm_kv_cache_bytes=922_354_000,
