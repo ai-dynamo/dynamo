@@ -3,6 +3,7 @@
 
 """Translate vLLM request errors into Dynamo's HTTP error boundary."""
 
+import logging
 import re
 from typing import Any
 
@@ -15,6 +16,14 @@ from vllm.v1.engine.exceptions import EngineGenerateError
 
 from dynamo.common.constants import UUID_ONLY_VARIANT_KEY
 from dynamo.llm.exceptions import HttpError, InvalidArgument
+
+logger = logging.getLogger(__name__)
+
+# Prefix of the ValueError vLLM's InputProcessingContext.call_hf_processor
+# raises around any exception from the model's HF processor.
+_HF_PROCESSOR_WRAPPER_PREFIX = "Failed to apply "
+
+PROCESSOR_REJECTED_INPUT_MESSAGE = "The model's processor rejected the multimodal input"
 
 _IMAGE_CACHE_MISS = re.compile(
     r"Cache miss for (?:image|vision_chunk) at index ([0-9]{1,10}) but data is not provided\."
@@ -80,3 +89,55 @@ def vllm_client_error_to_public_error(
     if http_error.code == 400:
         return InvalidArgument(http_error.message)
     return http_error
+
+
+def _only_value_errors(exc: BaseException) -> bool:
+    """Whether ``exc`` and every exception chained under it are ``ValueError``.
+
+    Transformers' ``BatchFeature.convert_to_tensors`` re-raises any
+    tensor-creation failure as ``ValueError``, including a CPU allocation
+    failure (a ``RuntimeError`` from PyTorch) or ``MemoryError``, so a
+    ``ValueError`` alone does not show that the input was at fault.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if not isinstance(current, ValueError):
+            return False
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    return True
+
+
+def processor_input_error(
+    exc: EngineGenerateError, request_id: str
+) -> InvalidArgument | None:
+    """Return a 400 when the model's HF processor rejected the request input.
+
+    vLLM wraps the processor's exception in ``ValueError("Failed to apply ...")``
+    and ``AsyncLLM.generate`` wraps that in ``EngineGenerateError``, a server
+    error. Only a ``ValueError`` from the processor itself (an image with an
+    aspect ratio or size the processor refuses) is treated as client input;
+    a processor bug (``TypeError``, ``IndexError``, ...) or a ``ValueError``
+    wrapping another failure, such as running out of memory, stays a server
+    error.
+    The wrapper text embeds the prompt and media, so the public message is
+    fixed and the processor's reason is only logged.
+    """
+    wrapper = exc.__cause__
+    if type(wrapper) is not ValueError or not str(wrapper).startswith(
+        _HF_PROCESSOR_WRAPPER_PREFIX
+    ):
+        return None
+    reason = wrapper.__cause__
+    if reason is None or not _only_value_errors(reason):
+        return None
+    logger.warning(
+        "Request %s: model processor rejected request input: %s", request_id, reason
+    )
+    return InvalidArgument(PROCESSOR_REJECTED_INPUT_MESSAGE)
