@@ -5,7 +5,7 @@ use std::{num::NonZeroU32, sync::Arc};
 
 use async_trait::async_trait;
 pub use dynamo_rl::RlAdminBaseUrl;
-use dynamo_runtime::component::{Endpoint, StartedEndpoint};
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::engine_routes::EngineRouteRegistry;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::pipeline::{
@@ -17,10 +17,6 @@ use futures::stream;
 use serde_json::{Value, json};
 
 const DEFAULT_RL_ENDPOINT: &str = "rl";
-
-pub(crate) struct RlServeEndpoint {
-    started: StartedEndpoint,
-}
 
 pub(crate) struct RlEndpointConfig {
     endpoint_name: String,
@@ -45,12 +41,6 @@ impl RlWorkerMetadata {
     }
 }
 
-impl RlServeEndpoint {
-    pub(crate) async fn shutdown(self) -> anyhow::Result<()> {
-        self.started.shutdown().await
-    }
-}
-
 pub(crate) fn prepare_endpoint(
     primary: &Endpoint,
     metadata: Option<RlWorkerMetadata>,
@@ -71,7 +61,7 @@ pub(crate) fn prepare_endpoint(
 pub(crate) async fn serve_endpoint(
     primary: &Endpoint,
     config: RlEndpointConfig,
-) -> anyhow::Result<RlServeEndpoint> {
+) -> anyhow::Result<Endpoint> {
     let endpoint = primary.component().endpoint(config.endpoint_name);
     let handler = Arc::new(RlRouteHandler {
         routes: primary.drt().engine_routes().clone(),
@@ -79,13 +69,13 @@ pub(crate) async fn serve_endpoint(
         metadata: config.metadata,
     });
     let ingress = Ingress::for_engine(handler)?;
-    let started = endpoint
+    endpoint
         .endpoint_builder()
         .handler(ingress)
         .graceful_shutdown(true)
         .start_with_registration()
         .await?;
-    Ok(RlServeEndpoint { started })
+    Ok(endpoint)
 }
 
 fn self_host_base_url(drt: &dynamo_runtime::DistributedRuntime) -> Option<String> {

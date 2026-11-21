@@ -42,7 +42,7 @@ use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::lifecycle::RequestTracker;
 use crate::lifecycle::{
     stage_await_inflight, stage_kv_quiescence, stage_router_grace, stage_stop_admission,
-    stage_unregister,
+    stage_unregister_endpoints,
 };
 use crate::publisher::{PublisherHandles, setup_publishers};
 use crate::shutdown::{
@@ -580,7 +580,7 @@ impl Worker {
     async fn run_owned(
         mut self,
         runtime: Runtime,
-        drt: Option<DistributedRuntime>,
+        mut drt: Option<DistributedRuntime>,
         shutdown: Option<CancellationToken>,
     ) -> Result<(), DynamoError> {
         let watchdog = Arc::new(std::sync::Mutex::new(None));
@@ -588,7 +588,7 @@ impl Worker {
         let result = self
             .run_lifecycle(
                 runtime.clone(),
-                drt,
+                &mut drt,
                 shutdown,
                 watchdog.clone(),
                 &mut signal_handle,
@@ -611,9 +611,13 @@ impl Worker {
             Duration::ZERO,
             &budget,
         ));
-        let teardown =
-            tokio::time::timeout(teardown_bound, runtime.shutdown_with_budget(teardown_bound))
-                .await;
+        let teardown = tokio::time::timeout(teardown_bound, async {
+            match drt {
+                Some(drt) => drt.shutdown_with_budget(teardown_bound).await,
+                None => runtime.shutdown_with_budget(teardown_bound).await,
+            }
+        })
+        .await;
         let outcome = StageOutcome::new(
             Stage::Runtime,
             match &teardown {
@@ -653,7 +657,7 @@ impl Worker {
     async fn run_lifecycle(
         &mut self,
         runtime: Runtime,
-        drt: Option<DistributedRuntime>,
+        drt: &mut Option<DistributedRuntime>,
         shutdown: Option<CancellationToken>,
         watchdog: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>>,
         signal_handle: &mut Option<tokio_util::task::AbortOnDropHandle<()>>,
@@ -751,7 +755,7 @@ impl Worker {
     async fn run_with_shutdown(
         &mut self,
         runtime: Runtime,
-        drt: Option<DistributedRuntime>,
+        drt: &mut Option<DistributedRuntime>,
         shutdown_token: CancellationToken,
     ) -> Result<(), DynamoError> {
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
@@ -841,7 +845,7 @@ impl Worker {
     async fn run_inner(
         &mut self,
         runtime: Runtime,
-        drt: Option<DistributedRuntime>,
+        drt: &mut Option<DistributedRuntime>,
         shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
@@ -855,19 +859,16 @@ impl Worker {
                         format!("distributed runtime config: {e}"),
                     )
                 })?;
-                let result = DistributedRuntime::new(runtime, config).await;
-                // A signal cancels DRT initialization through the runtime token.
-                // Preserve the clean pre-start shutdown contract before mapping
-                // independent connection failures to CannotConnect.
-                if shutdown.is_cancelled() {
-                    return Ok(());
+                match DistributedRuntime::new(runtime, config).await {
+                    Ok(connected) => drt.insert(connected),
+                    Err(_) if shutdown.is_cancelled() => return Ok(()),
+                    Err(error) => {
+                        return Err(err(
+                            ErrorType::Backend(BackendError::CannotConnect),
+                            format!("distributed runtime: {error}"),
+                        ));
+                    }
                 }
-                result.map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::CannotConnect),
-                        format!("distributed runtime: {e}"),
-                    )
-                })?
             }
         };
         tracing::debug!("distributed runtime connected");
@@ -938,7 +939,7 @@ impl Worker {
         // alive.
         if shutdown.is_cancelled() {
             tracing::info!("Shutdown signal observed during engine.start(); running orchestrator");
-            self.orchestrator_steps(&endpoint, None).await;
+            self.orchestrator_steps(&endpoint, None, None).await;
             return Ok(());
         }
 
@@ -1152,6 +1153,7 @@ impl Worker {
         &mut self,
         endpoint: &dynamo_runtime::component::Endpoint,
         tracker: Option<&RequestTracker>,
+        rl_endpoint: Option<&dynamo_runtime::component::Endpoint>,
     ) {
         endpoint.drt().runtime().mark_shutting_down();
         // Armed before the first stage, so every stage below shares one
@@ -1168,7 +1170,7 @@ impl Worker {
             Duration::ZERO,
             &budget,
         ));
-        let outcome = stage_unregister(endpoint, &budget).await;
+        let outcome = stage_unregister_endpoints(endpoint, rl_endpoint, &budget).await;
         self.observe_stage(&outcome);
 
         self.observe_stage(&StageOutcome::new(
@@ -1598,7 +1600,7 @@ impl Worker {
             Err(error) => {
                 let shutdown_requested = shutdown.is_cancelled();
                 self.begin_engine_route_shutdown().await;
-                self.orchestrator_steps(&endpoint, Some(&request_tracker))
+                self.orchestrator_steps(&endpoint, Some(&request_tracker), None)
                     .await;
                 if shutdown_requested {
                     return Ok(());
@@ -1616,7 +1618,7 @@ impl Worker {
         if shutdown.is_cancelled() {
             self.begin_engine_route_shutdown().await;
             set_worker_health(&endpoint, HealthStatus::NotReady);
-            self.orchestrator_steps(&endpoint, Some(&request_tracker))
+            self.orchestrator_steps(&endpoint, Some(&request_tracker), None)
                 .await;
             return Ok(());
         }
@@ -1629,10 +1631,14 @@ impl Worker {
             match crate::rl::serve_endpoint(&endpoint, rl_config).await {
                 Ok(endpoint) => Some(endpoint),
                 Err(error) => {
+                    let shutdown_requested = shutdown.is_cancelled();
                     self.begin_engine_route_shutdown().await;
                     set_worker_health(&endpoint, HealthStatus::NotReady);
-                    self.orchestrator_steps(&endpoint, Some(&request_tracker))
+                    self.orchestrator_steps(&endpoint, Some(&request_tracker), None)
                         .await;
+                    if shutdown_requested {
+                        return Ok(());
+                    }
                     return Err(err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("RL endpoint setup: {error}"),
@@ -1652,14 +1658,9 @@ impl Worker {
             // resume control may already have published readiness. Withdraw it
             // here as the serve loop's own teardown does.
             set_worker_health(&endpoint, HealthStatus::NotReady);
-            if let Some(rl_endpoint) = rl_endpoint
-                && let Err(error) = rl_endpoint.shutdown().await
-            {
-                tracing::warn!(%error, "RL discovery endpoint shutdown failed");
-            }
             // The local engine can already serve canary requests even before
             // readiness is published. Close its admission gate as well.
-            self.orchestrator_steps(&endpoint, Some(&request_tracker))
+            self.orchestrator_steps(&endpoint, Some(&request_tracker), rl_endpoint.as_ref())
                 .await;
             return Ok(());
         }
@@ -1712,13 +1713,7 @@ impl Worker {
         // orchestrator drains and unregisters.
         set_worker_health(&endpoint, HealthStatus::NotReady);
 
-        if let Some(rl_endpoint) = rl_endpoint
-            && let Err(error) = rl_endpoint.shutdown().await
-        {
-            tracing::warn!(%error, "RL discovery endpoint shutdown failed");
-        }
-
-        self.orchestrator_steps(&endpoint, Some(&request_tracker))
+        self.orchestrator_steps(&endpoint, Some(&request_tracker), rl_endpoint.as_ref())
             .await;
         serve_result
     }
@@ -4702,6 +4697,9 @@ mod handoff_and_lifecycle_tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn lost_engine_withdraws_the_worker_and_returns_its_error() {
+        use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig};
+        use dynamo_runtime::storage::kv;
+
         struct LostEngine {
             lost: CancellationToken,
             cleanup_calls: std::sync::atomic::AtomicUsize,
@@ -4743,7 +4741,13 @@ mod handoff_and_lifecycle_tests {
         }
 
         let runtime = dynamo_runtime::Runtime::from_current().unwrap();
-        let config = dynamo_runtime::distributed::DistributedConfig::process_local();
+        let directory = tempfile::tempdir().unwrap();
+        let config = DistributedConfig {
+            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(
+                directory.path().into(),
+            )),
+            ..DistributedConfig::process_local()
+        };
         let drt = DistributedRuntime::new(runtime, config).await.unwrap();
         let engine = Arc::new(LostEngine {
             lost: CancellationToken::new(),
@@ -4773,6 +4777,13 @@ mod handoff_and_lifecycle_tests {
         .await
         .expect("worker registers its endpoint");
 
+        assert!(
+            !drt.discovery()
+                .list(DiscoveryQuery::AllModels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         engine.lost.cancel();
         let error = tokio::time::timeout(Duration::from_secs(30), run)
             .await
@@ -4790,6 +4801,14 @@ mod handoff_and_lifecycle_tests {
         assert!(
             drt.discovery().list(query).await.unwrap().is_empty(),
             "a lost engine must leave no endpoint"
+        );
+        assert!(
+            drt.discovery()
+                .list(DiscoveryQuery::AllModels)
+                .await
+                .unwrap()
+                .is_empty(),
+            "worker shutdown must also remove its model card from file discovery"
         );
         assert_eq!(
             engine

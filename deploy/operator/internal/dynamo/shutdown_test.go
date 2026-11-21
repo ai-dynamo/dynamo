@@ -91,6 +91,16 @@ func TestValidateShutdownBudget(t *testing.T) {
 	if err := validateShutdownBudget(&pod, true); err != nil {
 		t.Fatal(err)
 	}
+	// A short runtime budget fits even when the engine main has no worker settings.
+	pod.InitContainers = []corev1.Container{{
+		Name: commonconsts.RuntimeContainerName, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Env: pod.Containers[0].Env,
+	}}
+	pod.Containers[0].Env = nil
+	require.NoError(t, validateShutdownBudget(&pod, true))
+	pod.InitContainers[0].Env[0].Value = "90"
+	require.ErrorContains(t, validateShutdownBudget(&pod, true), "at least 95")
+	pod.InitContainers = nil
 	pod.Containers = []corev1.Container{{Name: "frontend"}}
 	if err := validateShutdownBudget(&pod, false); err != nil {
 		t.Fatal(err)
