@@ -1,6 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-disagg-planner-router-policy
+data:
+  router-policy.yaml: |
+    # Route on load: prefix overlap earns no credit, and the lowest cost wins.
+    # The decode service below sets no --disaggregation-mode and registers as an
+    # aggregated worker, so every role carries the same parameters.
+    worker_selection:
+      aggregated:
+        type: dynamo-default-cost-fn
+        parameters:
+          overlap_score_credit: 0.0
+          router_temperature: 0.0
+      prefill:
+        type: dynamo-default-cost-fn
+        parameters:
+          overlap_score_credit: 0.0
+          router_temperature: 0.0
+      decode:
+        type: dynamo-default-cost-fn
+        parameters:
+          overlap_score_credit: 0.0
+          router_temperature: 0.0
+---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -39,14 +65,21 @@ spec:
           cpu: "128"
           memory: "100Gi"
       extraPodSpec:
+        volumes:
+          - name: router-policy
+            configMap:
+              name: vllm-disagg-planner-router-policy
         mainContainer:
           image: my-registry/dynamo-frontend:my-tag
           workingDir: /workspace/examples/backends/vllm
+          volumeMounts:
+            - name: router-policy
+              mountPath: /etc/dynamo/router
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128 --router-mode kv --router-kv-overlap-score-credit 0.0 --router-temperature 0.0 --no-router-kv-events"
+            - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128 --router-mode kv --router-policy-config /etc/dynamo/router/router-policy.yaml --no-router-kv-events"
     Planner:
       envFromSecret: hf-token-secret
       componentType: planner
