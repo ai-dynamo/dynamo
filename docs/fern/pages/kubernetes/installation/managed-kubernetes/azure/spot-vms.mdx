@@ -32,7 +32,7 @@ az aks nodepool add \
   --priority Spot \
   --eviction-policy Delete \
   --spot-max-price -1 \
-  --skip-gpu-driver-install
+  --gpu-driver None
 ```
 
 `--spot-max-price -1` means pay up to the on-demand price (recommended). `--eviction-policy Delete` removes evicted nodes from the pool; use `Deallocate` if you want to preserve node state across evictions.
