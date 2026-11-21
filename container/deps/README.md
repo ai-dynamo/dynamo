@@ -13,6 +13,7 @@ so each image only installs what it needs.
 | `requirements.frontend.txt` | Frontend deps |
 | `requirements.benchmark.txt` | Benchmark and profiling tools |
 | `requirements.test.txt` | Test-only deps |
+| `<framework>/test-constraints.txt` | Caps on test deps for one framework's test and dev images |
 | `requirements.dev.txt` | Dev-only tools |
 
 ## Version Pinning Strategy
