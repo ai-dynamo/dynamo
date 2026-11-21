@@ -233,6 +233,7 @@ def embedding_probe():
                 process_index=1,
                 addresses_json="{}",
                 parent_pid=os.getpid(),
+                listener_fds=(),
             ),
             stdout=subprocess.PIPE,
             text=True,
