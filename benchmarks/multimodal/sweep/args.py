@@ -18,7 +18,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         epilog=(
             "Examples:\n"
             "  python -m benchmarks.multimodal.sweep --config experiments/cache_sweep.yaml\n"
-            "  python -m benchmarks.multimodal.sweep --config exp.yaml --osl 200 --skip-plots\n"
+            "  python -m benchmarks.multimodal.sweep --config exp.yaml --osl 200\n"
         ),
     )
 
@@ -67,11 +67,5 @@ def parse_args(argv=None) -> argparse.Namespace:
             "If unset, derived from the input JSONL's unique session_id count "
             "(flat JSONLs count each row as a 1-turn conversation)."
         ),
-    )
-    parser.add_argument(
-        "--skip-plots",
-        action="store_true",
-        default=None,
-        help="Skip plot generation.",
     )
     return parser.parse_args(argv)
