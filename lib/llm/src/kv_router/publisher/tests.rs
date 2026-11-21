@@ -1407,6 +1407,8 @@ mod tests_startup_helpers {
                 Some(0),
                 heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
                 false,
+                Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });
@@ -1471,11 +1473,29 @@ mod tests_startup_helpers {
 
         assert_eq!(
             event_batch.len(),
-            2,
+            3,
             "one native payload must produce one input containing all accepted events"
         );
-        let event = &event_batch[0].event;
-        assert_eq!(event.event_id, 0);
+        // The recurrent-group store is kept and tagged, not filtered.
+        let mamba = &event_batch[0];
+        assert_eq!(mamba.event.event_id, 0);
+        assert_eq!(
+            mamba.placement.kv_cache_group,
+            Some(dynamo_kv_events::residency::KvCacheGroupTag {
+                group_idx: 1,
+                kind: dynamo_kv_events::residency::KvCacheGroupKind::Mamba,
+                expected_group_count: Some(3),
+                alignment_blocks: Some(1),
+            })
+        );
+        let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = &mamba.event.data else {
+            panic!("expected KvCacheStoreData");
+        };
+        assert_eq!(blocks[0].block_hash.0, 41);
+
+        let event = &event_batch[1].event;
+        assert_eq!(event.event_id, 1);
+        assert_eq!(event_batch[1].placement.kv_cache_group, None);
 
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
@@ -1491,7 +1511,7 @@ mod tests_startup_helpers {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash.0, 42);
 
-        let KvCacheEventData::Removed(removed) = &event_batch[1].event.data else {
+        let KvCacheEventData::Removed(removed) = &event_batch[2].event.data else {
             panic!("expected KvCacheRemoveData");
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(42)]);
@@ -1534,21 +1554,30 @@ mod tests_startup_helpers {
             .expect("timed out waiting for gap recovery")
             .expect("listener channel closed")
             .into_events();
+        // The replayed payload carries the same three events: the tagged
+        // Mamba store, the attention store and the removal.
         let offset = usize::from(heartbeat_source);
-        assert_eq!(recovery.len(), 2 + offset);
+        assert_eq!(recovery.len(), 3 + offset);
         if heartbeat_source {
             assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
         }
+        assert!(recovery[offset].placement.kv_cache_group.is_some());
         assert!(matches!(
             recovery[offset].event.data,
             KvCacheEventData::Stored(_)
         ));
+        assert_eq!(recovery[offset + 1].placement.kv_cache_group, None);
         assert!(matches!(
             recovery[offset + 1].event.data,
+            KvCacheEventData::Stored(_)
+        ));
+        assert!(matches!(
+            recovery[offset + 2].event.data,
             KvCacheEventData::Removed(_)
         ));
+        let first_id = recovery[0].event.event_id;
         for (index, event) in recovery.iter().enumerate() {
-            assert_eq!(event.event.event_id, 2 + index as u64);
+            assert_eq!(event.event.event_id, first_id + index as u64);
             assert_eq!(event.event.dp_rank, 0);
         }
 
@@ -1607,6 +1636,8 @@ mod tests_startup_helpers {
                 None,
                 None,
                 false,
+                Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });
@@ -1710,6 +1741,8 @@ mod tests_startup_helpers {
                 None,
                 None,
                 false,
+                Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });
@@ -1750,6 +1783,8 @@ mod tests_startup_helpers {
         };
         assert_eq!(data.block_hashes, vec![ExternalSequenceBlockHash(40)]);
 
+        // A windowed-attention group is still filtered at ingress (recurrent
+        // groups are kept and tagged since kv_cache_group).
         let filtered_batch = (
             0.0,
             vec![FilterTestEvent::BlockStored {
@@ -1758,7 +1793,7 @@ mod tests_startup_helpers {
                 token_ids: vec![0, 1, 2, 3],
                 block_size: 4,
                 group_idx: Some(1),
-                kv_cache_spec_kind: Some("mamba"),
+                kv_cache_spec_kind: Some("sliding_window"),
             }],
             Some(0_i32),
         );
@@ -1806,6 +1841,8 @@ mod tests_startup_helpers {
                 None,
                 None,
                 false,
+                Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });

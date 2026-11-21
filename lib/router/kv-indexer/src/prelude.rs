@@ -9,7 +9,8 @@ pub(crate) use dynamo_kv_events::event::{
     KvCacheStoredBlockData, RouterEvent,
 };
 pub(crate) use dynamo_kv_events::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, WireResidencyDomain,
+    KvCacheGroupKind, KvCacheGroupTag, ResetScope, ResidencyDomain, ResidencyOwner, StorageTier,
+    WireResidencyDomain,
 };
 pub(crate) use dynamo_kv_hashing::routing::{
     BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq, compute_next_seq_hash,

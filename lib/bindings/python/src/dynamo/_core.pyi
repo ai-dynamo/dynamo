@@ -1281,6 +1281,8 @@ class KvEventPublisher:
         video_token_id: Optional[int] = None,
         engine_owned_mm_identity: bool = False,
         idempotent_stores: bool = False,
+        recurrent_groups: Optional[List[int]] = None,
+        recurrent_alignment_blocks: int = 1,
     ) -> None:
         """
         Create a `KvEventPublisher` object.

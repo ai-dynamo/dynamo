@@ -72,6 +72,8 @@ pub(super) async fn start_zmq_listener(
     expected_rank: Option<u32>,
     liveness: Option<(u32, std::time::Duration)>,
     engine_owned_mm_identity: bool,
+    recurrent_groups: Option<Vec<u32>>,
+    recurrent_alignment_blocks: u32,
     recovery: Option<ZmqRecoveryConfig>,
 ) {
     tracing::debug!(
@@ -83,7 +85,9 @@ pub(super) async fn start_zmq_listener(
     let mut normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(image_token_id)
         .with_video_token_id(video_token_id)
-        .with_engine_owned_mm_identity(engine_owned_mm_identity);
+        .with_engine_owned_mm_identity(engine_owned_mm_identity)
+        .with_recurrent_groups(recurrent_groups)
+        .with_recurrent_alignment_blocks(recurrent_alignment_blocks);
     if let Some(recovery) = recovery {
         let ingest = super::zmq_recovery::RecoveryIngest::new(
             &mut normalizer,

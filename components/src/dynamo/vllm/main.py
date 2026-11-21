@@ -66,7 +66,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 from . import envs
 from .args import Config, configure_rl_logprobs_mode, parse_args_with_model_fetch
 from .backend_args import _configured_artifact_router_profile
-from .cache_info import get_configured_kv_event_block_size
+from .cache_info import get_configured_kv_event_block_size, recurrent_kv_layout
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -600,6 +600,9 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
+    recurrent_layout = recurrent_kv_layout(
+        vllm_config, enabled=env_bool("DYN_VLLM_RECURRENT_KV_EVENTS")
+    )
     # Placeholder token ids the frontend substitutes pad_value over. Pass them
     # to the KV publisher so the router-side normalizer rewrites image and
     # video runs in vLLM BlockStored events to the same canonical scheme.
@@ -627,6 +630,14 @@ def setup_kv_event_publisher(
             image_token_id=image_token_id,
             kv_state_endpoint=config.kv_state_endpoint,
             video_token_id=video_token_id,
+            recurrent_groups=(
+                recurrent_layout.recurrent_groups
+                if recurrent_layout is not None
+                else None
+            ),
+            recurrent_alignment_blocks=(
+                recurrent_layout.alignment_blocks if recurrent_layout is not None else 1
+            ),
         )
         kv_publishers.append(kv_publisher)
 
@@ -973,6 +984,14 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    recurrent_layout = recurrent_kv_layout(
+        vllm_config, enabled=env_bool("DYN_VLLM_RECURRENT_KV_EVENTS")
+    )
+    if recurrent_layout is not None:
+        runtime_config.set_engine_specific(
+            "kv_cache_group_layout_v1",
+            json.dumps(recurrent_layout.runtime_metadata()),
+        )
     publish_json_multimodal_capability(
         runtime_config, model_input, worker_type, config.enable_multimodal
     )

@@ -73,6 +73,35 @@ pub enum ResetScope {
     Domain(ResidencyDomain),
 }
 
+/// Kind of a non-main-attention KV cache group. Only recurrent state groups
+/// are indexed today; windowed attention groups are still dropped at ingress.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum KvCacheGroupKind {
+    /// Mamba / GDN / linear-attention state (`kv_cache_spec_kind = "mamba"`).
+    Mamba,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Which KV cache group a residency event describes when it is not the
+/// main-attention group.
+///
+/// vLLM publishes one `BlockStored` per group at the same positional block
+/// hash. A recurrent group's event announces the state checkpoint at that
+/// hash, not a reusable token range, so these events are kept out of the
+/// attention radix tree and recorded as per-group presence instead
+/// (see `KvCacheGroupResidency` in `dynamo-kv-indexer`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct KvCacheGroupTag {
+    pub group_idx: u32,
+    pub kind: KvCacheGroupKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_group_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment_blocks: Option<u32>,
+}
+
 /// Tolerant wire representation for the additive `residency_domain` field.
 ///
 /// `Missing` is the legacy compatibility signal. Unsupported values stay at
@@ -82,9 +111,17 @@ pub enum WireResidencyDomain {
     #[default]
     Missing,
     Known(ResidencyDomain),
+    /// A known domain on an event that carries a `kv_cache_group` tag. It is
+    /// written as `<domain>+kv_cache_group`, which consumers that predate the
+    /// tag decode as [`Self::Unknown`] and drop through their existing
+    /// unsupported-domain path instead of indexing recurrent state as
+    /// attention blocks. Consumers that know the tag parse it as the domain.
+    KnownTagged(ResidencyDomain),
     Unknown(Box<str>),
     Invalid,
 }
+
+const KV_CACHE_GROUP_DOMAIN_SUFFIX: &str = "+kv_cache_group";
 
 impl WireResidencyDomain {
     pub fn explicit(domain: ResidencyDomain) -> Self {
@@ -98,9 +135,33 @@ impl WireResidencyDomain {
     pub fn parse(&self) -> Result<Option<ResidencyDomain>, UnsupportedResidencyDomain> {
         match self {
             Self::Missing => Ok(None),
-            Self::Known(domain) => Ok(Some(*domain)),
+            Self::Known(domain) | Self::KnownTagged(domain) => Ok(Some(*domain)),
             Self::Unknown(_) | Self::Invalid => Err(UnsupportedResidencyDomain),
         }
+    }
+
+    pub(crate) fn tagged(self) -> Self {
+        match self {
+            Self::Known(domain) => Self::KnownTagged(domain),
+            other => other,
+        }
+    }
+
+    pub(crate) fn from_wire_str(value: &str) -> Option<Self> {
+        let (name, tagged) = match value.strip_suffix(KV_CACHE_GROUP_DOMAIN_SUFFIX) {
+            Some(name) => (name, true),
+            None => (value, false),
+        };
+        let domain = match name {
+            "worker" => ResidencyDomain::Worker,
+            "cache_owner" => ResidencyDomain::CacheOwner,
+            _ => return None,
+        };
+        Some(if tagged {
+            Self::KnownTagged(domain)
+        } else {
+            Self::Known(domain)
+        })
     }
 }
 
@@ -113,6 +174,12 @@ impl Serialize for WireResidencyDomain {
             Self::Missing | Self::Invalid => serializer.serialize_none(),
             Self::Known(ResidencyDomain::Worker) => serializer.serialize_str("worker"),
             Self::Known(ResidencyDomain::CacheOwner) => serializer.serialize_str("cache_owner"),
+            Self::KnownTagged(ResidencyDomain::Worker) => {
+                serializer.serialize_str("worker+kv_cache_group")
+            }
+            Self::KnownTagged(ResidencyDomain::CacheOwner) => {
+                serializer.serialize_str("cache_owner+kv_cache_group")
+            }
             Self::Unknown(value) => serializer.serialize_str(value),
         }
     }
@@ -128,19 +195,13 @@ impl<'de> Visitor<'de> for WireResidencyDomainVisitor {
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(match value {
-            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
-            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
-            value => WireResidencyDomain::Unknown(value.into()),
-        })
+        Ok(WireResidencyDomain::from_wire_str(value)
+            .unwrap_or_else(|| WireResidencyDomain::Unknown(value.into())))
     }
 
     fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(match value.as_str() {
-            "worker" => WireResidencyDomain::Known(ResidencyDomain::Worker),
-            "cache_owner" => WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
-            _ => WireResidencyDomain::Unknown(value.into_boxed_str()),
-        })
+        Ok(WireResidencyDomain::from_wire_str(&value)
+            .unwrap_or_else(|| WireResidencyDomain::Unknown(value.into_boxed_str())))
     }
 
     fn visit_char<E>(self, _value: char) -> Result<Self::Value, E> {

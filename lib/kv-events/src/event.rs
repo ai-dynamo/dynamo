@@ -10,8 +10,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, UnsupportedResidencyDomain,
-    WireResidencyDomain,
+    KvCacheGroupTag, ResetScope, ResidencyDomain, ResidencyOwner, StorageTier,
+    UnsupportedResidencyDomain, WireResidencyDomain,
 };
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
@@ -155,6 +155,11 @@ pub struct RouterEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Non-main-attention KV cache group this event belongs to. Absent on the
+    /// legacy wire and for attention-group events. Named MessagePack only, as
+    /// for `state_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache_group: Option<KvCacheGroupTag>,
 }
 
 impl RouterEvent {
@@ -195,7 +200,18 @@ impl RouterEvent {
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
+            kv_cache_group: None,
         }
+    }
+
+    /// Tag the event as belonging to a non-main-attention KV cache group. The
+    /// wire residency domain becomes `<domain>+kv_cache_group`, so consumers
+    /// that do not know the tag drop the event instead of indexing it as
+    /// attention residency.
+    pub fn with_kv_cache_group(mut self, kv_cache_group: KvCacheGroupTag) -> Self {
+        self.kv_cache_group = Some(kv_cache_group);
+        self.residency_domain = std::mem::take(&mut self.residency_domain).tagged();
+        self
     }
 
     /// Create a CacheOwner event with its required stable state source.
@@ -259,6 +275,14 @@ impl RouterEvent {
     }
 
     pub fn targets_primary(&self) -> Result<bool, UnsupportedResidencyDomain> {
+        if matches!(self.residency_domain, WireResidencyDomain::KnownTagged(_))
+            && self.kv_cache_group.is_none()
+        {
+            return Err(UnsupportedResidencyDomain);
+        }
+        if self.kv_cache_group.is_some() {
+            return Ok(false);
+        }
         if let Some(scope) = self.reset_scope()? {
             return Ok(!matches!(
                 scope,
@@ -273,6 +297,7 @@ impl RouterEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::residency::KvCacheGroupKind;
     use dynamo_kv_hashing::routing::compute_block_hash;
 
     mod residency_domain_compat {
@@ -311,6 +336,92 @@ mod tests {
                     blocks: Vec::new(),
                 }),
             )
+        }
+
+        /// A consumer that predates `kv_cache_group` (modelled by a RouterEvent
+        /// whose domain parser knows only `worker` / `cache_owner`) must not
+        /// turn a recurrent-group store into an attention store.
+        #[derive(Deserialize)]
+        struct PreTagRouterEvent {
+            #[allow(dead_code)]
+            worker_id: WorkerId,
+            #[serde(default)]
+            residency_domain: Option<String>,
+            #[allow(dead_code)]
+            event: KvCacheEvent,
+        }
+
+        #[test]
+        fn unknown_recurrent_kind_preserves_the_rest_of_a_wire_batch() {
+            let dense = RouterEvent::new(
+                7,
+                KvCacheEvent {
+                    event_id: 1,
+                    dp_rank: 0,
+                    data: KvCacheEventData::Cleared,
+                },
+            );
+            let tagged = dense.clone().with_kv_cache_group(KvCacheGroupTag {
+                group_idx: 0,
+                kind: KvCacheGroupKind::Mamba,
+                expected_group_count: Some(1),
+                alignment_blocks: Some(1),
+            });
+            let mut wire = serde_json::to_value(vec![tagged, dense]).unwrap();
+            wire[0]["kv_cache_group"]["kind"] = serde_json::json!("future_recurrent_kind");
+            let decoded: Vec<RouterEvent> = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.len(), 2);
+            assert_eq!(
+                decoded[0].kv_cache_group.unwrap().kind,
+                KvCacheGroupKind::Unknown
+            );
+            assert!(!decoded[0].targets_primary().unwrap());
+            assert!(decoded[1].targets_primary().unwrap());
+            let mut malformed = decoded[0].clone();
+            malformed.kv_cache_group = None;
+            assert!(malformed.targets_primary().is_err());
+        }
+
+        #[test]
+        fn tagged_events_are_unsupported_for_pre_tag_consumers_and_parsed_by_new_ones() {
+            let tagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::HostPinned)
+                .with_kv_cache_group(KvCacheGroupTag {
+                    group_idx: 1,
+                    kind: KvCacheGroupKind::Mamba,
+                    expected_group_count: Some(1),
+                    alignment_blocks: Some(1),
+                });
+            let bytes = rmp_serde::to_vec_named(&tagged).unwrap();
+
+            let old: PreTagRouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(
+                old.residency_domain.as_deref(),
+                Some("worker+kv_cache_group")
+            );
+            // The pre-tag parser maps that string to Unknown, i.e. unsupported.
+            assert!(
+                WireResidencyDomain::from_wire_str("worker").is_some()
+                    && !matches!(
+                        serde_json::from_value::<WireResidencyDomain>(serde_json::json!(
+                            "worker+something_else"
+                        ))
+                        .unwrap(),
+                        WireResidencyDomain::Known(_) | WireResidencyDomain::KnownTagged(_)
+                    )
+            );
+
+            let new: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(
+                new.resolved_residency_domain().unwrap(),
+                ResidencyDomain::Worker
+            );
+            assert_eq!(new.kv_cache_group, tagged.kv_cache_group);
+            assert!(!new.targets_primary().unwrap());
+
+            let untagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::HostPinned);
+            let bytes = rmp_serde::to_vec_named(&untagged).unwrap();
+            let old: PreTagRouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(old.residency_domain.as_deref(), Some("worker"));
         }
 
         #[test]
