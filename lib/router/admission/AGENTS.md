@@ -24,7 +24,8 @@ PolicyClassQueue
 ├── ready_by_lane[Worker(Exact(worker, rank))]   sessionless hard pins
 ├── ready_by_lane[Worker(Affinity(worker, rank))] sessionless ranked soft affinity
 ├── ready_by_lane[Worker(WorkerAffinity(worker))] sessionless worker-only soft affinity
-├── blocked_lanes: lane -> BlockReason           Capacity, Gate, or Fallback
+├── blocked_lanes: lane -> BlockReason           Capacity or Fallback
+├── gate_held                                    lanes the dispatch gate holds; only a full recheck asks them
 ├── shared_blocked, shared_heads                 lanes refused as SharedCapacity, in head order
 ├── promoted_shared                              the shared lane standing for the group among the candidates
 ├── candidate_lane_heads                         unblocked lane roots
@@ -44,7 +45,9 @@ one head. When the stand-in dispatches, the next best is promoted in its place, 
 admit n heads in n passes at one ask each; refused for the shared reason, the slot is gone and
 the group waits for the next capacity change; refused for its own reason, it is filed there and
 the next best stands in. A worker that frees costs one ask per class, as the shared heap had
-it, and never a walk of every session. The admission stage owns no worker
+it, and never a walk of every session: a capacity recheck walks only `blocked_lanes`, the lanes
+blocked on their own capacity or fallback, not the shared group and not the gate's holds. The
+admission stage owns no worker
 capacity or eligibility state. A blocked lane keeps its reason and leaves the candidate index
 until a recheck that can free it: `recheck_worker` re-asks the lanes pinned or bound to that
 worker and every keyed lane blocked on capacity; `recheck_affinity_lanes` (the scheduler's
@@ -53,3 +56,13 @@ capacity-blocked lane and `RecheckScope::All` adds the lanes the dispatch gate h
 only its wake or hold timer can free. Known fallback heads compete on every dispatch pass. A
 hard pin cannot hide a soft request that may fall back. Expiry and cancellation update all
 indexes and unblock a removed root's successor. Empty lanes leave the affinity index.
+
+## Performance
+
+The queue runs on the scheduler's actor thread, once per arrival and once per completion. `lib/router/scheduler/AGENTS.md` has the rules for the actor; these are the queue's.
+
+- **Adding a block reason or an index over lanes.** A worker free runs a capacity recheck in every class with a blocked lane, and it must not visit a lane the change cannot free. The shared-capacity group answers with one head and `gate_held` is visited only on a full recheck. Keep a new kind of blocked lane out of the `blocked_lanes` walk unless a capacity change can free it: when gate-held lanes sat in that walk, 10,000 of them cost 20 to 40 µs on every free.
+- **Editing the dispatch loop.** Measure every edit to `next_dispatchable_lane`, `pop_lane`, and `push_ready`, a removal or a reorder included. Reading the lane head's cost through the reference the dispatch check already held, in place of a second lookup, made `drain_one_per_exact_lane` 20% to 27% slower, and so did two other equivalent forms. The `head_expiry` early-outs look redundant and are worth 2% to 5% on lane drains.
+- **Growing a queued entry.** `PolicyQueueEntry`'s header stays within 64 bytes (`queue_entry_stays_compact`); the drain benchmarks lose 50% to 150% past one cache line.
+- **Calling `update_queue` or `admission_barrier`.** Both make the actor re-ask every blocked lane, gate-held ones included, which no arrival or completion does. Do not add a call on a per-request path, and keep them out of a measured loop: one barrier per cycle took the `session_lanes` bench from 26 µs to 3 ms at 10,000 lanes.
+- **Before the PR.** `cargo bench -p dynamo-kv-router --bench policy_queue` times the queue alone, and `cargo bench -p dynamo-kv-router --bench admission_core --features bench` one arrival, completion, and admission through the scheduler with a backlog waiting. Compare the 10,000 sizes. On a shared machine, build both arms' bench executables, run them alternately for three rounds, and compare medians: back-to-back runs of the same code have differed by tens of percent.
