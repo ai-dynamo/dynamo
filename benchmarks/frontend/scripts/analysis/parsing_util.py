@@ -134,16 +134,21 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
 
     poll_times = get_gauge_by_label("dynamo_tokio_worker_mean_poll_time_ns", "worker")
     snap.tokio_worker_mean_poll_time_ns = list(poll_times.values())
-    snap.tokio_event_loop_stall_total = (
-        get_gauge("dynamo_frontend_event_loop_stall_total") or 0
+    # Stalls are timer delays above 5 ms: the delay histogram's count minus its
+    # le="0.005" bucket.
+    delay_count = get_gauge("dynamo_frontend_event_loop_delay_seconds_count") or 0
+    delay_le_5ms = re.search(
+        r'^dynamo_frontend_event_loop_delay_seconds_bucket\{le="0\.005"\}\s+(\S+)',
+        text,
+        re.MULTILINE,
+    )
+    snap.tokio_event_loop_stall_total = delay_count - (
+        float(delay_le_5ms.group(1)) if delay_le_5ms else 0
     )
     snap.tokio_global_queue_depth = get_gauge("dynamo_tokio_global_queue_depth") or 0
     snap.tokio_budget_forced_yield_total = (
         get_gauge("dynamo_tokio_budget_forced_yield_total") or 0
     )
-
-    busy_ratios_raw = get_gauge_by_label("dynamo_tokio_worker_busy_ratio", "worker")
-    snap.tokio_worker_busy_ratio = [v / 1000.0 for v in busy_ratios_raw.values()]
 
     snap.tcp_pool_active = get_gauge("dynamo_transport_tcp_pool_active") or 0
     snap.tcp_pool_idle = get_gauge("dynamo_transport_tcp_pool_idle") or 0
