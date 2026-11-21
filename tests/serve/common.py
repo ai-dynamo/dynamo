@@ -90,8 +90,17 @@ def _payload_eligible_for_check(payload: Any, payload_cls: type) -> bool:
 def _with_endpoint_readiness_checks(
     config: EngineConfig, frontend_port: int
 ) -> EngineConfig:
+    def make_check(factory):
+        if factory is make_chat_health_check:
+            return factory(
+                frontend_port,
+                config.model,
+                max_tokens=config.chat_health_check_max_tokens,
+            )
+        return factory(frontend_port, config.model)
+
     new_checks = [
-        factory(frontend_port, config.model)
+        make_check(factory)
         for payload_cls, factory in _ENDPOINT_HEALTH_CHECK_FACTORIES
         if any(
             _payload_eligible_for_check(p, payload_cls) for p in config.request_payloads
