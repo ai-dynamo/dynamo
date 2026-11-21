@@ -118,19 +118,19 @@ impl RoutingHost {
         }
     }
 
-    pub(super) async fn select_and_dispatch_builtin<M, F>(
+    /// Select a built-in route without sending it: check the request's worker
+    /// targets, run the candidate policy, acquire the session-affinity hold,
+    /// pick the worker (advancing a round-robin cursor or reserving
+    /// occupancy), and start the request guard.
+    pub(super) async fn plan_builtin_route(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
-        prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
-    {
+    ) -> Result<BuiltinRoutePlan, Error> {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(request.content(), phase)?;
-        let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
+        let has_affinity_session = self.affinity.is_some() && affinity_id(request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
         if is_direct && explicit.is_none() && !has_affinity_session {
             return Err(invalid_argument(format!(
@@ -141,7 +141,6 @@ impl RoutingHost {
         // Declared before worker selection because the session-affinity wait is
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
-        let staged_kv = StagedKv::for_request(request.content());
         check_candidate_policy(request.content(), self.candidate_policy.is_some())?;
         let candidate = self
             .candidate_policy
@@ -172,7 +171,7 @@ impl RoutingHost {
                 &|| self.inner.client.instance_ids_avail(),
             )?;
         }
-        let (selection, mut operation) = if let Some(target) = candidate_target {
+        let (mut selection, affinity) = if let Some(target) = candidate_target {
             (
                 HostedSelection {
                     initial_worker: target,
@@ -186,7 +185,7 @@ impl RoutingHost {
             )
         } else {
             self.validate_explicit_worker(request.content(), phase)?;
-            self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
+            self.select_with_session_affinity(request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
                     SessionAffinityMode::Soft if is_direct => target,
@@ -196,23 +195,77 @@ impl RoutingHost {
                     (None, SessionAffinityMode::Soft) => target,
                     _ => None,
                 };
-                ready(self.select_hosted_worker(&request, pinned_target, affinity_target))
+                ready(self.select_hosted_worker(request, pinned_target, affinity_target))
             })
             .await?
         };
-        let HostedSelection {
-            initial_worker,
-            target_constraint,
-            occupancy_reservation,
-            candidate_count,
-            selected_occupancy,
-            device_aware_telemetry,
-        } = selection;
         let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(Hold::target).map(from_table)
+            affinity.as_ref().and_then(Hold::target).map(from_table)
         } else {
             None
         };
+        let guard = RequestGuard::new_builtin(
+            self.request_metrics.clone(),
+            selection.initial_worker,
+            selection.occupancy_reservation.take(),
+            attempt_lease,
+            request,
+        );
+        self.request_metrics
+            .input_sequence_tokens
+            .with_label_values(&[request.phase().as_str(), &request.model])
+            .observe(request.token_ids.len() as f64);
+        drop(route_guard);
+        Ok(BuiltinRoutePlan {
+            phase,
+            direct: is_direct && !has_affinity_session,
+            explicit,
+            selection,
+            candidate_fallback,
+            soft_affinity_target,
+            uses_occupancy: self
+                .required_worker_inputs()
+                .contains(WorkerInputs::ACTIVE_REQUESTS),
+            guard,
+            affinity,
+            budget,
+        })
+    }
+
+    /// Send a built-in route. The send can move to another instance when the
+    /// selected one is gone, so `prepare` (and the candidate policy's check)
+    /// runs here, with the worker the request is actually sent to.
+    pub(super) async fn dispatch_builtin_plan<M, F>(
+        &self,
+        mut request: SingleIn<PreprocessedRequest>,
+        plan: BuiltinRoutePlan,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
+    {
+        let BuiltinRoutePlan {
+            phase,
+            direct,
+            explicit,
+            selection:
+                HostedSelection {
+                    initial_worker,
+                    target_constraint,
+                    candidate_count,
+                    selected_occupancy,
+                    device_aware_telemetry,
+                    ..
+                },
+            candidate_fallback,
+            soft_affinity_target,
+            uses_occupancy,
+            mut guard,
+            mut affinity,
+            budget,
+        } = plan;
+        let phase_label = phase.to_string();
+        let staged_kv = StagedKv::for_request(request.content());
         let target_for_worker = |worker_id| {
             AffinityTarget::new(
                 worker_id,
@@ -221,28 +274,13 @@ impl RoutingHost {
                     .and_then(|target| target.dp_rank),
             )
         };
-        let uses_occupancy = self
-            .required_worker_inputs()
-            .contains(WorkerInputs::ACTIVE_REQUESTS);
-        let mut guard: RequestGuard = RequestGuard::new_builtin(
-            self.request_metrics.clone(),
-            initial_worker,
-            occupancy_reservation,
-            attempt_lease,
-            &request,
-        );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
-        self.request_metrics
-            .input_sequence_tokens
-            .with_label_values(&[request.phase().as_str(), &request.model])
-            .observe(request.token_ids.len() as f64);
-        drop(route_guard);
 
         // Stamped after selection, so a session-affinity wait counts too.
         request.stamp_elapsed_since_arrival();
         guard.begin_dispatch(&phase_label, request.content());
-        let dispatch_result = if is_direct && !has_affinity_session {
+        let dispatch_result = if direct {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             await_with_cleanup_policy(
                 request_context.as_ref(),
@@ -348,9 +386,9 @@ impl RoutingHost {
                     target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && !self.affinity_target_is_valid(expected_target)
-                    && let Some(operation) = operation.take()
+                    && let Some(hold) = affinity.take()
                 {
-                    operation.invalidate();
+                    hold.invalidate();
                 }
                 let typed_error = error
                     .chain()
@@ -385,7 +423,7 @@ impl RoutingHost {
                 transport_fallback = target.worker_id != initial_worker,
                 "Selected worker"
             );
-        } else if target_constraint.is_some() && (!is_direct || has_affinity_session) {
+        } else if target_constraint.is_some() && !direct {
             // `dispatch_exact` (session-affinity hits and explicit targets) logs nothing, while
             // the other non-occupancy paths log from `PushRouter`; keep one line per request.
             tracing::info!(
@@ -405,12 +443,49 @@ impl RoutingHost {
         }
         self.accept_dispatch(
             &mut guard,
-            operation.take(),
+            affinity.take(),
             target,
             &response_stream.context(),
         )
         .await?;
         Ok((metadata, into_monitored_response(response_stream, guard)))
+    }
+}
+
+/// A built-in route selected but not sent, from
+/// [`RoutingHost::plan_builtin_route`]. It holds the request guard (with any
+/// occupancy reservation and candidate-policy attempt lease) and the
+/// session-affinity hold until [`RoutingHost::dispatch_builtin_plan`] sends it
+/// or [`Self::abort`] gives it up. Dropping it also releases them.
+pub(crate) struct BuiltinRoutePlan {
+    phase: RequestPhase,
+    /// Direct mode with no affinity session: send to the explicit target.
+    direct: bool,
+    /// The request's explicit worker pin, for the candidate policy's check of
+    /// the worker the send lands on.
+    explicit: Option<AffinityTarget>,
+    /// The selection, its occupancy reservation already moved into `guard`.
+    selection: HostedSelection,
+    candidate_fallback: Option<HashSet<u64>>,
+    soft_affinity_target: Option<AffinityTarget>,
+    uses_occupancy: bool,
+    guard: RequestGuard,
+    affinity: Option<Hold>,
+    budget: CleanupBudget,
+}
+
+impl BuiltinRoutePlan {
+    /// The selected worker. The send can still move to another instance.
+    #[cfg(test)]
+    pub(crate) fn worker_id(&self) -> u64 {
+        self.selection.initial_worker
+    }
+
+    /// Give the route up before dispatch: release the guard's reservations
+    /// and drop the affinity hold.
+    #[cfg(test)]
+    pub(crate) async fn abort(mut self, error: Option<&Error>) {
+        self.guard.abort(error.map(|error| error.as_ref())).await;
     }
 }
 
