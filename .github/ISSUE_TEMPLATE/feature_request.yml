@@ -2,6 +2,7 @@ name: Feature Request
 description: Suggest an improvement for ai-dynamo
 title: '[FEATURE]: Enter feature title'
 labels: ["enhancement"]
+type: Feature
 body:
   - type: textarea
     id: feature-description
