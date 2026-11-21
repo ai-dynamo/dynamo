@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# CPU-only image containing the vLLM, SGLang, TensorRT-LLM, and LPX Rust
+# CPU-only image containing the vLLM, SGLang, TensorRT-LLM, LPX, and Speech NIM Rust
 # sidecars.
 # The dynamo-sidecar entrypoint selects an engine-specific binary; the GPU
 # engine continues to run in a separate container.
@@ -86,14 +86,16 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 # half the time. Published images keep the shipping profile.
 ARG FAST_RELEASE_PROFILE=false
 
-# Build all four sidecars and their compliance inventory in one RUN. The target
+# Build all five sidecars and their compliance inventory in one RUN. The target
 # directory exists only during this RUN. The final step removes it so the
 # intermediate layer retains only the installed binaries and metadata.
 #
-# One `cargo build` for all four compiles the shared tree once. Separate
+# One `cargo build` for the four LLM sidecars compiles their shared tree once. Separate
 # `cargo build -p` calls resolve features per package, so each one recompiled
 # dynamo-llm and most of its dependencies. The SGLang and TRT-LLM manifests
 # enable the vLLM sidecar's `mm-routing` so their SBOMs match their binaries.
+# Build Speech NIM separately to keep LLM-only features out of its binary
+# and preserve its package-specific dependency inventory.
 #
 # sharing=private: cargo's .package-cache lock lives in $CARGO_HOME, outside
 # these mounts, so two builds must not write one mount at once. A concurrent
@@ -122,11 +124,12 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
         -p dynamo-sglang-sidecar \
         -p dynamo-trtllm-sidecar \
         -p dynamo-lpx-sidecar; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
+    cargo build --release --locked -p dynamo-speech-nim-sidecar; \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar dynamo-speech-nim-sidecar; do \
         strip "target/release/${pkg}"; \
         install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
     done; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar dynamo-speech-nim-sidecar; do \
         manifest="lib/sidecar/${pkg#dynamo-}"; \
         manifest="${manifest%-sidecar}/Cargo.toml"; \
         cargo cyclonedx \
@@ -209,6 +212,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # The entrypoint script comes first so it does not wait behind the compile.
 COPY --chmod=755 lib/sidecar/dynamo-sidecar /usr/local/bin/dynamo-sidecar
 COPY --from=sidecar-builder /out/bin/ /usr/local/bin/
+COPY lib/sidecar/speech-nim/proto/LICENSE /licenses/speech-nim-protos/LICENSE
 
 # Numeric UID so Kubernetes runAsNonRoot can verify it.
 USER 1000
@@ -229,7 +233,7 @@ COPY container/compliance/ /src/container/compliance/
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
-# into the four sidecar executables. Bind mounts instead of COPY steps keep
+# into the five sidecar executables. Bind mounts instead of COPY steps keep
 # this to one BuildKit op after the runtime image is assembled.
 ENV PYTHONPATH=/src/container
 RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \

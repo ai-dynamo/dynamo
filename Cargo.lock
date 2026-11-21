@@ -3573,6 +3573,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-speech-nim-sidecar"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "futures",
+ "prost 0.13.5",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-structural-tag"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

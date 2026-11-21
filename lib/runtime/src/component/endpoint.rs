@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use derive_builder::Builder;
@@ -133,6 +132,22 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
+        self.start_with_registration_until(
+            std::future::pending(),
+            crate::runtime::graceful_shutdown_timeout(),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("uninterruptible endpoint registration stopped"))
+    }
+
+    /// Start an endpoint, or return `None` after rolling back interrupted registration.
+    /// The timeout bounds withdrawal if discovery cannot acknowledge the rollback.
+    pub async fn start_with_registration_until(
+        self,
+        stop: impl Future<Output = ()>,
+        rollback_timeout: Duration,
+    ) -> Result<Option<StartedEndpoint>> {
+        tokio::pin!(stop);
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
         if endpoint.track_response_completion
@@ -164,8 +179,16 @@ impl EndpointConfigBuilder {
         let endpoint_name_for_task = endpoint_id.name.clone();
 
         // Get the unified request plane server
-        let server = endpoint.drt().request_plane_server().await?;
-        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+        let transport_setup = async {
+            let server = endpoint.drt().request_plane_server().await?;
+            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+            anyhow::Ok((server, transport))
+        };
+        let (server, transport) = tokio::select! {
+            biased;
+            _ = &mut stop => return Ok(None),
+            result = transport_setup => result?,
+        };
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -212,29 +235,22 @@ impl EndpointConfigBuilder {
         );
 
         // Register endpoint with the server (unified interface)
-        server
-            .register_endpoint(
-                endpoint_name_for_task.clone(),
-                handler,
-                connection_id,
-                namespace_name_for_task.clone(),
-                component_name_for_task.clone(),
-                system_health.clone(),
-            )
-            .await?;
+        let register_transport = server.register_endpoint(
+            endpoint_name_for_task.clone(),
+            handler,
+            connection_id,
+            namespace_name_for_task.clone(),
+            component_name_for_task.clone(),
+            system_health.clone(),
+        );
+        tokio::select! {
+            biased;
+            _ = &mut stop => return Ok(None),
+            result = register_transport => result?,
+        }
 
-        let tracker_clone = if graceful_shutdown {
-            tracing::debug!(
-                "Registering endpoint '{}' with graceful shutdown tracker",
-                endpoint.name
-            );
-            let tracker = endpoint.drt().graceful_shutdown_tracker();
-            tracker.register_endpoint();
-            Some(tracker)
-        } else {
-            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
-            None
-        };
+        let tracker =
+            graceful_shutdown.then(|| endpoint.drt().graceful_shutdown_tracker().register_task());
 
         // Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
@@ -250,7 +266,28 @@ impl EndpointConfigBuilder {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        let discovery_instance = match discovery.register(discovery_spec).await {
+        let registration = tokio::select! {
+            biased;
+            _ = &mut stop => None,
+            result = discovery.register(discovery_spec.clone()) => Some(result),
+        };
+        let Some(registration) = registration else {
+            // Discovery may have applied the write before acknowledging it.
+            let rollback = unregister_endpoint(
+                &endpoint_name_for_task,
+                discovery.unregister(discovery_spec.into_instance(connection_id)),
+                server.unregister_endpoint_instance(&endpoint_id, connection_id),
+                rollback_timeout,
+            );
+            if tokio::time::timeout(rollback_timeout, rollback)
+                .await
+                .is_err()
+            {
+                tracing::warn!(%endpoint_id, "Endpoint startup rollback timed out");
+            }
+            return Ok(None);
+        };
+        let discovery_instance = match registration {
             Ok(instance) => instance,
             Err(e) => {
                 tracing::error!(
@@ -261,9 +298,6 @@ impl EndpointConfigBuilder {
                 let _ = server
                     .unregister_endpoint_instance(&endpoint_id, connection_id)
                     .await;
-                if let Some(tracker) = tracker_clone {
-                    tracker.unregister_endpoint();
-                }
                 anyhow::bail!(
                     "Unable to register service for discovery. Check discovery service status"
                 );
@@ -283,39 +317,47 @@ impl EndpointConfigBuilder {
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
 
-            if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
-                tracing::warn!(%error, "Failed to unregister endpoint from discovery");
-            }
-
             tracing::debug!(
                 endpoint = %endpoint_name_for_cleanup,
-                "Unregistering endpoint from request plane server"
+                "Unregistering endpoint from discovery and request plane server"
             );
+            unregister_endpoint(
+                &endpoint_name_for_cleanup,
+                discovery_for_cleanup.unregister(discovery_instance),
+                server_for_cleanup.unregister_endpoint_instance(&endpoint_id, connection_id),
+                crate::runtime::graceful_shutdown_timeout(),
+            )
+            .await;
 
-            if let Err(e) = server_for_cleanup
-                .unregister_endpoint_instance(&endpoint_id, connection_id)
-                .await
-            {
-                tracing::warn!(
-                    endpoint = %endpoint_name_for_cleanup,
-                    error = %e,
-                    "Failed to unregister endpoint"
-                );
-            }
-
-            if let Some(tracker) = tracker_clone {
-                tracing::debug!("Unregister endpoint from graceful shutdown tracker");
-                tracker.unregister_endpoint();
-            }
-
+            drop(tracker);
             anyhow::Ok(())
         });
 
-        Ok(StartedEndpoint {
+        Ok(Some(StartedEndpoint {
             instance,
             shutdown_token: endpoint_shutdown_token,
             task,
-        })
+        }))
+    }
+}
+
+async fn unregister_endpoint(
+    endpoint: &str,
+    discovery: impl Future<Output = Result<()>>,
+    drain: impl Future<Output = Result<()>>,
+    timeout: Duration,
+) {
+    // Discovery failure must not keep local admission open during shutdown.
+    let (discovery, drain) = tokio::join!(tokio::time::timeout(timeout, discovery), drain);
+    match discovery {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(endpoint, %error, "Failed to unregister endpoint from discovery")
+        }
+        Err(_) => tracing::warn!(endpoint, "Endpoint discovery cleanup timed out"),
+    }
+    if let Err(error) = drain {
+        tracing::warn!(endpoint, %error, "Failed to unregister endpoint from request plane");
     }
 }
 
@@ -479,6 +521,29 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn endpoint_cleanup_removes_local_admission_while_discovery_stalls() {
+        let removed = std::cell::Cell::new(false);
+        let cleanup = unregister_endpoint(
+            "stalled-discovery",
+            std::future::pending(),
+            async {
+                removed.set(true);
+                Ok(())
+            },
+            Duration::from_millis(10),
+        );
+        tokio::pin!(cleanup);
+        assert!(futures::poll!(&mut cleanup).is_pending());
+        assert!(
+            removed.get(),
+            "discovery must not block local endpoint removal"
+        );
+        tokio::time::timeout(Duration::from_secs(1), cleanup)
+            .await
+            .expect("discovery cleanup must be bounded");
+    }
 
     #[test]
     fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {

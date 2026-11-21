@@ -167,6 +167,7 @@ areas:
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
   - examples/nemotron_speech_cascaded_pipeline/
+  - lib/sidecar/speech-nim/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
@@ -1206,6 +1207,10 @@ shared:
 - glob: lib/sidecar/sglang/
   owners:
   - backend-sglang
+  - sidecar
+- glob: lib/sidecar/speech-nim/
+  owners:
+  - multimodal
   - sidecar
 - glob: lib/sidecar/testkit/
   owners:

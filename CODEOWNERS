@@ -157,6 +157,7 @@
 # === multimodal  (@ai-dynamo/dynamo-multimodal-codeowners) ===
 /benchmarks/omni/                                                                                       @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/multimodal/                                                                                 @ai-dynamo/dynamo-multimodal-codeowners
+/lib/sidecar/speech-nim/                                                                                @ai-dynamo/dynamo-multimodal-codeowners
 /examples/custom_encoder/                                                                               @ai-dynamo/dynamo-multimodal-codeowners
 /examples/nemotron_speech_cascaded_pipeline/                                                            @ai-dynamo/dynamo-multimodal-codeowners
 
@@ -603,6 +604,7 @@ requirements.txt                                                                
 /lib/sidecar/Dockerfile                                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/observability/*xpu*                                                                                @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/runtime/src/nvtx.rs                                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
+/lib/sidecar/speech-nim/                                                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /recipes/**/tokenspeed/**                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners
 /recipes/**/vllm/**/*xpu*                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /tests/serve/test_vllm.py                                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
