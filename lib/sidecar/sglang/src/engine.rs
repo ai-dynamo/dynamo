@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -29,7 +30,7 @@ use crate::args::Args;
 use crate::client::{self, AbortRpc, Client, GRPC_SERVICE, Pool, Retry, WORKER_GROUP_KEY};
 use crate::discovery::{self, EngineInfo, sglang_eagle_enabled};
 use crate::listeners::{Listener, NodeListeners};
-use crate::native_http::{self, NativeHttp};
+use crate::native_http::{self, InputTokenLimits, NativeHttp};
 use crate::node::{self, NodeInfo, NodeTable};
 use crate::proto as pb;
 use crate::protocol::{FrameOutput, ResponseConverter, Target, build_generate_request};
@@ -52,6 +53,8 @@ pub struct SglangSidecarEngine {
 
 struct StartedState {
     listeners: NodeListeners,
+    /// Checked only on native HTTP requests; default when unresolved.
+    input_token_limits: InputTokenLimits,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
 }
@@ -365,11 +368,14 @@ impl LLMEngine for SglangSidecarEngine {
         // startup deadline: the worker group's DNS lookup needs some of it.
         let kv_event_sources = discover_kv_event_sources(&node, &mut config, deadline).await?;
         let native_http = self.native_http(&started, &endpoints, deadline).await?;
-        if native_http.is_some() {
+        let input_token_limits = if native_http.is_some() {
             config
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
-        }
+            resolve_input_token_limits(&node.engine.model_path, deadline).await
+        } else {
+            InputTokenLimits::default()
+        };
         let mut native_http = native_http.map(Vec::into_iter);
         let listeners = started
             .into_iter()
@@ -405,6 +411,7 @@ impl LLMEngine for SglangSidecarEngine {
         self.state
             .set(StartedState {
                 listeners,
+                input_token_limits,
                 kv_event_sources,
                 combined_token_limit,
             })
@@ -461,9 +468,13 @@ impl LLMEngine for SglangSidecarEngine {
             prefill_rank: dispatch.prefill_rank,
             global_dp_size: listeners.global_dp_size,
         };
-        if let Some(native_request) =
-            native_http::request(&request, dispatched.rid(), mode, target)?
-        {
+        if let Some(native_request) = native_http::request(
+            &request,
+            dispatched.rid(),
+            mode,
+            target,
+            &state.input_token_limits,
+        )? {
             let native_http = listener.native_http.clone().ok_or_else(|| {
                 client::invalid_arg(
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
@@ -787,6 +798,56 @@ fn combined_token_limit(discovery: &EngineInfo) -> Option<u32> {
     discovery
         .context_length?
         .checked_sub(discovery.num_reserved_tokens?)
+}
+
+/// Bound configuration downloads within the remaining startup deadline.
+const INPUT_TOKEN_LIMITS_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Read native input-ID bounds from the model's `config.json`. SGLang does not
+/// report `vocab_size`, so use the local model directory or fetch the config
+/// (no weights) like the worker does. Any failure disables the check.
+async fn resolve_input_token_limits(model_path: &str, deadline: Instant) -> InputTokenLimits {
+    use dynamo_llm::local_model::LocalModel;
+    use std::path::PathBuf;
+
+    let local = PathBuf::from(model_path);
+    let model_dir = if local.is_dir() {
+        Ok(local)
+    } else {
+        let fetch_deadline = deadline.min(Instant::now() + INPUT_TOKEN_LIMITS_FETCH_TIMEOUT);
+        tokio::time::timeout_at(fetch_deadline, LocalModel::fetch(model_path, true))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")))
+    };
+    let config = model_dir.and_then(|dir| {
+        let path = dir.join("config.json");
+        let bytes = std::fs::read(&path)
+            .map_err(|error| anyhow::anyhow!("reading {}: {error}", path.display()))?;
+        Ok(serde_json::from_slice::<Value>(&bytes)?)
+    });
+    let limits = match config {
+        Ok(config) => InputTokenLimits::from_model_config(&config),
+        Err(error) => {
+            tracing::warn!(
+                model = %model_path,
+                %error,
+                "Unable to read model configuration; native input token IDs are not checked against the vocabulary"
+            );
+            return InputTokenLimits::default();
+        }
+    };
+    match limits.vocab_size() {
+        Some(vocab_size) => tracing::info!(
+            model = %model_path,
+            vocab_size,
+            "Native input token IDs are checked against the model vocabulary"
+        ),
+        None => tracing::warn!(
+            model = %model_path,
+            "Model configuration has no vocab_size; native input token IDs are not checked against the vocabulary"
+        ),
+    }
+    limits
 }
 
 /// EAGLE reserves at least one draft-token slot per request, so a server that
