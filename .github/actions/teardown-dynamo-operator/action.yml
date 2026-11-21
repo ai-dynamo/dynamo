@@ -99,17 +99,25 @@ runs:
         # vCluster HostPath Mapper is installed on the host for checkpoint
         # tests. Remove it explicitly before deleting the namespace so GPU-node
         # DaemonSet pods do not linger until namespace garbage collection.
-        helm uninstall vcluster-hpm \
-          --namespace "${NAMESPACE}" \
-          --wait \
-          --timeout 5m || true
+        # vcluster-hpm is namespace-wide and may belong to another run; uninstall it
+        # only when the VclusterReleaseName value set at setup names our vCluster.
+        HPM_OWNER=$(helm get values vcluster-hpm --namespace "${NAMESPACE}" -o json 2>/dev/null \
+          | jq -r '.VclusterReleaseName // empty' 2>/dev/null || true)
+        if [ "${HPM_OWNER}" = "${VCLUSTER_NAME}" ]; then
+          helm uninstall vcluster-hpm \
+            --namespace "${NAMESPACE}" \
+            --wait \
+            --timeout 5m || true
 
-        kubectl delete daemonset \
-          -n "${NAMESPACE}" \
-          -l app=vcluster-hostpath-mapper,release=vcluster-hpm \
-          --ignore-not-found \
-          --wait=true \
-          --timeout=300s || true
+          kubectl delete daemonset \
+            -n "${NAMESPACE}" \
+            -l app=vcluster-hostpath-mapper,release=vcluster-hpm \
+            --ignore-not-found \
+            --wait=true \
+            --timeout=300s || true
+        elif [ -n "${HPM_OWNER}" ]; then
+          echo "Leaving vcluster-hpm in ${NAMESPACE}: it belongs to vCluster ${HPM_OWNER}"
+        fi
 
         if ! vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1; then
           echo "::warning::vcluster delete failed; deleting vCluster resources directly"

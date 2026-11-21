@@ -11,7 +11,7 @@ inputs:
     required: false
     default: ''
   vcluster_namespace:
-    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-02 and aws-gb300 use the shared deploy-test namespace and other clusters use a per-run namespace.'
+    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-02 and aws-gb300 use the shared deploy-test namespace and other clusters use a per-run namespace. vCluster allows one virtual cluster per host namespace, so callers that share a namespace must serialize their whole setup, test and cleanup lifetime (for example with one concurrency group); this action fails rather than delete or adopt a differently named vCluster it finds there.'
     required: false
     default: ''
   registry:
@@ -300,6 +300,19 @@ runs:
            && helm status "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
           echo "vCluster ${VCLUSTER_NAME} is already being provisioned elsewhere; adopting it"
         else
+          # A namespace holds one vCluster: fail on another run's, never delete or
+          # adopt it. If the query fails, vcluster create still enforces the rule.
+          if VCLUSTER_STS=$(kubectl get statefulset -n "${NAMESPACE}" -l app=vcluster \
+               -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); then
+            OCCUPANTS=$(grep -vxF -- "${VCLUSTER_NAME}" <<<"${VCLUSTER_STS}" | grep . || true)
+            if [ -n "${OCCUPANTS}" ]; then
+              echo "::error::Namespace ${NAMESPACE} already holds another vCluster: ${OCCUPANTS//$'\n'/, }. This action never deletes or adopts another run's vCluster. Callers sharing this namespace must hold one concurrency group from setup through cleanup."
+              kubectl get statefulsets,pods -n "${NAMESPACE}" -l app=vcluster -o wide || true
+              exit 1
+            fi
+          else
+            echo "::warning::Could not list vCluster StatefulSets in ${NAMESPACE}; relying on vcluster create to reject a foreign occupant"
+          fi
           CREATE_LOG="$(mktemp)"
           if ! vcluster create "${VCLUSTER_NAME}" \
                --namespace "${NAMESPACE}" \
