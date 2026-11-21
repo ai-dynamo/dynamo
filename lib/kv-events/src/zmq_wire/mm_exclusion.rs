@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exclusion of multimodal values the request side cannot reproduce.
+//! Exclusion of multimodal values and raw extra keys the request side cannot
+//! reproduce.
 //!
 //! Since sgl-project/sglang#43043, SGLang fills each multimodal item with pad
 //! values derived from its own identity, so event tokens no longer equal
@@ -16,6 +17,11 @@
 //! A source flagged as engine-owned multimodal identity also excludes every
 //! value at or above `MM_PAD_SHIFT_VALUE`. Legacy sources keep those values,
 //! because their pads are Dynamo's own routing values.
+//!
+//! Raw extra keys take the same path. When a block's extra keys hold a msgpack
+//! `bin`, such as vLLM's prompt-embeds digest, decoding puts the sentinel on the
+//! first token of the first such block, so it and every block chained after it
+//! are excluded like a value that did not fit in `u32`.
 
 use rustc_hash::FxHashSet;
 
@@ -173,7 +179,8 @@ impl EngineMmState {
                 worker_id = key.0.worker_id,
                 dp_rank = key.0.dp_rank,
                 capacity = self.excluded_capacity,
-                "Multimodal exclusion state is full; accepting only root stores until cache clear"
+                "Multimodal exclusion state is full (blocks with raw extra keys, such as \
+                 prompt embeds, count too); accepting only root stores until cache clear"
             );
         }
     }
