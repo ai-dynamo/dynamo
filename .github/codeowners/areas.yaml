@@ -468,6 +468,8 @@ areas:
   - benchmarks/request_trace/README.md
   - benchmarks/request_trace/__init__.py
   - benchmarks/request_trace/convert_to_perfetto.py
+  - benchmarks/request_trace/nsys_request_timeline.py
+  - benchmarks/request_trace/tests/
   - benchmarks/request_trace/validate_convert_to_perfetto.py
   - benchmarks/router/
   - benchmarks/sin_load_generator/
