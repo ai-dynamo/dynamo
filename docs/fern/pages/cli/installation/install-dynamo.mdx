@@ -162,8 +162,10 @@ On a single machine you can run either of two configurations:
 | **Events** | ZMQ (in-process) | NATS |
 | **Scope** | Single machine only | Single **or** multi-node |
 | **Failure cleanup** | None | Lease-based auto-cleanup (default 10s TTL) — a crashed worker's endpoints are removed automatically and the frontend reroutes |
-| **KV events / routing / planner** | Not available | Available |
+| **KV events and KV-aware routing** | Available (ZMQ, no NATS or etcd) | Available |
 | **Matches production / Kubernetes** | No | Yes |
+
+In `file` mode, KV events travel over the default ZMQ event plane, so KV-aware routing needs no NATS or etcd. A vLLM worker publishes KV events only when you start it with `--kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'`; without that flag it publishes none. If you select the NATS event plane with `--event-plane nats` or `DYN_EVENT_PLANE=nats`, NATS is required again.
 
 The `file` mode is the lightest way to get a model answering with no prerequisites — ideal for a quick local smoke test. This guide uses **etcd + NATS** instead because it is the same discovery path Dynamo uses for multi-node and Kubernetes deployments, so what you learn here carries forward to production.
 
