@@ -70,7 +70,7 @@ aisim-core = { version = "=0.15.0-dev.202611130000000104", optional = true, feat
 dynamo-runtime = { path = "../../runtime" }
 dynamo-error = { path = "../../error", features = ["http"] }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "=11.0.11" }
+dynamo-parsers = { version = "=11.0.12" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 # default-features = false: sidecar defaults (mm-routing, jemalloc) must not reach the wheel.
