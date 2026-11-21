@@ -431,7 +431,9 @@ vllm_configs = {
             router_selection_chat_payload_default(),
             kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
-        env={},
+        # Same unexplained V2-runner decode stall on Blackwell CI runners as
+        # the vllm_aggregated sidecar config; see test_sidecar.py.
+        env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
     ),
     "agg-router-approx": VLLMConfig(
         name="agg-router-approx",
