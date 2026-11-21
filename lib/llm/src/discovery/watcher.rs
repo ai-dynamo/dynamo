@@ -778,6 +778,7 @@ impl ModelWatcher {
                     anyhow::anyhow!("chat pipeline requires preprocessed routing")
                 })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    worker_set.chat_engine_parses_output = true;
                     let routed_engine = routing
                         .build_preprocessed_pipeline(
                             card,
@@ -3946,6 +3947,8 @@ request_classifier:
                 assert!(model.has_chat_engine());
                 assert_eq!(model.has_completions_engine(), completions);
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let (_, parsing_options) = model.get_chat_engine_with_parsing().unwrap();
+                assert!(parsing_options.output_parsed_by_chat_processor);
             } else {
                 let error = prepared
                     .err()
