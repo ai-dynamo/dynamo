@@ -69,6 +69,11 @@ The parser accepts per-request Mooncake JSONL records:
 {"timestamp": 0, "input_length": 4096, "output_length": 512}
 ```
 
+The upstream Mooncake names `created_time`, `input_tokens`, and `output_tokens`
+are accepted in place of `timestamp`, `input_length`, and `output_length`. A
+record may mix the two spellings across fields, but setting one field under both
+names is an error.
+
 It also accepts `dynamo.request.trace.v1` `request_end` records. The Planner
 groups requests into adjustment intervals and computes request count, average
 input sequence length (ISL), and average output sequence length (OSL).

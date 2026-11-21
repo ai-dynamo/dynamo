@@ -26,6 +26,23 @@ from dynamo.planner.core.types import TrafficObservation
 TraceFormat = Literal["mooncake", "dynamo"]
 TraceRow = Tuple[float, int, int]
 
+# Mooncake field names and the upstream aliases that lib/data-gen's MooncakeRow
+# also accepts; third-party traces use either spelling. As with MooncakeRow, a row
+# may mix spellings across fields but must not repeat a field under both names.
+_MOONCAKE_FIELDS = (
+    ("timestamp", "created_time"),
+    ("input_length", "input_tokens"),
+    ("output_length", "output_tokens"),
+)
+
+
+def _mooncake_key(record: Dict[str, Any], name: str, alias: str, location: str) -> str:
+    if alias not in record:
+        return name
+    if name in record:
+        raise ValueError(f"{name} and its alias {alias} are both set at {location}")
+    return alias
+
 
 def _reject_duplicate_copies(paths: Sequence[Path]) -> List[Path]:
     selected: Dict[str, Path] = {}
@@ -87,7 +104,7 @@ def _detect_record_format(record: Dict[str, Any]) -> Optional[TraceFormat]:
     event = record.get("event", record)
     if isinstance(event, dict) and event.get("schema") == "dynamo.request.trace.v1":
         return "dynamo"
-    if all(field in record for field in ("timestamp", "input_length", "output_length")):
+    if all(any(name in record for name in names) for names in _MOONCAKE_FIELDS):
         return "mooncake"
     return None
 
@@ -151,10 +168,13 @@ def _length(record: Dict[str, Any], field: str, location: str) -> int:
 
 
 def _parse_mooncake_row(record: Dict[str, Any], location: str) -> TraceRow:
+    timestamp = _mooncake_key(record, "timestamp", "created_time", location)
+    input_length = _mooncake_key(record, "input_length", "input_tokens", location)
+    output_length = _mooncake_key(record, "output_length", "output_tokens", location)
     return (
-        _number(record, "timestamp", location),
-        _length(record, "input_length", location),
-        _length(record, "output_length", location),
+        _number(record, timestamp, location),
+        _length(record, input_length, location),
+        _length(record, output_length, location),
     )
 
 
