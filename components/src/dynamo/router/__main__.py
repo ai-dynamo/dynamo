@@ -166,8 +166,7 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Starting Standalone Router Service")
     logger.debug(
         "Configuration: endpoint=%s, router_block_size=%s, "
-        "overlap_score_credit=%s, overlap_score_credit_decay=%s, "
-        "prefill_load_scale=%s, decode_active_request_weight=%s, "
+        "overlap_score_credit=%s, prefill_load_scale=%s, "
         "router_temperature=%s, use_kv_events=%s, router_replica_sync=%s, "
         "router_track_active_blocks=%s, router_track_output_blocks=%s, "
         "router_assume_kv_reuse=%s, router_track_prefill_tokens=%s, "
@@ -175,9 +174,7 @@ async def worker(runtime: DistributedRuntime):
         config.endpoint,
         config.router_block_size,
         config.overlap_score_credit,
-        config.overlap_score_credit_decay,
         config.prefill_load_scale,
-        config.decode_active_request_weight,
         config.router_temperature,
         config.use_kv_events,
         config.router_replica_sync,

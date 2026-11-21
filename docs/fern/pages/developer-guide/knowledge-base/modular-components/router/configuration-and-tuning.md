@@ -70,16 +70,16 @@ its configuration even if the endpoint is unchanged.
 
 ## Routing Behavior
 
-`--router-queue-threshold` and `--router-queue-policy` are deprecated starting in v1.6, with removal planned for v1.7. Their replacements configure each queue in the policy YAML.
+Router queueing is configured for each policy class in the policy YAML. The `--router-queue-threshold` and `--router-queue-policy` flags were removed in v1.8. Their queue used `fcfs` by default and a policy class defaults to `edf`, so set `queue_policy: fcfs` on the class to keep that order.
 
 - `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to the policy’s `overlap_score_credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIS prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how router priority differs from backend engine priority.
-- `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and per-role worker-selection policies. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
+- `policy_classes[].prefill_busy_threshold_frac` in the policy YAML: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it for that class. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how router priority differs from backend engine priority.
+- `policy_classes[].queue_policy` in the policy YAML: Scheduling policy for the class's queue: `edf` (default), `fcfs`, or `wspt`.
+- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and per-role worker-selection policies. When omitted, the router uses one synthetic policy class that does not queue. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -91,8 +91,7 @@ rejects a request that is still waiting when its due time passes, and an explici
 a waiting request in every class; see [Policy-Class Queues](#policy-class-queues).
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
-`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. The CLI accepts `fcfs`, its
-default, and `wspt`; policy-class YAML accepts `edf`, `fcfs`, and `wspt`.
+`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`.
 
 For `fcfs` and `wspt`, the complete pending-queue key is
 `(strict_priority, due_at, policy_key)`, where `due_at` is only a request classifier's explicit
@@ -140,9 +139,9 @@ default parameters. To tune a policy, write a mapping with `type` and `parameter
 [Configure the Default Policy](#configure-the-default-policy)).
 
 > [!NOTE]
-> Before v1.7, the YAML listed `instances` (each with a `name`, a `type`, and `parameters`) and each
+> Through v1.7, the YAML listed `instances` (each with a `name`, a `type`, and `parameters`) and each
 > role referenced an instance by name. That form still works and logs a deprecation warning; it is
-> scheduled for removal in v1.8. Move each instance's `type` and `parameters` under the role that
+> scheduled for removal in v1.9. Move each instance's `type` and `parameters` under the role that
 > selected it.
 
 ```bash
@@ -171,21 +170,24 @@ worker_selection:
 ```
 
 Give `prefill` and `decode` their own `type` and `parameters` the same way when those pools need
-tuning; a role without a selection keeps the default selector with its flag-derived parameters.
+tuning; a role without a selection keeps the default selector with its default parameters, or
+with the values of the deprecated flags below.
 
 Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The default policy does not credit the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints); select `kvcr`, which applies the same multiplier to them. Without shared cache the multiplier defaults to `0`, so set it to enable that credit. Roles omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
-> The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
+> Three scoring flags and their environment variables are deprecated. They still work and emit a warning. Move their values into the policy’s `parameters` mapping. The other three were removed in v1.8: a frontend, router, or worker that passes one, or that routes by KV with its environment variable set, fails at startup with a message that names the parameter.
 
-| Deprecated Flag | Policy Parameter |
-|---|---|
-| `--router-kv-overlap-score-credit` | `overlap_score_credit` |
-| `--router-kv-overlap-score-credit-decay` | `overlap_score_credit_decay` |
-| `--router-prefill-load-scale` | `prefill_load_scale` |
-| `--router-decode-active-request-weight` | `decode_active_request_weight` |
-| `--shared-cache-multiplier` | `shared_cache_multiplier` |
-| `--router-temperature` | `router_temperature` |
+| Flag | Environment Variable | Policy Parameter | Status |
+|---|---|---|---|
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `overlap_score_credit` | Deprecated |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `prefill_load_scale` | Deprecated |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `router_temperature` | Deprecated |
+| `--router-kv-overlap-score-credit-decay` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `overlap_score_credit_decay` | Removed in v1.8 |
+| `--router-decode-active-request-weight` | `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT` | `decode_active_request_weight` | Removed in v1.8 |
+| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `shared_cache_multiplier` | Removed in v1.8 |
+
+The three deprecated flags stay because the AISimulate DGD output sets them on the frontend it generates, and the Planner's live retune reads a frontend's startup values from them. The standalone EPP links no policy catalog, so it still reads all six environment variables; see [EPP Runtime Environment](../../../../reference/components/gateway-api-routing.mdx#epp-runtime-environment).
 
 The host and disk cache-weight settings also affect cached-token estimates used for prefill load tracking and queue ordering, even with a custom selector. Configure these in the shared `router` section or with their existing flags. Set the same names in a default policy's `parameters` to change only that policy's scoring weights.
 
@@ -205,7 +207,7 @@ Values and defaults match the corresponding [frontend options](../../../../refer
 
 ##### Replace the Load-Aware Preset
 
-`--load-aware` and `DYN_ROUTER_LOAD_AWARE` are also deprecated for removal in v1.7. In the default-policy example above, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0` under `parameters`. Both control only that policy's scoring. Add this section to the same file to preserve the old preset's tracking settings:
+`--load-aware` and `DYN_ROUTER_LOAD_AWARE` were removed in v1.8. In the default-policy example above, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0` under `parameters`. Both control only that policy's scoring. Add this section to the same file to preserve the old preset's tracking settings:
 
 ```yaml
 router:
@@ -268,14 +270,13 @@ Each worker pool keeps its own bindings, so prefill and decode stages bind sessi
 
 #### Override the Selection
 
-`--router-prefill-policy`, `--router-decode-policy`, and their environment variables are deprecated for removal in v1.7. Move their selections to `worker_selection.prefill` and `worker_selection.decode`. During migration, existing overrides retain their precedence.
-
-`DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. `--router-prefill-policy` and
-`--router-decode-policy`, and their `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY`
-environment variables, override one stage each. An override value is a policy type, which runs with
-its default parameters, or `default`. Precedence for a stage is: stage flag, stage
-environment variable, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, then
-Dynamo's built-in selector. There is no YAML-wide default: a stage with no selection falls straight
+`DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. Its value is a policy type, which runs
+with its default parameters, or `default`. Precedence for a stage is:
+`DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, then
+Dynamo's built-in selector. To select one stage, set `worker_selection.prefill` or
+`worker_selection.decode` in the policy YAML; the `--router-prefill-policy` and
+`--router-decode-policy` flags and their environment variables were removed in v1.8.
+There is no YAML-wide default: a stage with no selection falls straight
 to the built-in selector, and `worker_selection` rejects unknown keys. Passing `default` explicitly selects the built-in selector
 for that scope, which makes it a quick way to A/B a policy against the default.
 
@@ -413,8 +414,7 @@ admitted request or predict its TTFT.
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
 profile; `default_policy_class` and classes are not inherited. With no YAML,
-the router uses a synthetic `default` class, which queues only when
-`--router-queue-threshold` is set. See the tested
+the router uses a synthetic `default` class, which does not queue. See the tested
 [sample policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml).
 
 ```bash
@@ -762,7 +762,7 @@ The default policy’s `overlap_score_credit` is the primary knob for cache reus
 
 Use `overlap_score_credit_decay` to reduce that device-local credit when a worker has more active prefill work than the least-loaded eligible worker. This helps prevent busy, cache-rich workers from repeatedly winning while newly autoscaled or lightly loaded workers receive too little traffic. The router normalizes the excess active prefill blocks by the incoming request size and multiplies the configured overlap credit by `1 / (1 + decay * normalized_excess)`. For example, a decay of `1` halves device credit at one request-equivalent of excess prefill load. Host, disk, and shared-cache credits are unchanged. This setting requires prefill-token tracking to have an effect and defaults to `0`.
 
-When migrating the older `--router-kv-overlap-score-weight` or `--kv-overlap-score-weight` aliases, move the value to the policy’s `prefill_load_scale`. A legacy value of `0` also requires `overlap_score_credit: 0` to preserve its behavior. Remove the old flag or environment variable after migrating.
+The older `--router-kv-overlap-score-weight` and `--kv-overlap-score-weight` aliases were removed in v1.8. Move their value to the policy’s `prefill_load_scale`. A legacy value of `0` also requires `overlap_score_credit: 0` to preserve its behavior.
 
 Use `prefill_load_scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + potential_decode_blocks + decode_active_request_weight * active_requests`.
 
@@ -782,7 +782,7 @@ Use `--no-router-track-prefill-tokens` when a router is serving decode-only traf
 
 Use `--router-track-output-blocks` when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. If you also pass `nvext.agent_hints.osl` per request, the router applies fractional decay to output blocks and the structurally exclusive prompt suffix so that requests nearing completion contribute less future load. Shared prompt blocks retain full weight. See [Decode Load Modeling](routing-concepts.md#decode-load-modeling) for the cost-model details.
 
-`--router-queue-threshold` controls when incoming requests are held in a priority queue. The router waits while all eligible workers exceed `threshold * max_num_batched_tokens`, then releases work as capacity frees up. A lower value queues earlier; `0.0` queues as soon as all eligible workers have any active prefill tokens. Priority hints have no router-level effect when requests do not enter this queue.
+A policy class's `prefill_busy_threshold_frac` controls when incoming requests are held in a priority queue. The router waits while all eligible workers exceed `threshold * max_num_batched_tokens`, then releases work as capacity frees up. A lower value queues earlier; `0.0` queues as soon as all eligible workers have any active prefill tokens. Priority hints have no router-level effect when requests do not enter this queue.
 
 This threshold delays dispatch. It does not remove workers from the candidate set; for that distinction, see [Router Filtering](worker-filtering.md).
 
@@ -793,11 +793,11 @@ Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long e
 - If `--max-prefill-tokens` is set, MDC's `max_num_batched_tokens` equals that value (the per-step prefill window — the value most users expect).
 - If `--max-prefill-tokens` is not set, MDC's `max_num_batched_tokens` falls back to `max_total_num_tokens` from SGLang's `scheduler_info`, which is the **total KV cache pool** in tokens. On large GPUs with high `mem-fraction-static` the pool can be hundreds of thousands of tokens — much larger than `chunked-prefill-size`.
 
-The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
+The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `prefill_busy_threshold_frac` (for example `0.1`) to compensate for the inflated denominator.
 
 Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and `--ais-perf-model`; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
 
-Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
+Set a policy class's `queue_policy` to `wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use `fcfs` when you want to minimize tail TTFT.
 
 ## Runtime Policy Updates
 

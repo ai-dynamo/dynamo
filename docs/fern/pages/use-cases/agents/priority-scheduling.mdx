@@ -66,7 +66,7 @@ python -m dynamo.frontend \
 A request waits while every eligible worker's active prefill tokens exceed `prefill_busy_threshold_frac` times its `max_num_batched_tokens`. Lower the fraction to queue sooner. Keep `queue_policy` set to `fcfs` or `wspt`: the default, `edf`, ignores `priority` and `strict_priority` when it orders the queue. See [Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) for the full schema, including `wspt` ordering and per-worker queue limits.
 
 <Note>
-The older `--router-queue-threshold` and `--router-queue-policy` flags are deprecated and are planned for removal in v1.7. Use the policy file instead.
+The older `--router-queue-threshold` and `--router-queue-policy` flags were removed in v1.8. Use the policy file.
 </Note>
 
 ### 2. Backend engine

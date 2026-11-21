@@ -64,9 +64,9 @@ rank_busy = any(configured check is true)
 worker_busy = all(data-parallel ranks are busy)
 ```
 
-The fractional and absolute prefill checks can be enabled separately or together. The absolute check,
-`--active-prefill-tokens-threshold`, is deprecated and will be removed in v1.7; use
-`--active-prefill-tokens-threshold-frac`. A worker is not excluded until all of its data-parallel ranks
+The fractional and absolute prefill checks can be enabled separately or together. The absolute
+check has no frontend flag: `--active-prefill-tokens-threshold` was removed in v1.8, so set the
+fractional check with `--active-prefill-tokens-threshold-frac`. A worker is not excluded until all of its data-parallel ranks
 are busy, which avoids discarding capacity on ranks that can still admit work.
 
 Decode-block rejection depends on the KV router worker-load path. `--router-mode kv` initializes that

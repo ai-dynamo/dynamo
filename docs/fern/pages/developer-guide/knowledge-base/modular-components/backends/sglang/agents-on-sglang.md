@@ -43,8 +43,8 @@ Enable priority-based scheduling so the engine respects the `priority` value fro
 
 When priority scheduling is enabled, the engine uses the `priority` field from `nvext.agent_hints` to order requests in its internal queue. Requests with higher effective priority are scheduled before lower-priority ones. Ties are broken by arrival time.
 
-Router queue priority is configured separately on the frontend with
-`--router-queue-threshold`; see
+Router queue priority is configured separately on the frontend, in a policy class of
+`--router-policy-config`; see
 [Router Configuration and Tuning](../../router/configuration-and-tuning.md#routing-behavior).
 
 ### Priority-Based KV Cache Eviction
@@ -92,7 +92,7 @@ Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to 
 
 | Agent Hint            | Router Behavior                                                                                            | SGLang Engine Behavior                                                                                                                    |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `priority`            | Router queue ordering when `--router-queue-threshold` is set.                                              | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. |
+| `priority`            | Router queue ordering when a policy class queues with `fcfs` or `wspt`.                                    | Request scheduling when `--enable-priority-scheduling` is set. Radix cache eviction order when `--radix-eviction-policy priority` is set. |
 | `osl`                 | Output block tracking for routing decisions (requires `--router-track-output-blocks`)                      | No direct engine effect.                                                                                                                  |
 | `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache.                                                                |
 

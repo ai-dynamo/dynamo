@@ -45,7 +45,7 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
     """Squeeze-Evolve config: the SE knobs + the shared per-tier KvRouter knobs.
 
     Inherits the KvRouter/AisPerf bases directly (NOT ``DynamoRouterConfig``) so we
-    reuse ``kv_router_kwargs()`` / ``ais_perf_kwargs()`` + the load-aware preset
+    reuse ``kv_router_kwargs()`` / ``ais_perf_kwargs()``
     without ``DynamoRouterConfig``'s single-``--endpoint`` requirement — Squeeze-Evolve
     has N tier endpoints (in ``--tiers``).
 

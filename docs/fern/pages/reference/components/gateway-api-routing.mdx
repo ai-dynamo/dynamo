@@ -76,6 +76,13 @@ Set these values on the EPP component's `main` container. Shared KV router setti
 semantics as Frontend-hosted routing; this section identifies the settings most relevant to the
 Gateway topology.
 
+The EPP links no worker-selection policy catalog, so it reads the default policy's scoring
+parameters from the variables below and not from a policy file. Configure router queueing with
+`policy_classes` in the file that `DYN_ROUTER_POLICY_CONFIG` names: `DYN_ROUTER_QUEUE_THRESHOLD`
+and `DYN_ROUTER_QUEUE_POLICY` were removed in v1.8, and the EPP fails at startup while one is set.
+Those variables queued with `fcfs` by default and a policy class defaults to `edf`, so set
+`queue_policy: fcfs` on the class to keep that order. A policy class cannot use `lcfs`.
+
 <ParamField path="DYN_MODEL_NAME" type="string">
   Model identifier used to load tokenizer and model configuration. Set it when discovery does not
   provide the model name. It must match the model served by the workers.

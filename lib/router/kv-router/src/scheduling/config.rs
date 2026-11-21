@@ -40,11 +40,42 @@ pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS
 /// The reserved value `default` selects Dynamo's built-in worker selector.
 pub const DYN_ROUTER_WORKER_SELECTION_POLICY: &str = "DYN_ROUTER_WORKER_SELECTION_POLICY";
 
-/// Selects a configured custom worker-selection policy instance for prefill workers.
+/// Removed in v1.8; startup fails while it is set. Use `worker_selection.prefill` in the policy file.
 pub const DYN_ROUTER_PREFILL_POLICY: &str = "DYN_ROUTER_PREFILL_POLICY";
 
-/// Selects a configured custom worker-selection policy instance for decode workers.
+/// Removed in v1.8; startup fails while it is set. Use `worker_selection.decode` in the policy file.
 pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
+
+/// Environment variables removed in v1.8, each with its replacement.
+/// A variable that was only ignored would stop applying without a signal, so
+/// [`try_kv_router_config_from_dynamo_env`] fails while one is set, whatever its value.
+// TODO(v1.9): Remove this table and its check.
+const REMOVED_ENV_VARS: &[(&str, &str)] = &[
+    (
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+        "DYN_ROUTER_PREFILL_LOAD_SCALE, with DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=0 for a value of 0",
+    ),
+    (
+        "DYN_OVERLAP_SCORE_WEIGHT",
+        "DYN_ROUTER_PREFILL_LOAD_SCALE, with DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=0 for a value of 0",
+    ),
+    (
+        "DYN_ROUTER_QUEUE_THRESHOLD",
+        "policy_classes[].prefill_busy_threshold_frac in the DYN_ROUTER_POLICY_CONFIG file, and set queue_policy there: the removed queue defaulted to fcfs, a class defaults to edf",
+    ),
+    (
+        "DYN_ROUTER_QUEUE_POLICY",
+        "policy_classes[].queue_policy in the DYN_ROUTER_POLICY_CONFIG file, which takes edf, fcfs or wspt and not lcfs",
+    ),
+    (
+        DYN_ROUTER_PREFILL_POLICY,
+        "worker_selection.prefill in the DYN_ROUTER_POLICY_CONFIG file",
+    ),
+    (
+        DYN_ROUTER_DECODE_POLICY,
+        "worker_selection.decode in the DYN_ROUTER_POLICY_CONFIG file",
+    ),
+];
 
 /// Selects the process-local retention policy for a primary approximate indexer.
 pub const DYN_ROUTER_APPROXIMATE_CACHE_POLICY: &str = "DYN_ROUTER_APPROXIMATE_CACHE_POLICY";
@@ -183,36 +214,36 @@ fn kv_router_config_from_lookup(
         get_env(key).and_then(|value| dynamo_truthy::parse_bool_opt(&value))
     }
 
-    // TODO(v1.7): Remove these env aliases after the v1.6 policy-YAML
-    // migration release; wire compatibility fields have a separate N-2 lifetime.
+    let removed: Vec<String> = REMOVED_ENV_VARS
+        .iter()
+        .filter(|(key, _)| get_env(key).is_some())
+        .map(|(key, replacement)| format!("{key} (use {replacement})"))
+        .collect();
+    if !removed.is_empty() {
+        return Err(format!(
+            "environment variables removed in v1.8 are still set: {}",
+            removed.join("; ")
+        ));
+    }
+
+    // The scoring variables outlive the other aliases deprecated in v1.6. The standalone EPP
+    // links no policy catalog, so it cannot load `dynamo-default-cost-fn` parameters from a
+    // policy file and has no other way to set them. The AISimulate DGD output also sets
+    // three of them on the frontend it generates.
     let get_env = |key: &str| {
         let value = get_env(key)?;
-        let replacement = match key {
-            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" => {
-                Some("default policy parameters.overlap_score_credit")
-            }
-            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY" => {
-                Some("default policy parameters.overlap_score_credit_decay")
-            }
-            "DYN_ROUTER_PREFILL_LOAD_SCALE"
-            | "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"
-            | "DYN_OVERLAP_SCORE_WEIGHT" => Some("default policy parameters.prefill_load_scale"),
-            "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT" => {
-                Some("default policy parameters.decode_active_request_weight")
-            }
-            "DYN_ROUTER_TEMPERATURE" => Some("default policy parameters.router_temperature"),
-            "DYN_SHARED_CACHE_MULTIPLIER" => {
-                Some("default policy parameters.shared_cache_multiplier")
-            }
-            DYN_ROUTER_PREFILL_POLICY => Some("worker_selection.prefill"),
-            DYN_ROUTER_DECODE_POLICY => Some("worker_selection.decode"),
-            "DYN_ROUTER_QUEUE_THRESHOLD" => Some("policy_classes[].prefill_busy_threshold_frac"),
-            "DYN_ROUTER_QUEUE_POLICY" => Some("policy_classes[].queue_policy"),
+        let parameter = match key {
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" => Some("overlap_score_credit"),
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY" => Some("overlap_score_credit_decay"),
+            "DYN_ROUTER_PREFILL_LOAD_SCALE" => Some("prefill_load_scale"),
+            "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT" => Some("decode_active_request_weight"),
+            "DYN_ROUTER_TEMPERATURE" => Some("router_temperature"),
+            "DYN_SHARED_CACHE_MULTIPLIER" => Some("shared_cache_multiplier"),
             _ => None,
         };
-        if let Some(replacement) = replacement {
+        if let Some(parameter) = parameter {
             tracing::warn!(
-                "{key} is deprecated and will be removed in v1.7; use {replacement} in DYN_ROUTER_POLICY_CONFIG."
+                "{key} is deprecated and will be removed in a later release; where the policy catalog is linked, use worker_selection.<role>.parameters.{parameter} in the DYN_ROUTER_POLICY_CONFIG file."
             );
         }
         Some(value)
@@ -231,19 +262,6 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
         config.decode_active_request_weight = value;
-    }
-    for key in [
-        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
-        "DYN_OVERLAP_SCORE_WEIGHT",
-    ] {
-        if let Some(value) = parse_f64(&get_env, key) {
-            apply_deprecated_overlap_score_weight_override(
-                value,
-                &mut config.overlap_score_credit,
-                &mut config.prefill_load_scale,
-            );
-            break;
-        }
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
         config.router_temperature = value;
@@ -278,17 +296,8 @@ fn kv_router_config_from_lookup(
     if let Some(value) = get_env("DYN_ROUTER_TRACKING_KEY_ID") {
         config.router_tracking_key_id = Some(value);
     }
-    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_QUEUE_THRESHOLD") {
-        config.router_queue_threshold = Some(value);
-    }
     if let Some(value) = get_env("DYN_ROUTER_POLICY_CONFIG") {
         config.router_policy_config = Some(value);
-    }
-    if let Some(value) = get_env(DYN_ROUTER_PREFILL_POLICY) {
-        config.router_prefill_policy = Some(value);
-    }
-    if let Some(value) = get_env(DYN_ROUTER_DECODE_POLICY) {
-        config.router_decode_policy = Some(value);
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
         config.conditional_disagg_enabled = value;
@@ -330,9 +339,6 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_EVENT_THREADS") {
         config.router_event_threads = value;
-    }
-    if let Some(value) = get_env("DYN_ROUTER_QUEUE_POLICY") {
-        config.router_queue_policy = value.parse()?;
     }
     if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
         config.use_remote_indexer = value;
@@ -544,6 +550,9 @@ pub struct KvRouterConfig {
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     /// If None, queueing is disabled and all requests go directly to ready.
     /// Disabled by default. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
+    // Compatibility with v1.6 and v1.7 workers, which can put a non-default value on a model
+    // card; the flag and environment variable that set it were removed in v1.8.
+    // TODO(v1.10): Remove when v1.7 falls outside the N-2 compatibility window.
     pub router_queue_threshold: Option<f64>,
 
     /// Optional startup-only YAML configuration for policy-class queues and custom worker selection.
@@ -579,6 +588,9 @@ pub struct KvRouterConfig {
     /// Scheduling policy for the router queue.
     /// "fcfs" (default): first-come first-served with priority bumps — optimizes tail TTFT.
     /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+    // Compatibility with v1.6 and v1.7 workers, which can put a non-default value on a model
+    // card; the flag and environment variable that set it were removed in v1.8.
+    // TODO(v1.10): Remove when v1.7 falls outside the N-2 compatibility window.
     pub router_queue_policy: RouterQueuePolicy,
 
     /// Whether to query a remote KV indexer served from the worker component
@@ -594,8 +606,9 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
-    /// Deprecated default-policy parameter. `None` lets the policy choose its default.
-    // TODO(v1.7): Remove with the deprecated flag after the v1.6 migration window.
+    /// Default-policy parameter set outside a policy file. `None` lets the policy choose its default.
+    // The Python flag was removed in v1.8. DYN_SHARED_CACHE_MULTIPLIER still sets this field on
+    // the standalone EPP, and v1.6 and v1.7 workers can put it on a model card.
     // Omit absent values so older readers continue to receive numbers, never null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_cache_multiplier: Option<f64>,
@@ -828,12 +841,12 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
             (None, Some(threshold)) => {
                 tracing::info!(
                     inherited_threshold = threshold,
-                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} is unset"
+                    "conditional_disagg prefill-load condition using router_queue_threshold because prefill_busy_threshold is unset"
                 );
             }
             (None, None) => {
                 return Err(format!(
-                    "conditional_disagg policy={:?} needs prefill_busy_threshold, but neither --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} nor --router-queue-threshold is set",
+                    "conditional_disagg policy={:?} needs prefill_busy_threshold; set it in --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} or DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
                     config.conditional_disagg_policy
                 ));
             }
@@ -1512,8 +1525,10 @@ mod tests {
         }
 
         // An explicit router-wide EDF selects it for the synthetic class.
-        let config = config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "edf")]);
-        assert_eq!(config.router_queue_policy, RouterQueuePolicy::Edf);
+        let config = KvRouterConfig {
+            router_queue_policy: RouterQueuePolicy::Edf,
+            ..Default::default()
+        };
         assert_eq!(
             config
                 .policy_profile(None)
@@ -1544,26 +1559,20 @@ mod tests {
                 "/run/secrets/dynamo/tracking-key",
             ),
             ("DYN_ROUTER_TRACKING_KEY_ID", "2026-01"),
-            ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
             ("DYN_ROUTER_TTL_SECS", "300"),
             ("DYN_ROUTER_EVENT_THREADS", "8"),
-            ("DYN_ROUTER_QUEUE_POLICY", "wspt"),
             ("DYN_USE_REMOTE_INDEXER", "true"),
             ("DYN_SHARED_CACHE_MULTIPLIER", "0.5"),
             ("DYN_SHARED_CACHE_TYPE", "hicache"),
             ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
             ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
             ("DYN_ROUTER_PREFILL_LOAD_MODEL", "ais"),
-            (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
-            (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
             (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
         assert_eq!(config.overlap_score_credit_decay, 0.75);
         assert_eq!(config.prefill_load_scale, 2.5);
-        assert_eq!(config.router_prefill_policy.as_deref(), Some("prefill-cli"));
-        assert_eq!(config.router_decode_policy.as_deref(), Some("decode-cli"));
         assert_eq!(config.decode_active_request_weight, 32.0);
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
@@ -1581,10 +1590,8 @@ mod tests {
             Some(PathBuf::from("/run/secrets/dynamo/tracking-key"))
         );
         assert_eq!(config.router_tracking_key_id.as_deref(), Some("2026-01"));
-        assert_eq!(config.router_queue_threshold, Some(4.5));
         assert_eq!(config.router_ttl_secs, 300.0);
         assert_eq!(config.router_event_threads, 8);
-        assert_eq!(config.router_queue_policy, RouterQueuePolicy::Wspt);
         assert!(config.use_remote_indexer);
         assert_eq!(config.shared_cache_multiplier, Some(0.5));
         assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
@@ -1647,23 +1654,42 @@ mod tests {
     }
 
     #[test]
-    fn dynamo_env_config_preserves_deprecated_alias_precedence() {
-        let config = config_from_values(&[
-            ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
-            ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2"),
-            ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "3"),
-            ("DYN_OVERLAP_SCORE_WEIGHT", "4"),
-        ]);
+    fn dynamo_env_config_rejects_removed_variables() {
+        for (key, replacement) in REMOVED_ENV_VARS {
+            let error = try_config_from_values(&[(key, "1")]).unwrap_err();
+            assert!(error.contains("removed in v1.8"), "{key}: {error}");
+            assert!(error.contains(key), "{key}: {error}");
+            assert!(error.contains(replacement), "{key}: {error}");
+        }
 
-        assert_eq!(config.overlap_score_credit, 0.25);
-        assert_eq!(config.prefill_load_scale, 3.0);
+        let error = try_config_from_values(&[
+            ("DYN_ROUTER_QUEUE_THRESHOLD", "0.5"),
+            ("DYN_ROUTER_QUEUE_POLICY", "wspt"),
+        ])
+        .unwrap_err();
+        assert!(error.contains("DYN_ROUTER_QUEUE_THRESHOLD"), "{error}");
+        assert!(error.contains("DYN_ROUTER_QUEUE_POLICY"), "{error}");
+    }
 
-        let disabled = config_from_values(&[
-            ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.75"),
-            ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0"),
-        ]);
-        assert_eq!(disabled.overlap_score_credit, 0.0);
-        assert_eq!(disabled.prefill_load_scale, 0.0);
+    #[test]
+    fn queue_fields_still_decode_from_a_model_card() {
+        // Nothing sets these at startup any more, but a v1.6 or v1.7 worker can advertise
+        // them, and the frontend still queues by them.
+        let config: KvRouterConfig = serde_json::from_value(serde_json::json!({
+            "router_queue_threshold": 4.5,
+            "router_queue_policy": "wspt",
+        }))
+        .unwrap();
+
+        assert!(config.queueing_enabled(None).unwrap());
+        assert_eq!(
+            config
+                .policy_profile(None)
+                .unwrap()
+                .default_class()
+                .queue_policy,
+            RouterQueuePolicy::Wspt
+        );
     }
 
     #[test]
@@ -1717,9 +1743,6 @@ mod tests {
         let error =
             try_config_from_values(&[(DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "clock")]).unwrap_err();
         assert!(error.contains("expected 'ttl' or 'lru'"));
-
-        let error = try_config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "random")]).unwrap_err();
-        assert!(error.contains("expected 'edf', 'fcfs', 'lcfs', or 'wspt'"));
 
         let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
         assert!(error.contains("expected 'none' or 'hicache'"));
