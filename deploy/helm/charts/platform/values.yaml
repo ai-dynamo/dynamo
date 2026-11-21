@@ -38,6 +38,8 @@ global:
     # Automatically enabled when install=true. The operator uses this to decide whether to
     # inject schedulerName and queue labels into pod templates.
     enabled: false
+    # -- Scheduler name the operator sets on Grove pods when KAI integration is enabled. A custom name requires install=false and a Grove version that maps the name to its KAI backend; this setting does not reconfigure Grove or KAI.
+    schedulerName: kai-scheduler
 
   volcano-scheduler:
     # -- EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets.

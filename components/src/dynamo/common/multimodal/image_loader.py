@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES, UUID_ONLY_VARIANT_KEY
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -39,9 +41,20 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
-UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
 IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
+
+
+# Pillow reports a codec allocation failure as an OSError without errno.
+_PILLOW_CODEC_OOM_MESSAGE: Final = "out of memory when reading image file"
+
+
+def _is_host_resource_error(e: OSError) -> bool:
+    """True when a decode OSError comes from host resource exhaustion rather
+    than from the image bytes."""
+    if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+        return True
+    return e.errno is None and _PILLOW_CODEC_OOM_MESSAGE in str(e)
 
 
 def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
@@ -250,7 +263,13 @@ class ImageLoader:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
         # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
         # (most phone cameras), which report image.format == "MPO".
-        with Image.open(image_data, formats=["JPEG", "PNG", "WEBP"]) as image:
+        try:
+            image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
+        except Image.DecompressionBombError as exc:
+            raise HttpStatusError(
+                413, "Image exceeds the decoded pixel limit", "image"
+            ) from exc
+        with image:
             if max_pixels is not None and image.width * image.height > max_pixels:
                 raise HttpStatusError(
                     413, "Image exceeds the decoded pixel limit", "image"
@@ -329,11 +348,24 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            image = await self._open_image(
-                image_data,
-                max_pixels if max_pixels is not None else self._max_pixels,
-                to_rgb or self._to_rgb,
-            )
+            # Only the decode is covered: fetch failures (SSRF blocks, aiohttp
+            # connector errors) are OSErrors too and must not read as bad data.
+            try:
+                image = await self._open_image(
+                    image_data,
+                    max_pixels if max_pixels is not None else self._max_pixels,
+                    to_rgb or self._to_rgb,
+                )
+            except Image.UnidentifiedImageError:
+                raise
+            except (OSError, SyntaxError) as e:
+                # Pillow: OSError for truncated or corrupt data, SyntaxError for a
+                # broken PNG chunk. Host resource exhaustion is a server fault.
+                if isinstance(e, OSError) and _is_host_resource_error(e):
+                    raise
+                raise HttpStatusError(
+                    400, "Invalid or truncated image data", image_url
+                ) from e
             if self._shared_image_cache is not None and key is not None:
                 # Cache fills are awaited deliberately so Redis acknowledges a
                 # successful write before this request returns. A cache outage
@@ -348,6 +380,8 @@ class ImageLoader:
                 e.status,
                 describe_media_source(image_url),
             )
+            if message := IMAGE_FETCH_ERROR_MESSAGES.get(e.status):
+                raise HttpStatusError(400, message, image_url) from e
             raise
         except HttpTimeoutError as e:
             logger.error(
@@ -537,7 +571,7 @@ class ImageLoader:
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
-            except OSError as e:
+            except (OSError, SyntaxError) as e:
                 logger.error(
                     "Invalid or truncated image data: '%s'",
                     describe_media_source(image_url),

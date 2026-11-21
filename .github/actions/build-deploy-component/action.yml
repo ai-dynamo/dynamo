@@ -129,7 +129,7 @@ runs:
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
           operator)
-            BASELINE_STEM="go@9ef7b9ac"
+            BASELINE_STEM="go@f68eec2e"
             [[ -z "${{ inputs.target }}" ]] && RUN_COMPLIANCE="true" ;;
         esac
         echo "baseline_stem=${BASELINE_STEM}" >> $GITHUB_OUTPUT
@@ -473,6 +473,7 @@ runs:
         # images' compliance-<git-sha>-<container> naming. artifact_tag lets a
         # suffixed image tag (nightly) keep this canonical artifact name.
         name: compliance-${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}
+        overwrite: true
         path: /tmp/compliance/
         retention-days: 90
 
@@ -481,5 +482,6 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}-sources
+        overwrite: true
         path: /tmp/sources/
         retention-days: 90

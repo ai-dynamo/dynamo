@@ -72,12 +72,16 @@ class ProfilerOperationalConfig:
 
 def picked_config_from_row(prefix: str, row: pd.Series) -> PickedParallelConfig:
     """Extract a PickedParallelConfig from a picked ColumnsDisagg DataFrame row."""
+    # The picker writes ``(p)cp`` only; decode rows have no CP column, and
+    # frames built from older column lists NaN-fill it.
+    cp = row.get(f"{prefix}cp")
     return PickedParallelConfig(
         tp=int(row.get(f"{prefix}tp", 1)),
         pp=int(row.get(f"{prefix}pp", 1)),
         dp=int(row.get(f"{prefix}dp", 1)),
         moe_tp=int(row.get(f"{prefix}moe_tp", 1)),
         moe_ep=int(row.get(f"{prefix}moe_ep", 1)),
+        cp=int(cp) if pd.notna(cp) else 1,
     )
 
 
@@ -177,7 +181,7 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
       Requests with Planner configuration use its sweep mode; mocker-only
       requests use the DGDR search strategy. In rapid mode the mocker pulls
       latency data directly from the AIConfigurator SDK via
-      ``--ais-perf-model`` flags injected by the profiler, so no NPZ is
+      ``--ais-perf-model VALUE`` injected by the profiler, so no NPZ is
       emitted.
     * **Planner** when thorough-mode bootstrap data is requested. In rapid
       mode the planner receives ``ais_perf_model`` and can also run AIC

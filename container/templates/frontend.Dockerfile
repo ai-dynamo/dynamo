@@ -36,9 +36,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             libc6-dev \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
-        && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
         && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*; \
+        && rm -rf /var/lib/apt/lists/* \
+        && {% include "templates/verify_ca_certificates.Dockerfile" %}; \
     fi
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         python${PYTHON_VERSION} -m venv /tmp/buildenv \
@@ -72,11 +72,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
-    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    && rm -rf /var/lib/apt/lists/* \
+    && {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
@@ -87,6 +85,8 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -97,10 +97,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
         libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
         openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

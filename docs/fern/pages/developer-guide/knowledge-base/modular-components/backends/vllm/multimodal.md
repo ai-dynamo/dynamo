@@ -15,6 +15,12 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > serve but also extends it to all multimodal content (URL, embeddings, and
 > base64 data).
 
+> [!NOTE]
+> Embedding workers are the exception. A vLLM `--embedding-worker` accepts
+> image, video, and audio in chat-style `messages` without
+> `--enable-multimodal`, and cannot be combined with it. See
+> [Embedding](../../../../../reference/backends/vllm-configuration.mdx#embedding).
+
 ## Support Matrix
 
 | Modality | Aggregated | P/D | Separate encode worker |
@@ -315,9 +321,25 @@ UUID-only cache reuse is currently limited to images in Dynamo. Audio and video
 parts must include a URL even when they also provide a UUID.
 
 UUIDs are opaque nonempty strings and must use the top-level field shown above.
-A UUID-only request fails on a cache miss because it contains no media payload
-to process. Dynamo also rejects a media content part that has neither a URL nor
-a UUID.
+A UUID-only request fails on a cache miss because it has no image to process.
+The error asks the client to resend the request with the image URL or inline
+image data and the same UUID.
+
+Cache entries are local to each worker:
+
+- Every worker that processes the image needs its own entry. In disaggregated
+  serving, both prefill and decode look up the image. Qwen-VL models using
+  Dynamo's embedding handoff are the exception: only prefill looks up the image,
+  and decode reuses prefill's image embeddings.
+- Resending the image can populate the workers that handle that request, not
+  other replicas.
+- Eviction, a worker restart, or routing to different workers can require
+  another resend.
+
+A cache miss on a request that includes the URL is handled automatically: the
+worker fetches the image if needed, without a client resend.
+
+Dynamo also rejects a media content part that has neither a URL nor a UUID.
 
 When KV-aware routing is enabled, requests with client UUIDs use text-prefix
 routing. Dynamo cannot convert an opaque client key into its content-derived

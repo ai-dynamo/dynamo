@@ -56,33 +56,33 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:20509fabe50dda62c09c0786d1a6effa299d3dbdddcc49331b93e65144652a8c",
+      "baseline_digest": "sha256:be3a9aea234be64ffc2816ac561c597e0f0b1f44a61a7f4912780e4d77450086",
       "baseline_image": "vllm/vllm-openai-xpu",
-      "baseline_sbom": "vllm-openai-xpu@20509fab-amd64.cdx.json",
-      "baseline_tag": "v0.32.0",
-      "from_digest": "sha256:20509fabe50dda62c09c0786d1a6effa299d3dbdddcc49331b93e65144652a8c",
+      "baseline_sbom": "vllm-openai-xpu@be3a9aea-amd64.cdx.json",
+      "baseline_tag": "v0.33.0",
+      "from_digest": "sha256:be3a9aea234be64ffc2816ac561c597e0f0b1f44a61a7f4912780e4d77450086",
       "from_image": "vllm/vllm-openai-xpu",
-      "from_tag": "v0.32.0",
+      "from_tag": "v0.33.0",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
+      "baseline_digest": "sha256:f68eec2eff2ecd70354573605ed5ab3bc6c727ae26978260e2486c34cc5adeec",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@9ef7b9ac-amd64.cdx.json",
-      "baseline_tag": "v4.1.7",
-      "from_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
+      "baseline_sbom": "go@f68eec2e-amd64.cdx.json",
+      "baseline_tag": "v4.2.1",
+      "from_digest": "sha256:f68eec2eff2ecd70354573605ed5ab3bc6c727ae26978260e2486c34cc5adeec",
       "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.1.7",
+      "from_tag": "v4.2.1",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
+      "baseline_digest": "sha256:f68eec2eff2ecd70354573605ed5ab3bc6c727ae26978260e2486c34cc5adeec",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@9ef7b9ac-arm64.cdx.json",
-      "baseline_tag": "v4.1.7",
-      "from_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
+      "baseline_sbom": "go@f68eec2e-arm64.cdx.json",
+      "baseline_tag": "v4.2.1",
+      "from_digest": "sha256:f68eec2eff2ecd70354573605ed5ab3bc6c727ae26978260e2486c34cc5adeec",
       "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.1.7",
+      "from_tag": "v4.2.1",
       "platform": "linux/arm64"
     },
     {
@@ -110,43 +110,43 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@93a3eaf1-amd64.cdx.json",
-      "baseline_tag": "1.4.0rc2",
-      "from_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_sbom": "release@aa9c10c5-amd64.cdx.json",
+      "baseline_tag": "1.4.0rc3",
+      "from_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.4.0rc2",
+      "from_tag": "1.4.0rc3",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@93a3eaf1-arm64.cdx.json",
-      "baseline_tag": "1.4.0rc2",
-      "from_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_sbom": "release@aa9c10c5-arm64.cdx.json",
+      "baseline_tag": "1.4.0rc3",
+      "from_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.4.0rc2",
+      "from_tag": "1.4.0rc3",
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
+      "baseline_digest": "sha256:794a5902c6b41c4e38088d6ad0c838e198c11f59497ca82b723a8f8f24ba5e4b",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@c718fc95-amd64.cdx.json",
-      "baseline_tag": "3.13-v4.1.10",
-      "from_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
+      "baseline_sbom": "python@794a5902-amd64.cdx.json",
+      "baseline_tag": "3.13-v4.2.1",
+      "from_digest": "sha256:794a5902c6b41c4e38088d6ad0c838e198c11f59497ca82b723a8f8f24ba5e4b",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.10",
+      "from_tag": "3.13-v4.2.1",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
+      "baseline_digest": "sha256:794a5902c6b41c4e38088d6ad0c838e198c11f59497ca82b723a8f8f24ba5e4b",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@c718fc95-arm64.cdx.json",
-      "baseline_tag": "3.13-v4.1.10",
-      "from_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
+      "baseline_sbom": "python@794a5902-arm64.cdx.json",
+      "baseline_tag": "3.13-v4.2.1",
+      "from_digest": "sha256:794a5902c6b41c4e38088d6ad0c838e198c11f59497ca82b723a8f8f24ba5e4b",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.10",
+      "from_tag": "3.13-v4.2.1",
       "platform": "linux/arm64"
     },
     {
@@ -192,6 +192,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-11-12T15:21:51+00:00",
+  "generated_at": "2026-11-17T10:05:18+00:00",
   "schema_version": 2
 }

@@ -133,7 +133,7 @@ pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_scheduler::kv_hints::KvHint;
+    use dynamo_kv_hints::KvHint;
 
     /// The wire shape engines and KVCR read: field names and values are N-2 compatible.
     #[test]

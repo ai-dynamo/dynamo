@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from typing import Any
 
 import pytest
 
@@ -772,12 +773,30 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
 _VIDEO_DECODING_ENGINES = {"e_pd": 1, "epd": 2, "epd_video": 2, "p_d": 2}
 
 
+def _has_video(obj: Any) -> bool:
+    if isinstance(obj, dict):
+        return obj.get("type") == "video_url" or any(map(_has_video, obj.values()))
+    if isinstance(obj, list):
+        return any(map(_has_video, obj))
+    return False
+
+
+def _sends_video(topo: TopologyConfig) -> bool:
+    return any(
+        _has_video(payload.body)
+        for case in topo.tests
+        for payload in (case.payload, *case.followup_payloads)
+    )
+
+
 def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
     """Add vLLM's PyNvVideoCodec decoder reservation back to each topology.
 
     When the image selects the PyNvVideoCodec video loader, vLLM subtracts the
-    reservation from the requested KV cache. Topologies that select another
-    loader are left unchanged.
+    reservation from the requested KV cache, so the requested KV is raised by
+    it. The decoder only allocates that memory when it decodes video, so
+    ``profiled_vram_gib`` grows only for topologies whose cases send video.
+    Topologies that select another loader are left unchanged.
     """
     reserved = pynvvideocodec_reserved_bytes()
     if not reserved:
@@ -791,7 +810,7 @@ def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
             engines = _VIDEO_DECODING_ENGINES.get(key, 1)
             if topo.requested_vllm_kv_cache_bytes:
                 topo.requested_vllm_kv_cache_bytes += reserved
-            if topo.profiled_vram_gib is not None:
+            if topo.profiled_vram_gib is not None and _sends_video(topo):
                 topo.profiled_vram_gib = round(
                     topo.profiled_vram_gib + engines * reserved / 1024**3, 1
                 )

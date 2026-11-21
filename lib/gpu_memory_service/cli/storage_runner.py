@@ -104,12 +104,10 @@ def _run_load(args) -> None:
     socket_path = _resolve_socket(args.device, args.socket_path)
 
     logger.info(
-        "Loading GMS state: device=%s, socket=%s, input_dir=%s, "
-        "clear_existing=%s, transfer_backend=%s",
+        "Loading GMS state: device=%s, socket=%s, input_dir=%s, transfer_backend=%s",
         args.device,
         socket_path,
         args.input_dir,
-        not args.no_clear,
         args.transfer_backend,
     )
 
@@ -122,11 +120,7 @@ def _run_load(args) -> None:
         sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
     )
 
-    id_map = client.load_to_gms(
-        args.input_dir,
-        max_workers=args.workers,
-        clear_existing=not args.no_clear,
-    )
+    id_map = client.load_to_gms(args.input_dir, max_workers=args.workers)
 
     logger.info("Load complete: %s allocations committed to GMS", len(id_map))
     for old_id, new_id in id_map.items():
@@ -275,15 +269,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Number of independent sharded-ssd restore queues per SSD root. "
             "Increase this "
             "to use multiple NIXL/POSIX workers per local SSD root."
-        ),
-    )
-    load_p.add_argument(
-        "--no-clear",
-        action="store_true",
-        default=False,
-        help=(
-            "Do not clear existing GMS allocations before loading. "
-            "Default behaviour clears the server to produce an exact replica."
         ),
     )
     load_p.add_argument(

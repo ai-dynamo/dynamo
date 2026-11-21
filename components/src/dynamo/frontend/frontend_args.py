@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
@@ -228,7 +229,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
-    response_plane: str = "tcp"
+    response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     chat_processor: str
     chat_processor_config: Optional[Dict[str, Any]] = None
@@ -242,6 +243,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
+    isolate_tool_call_markers: bool
     default_chat_template_kwargs: Optional[Dict[str, Any]] = None
     preprocess_workers: Optional[int]
     tokenizer_backend: str
@@ -278,6 +280,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         elif self.preprocess_workers < 0:
             raise ValueError("--dyn-preprocess-workers must be >= 0")
 
+        # Check what was asked for before --load-aware forces KV routing, so a
+        # policy file with a conflicting --router-mode still fails.
+        self.router_mode = resolve_router_mode(
+            self.router_mode, self.router_policy_config
+        )
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
@@ -343,10 +350,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+        if self.isolate_tool_call_markers and self.chat_processor != "sglang":
             raise ValueError(
-                "--ais-perf-config requires --router-prefill-load-model=ais"
+                "--isolate-tool-call-markers requires --dyn-chat-processor=sglang"
             )
+        self.validate_ais_perf_inputs()
         if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(
@@ -622,7 +630,7 @@ class FrontendArgGroup(ArgGroup):
 
         # Router options (shared with dynamo.router)
         RouterArgGroup(
-            default_router_mode="round-robin",
+            default_router_mode=None,
             include_frontend_only=True,
             env=self.env,
         ).add_arguments(parser)
@@ -780,8 +788,12 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--response-plane",
             env_var="DYN_RESPONSE_PLANE",
-            default="tcp",
-            help="Select the response transport. Frontend and workers must match.",
+            default=None,
+            help=(
+                "Select the response transport. Frontend and workers must match. "
+                "When unset, the runtime uses tcp. velo has no TLS, so it falls "
+                "back to tcp while any DYN_TCP_TLS_* setting is present."
+            ),
             choices=["tcp", "quic", "velo"],
             env=self.env,
         )
@@ -924,6 +936,23 @@ class FrontendArgGroup(ArgGroup):
                 "replaces the thinking keys. Set this on the frontend, not on the "
                 "engine: the frontend renders the chat template, so the engine flag "
                 "has no effect behind Dynamo."
+            ),
+            env=self.env,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--isolate-tool-call-markers",
+            env_var="DYN_ISOLATE_TOOL_CALL_MARKERS",
+            default=False,
+            help=(
+                "Tokenize message content that contains the tool-call parser's "
+                "delimiters (for example a literal <tool_call> in a tool result) as "
+                "plain sub-words instead of the delimiter tokens, so the model cannot "
+                "copy a delimiter token out of untrusted input and have it parsed as "
+                "a real tool call. Requests whose content the chat template rewrites "
+                "are rejected rather than encoded unsafely. Requires "
+                "--dyn-chat-processor=sglang. Evaluate against your model before "
+                "enabling."
             ),
             env=self.env,
         )

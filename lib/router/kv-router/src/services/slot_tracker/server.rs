@@ -19,7 +19,7 @@ use crate::services::common::replica_sync::PeerManager;
 use crate::services::common::replica_sync_http;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
-use dynamo_scheduler::identity::default_routing_group;
+use dynamo_scheduler::default_routing_group;
 use dynamo_slot_tracker::SequenceError;
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry};
@@ -281,9 +281,6 @@ fn service_error(error: ServiceError) -> Response {
         }
         ServiceError::Sequence(SequenceError::DuplicateRequest { .. }) => {
             json_error(StatusCode::CONFLICT, error)
-        }
-        ServiceError::Sequence(SequenceError::ReplicaSyncPublishFailed(_)) => {
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, error)
         }
     }
 }

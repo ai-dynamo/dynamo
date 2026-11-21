@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
@@ -150,6 +151,21 @@ def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
     )
 
 
+# Must outlast the executor's TP-worker shutdown (5 s, then SIGTERM and 4 s more)
+# plus EngineCore's own teardown. vLLM uses the same value on ROCm.
+_ENGINE_CLEANUP_WINDOW_S = 15.0
+
+
+def _engine_shutdown_timeout(vllm_config: VllmConfig) -> float:
+    """Seconds EngineCore gets to exit before vLLM force-kills it."""
+    if vllm_config.shutdown_timeout > 0:
+        return float(vllm_config.shutdown_timeout)
+    # Forwarding vLLM's default 0 would SIGKILL EngineCore and its TP workers at
+    # once; VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS (or ROCm's 15 s) still wins.
+    window = get_engine_process_shutdown_timeout(0, 0)
+    return window if window else _ENGINE_CLEANUP_WINDOW_S
+
+
 async def _sync_fpm_worker_id(
     engine_client: AsyncLLM, vllm_config: VllmConfig, new_worker_id: str
 ) -> None:
@@ -193,7 +209,7 @@ async def _sync_fpm_worker_id_or_shutdown(
         await _sync_fpm_worker_id(engine_client, vllm_config, new_worker_id)
     except BaseException:
         try:
-            engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+            engine_client.shutdown(timeout=_engine_shutdown_timeout(vllm_config))
         except Exception:
             logger.exception(
                 "Failed to shut down the restored engine after the FPM worker_id "
@@ -1745,7 +1761,9 @@ class _WorkerLifecycle:
                 self.handler.cleanup()
         finally:
             if self.engine_client is not None and self.vllm_config is not None:
-                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
+                self.engine_client.shutdown(
+                    timeout=_engine_shutdown_timeout(self.vllm_config)
+                )
 
 
 class WorkerFactory:
@@ -1774,17 +1792,12 @@ class WorkerFactory:
         config: Config,
         generate_endpoint: Endpoint,
         vllm_config: VllmConfig,
-        *,
-        consolidator_enabled: bool,
-        consolidator_port: int | None,
     ) -> Optional[Any]:
         if state_agent_settings(config) is None:
             return self.setup_kv_event_publisher(
                 config,
                 generate_endpoint,
                 vllm_config,
-                consolidator_enabled=consolidator_enabled,
-                consolidator_port=consolidator_port,
             )
 
         # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
@@ -2279,6 +2292,13 @@ class WorkerFactory:
             endpoint=generate_endpoint,
             embedding_worker=True,
         )
+        # Chat-style embedding input loads media in this worker. Use dynamo's
+        # media connector, as the frontend does, so DYN_MM_ALLOW_REMOTE_URLS
+        # applies here too: vLLM's default ``http`` connector fetches any URL.
+        # Set it before the engine starts, since vLLM can cache env reads.
+        os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
+        import dynamo.common.multimodal.media_connector  # noqa: F401
+
         (
             engine_client,
             vllm_config,
@@ -2608,26 +2628,11 @@ class WorkerFactory:
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
-        # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
-        consolidator_enabled = False
-        consolidator_port = None
-
-        _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
-        if _consolidator_eps:
-            # Extract connect endpoint (third element) for clients to subscribe
-            # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-            consolidator_output_endpoint = _consolidator_eps[2]
-            consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
-            consolidator_enabled = True
-
         # Set up KV event publisher for prefix caching if enabled
-        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
         kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
-            consolidator_enabled=consolidator_enabled,
-            consolidator_port=consolidator_port,
         )
         if kv_publishers:
             handler.kv_publishers = kv_publishers
@@ -2908,26 +2913,11 @@ class WorkerFactory:
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
-        # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
-        consolidator_enabled = False
-        consolidator_port = None
-
-        _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
-        if _consolidator_eps:
-            # Extract connect endpoint (third element) for clients to subscribe
-            # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-            consolidator_output_endpoint = _consolidator_eps[2]
-            consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
-            consolidator_enabled = True
-
         # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
-        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
         kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
-            consolidator_enabled=consolidator_enabled,
-            consolidator_port=consolidator_port,
         )
         if kv_publishers:
             handler.kv_publishers = kv_publishers

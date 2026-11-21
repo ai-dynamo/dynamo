@@ -42,7 +42,6 @@ use crate::kv_router::{
 
 mod attachment_owner;
 mod batching;
-mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
@@ -58,8 +57,7 @@ pub use zmq_recovery::{KvStreamCommand, KvStreamStatus, ZmqRecoveryConfig};
 pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
 pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
-#[cfg(test)]
-use dedup::{EventDedupFilter, EventDedupPolicy};
+use dynamo_kv_events::zmq_wire::EventDedupPolicy;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::start_event_processor;
@@ -106,6 +104,11 @@ pub enum KvEventSourceConfig {
         /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
         /// values that do not fit in `u32` are excluded.
         engine_owned_mm_identity: bool,
+        /// The source emits one remove per block however many times it stored
+        /// it (SGLang), so the publisher does not count repeated Worker-domain
+        /// stores on any tier. Otherwise stores are refcounted, because vLLM
+        /// emits a remove per store.
+        idempotent_stores: bool,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -170,6 +173,7 @@ impl KvEventSource {
                 expected_rank,
                 liveness,
                 engine_owned_mm_identity,
+                idempotent_stores: _,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -428,6 +432,17 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
+        let worker_dedup_policy = if matches!(
+            source_config,
+            Some(KvEventSourceConfig::Zmq {
+                idempotent_stores: true,
+                ..
+            })
+        ) {
+            EventDedupPolicy::SetLike
+        } else {
+            EventDedupPolicy::RefCounted
+        };
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
@@ -553,6 +568,7 @@ impl KvEventPublisher {
                 rx,
                 local_indexer_clone,
                 batching_timeout_ms,
+                worker_dedup_policy,
             )
             .await;
 

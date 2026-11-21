@@ -21,9 +21,10 @@ pub use registry::{
     HintPolicyParameters, HintPolicyProvider, HintPolicyProviderError, HintPolicyRegistryError,
 };
 
-pub use dynamo_scheduler::hint_policy::{
+pub use dynamo_kv_hints::KvHintAction;
+pub use dynamo_scheduler::{
     Commitments, DuplicateHintPolicyName, HintContext, HintPolicy, HintPolicyConstructor,
-    HintPolicyError, HintPolicyFactory, KvHintAction, NamedHintPolicy, RoleHintPolicies,
+    HintPolicyError, HintPolicyFactory, NamedHintPolicy, RoleHintPolicies,
 };
 
 /// A plugin under which a hint runs by default, when the role's entry lists no `hints`. A hint

@@ -331,15 +331,10 @@ def parse_args() -> (
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
-            from vllm.utils import FlexibleArgumentParser
-        except ImportError:
-            try:
-                from vllm.utils.argparse_utils import FlexibleArgumentParser
-            except ModuleNotFoundError:
-                logger.exception(
-                    "Flag '--chat-processor vllm' requires vllm be installed."
-                )
-                sys.exit(1)
+            from vllm.utils.argparse_utils import FlexibleArgumentParser
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
 
         # On a host with no GPU and a CUDA-built wheel, vllm.platforms
         # auto-detection picks UnspecifiedPlatform and the
@@ -357,14 +352,7 @@ def parse_args() -> (
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-
-            try:
-                from vllm.entrypoints.common.cli_args import FrontendArgs
-            except ModuleNotFoundError as exc:
-                if exc.name != "vllm.entrypoints.common.cli_args":
-                    raise
-                # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
-                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            from vllm.entrypoints.common.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -485,8 +473,8 @@ async def async_main():
         config.session_affinity_max_entries
     )
     # Shared with the backends so a worker's advertised config is built from the
-    # same flags and semantics. --router-mode always has a default here, so this
-    # never returns None.
+    # same flags and semantics. FrontendConfig.validate resolved the router mode,
+    # so this never returns None.
     router_config = build_router_config(config)
 
     metrics_prefix = (
