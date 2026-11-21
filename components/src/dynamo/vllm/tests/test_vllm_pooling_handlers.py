@@ -12,6 +12,7 @@ import torch
 
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as mod
+from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -250,6 +251,40 @@ class TestClassifyWorkerHandler:
 
         assert seen_prompt["prompt_token_ids"] == [101, 102]
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("is_pooling", [False, True])
+    @pytest.mark.parametrize("failure_stage", ["setup", "prompt"])
+    async def test_tokenization_errors_are_public_invalid_argument(
+        self, is_pooling, failure_stage
+    ):
+        from vllm.exceptions import VLLMValidationError
+        from vllm.renderers import TokenizeParams
+
+        handler = _make_handler()
+        handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
+            max_total_tokens=8, truncate_prompt_tokens=None
+        )
+        handler.engine_client.renderer.tokenizer = SimpleNamespace(
+            truncation_side="left"
+        )
+        request = {"input": list(range(9)), "model": "test-model"}
+        if failure_stage == "setup":
+            request["input"] = "hello"
+            request["truncate_prompt_tokens"] = 9
+            message = "truncate_prompt_tokens"
+        else:
+            message = "maximum context length"
+        if is_pooling:
+            request["encoding_format"] = "float"
+
+        with pytest.raises(InvalidArgument, match=message) as error:
+            async for _ in handler.generate(request, _make_context()):
+                pass
+
+        assert isinstance(error.value.__cause__, VLLMValidationError)
+        handler.engine_client.encode.assert_not_called()
+
 
 class TestPoolingWorkerHandler:
     @pytest.mark.asyncio
@@ -424,6 +459,25 @@ class TestPoolingBatchExecution:
 
         assert all(event.is_set() for event in started.values())
         assert cancelled == {0, 2, 3}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_vllm_validation_error_is_public_invalid_argument(self):
+        from vllm.exceptions import VLLMValidationError
+
+        message = "Model 'test-model' does not support Matryoshka embeddings"
+        handler = _make_handler()
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            raise VLLMValidationError(message)
+            yield
+
+        handler.engine_client.encode = fake_encode
+        with pytest.raises(InvalidArgument, match="does not support Matryoshka"):
+            async for _ in handler.generate(
+                {"input": ["a"], "model": "test-model"}, _make_context()
+            ):
+                pass
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

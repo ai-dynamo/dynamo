@@ -24,7 +24,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from dynamo._core import Context
 
 from .args import Config
-from .handlers import EmbeddingWorkerHandler
+from .handlers import EmbeddingWorkerHandler, _translate_vllm_client_errors
 
 logger = logging.getLogger(__name__)
 
@@ -143,22 +143,33 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         pooling_params: PoolingParams,
     ) -> list[Any]:
         """Encode all inputs with common request controls and preprocessing."""
+        # Marker collection stubs vLLM without its request-error classes.
+        from vllm.exceptions import VLLMClientError
+
+        from .errors import vllm_client_error_to_public_error
+
         tokenization_kwargs = _build_tokenization_kwargs(request)
-        tokenize_params = _build_pooling_tokenize_params(
-            self.engine_client, tokenization_kwargs
-        )
+        try:
+            tokenize_params = _build_pooling_tokenize_params(
+                self.engine_client, tokenization_kwargs
+            )
+        except VLLMClientError as exc:
+            raise vllm_client_error_to_public_error(exc) from exc
         tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
         engine_request_id = context.id()
         priority = request.get("priority", 0)
 
         async def _encode_one(idx: int, prompt: Any) -> Any:
             request_id = f"{engine_request_id}-{idx}"
-            encode_arg = _prepare_pooling_prompt(
-                prompt,
-                request,
-                tokenize_params,
-                tokenizer,
-            )
+            try:
+                encode_arg = _prepare_pooling_prompt(
+                    prompt,
+                    request,
+                    tokenize_params,
+                    tokenizer,
+                )
+            except VLLMClientError as exc:
+                raise vllm_client_error_to_public_error(exc) from exc
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -173,7 +184,9 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 if tokenization_kwargs is not None and isinstance(prompt, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for output in self.engine_client.encode(**encode_kwargs):
+                async for output in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs), request
+                ):
                     final_output = output
 
             if final_output is None:

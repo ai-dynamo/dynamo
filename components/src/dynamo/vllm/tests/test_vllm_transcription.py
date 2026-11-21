@@ -156,6 +156,40 @@ async def _assert_generate_preserves_native_vllm_error_status():
     assert error.value.code == 404
 
 
+def test_generate_reports_native_vllm_400_as_invalid_argument():
+    asyncio.run(_assert_generate_reports_native_vllm_400())
+
+
+async def _assert_generate_reports_native_vllm_400():
+    # HttpError text stays private at the Rust boundary, so a returned 400 must
+    # be InvalidArgument for its reason to reach the client.
+    protocol = pytest.importorskip("vllm.entrypoints.serve.engine.protocol")
+    ErrorInfo, ErrorResponse = protocol.ErrorInfo, protocol.ErrorResponse
+
+    handler = make_handler()
+    handler._run_with_cancellation = AsyncMock(
+        return_value=ErrorResponse(
+            error=ErrorInfo(
+                message="Currently do not support verbose_json for this model",
+                type="BadRequestError",
+                code=400,
+            )
+        )
+    )
+
+    with pytest.raises(InvalidArgument, match="verbose_json for this model"):
+        await anext(
+            handler.generate(
+                {
+                    "audio_b64": base64.b64encode(b"audio").decode("ascii"),
+                    "filename": "sample.wav",
+                    "response_format": "verbose_json",
+                },
+                object(),
+            )
+        )
+
+
 @pytest.mark.parametrize("error_name", ["VLLMValidationError", "ValueError"])
 def test_generate_reports_vllm_request_errors_as_invalid_argument(error_name):
     asyncio.run(_assert_generate_reports_vllm_request_error(error_name))

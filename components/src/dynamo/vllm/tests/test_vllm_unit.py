@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm import decision_execution as decisions
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
@@ -1904,6 +1905,26 @@ def test_vllm_validation_error_is_public_invalid_argument():
 
     assert isinstance(public_error, InvalidArgument)
     assert str(public_error) == message
+
+
+@pytest.mark.asyncio
+async def test_worker_translates_vllm_validation_error_to_invalid_argument():
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.vllm.handlers import _translate_vllm_client_errors
+
+    message = "The decoder prompt is longer than the maximum model length."
+
+    async def generator():
+        yield "first"
+        raise VLLMValidationError(message)
+
+    translated = _translate_vllm_client_errors(generator(), {})
+    assert await anext(translated) == "first"
+    with pytest.raises(InvalidArgument) as error:
+        await anext(translated)
+
+    assert str(error.value) == message
 
 
 def test_vllm_validation_error_public_message_is_truncated():

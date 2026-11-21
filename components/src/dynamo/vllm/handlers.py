@@ -117,7 +117,7 @@ from .engine_generate import (
     publish_json_multimodal_capability,
 )
 from .engine_monitor import VllmEngineMonitor
-from .errors import uuid_image_cache_miss_error, vllm_client_error_to_http_error
+from .errors import uuid_image_cache_miss_error, vllm_client_error_to_public_error
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -980,12 +980,16 @@ async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
     request: dict[str, Any],
 ) -> AsyncIterator[ResponseT]:
-    """Keep request-side vLLM errors client-visible on worker endpoints."""
+    """Keep request-side vLLM errors client-visible on worker endpoints.
+
+    A 400 is raised as ``InvalidArgument`` so its reason reaches the client;
+    404 and 422 keep their status as ``HttpError``.
+    """
     try:
         async for chunk in generator:
             yield chunk
     except VLLMClientError as exc:
-        raise vllm_client_error_to_http_error(exc) from exc
+        raise vllm_client_error_to_public_error(exc) from exc
     except (ValueError, EngineGenerateError) as exc:
         if error := uuid_image_cache_miss_error(exc, request):
             raise error from exc
@@ -4542,10 +4546,10 @@ class EmbeddingWorkerHandler:
         subject to the engine's media limits and allowed media sources.
 
         Input vLLM rejects is a client error rather than a 500. vLLM's typed
-        client errors go through ``vllm_client_error_to_http_error``, as on the
-        other vLLM request paths: the worker raises their status (422 for
-        media that can't be loaded), and the frontend maps it to its error
-        class and keeps the message private, since it can name the media URL.
+        client errors go through ``vllm_client_error_to_public_error``: a 400
+        raises ``InvalidArgument`` with vLLM's message. Other statuses keep
+        their message private, including 422 for media that can't be loaded,
+        since that message can name the media URL.
         Other validation failures (a text-only model given media, a malformed
         message) raise ``InvalidArgument``, a 400 with vLLM's message.
         """
@@ -4557,7 +4561,7 @@ class EmbeddingWorkerHandler:
         from vllm.renderers.chat_utils import load_chat_template
         from vllm.utils.mistral import is_mistral_tokenizer
 
-        from .errors import vllm_client_error_to_http_error
+        from .errors import vllm_client_error_to_public_error
 
         messages = request["messages"]
         batched = (
@@ -4596,7 +4600,7 @@ class EmbeddingWorkerHandler:
                 chat_request.build_tok_params(model_config),
             )
         except VLLMClientError as e:
-            raise vllm_client_error_to_http_error(e) from e
+            raise vllm_client_error_to_public_error(e) from e
         # The other errors vLLM's server answers with 400 (pydantic's
         # ValidationError is a ValueError).
         except (ValueError, TypeError) as e:
