@@ -133,7 +133,9 @@ request_classifier:
 }
 
 fn classify(classifier: &mut dyn RequestClassifier, request_id: &str, session: &SessionContext) {
-    let request = ClassifyRequest::for_test(ISL, Some(request_id), Some(session.clone()));
+    let request = ClassifyRequest::with_timing(ISL, 0, Instant::now())
+        .with_request_id(request_id)
+        .with_session_context(session.clone());
     classifier
         .classify(request, &NoWorkers)
         .expect("classification succeeds");

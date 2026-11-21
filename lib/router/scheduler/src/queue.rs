@@ -2575,7 +2575,7 @@ impl<
         }
         // Consume hints even when there is no pending work. Blocked lanes count as ready here
         // and still need their recheck.
-        if !self.pending.has_ready() {
+        if self.pending.pending_count() == 0 {
             return;
         }
         let mut capacity_all = drained.full_recheck;
@@ -2608,7 +2608,7 @@ impl<
         self.expire_due_classes(Instant::now());
         let cleanup_ready = drain_cleanup && self.drain_cleanup();
         self.recheck_capacity_updates(cleanup_ready.then_some(RecheckScope::All));
-        if !self.pending.has_ready() {
+        if self.pending.pending_count() == 0 {
             return;
         }
         self.drain_ready(None).await;
@@ -2640,7 +2640,7 @@ impl<
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
         loop {
-            if !self.pending.has_ready() {
+            if self.pending.pending_count() == 0 {
                 break;
             }
             let decay_now = Instant::now();

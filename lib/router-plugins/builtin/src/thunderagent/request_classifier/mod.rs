@@ -317,11 +317,13 @@ mod tests {
     }
 
     fn session_request(request_id: &str, session_id: &str, tokens: usize) -> ClassifyRequest {
-        ClassifyRequest::for_test(
-            tokens,
-            Some(request_id),
-            Some(SessionContext::new(session_id.into(), None, None, None)),
-        )
+        request(tokens)
+            .with_request_id(request_id)
+            .with_session_context(SessionContext::new(session_id.into(), None, None, None))
+    }
+
+    fn request(tokens: usize) -> ClassifyRequest {
+        ClassifyRequest::with_timing(tokens, 0, Instant::now())
     }
 
     fn head<'a>(
@@ -375,7 +377,7 @@ mod tests {
         let wakes = attach_counter(gate.as_ref());
 
         // A request without a session passes through untouched.
-        let plain = ClassifyRequest::for_test(10, Some("plain"), None);
+        let plain = request(10).with_request_id("plain");
         assert!(classifier.classify(plain, &NoWorkers).is_ok());
 
         let session_a = SessionContext::new("a".into(), None, None, None);
@@ -446,12 +448,9 @@ mod tests {
     #[tokio::test]
     async fn classification_requires_a_request_id_for_session_traffic() {
         let mut classifier = classifier(&[(1, 400)]);
-        let request = ClassifyRequest::for_test(
-            10,
-            None,
-            Some(SessionContext::new("a".into(), None, None, None)),
-        );
-        let error = classifier.classify(request, &NoWorkers).unwrap_err();
+        let anonymous =
+            request(10).with_session_context(SessionContext::new("a".into(), None, None, None));
+        let error = classifier.classify(anonymous, &NoWorkers).unwrap_err();
         assert!(error.to_string().contains("request ID"));
     }
 }

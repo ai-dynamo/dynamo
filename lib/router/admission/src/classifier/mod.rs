@@ -5,8 +5,9 @@
 
 mod inputs;
 mod progress;
-pub mod runtime;
+mod runtime;
 mod view;
+
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycle};
@@ -14,12 +15,10 @@ pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycl
 pub(crate) use view::NoWorkers;
 pub use view::{WorkerCacheView, WorkerLoadView, WorkerView};
 
-use crate::placement::LaneKey;
 use std::error::Error;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
 use dynamo_router_protocol::columns::WorkerInputs;
@@ -27,7 +26,9 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
+use dynamo_tokens::SequenceHash;
 
+use crate::lane_key::LaneKey;
 use crate::queue::QueueSnapshot;
 
 #[derive(Debug)]
@@ -43,7 +44,7 @@ pub struct ClassifyRequest {
     progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    reject_thresholds: Option<BusyThresholds>,
+    reject_thresholds: BusyThresholds,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -58,25 +59,6 @@ pub struct ClassificationOverrides {
 }
 
 impl ClassifyRequest {
-    #[cfg(test)]
-    pub fn new(input_tokens: usize, initial_cached_tokens: usize) -> Self {
-        Self::with_timing(input_tokens, initial_cached_tokens, Instant::now())
-    }
-
-    /// A classification input for plugin tests and benchmarks: `input_tokens` with no cached
-    /// prefix, an optional request id, and an optional session.
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
-    pub fn for_test(
-        input_tokens: usize,
-        request_id: Option<&str>,
-        session_context: Option<SessionContext>,
-    ) -> Self {
-        let mut request = Self::with_timing(input_tokens, 0, Instant::now());
-        request.request_id = request_id.map(str::to_owned);
-        request.session_context = session_context;
-        request
-    }
-
     pub fn with_timing(
         input_tokens: usize,
         initial_cached_tokens: usize,
@@ -94,7 +76,7 @@ impl ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
-            reject_thresholds: None,
+            reject_thresholds: BusyThresholds::default(),
         }
     }
 
@@ -126,14 +108,14 @@ impl ClassifyRequest {
 
     /// The router-wide busy thresholds read when classification started.
     pub fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
-        self.reject_thresholds = Some(reject);
+        self.reject_thresholds = reject;
         self
     }
 
     /// Router-wide busy thresholds, read when classification started. Selection skips a
     /// worker past them and rejects the request when none remains.
     pub fn reject_thresholds(&self) -> BusyThresholds {
-        self.reject_thresholds.unwrap_or_default()
+        self.reject_thresholds
     }
 
     pub fn request_id(&self) -> Option<&str> {

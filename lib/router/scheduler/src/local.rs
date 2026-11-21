@@ -1104,26 +1104,8 @@ mod tests {
 
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
-            accounting_attribution: Default::default(),
-            mode,
             token_seq: Some(vec![1, 2, 3, 4]),
-            block_hashes: None,
-            isl_tokens: 64,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: crate::protocols::RoutingConstraints::default(),
-            router_config_override: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
+            ..crate::test_utils::test_schedule_request(mode, 64)
         }
     }
 
