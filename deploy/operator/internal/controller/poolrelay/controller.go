@@ -23,6 +23,8 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -57,14 +59,18 @@ type reconciler struct {
 	client.Client
 	scheme         *runtime.Scheme
 	defaultBackend configv1alpha1.DiscoveryBackend
+	// exports configures the pool's ServiceExports, which the controller maintains
+	// when the multiClusterExport gate is on, and is nil otherwise.
+	exports *exportSettings
 }
 
-// Setup registers the one-DGD Relay controller and its DGD dependency watch.
+// Setup registers the one-DGD Relay controller and its DGD dependency watch, and,
+// when the multiClusterExport gate is on, the watches of the pool's exports.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
 	r := &reconciler{Client: mgr.GetClient(), scheme: mgr.GetScheme(), defaultBackend: config.Discovery.Backend}
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoPoolRelay{}).
-		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
+		WithEventFilter(eventFilter(config, runtimeConfig)).
 		Watches(&v1beta1.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, object client.Object) []ctrl.Request {
 			key := types.NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
 			return []ctrl.Request{{NamespacedName: key}}
@@ -74,8 +80,14 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
-		Owns(&rbacv1.RoleBinding{}).
-		Complete(r)
+		Owns(&rbacv1.RoleBinding{})
+	if runtimeConfig.Gate.Enabled(features.MultiClusterExport) {
+		var err error
+		if controllerBuilder, err = r.watchExports(mgr, controllerBuilder, config, runtimeConfig); err != nil {
+			return err
+		}
+	}
+	return controllerBuilder.Complete(r)
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamopoolrelays,verbs=get;list;watch
@@ -88,7 +100,8 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 // +kubebuilder:rbac:groups=core,resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update
 
-// Reconcile keeps one Relay Deployment and Service in step with its named DGD.
+// Reconcile keeps one Relay Deployment and Service in step with its named DGD, and
+// the pool's exports with them.
 func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
 	var relay v1alpha1.DynamoPoolRelay
 	if err := r.Get(ctx, request.NamespacedName, &relay); err != nil {
@@ -139,22 +152,45 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
+	result, err := r.publish(ctx, &relay, resources, desiredDeployment)
+	if errors.Is(err, errOwnershipConflict) {
+		// publish withdrew the Relay, and with it the pool's exports.
+		return result, err
+	}
+	// The pool's exports follow the DGD whether or not the Relay's own resources
+	// applied: a failure of one does not hold back the other.
+	if err := errors.Join(err, r.reconcileExports(ctx, &relay, &dgd)); err != nil {
+		// An error requeues the Relay with backoff, which replaces the result.
+		return ctrl.Result{}, err
+	}
+	return result, nil
+}
+
+// publish applies the Relay's resources and Deployment, and reports the
+// Deployment's progress in the Relay's status. A resource that another owner
+// controls withdraws the Relay, with an error that wraps errOwnershipConflict.
+func (r *reconciler) publish(
+	ctx context.Context,
+	relay *v1alpha1.DynamoPoolRelay,
+	resources []client.Object,
+	desiredDeployment *appsv1.Deployment,
+) (ctrl.Result, error) {
 	for _, resource := range resources {
-		if err := r.apply(ctx, &relay, resource); err != nil {
+		if err := r.apply(ctx, relay, resource); err != nil {
 			if errors.Is(err, errOwnershipConflict) {
-				_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
+				_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
 				return ctrl.Result{}, errors.Join(err, withdrawErr)
 			}
-			return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
+			return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
 		}
 	}
-	deployment, err := r.applyDeployment(ctx, &relay, desiredDeployment)
+	deployment, err := r.applyDeployment(ctx, relay, desiredDeployment)
 	if err != nil {
 		if errors.Is(err, errOwnershipConflict) {
-			_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
+			_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
 			return ctrl.Result{}, errors.Join(err, withdrawErr)
 		}
-		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
+		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
 	}
 
 	// Deployment status is listener availability, never model or KV readiness.
@@ -167,7 +203,7 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if ready {
 		reason, message = "ListenerAvailable", "All requested Relay listeners are available"
 	}
-	if err := r.setStatus(ctx, &relay, ready, reason, message, serviceName(relay.Name), available, true); err != nil {
+	if err := r.setStatus(ctx, relay, ready, reason, message, multicluster.PoolRelayServiceName(relay.Name), available, true); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !ready {
@@ -237,7 +273,7 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 
 // withdraw removes the publication endpoint before reporting an unresolved source.
 func (r *reconciler) withdraw(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason, message string) (ctrl.Result, error) {
-	name := serviceName(relay.Name)
+	name := multicluster.PoolRelayServiceName(relay.Name)
 	metadata := metav1.ObjectMeta{Name: name, Namespace: relay.Namespace}
 	var cleanupErrors []error
 	for _, object := range []client.Object{
@@ -259,6 +295,10 @@ func (r *reconciler) withdraw(ctx context.Context, relay *v1alpha1.DynamoPoolRel
 		if err := r.Delete(ctx, object, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 			cleanupErrors = append(cleanupErrors, err)
 		}
+	}
+	// The pool's exports go with the Relay's Service, whatever the reason.
+	if err := r.withdrawExports(ctx, relay); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
 	}
 	if err := r.setStatus(ctx, relay, false, reason, message, "", 0, len(cleanupErrors) == 0); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
@@ -450,10 +490,8 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-func serviceName(dgdName string) string { return dgdName + "-pool-relay" }
-
 func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
-	name := serviceName(relay.Name)
+	name := multicluster.PoolRelayServiceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
