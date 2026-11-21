@@ -36,15 +36,24 @@ def create_mock_encode_client(
     embeddings: list[torch.Tensor],
     processed_prompt: str = "prompt",
     prompt_token_ids: list[int] | None = None,
+    grids: list[list[int]] | None = None,
 ) -> AsyncMock:
-    """Create mock encode client that returns embeddings via CUDA IPC handles."""
+    """Create mock encode client that returns embeddings via CUDA IPC handles.
+
+    With grids, each handle carries its image grid in its metadata.
+    """
+
+    def handle(i: int) -> dict[str, Any]:
+        if grids is None:
+            return {"name": f"h{i}"}
+        return {"name": f"h{i}", "metadata": {"image_grid_thw": grids[i]}}
 
     class MockResponse:
         def data(self):
             return {
                 "ep_disaggregated_params": {
                     "multimodal_embedding_handles": [
-                        f"h{i}" for i in range(len(embeddings))
+                        handle(i) for i in range(len(embeddings))
                     ]
                 },
                 "processed_prompt": processed_prompt,
@@ -123,6 +132,65 @@ class TestFetchEmbeddingsFromEncoder:
 
         assert len(result) == 2
         assert torch.equal(result[0], embedding1)
+
+    @pytest.mark.asyncio
+    async def test_cache_passes_each_image_grid(self, encoder_cache):
+        """Each image keeps its own grid on a cache miss and on a later hit.
+
+        A wide and a tall image can give the same number of embedding rows,
+        so only the grid tells TRT-LLM how each image is laid out.
+        """
+        urls = ["http://example.com/wide.jpg", "http://example.com/tall.jpg"]
+        embeddings = [torch.ones(2040, 8), torch.ones(2040, 8) * 2]
+        grids = [[1, 68, 120], [1, 120, 68]]
+        mock_client = create_mock_encode_client(embeddings, grids=grids)
+
+        with patch(
+            "dynamo.trtllm.multimodal.embedding_fetcher.extract_embeddings_from_handles",
+            AsyncMock(return_value=embeddings),
+        ) as extract:
+            miss = await fetch_embeddings_from_encoder(
+                urls, {"messages": []}, mock_client, encoder_cache
+            )
+            hit = await fetch_embeddings_from_encoder(
+                urls[::-1], {"messages": []}, mock_client, encoder_cache
+            )
+
+        assert extract.await_count == 1
+        for result, order in ((miss, [0, 1]), (hit, [1, 0])):
+            assert [item["image_grid_thw"] for item in result] == [
+                grids[i] for i in order
+            ]
+            for item, i in zip(result, order):
+                assert torch.equal(item["mm_embeddings"], embeddings[i])
+        for url, grid in zip(urls, grids):
+            cached = encoder_cache.get(MultimodalHasher.hash_bytes(url.encode()))
+            assert cached.image_grid_thw == grid
+
+    @pytest.mark.asyncio
+    async def test_cache_without_grid_keeps_bare_tensors(self, encoder_cache):
+        """An encoder that gives no grid still gets bare tensors, as before."""
+        url = "http://example.com/img.jpg"
+        embedding = torch.ones(10, 256)
+        mock_client = create_mock_encode_client([embedding])
+
+        with patch(
+            "dynamo.trtllm.multimodal.embedding_fetcher.extract_embeddings_from_handles",
+            AsyncMock(return_value=[embedding]),
+        ):
+            miss = await fetch_embeddings_from_encoder(
+                [url], {"messages": []}, mock_client, encoder_cache
+            )
+            hit = await fetch_embeddings_from_encoder(
+                [url], {"messages": []}, mock_client, encoder_cache
+            )
+
+        for result in (miss, hit):
+            assert len(result) == 1
+            assert isinstance(result[0], torch.Tensor)
+            assert torch.equal(result[0], embedding)
+        cached = encoder_cache.get(MultimodalHasher.hash_bytes(url.encode()))
+        assert cached.image_grid_thw is None
 
     @pytest.mark.asyncio
     async def test_session_scope_partitions_embedding_cache(
