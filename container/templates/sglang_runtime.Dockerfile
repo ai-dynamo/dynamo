@@ -449,6 +449,11 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
 
+{% if device == "cuda" and target == "runtime" %}
+# SGLang handles the absence of its optional benchmark plotter.
+RUN uv pip uninstall termplotlib
+{% endif %}
+
 {%- if device != "xpu" %}
 # Precompile Python bytecode into the image while still root. CI runs tests as
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
