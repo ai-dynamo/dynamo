@@ -1,0 +1,283 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Shadow Engine Recovery
+subtitle: Recover a failed engine with a snapshot-restored standby in the same Pod
+---
+
+Shadow engine recovery keeps an active engine and a paused standby in one worker
+Pod. Both restore from the same Dynamo Snapshot and share model weights through
+GPU Memory Service (GMS). When the active engine exits, the standby takes the
+shared lock, resumes, and registers to serve new requests.
+
+<Warning>
+**Experimental.** This guide covers **snapshotfailover** for single-node vLLM
+and SGLang workers. The separate **coldstartfailover** path initializes engines
+without Snapshot and uses GMS V0 with vLLM. Its manifests and `--load-format gms`
+settings do not apply here.
+</Warning>
+
+```text
+Capture: initialize + pause -> save process state and GMS weights
+                                |
+Worker Pod:                     v
+  GMS weights <---- active engine + paused standby
+                         |
+                   engine failure
+                         v
+                  standby resumes -> serves new requests
+```
+
+The examples use Qwen3-0.6B, one GPU, tensor parallelism of one (TP1), and eager
+execution. Either engine can become active first; `engine-0` is not a fixed role.
+
+## Prerequisites
+
+- Install a Dynamo platform version containing snapshotfailover support
+  (v1.6.0 or later), with checkpoint support enabled. Install standalone Snapshot
+  once per cluster, or use the bundled chart. Follow
+  [the Snapshot setup steps](../model-deployment/model-loading/snapshot.mdx#prerequisites).
+- Use Kubernetes 1.34 or later with DRA enabled, the NVIDIA GPU DRA driver, and
+  the `gpu.nvidia.com` DeviceClass. Capture and serving need compatible GPUs;
+  they run in separate Pods, each requesting one GPU in this example.
+- Meet [Snapshot's runtime prerequisites](https://github.com/ai-dynamo/snapshot#prerequisites),
+  including its node agent and the `nvidia` RuntimeClass. The examples run as
+  root, use unconfined AppArmor, and require
+  `profiles/block-iouring.json` on eligible nodes.
+- Provide an RWX StorageClass for the example's model cache and GMS weight PVCs.
+  Snapshot uses its own artifact storage; see
+  [Snapshot storage configuration](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/storage.md).
+- Use a matching Dynamo backend runtime image for all containers in the example.
+  Pin its digest for repeatable capture and restore. An upstream engine image
+  alone does not include Dynamo and GMS.
+
+## Deploy and verify recovery
+
+Set `RUNTIME_IMAGE` to your chosen backend's Dynamo runtime image containing
+snapshotfailover support, from a release, nightly, or your own build. Set the
+matching backend, namespace, and StorageClass below. Run one example at a time
+if the cluster has only one available GPU.
+
+```bash
+export NAMESPACE=dynamo-recovery
+export BACKEND=vllm
+: "${RUNTIME_IMAGE:?Set RUNTIME_IMAGE to a matching Dynamo backend runtime image}"
+export RWX_STORAGE_CLASS=your-rwx-storage-class
+export DGD="${BACKEND}-snapshot-failover"
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+```
+
+For SGLang, set `BACKEND=sglang`, use the matching `sglang-runtime` image, and
+recompute `DGD`. Select an image tag or digest actually published for your chosen
+[Dynamo release](https://github.com/ai-dynamo/dynamo/releases).
+
+<Steps>
+<Step title="Deploy the example">
+
+Download the [vLLM manifest](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/snapshot-failover.yaml)
+or [SGLang manifest](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/snapshot-failover.yaml)
+and substitute your image and storage settings:
+
+```bash
+curl --fail --location \
+  "https://raw.githubusercontent.com/ai-dynamo/dynamo/main/examples/backends/${BACKEND}/deploy/snapshot-failover.yaml" \
+  -o snapshot-failover-template.yaml
+sed -e "s|my-registry/${BACKEND}-runtime:my-tag|${RUNTIME_IMAGE}|g" \
+    -e "s|your-rwx-storage-class|${RWX_STORAGE_CLASS}|g" \
+  snapshot-failover-template.yaml > snapshot-failover.yaml
+kubectl apply -n "$NAMESPACE" -f snapshot-failover.yaml
+```
+
+The manifest creates two PVCs and a DGD. An init container downloads the model
+before capture; the engine then loads it offline. The worker combines:
+
+```yaml
+experimental:
+  gpuMemoryService:
+    mode: IntraPod
+  failover:
+    mode: IntraPod
+  checkpoint:
+    enabled: true
+    startupPolicy: WaitForCheckpoint
+    targetContainerName: main
+```
+
+Dynamo injects GMS V1 and shared GPU claims. The capture-only `gms-saver` persists
+weights after the engine pauses. The serving GMS sidecar loads those weights
+before the restored engines resume. `WaitForCheckpoint` keeps serving replicas
+at zero until both process capture and weight saving complete.
+
+See the [configuration reference](../../reference/kubernetes-api/dynamo-component-deployment.mdx#experimentalspec)
+for the complete `checkpoint`, `gpuMemoryService`, and `failover` fields.
+
+</Step>
+<Step title="Verify capture and restore">
+
+```bash
+kubectl wait "dgd/$DGD" -n "$NAMESPACE" \
+  --for='jsonpath={.status.checkpoints.worker.ready}=true' --timeout=30m
+export SNAPSHOT_NAME=$(kubectl get "dgd/$DGD" -n "$NAMESPACE" \
+  -o jsonpath='{.status.checkpoints.worker.checkpointName}')
+kubectl get "podsnapshot/$SNAPSHOT_NAME" -n "$NAMESPACE"
+
+export WORKER_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component=worker,"'!nvidia.com/snapshot-job'
+kubectl wait pod -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
+  --for=condition=Ready --timeout=10m
+export WORKER_POD=$(kubectl get pod -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl get pod "$WORKER_POD" -n "$NAMESPACE" \
+  -o jsonpath='{range .status.conditions[?(@.type=="nvidia.com/Restored")]}{.type}={.status}{"\n"}{end}{range .status.containerStatuses[*]}{.name}: ready={.ready}, restarts={.restartCount}{"\n"}{end}'
+```
+
+Expect `nvidia.com/Restored=True` and both `engine-0` and `engine-1` ready.
+Snapshot readiness alone does not prove that the serving containers restored.
+Standby readiness means it is waiting for promotion; it does not register a
+second serving worker.
+
+</Step>
+<Step title="Send an inference request">
+
+In a separate terminal, forward the frontend:
+
+```bash
+kubectl port-forward -n "$NAMESPACE" "service/${DGD}-frontend" 8000:8000
+```
+
+Send a short request and keep this command for the post-failure check:
+
+```bash
+curl --fail-with-body http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Name the capital of France."}],"max_tokens":32,"temperature":0}'
+```
+
+Expect a successful response with generated text before proceeding.
+
+</Step>
+<Step title="Fail the active engine">
+
+Run this only on the example deployment. Read the shared lock to identify the
+active container, then kill its Dynamo worker process. Leave the Pod and GMS
+sidecar running so this tests local engine recovery.
+
+```bash
+export ACTIVE=$(kubectl exec -n "$NAMESPACE" "$WORKER_POD" -c engine-0 -- \
+  cat /gms-intrapod-control/failover.lock)
+case "$ACTIVE" in
+  engine-0|engine-1) echo "Failing $ACTIVE" ;;
+  *) echo "No active engine identity found"; exit 1 ;;
+esac
+export RESTARTS=$(kubectl get pod "$WORKER_POD" -n "$NAMESPACE" \
+  -o "jsonpath={.status.containerStatuses[?(@.name==\"$ACTIVE\")].restartCount}")
+kubectl exec -i -n "$NAMESPACE" "$WORKER_POD" -c "$ACTIVE" -- \
+  python3 - "$BACKEND" <<'PY'
+import os
+import signal
+import sys
+from pathlib import Path
+
+target = ("dynamo." + sys.argv[1]).encode()
+pids = []
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        argv = (entry / "cmdline").read_bytes().split(b"\0")
+    except (FileNotFoundError, PermissionError):
+        continue
+    if argv[1:3] == [b"-m", target]:
+        pids.append(int(entry.name))
+assert len(pids) == 1 and pids[0] != 1, f"Expected one worker child, found {pids}"
+os.kill(pids[0], signal.SIGKILL)
+PY
+```
+
+The surviving engine acquires the lock and wakes. Check its logs and rerun the
+inference request:
+
+```bash
+export SURVIVOR=engine-1
+if [ "$ACTIVE" = engine-1 ]; then export SURVIVOR=engine-0; fi
+kubectl logs -n "$NAMESPACE" "$WORKER_POD" -c "$SURVIVOR" --tail=100
+kubectl exec -n "$NAMESPACE" "$WORKER_POD" -c "$SURVIVOR" -- \
+  cat /gms-intrapod-control/failover.lock
+```
+
+Expect `Lock acquired, waking engine`, then `Engine awake, registering with
+discovery`, and the survivor's name in the lock file. Serving can briefly
+interrupt while failure detection, promotion, and routing converge.
+
+</Step>
+<Step title="Check standby replenishment">
+
+With a Snapshot agent that supports restoring restarted destination containers,
+Kubernetes restarts the failed container and Snapshot restores that new
+incarnation as the standby. Check that its restart count increased, both
+engines are ready again, and GMS has not restarted:
+
+```bash
+kubectl wait pod "$WORKER_POD" -n "$NAMESPACE" \
+  --for="jsonpath={.status.containerStatuses[?(@.name==\"$ACTIVE\")].restartCount}=$((RESTARTS + 1))" \
+  --timeout=10m
+kubectl wait pod "$WORKER_POD" -n "$NAMESPACE" \
+  --for=condition=Ready --timeout=10m
+kubectl get pod "$WORKER_POD" -n "$NAMESPACE" \
+  -o jsonpath='{range .status.containerStatuses[*]}{.name}: id={.containerID}, ready={.ready}, restarts={.restartCount}{"\n"}{end}{range .status.initContainerStatuses[?(@.name=="gms-server")]}{.name}: id={.containerID}, restarts={.restartCount}{"\n"}{end}'
+```
+
+Confirm replacement restore in the Snapshot agent logs; the original Pod-level
+`Restored=True` condition alone is insufficient. After replenishment, repeat the
+failure step against the newly active engine to verify a second recovery cycle.
+See the dependency below before attempting this step.
+
+</Step>
+</Steps>
+
+## Limitations
+
+- **Scope:** snapshotfailover supports single-node vLLM and SGLang. These examples
+  cover TP1 eager execution. TensorRT-LLM snapshot capture/restore does not yet
+  support this failover path.
+- **Failure boundary:** the Pod, node, GPU, and GMS server must remain healthy.
+  This recovers an engine process, not hardware or Pod loss.
+- **Request state:** in-flight requests and KV cache contents are not preserved.
+  [Request migration](request-migration.md) is a separate mechanism; promotion
+  does not guarantee uninterrupted serving.
+- **Replenishment:** repeated recovery requires destination-container restore
+  support in the Snapshot agent. That change is tracked in
+  [Snapshot PR #174](https://github.com/ai-dynamo/snapshot/pull/174); verify that
+  your deployed build contains it before relying on standby replacement.
+- **Capture compatibility:** keep capture and restore images, engine settings,
+  volumes, and GPUs compatible. Recapture after changing them, using a fresh GMS
+  artifact directory. Extra listeners or instrumentation opened before capture
+  can conflict when restored twice into the same Pod.
+
+## Troubleshooting
+
+- **Capture stays pending:** inspect `kubectl get snapshotjobs,podsnapshots -n
+  "$NAMESPACE"`, capture Pod logs, and `gms-saver` logs. Check GPU claims and PVCs.
+- **Restore fails:** check the Snapshot agent logs on the worker's node and the
+  worker's events. See
+  [Snapshot troubleshooting](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/troubleshooting.md).
+- **No response after promotion:** confirm the new lock owner, wake/registration
+  logs, and [engine health](../../reference/observability/health-checks.mdx).
+
+## Cleanup
+
+```bash
+kubectl delete "dgd/$DGD" -n "$NAMESPACE"
+```
+
+The example uses `deletionPolicy: Delete` for Dynamo-managed capture resources.
+Its model-cache and GMS-artifact PVCs are independent and remain until you delete
+them. Once capture and serving Pods have terminated, remove those example PVCs
+if their data is no longer needed:
+
+```bash
+kubectl delete pvc -n "$NAMESPACE" \
+  "${BACKEND}-snapshot-model-cache" "${BACKEND}-snapshot-gms-artifacts"
+```
+
+Do not delete shared Snapshot storage or uninstall the cluster-wide Snapshot
+operator to clean up this example.
