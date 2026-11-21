@@ -112,6 +112,47 @@ import { TerminalDemo } from "@/components/TerminalDemo";
 />
 ```
 
+### SlimeRLLoop
+
+On the Slime Integration overview only. It takes no props and renders its own
+styles from `SlimeRLLoopStyles.tsx`. It lists the integration's parts, then
+steps from the two-box RL loop to Slime with Dynamo, using the layout that
+`SlimeIntegrationMap` uses for the tutorial.
+
+```mdx
+import { SlimeRLLoop } from "@/components/SlimeRLLoop";
+
+<SlimeRLLoop />
+```
+
+### SlimeClusterMap
+
+On the Slime Integration overview only. It takes no props and renders its own
+styles from `SlimeClusterMapStyles.tsx`. It places the tutorial's Pods on a
+Kubernetes cluster, and its term buttons highlight what each overlapping term
+(node, Pod, Ray cluster, RayJob, and so on) covers. Its Pods follow the Slime
+tutorial pages.
+
+```mdx
+import { SlimeClusterMap } from "@/components/SlimeClusterMap";
+
+<SlimeClusterMap />
+```
+
+### SlimeIntegrationMap
+
+On the Slime Integration overview only. It takes no props and renders its own
+styles from `SlimeIntegrationMapStyles.tsx`. Its numbers follow the Slime
+tutorial pages, so update the component when the tutorial's run changes. It
+shows KV-aware routing, which the tutorial's DynamoGraphDeployment doesn't turn
+on, so the page says so next to it.
+
+```mdx
+import { SlimeIntegrationMap } from "@/components/SlimeIntegrationMap";
+
+<SlimeIntegrationMap />
+```
+
 ## Generated Modules
 
 `nightly-selector-data.generated.ts` is gitignored and rebuilt by the docs
