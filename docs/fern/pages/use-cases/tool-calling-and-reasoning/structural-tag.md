@@ -289,7 +289,9 @@ tool arguments inside the structural tag:
 
 - Tools with `strict: true` — their declared parameter schema is used.
 - Tools with omitted `strict` — their declared parameter schema is used. A
-  regex in it that the backend's XGrammar cannot compile is left out; see
+  `pattern` the backend's XGrammar cannot compile is left out, and a
+  `patternProperties` key it cannot compile leaves the tool's arguments
+  unconstrained; see
   [Regex constructs the backend cannot compile](#regex-constructs-the-backend-cannot-compile).
 - Tools with `strict: false` — argument content is schema-relaxed when the
   parser builds a structural tag.
