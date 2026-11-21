@@ -122,6 +122,10 @@ impl RouterPluginBuilder {
         Ok(())
     }
 
+    pub(crate) fn has_request_classifier(&self) -> bool {
+        self.plugins.request_classifier().is_some()
+    }
+
     pub(crate) fn has_custom_worker_selection(&self) -> bool {
         self.plugins.has_custom_worker_selection()
     }

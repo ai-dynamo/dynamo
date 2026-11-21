@@ -29,7 +29,7 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{
-        EncoderRouter, PrefillRouter, RolePolicy, RouterLoadSource, RoutingLoadContext,
+        EncoderRouter, PrefillRouter, RoleInputs, RolePolicy, RouterLoadSource, RoutingLoadContext,
         RoutingPolicy, role_routing,
     },
     local_model::runtime_config::{
@@ -554,17 +554,24 @@ impl ModelWatcher {
             return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
-        role_routing::log_serving_set_routing(
-            card.name(),
-            &spec.key.id(),
-            effective_worker_type(card.worker_type, card.model_type),
-            card.router_config.is_some(),
-            &router_config,
-        );
+        // A set that routes tokenized requests logs its routing once its policy is resolved.
+        let routes_tokens = card.model_input == ModelInput::Tokens
+            && (card.model_type.supports_chat() || card.model_type.supports_completions());
+        let log_routing = |policy: Option<&RolePolicy>| {
+            role_routing::log_serving_set_routing(
+                card.name(),
+                &spec.key.id(),
+                effective_worker_type(card.worker_type, card.model_type),
+                card.router_config.is_some(),
+                &router_config,
+                policy,
+            )
+        };
+        if !routes_tokens {
+            log_routing(None);
+        }
 
-        if card.model_input == ModelInput::Tokens
-            && (card.model_type.supports_chat() || card.model_type.supports_completions())
-        {
+        if routes_tokens {
             // Case 1: Tokens + (Chat OR Completions OR Both)
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
@@ -639,19 +646,29 @@ impl ModelWatcher {
             // Resolve the set's policy whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
             // need the shared chooser in KV mode.
-            let policy = match needs_preprocessed_routing
+            let role_policy = needs_preprocessed_routing
                 .then(|| {
                     role_routing::role_policy(
                         &router_config.router_mode,
-                        effective_worker_type(card.worker_type, card.model_type),
-                        &router_config.kv_router_config,
-                        Some(&card.display_name),
+                        &RoleInputs {
+                            role: effective_worker_type(card.worker_type, card.model_type),
+                            config: &router_config.kv_router_config,
+                            model_name: Some(&card.display_name),
+                            selection: self.plugins.selection_policy(),
+                            has_request_classifier: self.plugins.has_request_classifier(),
+                            lora_enabled: self.manager.lora_enabled(),
+                            reserves_workers: false,
+                            busy_thresholds: load_thresholds.is_configured(),
+                            workers_have_taints: !card.runtime_config.taints.is_empty(),
+                            fronts_conditional_disagg: false,
+                        },
                     )
                 })
-                .transpose()?
-            {
-                Some(RolePolicy::Kv { selection }) => {
-                    let plugins = selection.map(|named| self.plugins.with_selection_policy(named));
+                .transpose()?;
+            log_routing(role_policy.as_ref());
+            let policy = match role_policy {
+                Some(RolePolicy::Kv { selection, .. }) => {
+                    let plugins = self.plugins.with_selection_policy(selection);
                     let mut chooser = self
                         .manager
                         .kv_chooser_for_with_plugins_and_client(
@@ -661,7 +678,7 @@ impl ModelWatcher {
                                 .client()
                                 .clone(),
                             card.kv_cache_block_size,
-                            plugins.as_ref().unwrap_or(&self.plugins),
+                            &plugins,
                             Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             card.worker_type,
@@ -708,6 +725,7 @@ impl ModelWatcher {
                     card.kv_cache_block_size,
                     Some(prefill_config),
                     self.plugins.selection_policy(),
+                    false,
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,

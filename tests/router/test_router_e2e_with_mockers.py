@@ -22,6 +22,7 @@ import aiohttp
 import pytest
 
 from tests.router.common import (
+    _plain_log,
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_disagg_per_role_router_modes,
@@ -105,6 +106,13 @@ ROUTER_AIS_CONFIG = {
     "worker_type": "aggregated",
 }
 
+_PREFILL_TOKENS_OVERLOAD = {
+    "blocks_threshold": "None",
+    "tokens_threshold": 1,
+    "tokens_threshold_frac": "None",
+    "router_queue_threshold": "None",
+    "max_tokens": 1,
+}
 ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
@@ -113,16 +121,7 @@ ROUTER_OVERLOAD_529_CASES = (
         },
         id="decode-blocks",
     ),
-    pytest.param(
-        {
-            "blocks_threshold": "None",
-            "tokens_threshold": 1,
-            "tokens_threshold_frac": "None",
-            "router_queue_threshold": "None",
-            "max_tokens": 1,
-        },
-        id="prefill-tokens",
-    ),
+    pytest.param(_PREFILL_TOKENS_OVERLOAD, id="prefill-tokens"),
 )
 # Speed isolation: only the *gated* stage is slow (speedup_ratio 0.01); the
 # non-gated stage is orders of magnitude faster (100.0) so its latency never
@@ -733,6 +732,35 @@ def test_mocker_kv_router_overload_529(
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             **overload_config,
+        )
+
+
+# ~22s measured; the failure path alone waits 20s for a rejection.
+@pytest.mark.timeout(90)
+def test_busy_threshold_keeps_picker_only_role_on_kv_path(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """A busy threshold keeps a picker-only policy-file role on the KV path.
+
+    The prefill-token threshold is judged against the load a KV router books,
+    so a ``round-robin`` role that ran without one would stop returning 529.
+    """
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("worker_selection:\n  aggregated: round-robin\n")
+    mocker_args = {"speedup_ratio": 0.01, "block_size": 4, "num_gpu_blocks": 64}
+
+    with MockerProcess(request, mocker_args=mocker_args, num_mockers=1) as mockers:
+        _test_router_overload_529(
+            engine_workers=mockers,
+            block_size=4,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            router_policy_config=str(policy_file),
+            **_PREFILL_TOKENS_OVERLOAD,
         )
 
 
@@ -1374,16 +1402,31 @@ def test_mocker_disagg_router_overload_529(
         )
 
 
+@pytest.mark.parametrize(
+    "decode_policy",
+    [None, "round-robin"],
+    ids=["default-policy", "picker-only-decode"],
+)
 @pytest.mark.timeout(180)
 def test_disagg_topology_required_prefill_pin_match_and_mismatch(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     tmp_path,
+    decode_policy,
 ):
-    """Validate required KV-transfer topology policy from pinned prefill workers."""
+    """Validate required KV-transfer topology policy from pinned prefill workers.
+
+    Decode workers that advertise topology keep their KV router under a
+    picker-only policy too, and it filters them by the required taint.
+    """
     logger.info("Starting disaggregated topology-aware prefill pin test")
     _ = (runtime_services_dynamic_ports, predownload_tokenizers)
+    router_policy_config = None
+    if decode_policy is not None:
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(f"worker_selection:\n  decode: {decode_policy}\n")
+        router_policy_config = str(policy_file)
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
@@ -1458,6 +1501,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     prefill_zone_b_id=prefill_zone_b_id,
                     shared_namespace=shared_namespace,
                     request_plane="tcp",
+                    router_policy_config=router_policy_config,
                 )
 
 
@@ -1589,7 +1633,7 @@ def test_disagg_per_role_policy_file(
         num_decode_mockers=2,
         enable_disagg_bootstrap=False,
     ) as (prefill_workers, decode_workers):
-        _test_disagg_per_role_router_modes(
+        frontend_log = _test_disagg_per_role_router_modes(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=BLOCK_SIZE,
@@ -1599,6 +1643,73 @@ def test_disagg_per_role_policy_file(
             request_plane="nats",
             router_policy_config=str(policy_file),
         )
+
+    # Each role takes the path its own policy needs: the cost function keeps a
+    # KV router, and round-robin runs without one.
+    assert re.search(
+        r'Activating prefill router .* policy="dynamo-default-cost-fn" kv_router=true ',
+        frontend_log,
+    )
+    assert re.search(
+        r'Activating router .* policy="round-robin" kv_router=false ', frontend_log
+    )
+    assert not re.search(r"KvRouter scheduling .* worker_type=decode", frontend_log)
+
+
+@pytest.mark.timeout(180)
+def test_policy_file_picker_only_roles_run_without_kv_router(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """A role whose policy-file type is only a picker runs without a KV router.
+
+    ``random`` and ``round-robin`` read no cache or load state, so the frontend
+    routes both hops the way ``--router-mode`` would and builds no KV router.
+    """
+    num_requests = 6
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text(
+        "worker_selection:\n  prefill: random\n  decode: round-robin\n"
+    )
+
+    with launch_disagg_workers(
+        request,
+        f"test-namespace-{generate_random_suffix()}",
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as worker_groups:
+        worker_ids, frontend_log = _test_router_mode_policy_type(
+            worker_groups=list(worker_groups),
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            policy_type=None,
+            num_requests=num_requests,
+            router_policy_config=str(policy_file),
+        )
+
+    assert re.search(
+        r'Activating prefill router .* policy="random" kv_router=false ', frontend_log
+    )
+    assert re.search(
+        r'Activating router .* policy="round-robin" kv_router=false ', frontend_log
+    )
+    assert "KV Routing initialized" not in frontend_log
+    # The transport picks the worker and names each role's policy.
+    for policy in ("random", "round-robin"):
+        selected = frontend_log.count(f'Selected worker router_mode="{policy}"')
+        assert selected >= num_requests, f"{policy}: {selected} selections"
+    assert 'Selected worker router_mode="kv"' not in frontend_log
+    decode_ids = [ids["decode_worker_id"] for ids in worker_ids]
+    assert all(a != b for a, b in zip(decode_ids, decode_ids[1:])), decode_ids
 
 
 @pytest.mark.timeout(180)
@@ -1821,6 +1932,9 @@ def test_router_per_worker_config(
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize(
+    "picker_only", [False, True], ids=["default-policy", "picker-only-policy"]
+)
 def test_update_model_taints_replaces_worker_routing_constraints(
     request,
     runtime_services_dynamic_ports,
@@ -1828,8 +1942,14 @@ def test_update_model_taints_replaces_worker_routing_constraints(
     request_plane,
     event_plane,
     num_system_ports,
+    picker_only,
 ):
-    """Update one worker's taints through HTTP and observe KV routing propagation."""
+    """Update one worker's taints through HTTP and observe routing propagation.
+
+    With a picker-only policy the workers register without taints, so the role
+    runs without a KV router. It reads the taints each worker has when a request
+    requires some, so it routes by taints the workers get later too.
+    """
     assert event_plane == "zmq"
     assert num_system_ports == 2
     worker_a_system_port, worker_b_system_port = dynamo_dynamic_ports.system_ports
@@ -1864,7 +1984,7 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             frontend_url=frontend_url,
             expected_num_workers=workers.num_workers,
             timeout=60,
-            test_payload=fast_payload,
+            test_payload=COUNTER_TEST_PAYLOAD if picker_only else fast_payload,
             engine_workers=workers,
             store_backend="etcd",
             request_plane=request_plane,
@@ -1877,45 +1997,53 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             async with session.post(chat_url, json=payload) as response:
                 return response.status, await response.text()
 
-        client_timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            baseline_a = read_count(workers.cpu_count_file)
-            baseline_b = read_count(workers.gpu_count_file)
-            status, body = await post_chat(session, fast_payload)
-            assert status == 200, body
-            assert read_count(workers.cpu_count_file) == baseline_a + 1
-            assert read_count(workers.gpu_count_file) == baseline_b
-
+        async def update_taints(
+            session: aiohttp.ClientSession, worker: int, taint: str
+        ) -> None:
             update_url = (
-                f"http://127.0.0.1:{system_ports[0]}/engine/update/model_taints"
+                f"http://127.0.0.1:{system_ports[worker]}/engine/update/model_taints"
             )
-            async with session.post(
-                update_url,
-                json={"taints": ["capacity/slow"]},
-            ) as response:
+            async with session.post(update_url, json={"taints": [taint]}) as response:
                 update_body = await response.json(content_type=None)
                 assert response.status == 200, update_body
-            assert update_body == {
-                "status": "ok",
-                "taints": ["capacity/slow"],
-            }
+            assert update_body == {"status": "ok", "taints": [taint]}
 
+        async def wait_until_routed(
+            session: aiohttp.ClientSession, payload: dict[str, Any], taint: str
+        ) -> None:
             # The first successful constrained request is the propagation barrier.
             deadline = asyncio.get_running_loop().time() + 30
             last_status = None
             last_body = ""
             while asyncio.get_running_loop().time() < deadline:
-                last_status, last_body = await post_chat(session, slow_payload)
+                last_status, last_body = await post_chat(session, payload)
                 if last_status == 200:
-                    break
+                    return
                 await asyncio.sleep(0.1)
-            else:
-                raise AssertionError(
-                    "Timed out waiting for capacity/slow routing propagation: "
-                    f"status={last_status} body={last_body}"
-                )
+            raise AssertionError(
+                f"Timed out waiting for {taint} routing propagation: "
+                f"status={last_status} body={last_body}"
+            )
 
-            assert read_count(workers.cpu_count_file) == baseline_a + 2
+        client_timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            baseline_a = read_count(workers.cpu_count_file)
+            baseline_b = read_count(workers.gpu_count_file)
+            status, body = await post_chat(session, fast_payload)
+            if picker_only:
+                # No worker has a taint yet. The second worker gets its own now.
+                assert status == 500, body
+                await update_taints(session, 1, "capacity/other")
+            else:
+                assert status == 200, body
+                baseline_a += 1
+            assert read_count(workers.cpu_count_file) == baseline_a
+            assert read_count(workers.gpu_count_file) == baseline_b
+
+            await update_taints(session, 0, "capacity/slow")
+            await wait_until_routed(session, slow_payload, "capacity/slow")
+
+            assert read_count(workers.cpu_count_file) == baseline_a + 1
             assert read_count(workers.gpu_count_file) == baseline_b
 
             before_removed_a = read_count(workers.cpu_count_file)
@@ -1930,16 +2058,30 @@ def test_update_model_taints_replaces_worker_routing_constraints(
 
             before_other_a = read_count(workers.cpu_count_file)
             before_other_b = read_count(workers.gpu_count_file)
-            status, body = await post_chat(session, other_payload)
-            assert status == 200, body
+            if picker_only:
+                await wait_until_routed(session, other_payload, "capacity/other")
+            else:
+                status, body = await post_chat(session, other_payload)
+                assert status == 200, body
             assert read_count(workers.cpu_count_file) == before_other_a
             assert read_count(workers.gpu_count_file) == before_other_b + 1
+
+            if picker_only:
+                # Every request that requires a taint goes to the one worker that has
+                # it, and a request that requires none still rotates over both.
+                for payload in [slow_payload] * 4 + [COUNTER_TEST_PAYLOAD] * 4:
+                    status, body = await post_chat(session, payload)
+                    assert status == 200, body
+                assert read_count(workers.cpu_count_file) == before_other_a + 6
+                assert read_count(workers.gpu_count_file) == before_other_b + 3
 
     with CounterWorkerProcess(
         request,
         request_plane=request_plane,
         router_mode="kv",
-        initial_taints=(("capacity/fast",), ("capacity/other",)),
+        initial_taints=None
+        if picker_only
+        else (("capacity/fast",), ("capacity/other",)),
         system_ports=system_ports,
     ) as workers:
         with FrontendRouterProcess(
@@ -1951,5 +2093,15 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             request_plane=request_plane,
             router_mode="kv",
             min_initial_workers=workers.num_workers,
-        ):
+            # The workers advertise their own router configuration, which replaces the
+            # frontend's but for its selection of the worker-selection policy.
+            extra_env={"DYN_ROUTER_WORKER_SELECTION_POLICY": "round-robin"}
+            if picker_only
+            else None,
+        ) as frontend:
             asyncio.run(run_test(workers))
+            if picker_only:
+                assert re.search(
+                    r'Activating router .* policy="round-robin" kv_router=false ',
+                    _plain_log(frontend),
+                )

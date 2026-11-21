@@ -179,6 +179,28 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     } else {
         None
     };
+    // A role hosted by its policy reads each worker's taints from the endpoint's own watch,
+    // for the requests that require some. As a KV router does, it starts with the configs
+    // of the initial workers, so those requests do not fail until the watch fills.
+    let worker_configs = if policy.honors_required_taints() {
+        let mut worker_configs = model_manager
+            .get_or_create_runtime_config_watcher(&router_client.endpoint)
+            .await?;
+        if min_initial_workers > 0 {
+            let _ = worker_configs
+                .wait_for(|configs| configs.len() >= min_initial_workers)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "runtime config watch closed before {min_initial_workers} workers \
+                         appeared for endpoint {endpoint_id}"
+                    )
+                })?;
+        }
+        Some(worker_configs)
+    } else {
+        None
+    };
 
     let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
     let affinity = match (ttl, &policy) {
@@ -235,6 +257,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             .load_context(load_context)
             .affinity_coordinator(affinity)
             .candidate_policy(candidate_policy)
+            .worker_configs(worker_configs)
             .multimodal_cache(embedding_cache_indexer.zip(cache_key_extractor))
             .build()
             .await?,
@@ -664,6 +687,105 @@ mod tests {
                 .to_string()
                 .contains("requires DYN_LORA_ENABLED")
         );
+        runtime.shutdown();
+    }
+
+    /// A role hosted by its policy starts with the runtime configs of its initial workers,
+    /// as a KV router does, so the first request that requires taints finds them.
+    #[tokio::test]
+    async fn role_hosted_by_its_policy_waits_for_initial_worker_configs() {
+        use crate::kv_router::{RoleInputs, RolePolicy, SelectionPolicySource, role_policy};
+
+        // The initial-worker count is process-wide.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::role_hosted_by_its_policy_waits_for_initial_worker_configs"
+            ),
+            &[("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")],
+        ) {
+            return;
+        }
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(
+            runtime.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = distributed
+            .namespace("hosted-initial-configs".to_string())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+        let load_context = RoutingLoadContext::start(
+            client.clone(),
+            crate::kv_router::RouterLoadSource::Aggregated,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let config = dynamo_kv_router::config::KvRouterConfig {
+            router_decode_policy: Some("round-robin".to_string()),
+            ..Default::default()
+        };
+        let role = RoleInputs {
+            role: crate::worker_type::WorkerType::Decode,
+            config: &config,
+            model_name: Some("test-model"),
+            selection: SelectionPolicySource::Registry,
+            has_request_classifier: false,
+            lora_enabled: false,
+            reserves_workers: false,
+            busy_thresholds: false,
+            workers_have_taints: false,
+            fronts_conditional_disagg: false,
+        };
+        let RolePolicy::Ready(policy) = role_policy(&RouterMode::KV.into(), &role).unwrap() else {
+            panic!("round-robin must run hosted");
+        };
+        let build = build_preprocessed_routing(
+            &client,
+            Arc::new(ModelManager::new()),
+            policy,
+            load_context,
+            None,
+            None,
+            false,
+            None,
+        );
+        tokio::pin!(build);
+
+        // The worker's instance is known and its runtime config is not.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut build)
+                .await
+                .is_err()
+        );
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        distributed
+            .discovery()
+            .register(
+                dynamo_runtime::discovery::DiscoverySpec::from_model(
+                    "hosted-initial-configs".to_string(),
+                    "workers".to_string(),
+                    "generate".to_string(),
+                    &card,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let built = tokio::time::timeout(Duration::from_secs(5), build)
+            .await
+            .expect("the worker's runtime config must end the wait");
+        assert!(built.is_ok());
         runtime.shutdown();
     }
 

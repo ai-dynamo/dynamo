@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use dynamo_runtime::pipeline::{OccupancyReservation, PushRouter, RoutingOccupancyState};
@@ -31,6 +31,7 @@ impl HostedOccupancy {
         picker: &HostedWorkerPicker,
         request: &PreprocessedRequest,
         pinned_worker: Option<u64>,
+        taint_eligible: Option<&HashSet<u64>>,
     ) -> Result<HostedOccupancySelection> {
         if let Some(worker_id) = pinned_worker {
             router.ensure_routable(worker_id)?;
@@ -44,7 +45,9 @@ impl HostedOccupancy {
         }
 
         let request = super::hosted::hosted_request(request);
-        let candidates = router.selectable_worker_ids()?;
+        let candidates = router.with_selectable_worker_ids(|ids| {
+            super::hosted::with_required_taints(ids, taint_eligible).map(Cow::into_owned)
+        })??;
         let selection = self
             .state
             .select_and_reserve_with(&candidates, |occupancy| {

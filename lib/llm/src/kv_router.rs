@@ -81,7 +81,7 @@ pub(crate) use request_lease::RequestAttemptRelease;
 pub(crate) use role_routing::{
     EVERY_ROLE, check_hint_policies_route_on_kv_path, check_policy_type_mode,
 };
-pub use role_routing::{RolePolicy, role_policy};
+pub use role_routing::{KvPathReason, RoleInputs, RolePolicy, role_policy};
 pub use routing_host::{
     HostedPolicy, KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
     RoutingPolicy,
