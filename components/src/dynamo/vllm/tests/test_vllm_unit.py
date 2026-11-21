@@ -716,9 +716,8 @@ def test_pinned_tekken_backend_serves_mixed_structured_outputs(
     from vllm.tokenizers.mistral import MistralTokenizer
 
     vllm_main = _load_vllm_main()
-    # mistral-common before 1.13.0 (the vLLM XPU image ships 1.11.7) rejects the
-    # `json_schema` settings builder; the shared fixture keeps it for the Rust
-    # frontend tests, and backend resolution does not depend on it.
+    # mistral-common < 1.13.0 (vLLM XPU image: 1.11.7) rejects the `json_schema`
+    # builder, which Rust frontend tests need; backend resolution ignores it.
     tekken = json.loads((_MOCK_TEKKEN_DIR / "tekken.json").read_text())
     tekken["model_settings_builder"].pop("json_schema", None)
     (tmp_path / "tekken.json").write_text(json.dumps(tekken))
