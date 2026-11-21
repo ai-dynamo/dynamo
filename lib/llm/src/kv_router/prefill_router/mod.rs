@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
@@ -11,6 +12,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
@@ -24,13 +26,16 @@ use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    discovery::{
+        ModelManager, RuntimeConfigWatch, WorkerSetTarget, WorkerSetTargetId,
+        available_peer_taints, has_kv_transfer_peer,
+    },
+    kv_router::{KvRouter, RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+        preprocessor::{BootstrapInfo, PrefillResult, RoutingHints, TraceLink},
         timing::RequestPhase,
     },
     protocols::response_merge::{
@@ -81,6 +86,7 @@ impl PrefillLifecycleState {
 enum PrefillDispatchErrorClass {
     Cancelled,
     AtCapacity,
+    Unavailable,
     Failed,
 }
 
@@ -99,6 +105,8 @@ fn classify_prefill_dispatch_error(
         &[],
     ) {
         PrefillDispatchErrorClass::AtCapacity
+    } else if match_error_chain(error, &[ErrorType::WorkerUnavailable], &[]) {
+        PrefillDispatchErrorClass::Unavailable
     } else {
         PrefillDispatchErrorClass::Failed
     }
@@ -268,6 +276,8 @@ pub struct PrefillRouter {
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
+    /// The last prefill steering set; see [`DecodeReachability`].
+    decode_reachability: ArcSwapOption<DecodeReachability>,
     selection_policy: Option<SelectionPolicySource>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
@@ -554,27 +564,6 @@ impl
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
-        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
-
-        // Try to resolve prefill worker upfront: if we can get bootstrap info early,
-        // spawn prefill in background and proceed to decode immediately.
-        let preselected_worker = prefill_req
-            .routing
-            .as_ref()
-            .and_then(|r| r.prefill_worker_id);
-
-        let tracker = prefill_req.tracker.clone();
-        let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
-        let prefill_ctx = prefill_context.context();
-        if let Some(session_affinity) = session_affinity {
-            prefill_context.insert(
-                SESSION_AFFINITY_CONTEXT_KEY,
-                session_affinity.as_ref().clone(),
-            );
-        }
-        let prefill_engine_ctx = prefill_context.context();
         let binding = match self.binding.load_full() {
             Some(binding) => binding,
             // The target was replaced after the gate above (a WorkerSet succession
@@ -595,6 +584,32 @@ impl
                 }
             },
         };
+
+        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
+
+        // Try to resolve prefill worker upfront: if we can get bootstrap info early,
+        // spawn prefill in background and proceed to decode immediately.
+        let preselected_worker = prefill_req
+            .routing
+            .as_ref()
+            .and_then(|r| r.prefill_worker_id);
+        // A pinned prefill worker is not steered: the dispatch check reports a stranded pin.
+        if !pins_prefill_worker(prefill_req.routing.as_ref()) {
+            self.steer_prefill_to_decode_reachable_workers(&mut prefill_req, &binding.endpoint_id);
+        }
+
+        let tracker = prefill_req.tracker.clone();
+        let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
+        let prefill_ctx = prefill_context.context();
+        if let Some(session_affinity) = session_affinity {
+            prefill_context.insert(
+                SESSION_AFFINITY_CONTEXT_KEY,
+                session_affinity.as_ref().clone(),
+            );
+        }
+        let prefill_engine_ctx = prefill_context.context();
 
         // Keyed on the prefill mode, not the decode set's, and checked after
         // the binding loads because that is where the prefill mode lives.
@@ -691,6 +706,10 @@ impl
                         error = %error,
                         "request rejected by prefill worker (at capacity)"
                     ),
+                    PrefillDispatchErrorClass::Unavailable => tracing::warn!(
+                        error = %error,
+                        "Remote prefill not served, failing request with a retryable error"
+                    ),
                     PrefillDispatchErrorClass::Failed => {
                         tracing::error!(error = %error, "Remote prefill failed, failing request");
                     }
@@ -773,6 +792,58 @@ impl
     }
 }
 
+/// Whether the request pins its prefill worker. Prefill selection falls back to
+/// `backend_instance_id` when `prefill_worker_id` is unset.
+fn pins_prefill_worker(routing: Option<&RoutingHints>) -> bool {
+    routing.is_some_and(|routing| {
+        routing
+            .prefill_worker_id
+            .or(routing.backend_instance_id)
+            .is_some()
+    })
+}
+
+/// Intersect the request's allowlist with `reachable`. Leave it unchanged if that would
+/// leave no candidate; the dispatch preflight then rejects the pick.
+fn restrict_to_reachable(routing: &mut RoutingHints, reachable: &HashSet<WorkerId>) {
+    let narrowed = match routing.allowed_worker_ids.as_ref() {
+        Some(allowed) => allowed.intersection(reachable).copied().collect(),
+        None => reachable.clone(),
+    };
+    if !narrowed.is_empty() {
+        routing.allowed_worker_ids = Some(narrowed);
+    }
+}
+
+/// The prefill workers that have an available decode worker for their KV, and the inputs
+/// they were computed from. Reused until one of those inputs changes.
+struct DecodeReachability {
+    endpoint_id: EndpointId,
+    prefill_configs: RuntimeConfigWatch,
+    decode_configs: RuntimeConfigWatch,
+    decode_available: Option<Arc<HashSet<WorkerId>>>,
+    /// `None` when no prefill worker is excluded.
+    reachable: Option<Arc<HashSet<WorkerId>>>,
+}
+
+impl DecodeReachability {
+    fn is_current(
+        &self,
+        endpoint_id: &EndpointId,
+        decode_available: Option<&Arc<HashSet<WorkerId>>>,
+    ) -> bool {
+        // A closed watch reports an error: recompute rather than trust the entry.
+        let unchanged = |configs: &RuntimeConfigWatch| matches!(configs.has_changed(), Ok(false));
+        self.endpoint_id == *endpoint_id
+            && unchanged(&self.prefill_configs)
+            && unchanged(&self.decode_configs)
+            && match (self.decode_available.as_ref(), decode_available) {
+                (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
+                (cached, current) => cached.is_none() && current.is_none(),
+            }
+    }
+}
+
 /// Prefill must survive client cancellation once decode needs its KV transfer.
 /// Copy request identity and metadata, but keep a separate cancellation controller.
 fn independent_prefill_context(
@@ -786,10 +857,6 @@ fn independent_prefill_context(
 }
 
 impl PrefillRouter {
-    pub(crate) fn conditional_disagg_enabled(&self) -> bool {
-        self.conditional_disagg_policy.is_enabled()
-    }
-
     pub(crate) fn set_decode_routing_host(&self, routing_host: Arc<RoutingHost>) -> Result<()> {
         match self.decode_routing_host.set(routing_host) {
             Ok(()) => Ok(()),
@@ -816,6 +883,9 @@ impl PrefillRouter {
         let AffinityTarget { worker_id, dp_rank } = target;
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
+        if let Some(constraints) = topology_constraints.as_ref() {
+            self.ensure_decode_can_satisfy(worker_id, constraints)?;
+        }
 
         let bootstrap_info = self
             .model_manager
@@ -847,6 +917,98 @@ impl PrefillRouter {
             bootstrap_info,
             topology_constraints,
         })
+    }
+
+    /// The decode set's `RoutingHost` and its `KvRouter`; only the KV plane tracks decode
+    /// worker taints.
+    fn decode_kv_host(&self) -> Option<(&RoutingHost, &Arc<KvRouter>)> {
+        let host = self.decode_routing_host.get()?;
+        Some((host, host.kv_router_if_enabled()?))
+    }
+
+    fn steer_prefill_to_decode_reachable_workers(
+        &self,
+        request: &mut PreprocessedRequest,
+        endpoint_id: &EndpointId,
+    ) {
+        if let Some(reachable) = self.decode_reachable_prefill_workers(endpoint_id) {
+            restrict_to_reachable(request.routing_mut(), &reachable);
+        }
+    }
+
+    /// The prefill workers of `endpoint_id` with an available decode worker for their KV,
+    /// or `None` when none is excluded. Recomputed only after the prefill configs, the
+    /// decode configs, or decode availability change.
+    fn decode_reachable_prefill_workers(
+        &self,
+        endpoint_id: &EndpointId,
+    ) -> Option<Arc<HashSet<WorkerId>>> {
+        let (decode_host, decode_router) = self.decode_kv_host()?;
+        let decode_available = decode_host.available_instance_ids();
+        if let Some(cached) = self.decode_reachability.load().as_ref()
+            && cached.is_current(endpoint_id, decode_available.as_ref())
+        {
+            return cached.reachable.clone();
+        }
+
+        let mut prefill_configs = self.model_manager.runtime_config_watch(endpoint_id)?;
+        let mut decode_configs = decode_router.workers_with_configs.clone();
+        // Mark both watches seen before reading them: a change made during the computation
+        // then invalidates the entry rather than being missed.
+        prefill_configs.mark_unchanged();
+        // Release the decode watch before reading the prefill one: both are the same watch
+        // when prefill and decode share an endpoint.
+        let decode_taints = available_peer_taints(
+            &decode_configs.borrow_and_update(),
+            decode_available.as_deref(),
+        );
+        let reachable = self
+            .model_manager
+            .kv_transfer_reachable_workers(endpoint_id, &decode_taints)
+            .map(Arc::new);
+        self.decode_reachability
+            .store(Some(Arc::new(DecodeReachability {
+                endpoint_id: endpoint_id.clone(),
+                prefill_configs,
+                decode_configs,
+                decode_available,
+                reachable: reachable.clone(),
+            })));
+        reachable
+    }
+
+    /// Refuse dispatch when no available decode worker carries every required taint;
+    /// otherwise prefill holds its KV until the engine's bootstrap timeout.
+    fn ensure_decode_can_satisfy(
+        &self,
+        prefill_worker_id: WorkerId,
+        constraints: &RoutingConstraints,
+    ) -> anyhow::Result<()> {
+        if !constraints.has_hard_constraints() {
+            return Ok(());
+        }
+        let Some((decode_host, decode_router)) = self.decode_kv_host() else {
+            return Ok(());
+        };
+        let available = decode_host.available_instance_ids();
+        if has_kv_transfer_peer(
+            &decode_router.workers_with_configs.borrow(),
+            available.as_deref(),
+            constraints,
+        ) {
+            return Ok(());
+        }
+        // WorkerUnavailable (503) so the request can migrate: the decode left after prefill
+        // selection, and another domain may serve the retry.
+        Err(DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .message(format!(
+                "no available decode worker satisfies the KV-transfer constraints {:?} of \
+                 prefill worker {prefill_worker_id}; not dispatching prefill",
+                constraints.required_taints
+            ))
+            .build()
+            .into())
     }
 
     fn preflight_kv_transfer_constraints(
@@ -930,11 +1092,13 @@ mod tests {
     };
     use tokio::sync::oneshot;
 
+    use crate::local_model::runtime_config::{ModelRuntimeConfig, topology_taint};
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
         timing::{RequestTracker, RoutingData},
     };
+    use dynamo_kv_hints::KvTransferEnforcement;
 
     const MAX_ROOM: u64 = i64::MAX as u64;
 
@@ -990,7 +1154,7 @@ mod tests {
             crate::discovery::LoadThresholdHandle::new(Default::default()),
             CancellationToken::new(),
         );
-        assert!(router.conditional_disagg_enabled());
+        assert!(router.conditional_disagg_policy.is_enabled());
         router.lifecycle.store(
             PrefillLifecycleState::Active as u8,
             std::sync::atomic::Ordering::Release,
@@ -1343,9 +1507,55 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
-        use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
+    #[test]
+    fn prefill_steering_intersects_the_allowlist_and_never_empties_it() {
+        let mut routing = RoutingHints::default();
+        restrict_to_reachable(&mut routing, &HashSet::from([1, 2]));
+        assert_eq!(routing.allowed_worker_ids, Some(HashSet::from([1, 2])));
+
+        routing.allowed_worker_ids = Some(HashSet::from([2, 3]));
+        restrict_to_reachable(&mut routing, &HashSet::from([1, 2]));
+        assert_eq!(routing.allowed_worker_ids, Some(HashSet::from([2])));
+
+        // Nothing reachable, or nothing reachable inside the caller's allowlist: keep the
+        // request as it was so the dispatch preflight reports the missing decode.
+        routing.allowed_worker_ids = None;
+        restrict_to_reachable(&mut routing, &HashSet::new());
+        assert_eq!(routing.allowed_worker_ids, None);
+        routing.allowed_worker_ids = Some(HashSet::from([3]));
+        restrict_to_reachable(&mut routing, &HashSet::from([1, 2]));
+        assert_eq!(routing.allowed_worker_ids, Some(HashSet::from([3])));
+    }
+
+    #[test]
+    fn a_backend_instance_pin_also_pins_prefill() {
+        assert!(!pins_prefill_worker(None));
+        assert!(!pins_prefill_worker(Some(&RoutingHints::default())));
+        for routing in [
+            RoutingHints {
+                prefill_worker_id: Some(1),
+                ..Default::default()
+            },
+            RoutingHints {
+                backend_instance_id: Some(1),
+                ..Default::default()
+            },
+        ] {
+            assert!(pins_prefill_worker(Some(&routing)), "{routing:?}");
+        }
+    }
+
+    /// A KV-plane decode `RoutingHost` in a process-local runtime.
+    struct KvDecodeHost {
+        host: Arc<RoutingHost>,
+        /// Changes the registered decode workers, as discovery would.
+        workers: watch::Sender<HashMap<u64, ModelRuntimeConfig>>,
+        /// Overriding its discovered instances changes decode availability.
+        client: dynamo_runtime::component::Client,
+        runtime: dynamo_runtime::Runtime,
+    }
+
+    async fn kv_decode_host(configs: HashMap<u64, ModelRuntimeConfig>) -> KvDecodeHost {
         use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
@@ -1354,13 +1564,13 @@ mod tests {
                 .await
                 .unwrap();
         let endpoint = distributed
-            .namespace("conditional-invalid-worker")
+            .namespace(format!("decode-{}", Uuid::new_v4().simple()))
             .unwrap()
             .component("decode")
             .unwrap()
             .endpoint("generate");
         let client = endpoint.client().await.unwrap();
-        let (_workers_tx, workers) = watch::channel(HashMap::<u64, ModelRuntimeConfig>::new());
+        let (workers, workers_rx) = watch::channel(configs);
         let config = KvRouterConfig {
             skip_initial_worker_wait: true,
             use_kv_events: false,
@@ -1370,7 +1580,7 @@ mod tests {
         let chooser = KvRouter::new(
             endpoint,
             client.clone(),
-            workers,
+            workers_rx,
             None,
             16,
             SelectionPolicySource::Registry,
@@ -1385,14 +1595,195 @@ mod tests {
         .await
         .unwrap();
         let host = Arc::new(
-            RoutingHost::builder(client, RouterMode::KV)
+            RoutingHost::builder(client.clone(), RouterMode::KV)
                 .kv_router(Arc::new(chooser))
                 .build()
                 .await
                 .unwrap(),
         );
+        KvDecodeHost {
+            host,
+            workers,
+            client,
+            runtime,
+        }
+    }
+
+    fn decode_in(zone: &str) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig {
+            topology_domains: HashMap::from([("zone".to_string(), zone.to_string())]),
+            ..Default::default()
+        };
+        config.add_topology_taints();
+        config
+    }
+
+    /// A prefill worker in zone `zone` that may hand its KV only to a decode in that zone.
+    fn required_prefill_in(zone: &str) -> ModelRuntimeConfig {
+        ModelRuntimeConfig {
+            kv_transfer_domain: Some("zone".to_string()),
+            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
+            ..decode_in(zone)
+        }
+    }
+
+    #[tokio::test]
+    async fn required_topology_without_available_decode_fails_before_prefill_dispatch() {
         let router = active_conditional_router();
-        assert!(router.decode_routing_host.set(host).is_ok());
+        let in_zone = |zone: &str| RoutingConstraints {
+            required_taints: HashSet::from([topology_taint("zone", zone)]),
+            ..Default::default()
+        };
+        // No decode host yet: nothing to check against, keep the old behavior.
+        assert!(router.ensure_decode_can_satisfy(1, &in_zone("a")).is_ok());
+
+        let decode =
+            kv_decode_host(HashMap::from([(7, decode_in("a")), (8, decode_in("b"))])).await;
+        router.set_decode_routing_host(decode.host.clone()).unwrap();
+        assert!(router.ensure_decode_can_satisfy(1, &in_zone("a")).is_ok());
+        assert!(router.ensure_decode_can_satisfy(1, &in_zone("b")).is_ok());
+        assert!(router.ensure_decode_can_satisfy(1, &in_zone("c")).is_err());
+        // Preferred-only constraints never block.
+        let preferred = RoutingConstraints {
+            preferred_taints: HashMap::from([(topology_taint("zone", "c"), 0.5)]),
+            ..Default::default()
+        };
+        assert!(router.ensure_decode_can_satisfy(1, &preferred).is_ok());
+
+        // Zone b's decode is still registered but no longer available, as after a
+        // reported failure.
+        decode.client.override_discovered_instances(vec![7]);
+        let error = router
+            .ensure_decode_can_satisfy(1, &in_zone("b"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not dispatching prefill"),
+            "{error}"
+        );
+        assert!(
+            crate::migration::is_migratable(error.as_ref()),
+            "another domain can take the request: {error}"
+        );
+
+        // The zone's last decode leaves: the check reads the live worker set.
+        decode.workers.send_replace(HashMap::new());
+        assert!(router.ensure_decode_can_satisfy(1, &in_zone("a")).is_err());
+        drop(router);
+        decode.runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn prefill_steering_follows_the_available_decode_workers() {
+        let router = active_conditional_router();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let prefill_workers = router.model_manager.set_runtime_configs_for_test(
+            &endpoint_id,
+            HashMap::from([(1, required_prefill_in("a")), (2, required_prefill_in("b"))]),
+        );
+        let steered = || {
+            let mut request = inference_request();
+            router.steer_prefill_to_decode_reachable_workers(&mut request, &endpoint_id);
+            request
+                .routing
+                .and_then(|routing| routing.allowed_worker_ids)
+        };
+
+        // No decode RoutingHost (not the KV plane): selection is left alone.
+        assert_eq!(steered(), None);
+
+        let decode = kv_decode_host(HashMap::from([(7, decode_in("a"))])).await;
+        router.set_decode_routing_host(decode.host.clone()).unwrap();
+
+        // Zone b has no decode: its prefill worker is not a candidate.
+        assert_eq!(steered(), Some(HashSet::from([1])));
+        let first = router.decode_reachable_prefill_workers(&endpoint_id);
+        let again = router.decode_reachable_prefill_workers(&endpoint_id);
+        assert!(
+            first.zip(again).is_some_and(|(a, b)| Arc::ptr_eq(&a, &b)),
+            "unchanged inputs reuse the computed set"
+        );
+
+        // Zone b's decode registers: nothing is excluded, so the request is not narrowed.
+        decode
+            .workers
+            .send_replace(HashMap::from([(7, decode_in("a")), (8, decode_in("b"))]));
+        assert_eq!(steered(), None);
+
+        // Zone b's decode becomes unavailable, then available again.
+        decode.client.override_discovered_instances(vec![7]);
+        assert_eq!(steered(), Some(HashSet::from([1])));
+        decode.client.override_discovered_instances(vec![7, 8]);
+        assert_eq!(steered(), None);
+
+        // A prefill worker joins zone c, which has no decode.
+        prefill_workers.send_replace(HashMap::from([
+            (1, required_prefill_in("a")),
+            (2, required_prefill_in("b")),
+            (3, required_prefill_in("c")),
+        ]));
+        assert_eq!(steered(), Some(HashSet::from([1, 2])));
+
+        // No decode anywhere: steering can't help, so the request keeps its candidates and
+        // the dispatch preflight refuses it.
+        decode.workers.send_replace(HashMap::new());
+        assert_eq!(steered(), None);
+        drop(router);
+        decode.runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn prefill_dispatch_is_refused_when_its_decode_domain_is_empty() {
+        let router = active_conditional_router();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let _prefill_workers = router.model_manager.set_runtime_configs_for_test(
+            &endpoint_id,
+            HashMap::from([(1, required_prefill_in("a")), (2, required_prefill_in("b"))]),
+        );
+        let decode = kv_decode_host(HashMap::from([(7, decode_in("a"))])).await;
+        router.set_decode_routing_host(decode.host.clone()).unwrap();
+
+        let mut request = inference_request();
+        let Err(error) =
+            router.prepare_prefill_dispatch(&mut request, AffinityTarget::worker(2), &endpoint_id)
+        else {
+            panic!("prefill worker 2 has no decode in its zone");
+        };
+        assert!(crate::migration::is_migratable(error.as_ref()), "{error}");
+        assert_eq!(
+            classify_prefill_dispatch_error(error.as_ref()),
+            PrefillDispatchErrorClass::Unavailable,
+            "prefill never ran, so this is not a prefill failure"
+        );
+        assert!(
+            request
+                .routing
+                .as_ref()
+                .is_none_or(|routing| routing.prefill_worker_id.is_none()),
+            "a refused prefill is not recorded on the request"
+        );
+
+        let prepared = router
+            .prepare_prefill_dispatch(&mut request, AffinityTarget::worker(1), &endpoint_id)
+            .unwrap();
+        assert_eq!(prepared.worker_id, 1);
+
+        // The decode leaves between prefill selection and dispatch.
+        decode.workers.send_replace(HashMap::new());
+        let mut request = inference_request();
+        assert!(
+            router
+                .prepare_prefill_dispatch(&mut request, AffinityTarget::worker(1), &endpoint_id)
+                .is_err()
+        );
+        drop(router);
+        decode.runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
+        let decode = kv_decode_host(HashMap::new()).await;
+        let router = active_conditional_router();
+        router.set_decode_routing_host(decode.host.clone()).unwrap();
         let downstream = Arc::new(QueryOnlyDecodeHost::default());
         let mut request = query_only_request();
         request.annotations.clear();
@@ -1411,7 +1802,7 @@ mod tests {
         ));
         assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
         drop(router);
-        runtime.shutdown();
+        decode.runtime.shutdown();
     }
 
     #[tokio::test]

@@ -76,7 +76,7 @@ sequenceDiagram
     DR->>D: select compatible or preferred decode worker
 ```
 
-The prefill router builds the decode constraint before dispatching prefill when the selected worker is already known. This keeps `required` policy fail-closed: if the router cannot derive authoritative decode constraints for a required policy, it fails the request instead of dispatching prefill and then discovering that decode cannot be routed safely.
+The prefill router builds the decode constraint before dispatching prefill when the selected worker is already known. This keeps `required` policy fail-closed: if the router cannot derive authoritative decode constraints for a required policy, it fails the request instead of dispatching prefill and then discovering that decode cannot be routed safely. With `DYN_ROUTER_MODE=kv`, it also checks that an available decode worker carries the required taint, and fails the request with a `WorkerUnavailable` error (HTTP 503) if none does. A decode worker is available when it is registered and the frontend has not marked it down; until the frontend has discovered its first decode worker, every registered decode worker counts as available.
 
 ## Enforcement Modes
 
@@ -88,7 +88,7 @@ The prefill router builds the decode constraint before dispatching prefill when 
 required_taints = {"dynamo.topology/zone=us-east-1a"}
 ```
 
-Decode workers without that taint are ineligible. If no eligible decode worker exists, routing returns no endpoint for that request.
+Decode workers without that taint are ineligible. With `DYN_ROUTER_MODE=kv`, and when the prefill workers are also routed by the KV router, prefill selection skips prefill workers whose domain has no available decode worker, so requests go to domains that can complete them. Other prefill routing modes, such as round-robin, generally do not skip them. If no domain has one, the selected domain loses its last decode worker before prefill is dispatched, or the request pins a prefill worker in such a domain, the request fails with HTTP 503 before prefill runs. When `--migration-limit` is above 0, request migration retries requests that do not pin a prefill worker.
 
 ### Preferred
 
@@ -177,7 +177,7 @@ For KVCR, use `required`. If each host is its own RDMA island, set `labelKey: ku
 
 - Prefill-to-decode constraints apply only to disaggregated deployments. KV fetch hints also apply to aggregated workers, so configure topology there when workers fetch KV from peers, for example with KVCR.
 - Keep `DYN_ROUTER_MODE=kv` on the frontend so the prefill and decode routing paths use the KV router.
-- Make sure every prefill domain has enough decode capacity when using `required`; otherwise the router can legitimately fail requests in domains without decode workers.
+- Make sure every prefill domain has enough decode capacity when using `required`. With KV routing, a prefill worker whose domain has no available decode worker receives no unpinned requests, so its capacity sits idle.
 - Use `preferred` during incremental rollouts when same-domain transfer is a latency preference rather than a hard placement requirement.
 - Transport health is separate from topology selection. Topology-aware routing chooses a better peer, but RDMA, EFA, UCX, or libfabric still need to be configured correctly for NIXL KV transfer.
 
@@ -186,7 +186,8 @@ For KVCR, use `required`. If each host is its own RDMA island, set `labelKey: ku
 | Symptom | Likely cause | Check |
 |---------|--------------|-------|
 | Worker exits during startup | `DYN_KV_TRANSFER_DOMAIN` missing, or topology file never populated. | Worker logs and contents of `DYN_TOPOLOGY_MOUNT_PATH`. |
-| Required policy returns no endpoint | No decode worker has the selected prefill worker's generated topology taint. | Worker `ModelRuntimeConfig` topology metadata and decode worker placement. |
+| Required policy fails requests with HTTP 503 | No available decode worker has the topology taint of any eligible prefill worker, or of the pinned prefill worker. | Worker `ModelRuntimeConfig` topology metadata and decode worker placement. |
+| Some prefill workers get no requests | Their transfer domain has no available decode worker. | Decode worker placement and health in that domain. |
 | Preferred policy still routes cross-domain | Matching domain is overloaded or unavailable, or weight is too low relative to load. | Increase `preferredWeight`, add same-domain decode capacity, or switch to `required`. |
 | Router sees no topology metadata | Worker did not publish topology fields. | Backend startup logs and runtime config metrics/discovery data. |
 | KV fetch hints stop after enabling topology | No source with a longer prefix is in the target's island, or sources have no value for the transfer domain. | Worker `topology_domains` and placement of the workers that hold the cache. |

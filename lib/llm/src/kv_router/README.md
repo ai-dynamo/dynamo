@@ -122,6 +122,15 @@ hops.
   set or the policy file's `router` section configures: prefill load is prompt-side.
 - `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
   `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
+- With a `required` KV-transfer domain, and only on the KV plane, prefill selection skips
+  workers whose domain has no available decode worker: the hop narrows
+  `routing.allowed_worker_ids` on its copy of the request, never to an empty set. It caches
+  that set until the prefill configs, the decode configs, or decode availability change.
+  KV prefill selection reads the narrowed allowlist; the hosted modes read it only for
+  LoRA candidate filtering, so they don't otherwise skip those workers.
+  Before dispatch it checks the chosen worker again and fails with `WorkerUnavailable` if
+  its domain has lost its last available decode worker. Migration can retry that error
+  unless the request pins its prefill worker.
 - Merges the prefill worker's KV-transfer topology constraints into the decode request's
   `routing_constraints`.
 - Rewrites the decode request's `router_config_override`. `assume_kv_reuse` and
@@ -156,6 +165,7 @@ errors, which return to the client.
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
 | Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
+| Decode reachability for a `required` KV-transfer domain (prefill hop) | The decode `RoutingHost`'s worker configs and availability, applied as `routing.allowed_worker_ids`. The Runtime EPP supplies none. |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
 | Decode progress (experimental picker input) | Original streamed-output observations in this frontend's native bookings; enabled by the policy's `DECODE_PROGRESS` declaration, independent of output-block accounting. The standalone EPP has no producer and supplies none. |

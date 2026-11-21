@@ -1311,7 +1311,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
     predownload_tokenizers,
     tmp_path,
 ):
-    """Validate required KV-transfer topology policy from pinned prefill workers."""
+    """Validate required KV-transfer topology policy for pinned and unpinned prefill."""
     logger.info("Starting disaggregated topology-aware prefill pin test")
     _ = (runtime_services_dynamic_ports, predownload_tokenizers)
 
