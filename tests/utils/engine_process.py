@@ -70,6 +70,8 @@ class EngineConfig:
     # health check must not probe beyond this count.
     health_check_worker_count: int = 2
     health_check_funcs: List[Any] = field(default_factory=list)
+    # max_tokens of the chat readiness request that run_serve_deployment adds.
+    chat_health_check_max_tokens: int = 8
     env: Dict[str, str] = field(default_factory=dict)
     stragglers: list[str] = field(default_factory=list)
 

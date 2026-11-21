@@ -644,12 +644,12 @@ def pooling_payload(
 # these should only be used as a last resort. Generally want to use an actual health check
 
 
-def make_chat_health_check(port: int, model: str):
+def make_chat_health_check(port: int, model: str, max_tokens: int = 8):
     def _check_chat_endpoint(remaining_timeout: float = 30.0) -> bool:
         payload = chat_payload_default(
             repeat_count=1,
             expected_response=[],
-            max_tokens=8,
+            max_tokens=max_tokens,
             temperature=0.0,
             stream=False,
         ).with_model(model)
