@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AgentX multi-turn trace replay with aiperf against one deployed recipe. Render with envsubst (see perf/README.md):
+#   CONCURRENCY=<concurrency> ENDPOINT=http://<dgd-name>-frontend:8000 CACHE_SALT=$(openssl rand -hex 12) \
+#     envsubst '$CONCURRENCY $ENDPOINT $CACHE_SALT' < perf/perf.yaml | kubectl apply -f - -n ${NAMESPACE}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv41-flash-agentx-perf
+  labels: {app: dsv41-flash-agentx-perf}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 28800
+  template:
+    metadata:
+      labels: {app: dsv41-flash-agentx-perf}
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: aiperf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        command: [bash, -lc]
+        args:
+        - |
+          set -euo pipefail
+          export PYTHONUNBUFFERED=1
+          # build-essential: aiperf pulls crick, which has no arm64 wheel
+          apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends build-essential procps >/dev/null
+          pip install -q 'aiperf==0.13.0'
+          aiperf --version
+          OUT=/artifacts/c${CONCURRENCY}
+          mkdir -p "$OUT"
+          aiperf profile -m deepseek-ai/DeepSeek-V4.1-Flash-1017 --endpoint-type chat \
+            --url "${ENDPOINT}" \
+            --public-dataset semianalysis_cc_traces_weka_062126 \
+            --scenario inferencex-agentx-mvp \
+            --concurrency "${CONCURRENCY}" --workers-max 16 --ui none --artifact-dir "$OUT" \
+            --use-server-token-count --request-timeout-seconds 3600 --streaming \
+            --tokenizer-trust-remote-code --per-chunk-usage \
+            --trajectory-start-min-ratio 0.25 --trajectory-start-max-ratio 0.75 \
+            --random-seed 42 --benchmark-duration 3600 \
+            --extra-inputs skip_special_tokens:false --extra-inputs ignore_eos:true \
+            --extra-inputs "cache_salt:${CACHE_SALT}" \
+            --server-metrics-formats json --server-metrics-formats csv 2>&1 | tee "$OUT/aiperf.log"
+          echo "RC=${PIPESTATUS[0]}"
+          echo AGENTX_DONE
+        env:
+        - {name: CONCURRENCY, value: "${CONCURRENCY}"}
+        - {name: ENDPOINT, value: "${ENDPOINT}"}
+        - {name: CACHE_SALT, value: "${CACHE_SALT}"}
+        # Dynamo pins every trajectory to one worker through this header; without it session affinity is inert.
+        - {name: AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID, value: "1"}
+        - {name: AIPERF_DATASET_CONFIGURATION_TIMEOUT, value: "1200"}
+        - {name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT, value: "1200"}
+        - {name: AIPERF_RECORD_PROCESS_RECORDS_TIMEOUT, value: "1200"}
+        - {name: HF_HOME, value: /tmp/hf}
+        resources:
+          requests: {cpu: "16", memory: 64Gi}
+          limits: {cpu: "32", memory: 160Gi}
+        volumeMounts:
+        - {name: artifacts, mountPath: /artifacts}
+      volumes:
+      - name: artifacts
+        emptyDir: {}
