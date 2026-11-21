@@ -22,24 +22,12 @@ pub async fn create_lease(
 ) -> anyhow::Result<u64> {
     // Enroll before granting a lease: teardown must also await construction
     // that races cancellation, not just already-running keep-alive tasks.
-    let teardown_guard = runtime.teardown_guard()?;
     let token = runtime.primary_token();
-    if token.is_cancelled() {
-        let _ = teardown_guard.send(Ok(()));
-        anyhow::bail!("lease creation cancelled");
-    }
-
+    anyhow::ensure!(!token.is_cancelled(), "lease creation cancelled");
+    let mut pending = PendingLeaseGrant(Some(runtime.teardown_guard()?));
     let mut lease_client = connector.get_client().lease_client();
-    let lease = match lease_client.grant(ttl as i64, None).await {
-        Ok(lease) => lease,
-        Err(error) => {
-            // No lease ID is available to revoke; preserve the grant failure
-            // for shutdown as well as for the constructor's caller.
-            let _ = teardown_guard.send(Err(anyhow::anyhow!(error.to_string())));
-            return Err(error.into());
-        }
-    };
-
+    let lease = lease_client.grant(ttl as i64, None).await?;
+    let teardown_guard = pending.0.take().expect("pending lease grant");
     let id = lease.id() as u64;
     if token.is_cancelled() {
         let result = lease_client
@@ -76,6 +64,19 @@ pub async fn create_lease(
     });
 
     Ok(id)
+}
+
+// Until etcd acknowledges the grant, no key can be attached to this lease.
+// A rejected or cancelled startup attempt must not fail a later shutdown.
+// Once acknowledged, only the actual lease teardown may complete the guard.
+struct PendingLeaseGrant(Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>);
+
+impl Drop for PendingLeaseGrant {
+    fn drop(&mut self) {
+        if let Some(guard) = self.0.take() {
+            let _ = guard.send(Ok(()));
+        }
+    }
 }
 
 /// Task to keep leases alive with reconnection support.
