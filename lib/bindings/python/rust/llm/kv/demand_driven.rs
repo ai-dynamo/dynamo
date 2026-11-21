@@ -224,7 +224,7 @@ impl DemandDrivenResponseStream {
                     .next()
                     .await
                     .ok_or_else(|| PyStopAsyncIteration::new_err("Stream exhausted"))?;
-                let response = response.ok().map_err(PyValueError::new_err)?;
+                let response = crate::errors::check_response_error(response)?;
                 if let Some(data) = response.data {
                     return Ok(data);
                 }
@@ -245,7 +245,7 @@ pub(super) fn process_request_to_stream<'p>(
             .generate(request)
             .instrument(dispatch_span)
             .await
-            .map_err(to_pyerr)?;
+            .map_err(crate::errors::routed_error_to_pyerr)?;
         // Zero capacity is genuinely demand-driven only for direct Python
         // consumption of this KvRouter iterator: each __anext__ polls the
         // upstream stream once. PythonServerStreamingEngine adds its own
