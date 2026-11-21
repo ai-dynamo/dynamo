@@ -19,28 +19,12 @@
 # Dynamo operator configuration
 dynamo-operator:
   controllerManager:
+    # The operator's pre-install/pre-upgrade check jobs reuse these tolerations.
     tolerations:
       - key: kubernetes.azure.com/scalesetpriority
         operator: Equal
         value: spot
         effect: NoSchedule
-
-  dynamo:
-    mpiRun:
-      sshKeygen:
-        tolerations:
-          - key: kubernetes.azure.com/scalesetpriority
-            operator: Equal
-            value: spot
-            effect: NoSchedule
-
-  webhook:
-    certGenerator:
-      tolerations:
-        - key: kubernetes.azure.com/scalesetpriority
-          operator: Equal
-          value: spot
-          effect: NoSchedule
 
 etcd:
   tolerations:
