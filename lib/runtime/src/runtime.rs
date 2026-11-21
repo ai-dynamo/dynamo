@@ -615,7 +615,9 @@ impl Runtime {
                     })?;
                     for result in results {
                         result.map_err(|_| {
-                            anyhow::anyhow!("Runtime teardown task exited without reporting cleanup completion")
+                            anyhow::anyhow!(
+                                "Runtime teardown task exited without reporting cleanup completion"
+                            )
                         })??;
                     }
                 }

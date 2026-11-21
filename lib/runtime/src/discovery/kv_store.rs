@@ -1081,6 +1081,8 @@ mod tests {
         let second = client.register(spec(205, 7)).await.unwrap();
         assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
 
+        // Admin withdrawal and runtime teardown can delete the same instance.
+        client.unregister(first.clone()).await.unwrap();
         client.unregister(first).await.unwrap();
         assert_eq!(client.list(query).await.unwrap(), vec![second]);
     }
