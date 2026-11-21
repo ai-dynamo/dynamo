@@ -10,6 +10,13 @@ It replaces the decision engine inside Gym replay: Jev's selections directly
 produce `PlannerEffects.scale_to`. The native Planner remains a separate baseline.
 This does not configure a deployed Dynamo Planner service.
 
+This page covers the hosted provider. With `provider: self_hosted` the same
+adapter runs the [Cognitive Agent](cognitive-agent.md), which asks one joint
+fleet question over measured outcomes instead of one question per pool.
+Both providers accept choice probabilities rounded to two decimal places,
+within the rounding error, and can resume a run from a saved decision log
+(`replay_decisions`, its SHA-256 and `prior_calls`).
+
 ## Run the pilot
 
 Use the same working Dynamo runtime as other offline Gym matches. From `gyms/planner-gym`:
@@ -53,7 +60,8 @@ Setting a threshold explicitly makes low-confidence answers hold their pool's
 current expected target. Default `failure_mode: raise` fails on a timeout, API
 error, malformed answer, or pinned-model mismatch. `failure_mode: hold` is a
 separate reliability experiment; it holds both targets and logs the error.
-Exhausting `max_calls` always stops the run.
+Exhausting `max_calls` stops the run at the next decision that needs a model
+call.
 
 ## Evidence and interpretation
 

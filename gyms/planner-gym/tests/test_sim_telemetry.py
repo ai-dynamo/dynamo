@@ -674,8 +674,8 @@ def test_explicit_engine_role_must_match_slot(
 
 
 @pytest.mark.parametrize(
-    ("telemetry_interval", "expected_telemetry"),
-    [(5.0, True), (None, False)],
+    ("telemetry_interval", "expected_telemetry", "consumes_telemetry"),
+    [(5.0, True, False), (None, False, False), (5.0, True, True)],
 )
 def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     sims_module: types.ModuleType,
@@ -683,6 +683,7 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     tmp_path: Path,
     telemetry_interval: float | None,
     expected_telemetry: bool,
+    consumes_telemetry: bool,
 ) -> None:
     # An advisory rival config: the arena must still apply its decisions.
     config = types.SimpleNamespace(mode="agg", advisory=True)
@@ -690,7 +691,16 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
         {"backend": "vllm", "backend_version": "current"}
     )
     capabilities = types.SimpleNamespace(decode="decode-caps")
-    engine = object()
+    # An engine that opts in receives every sample through the native callback.
+    engine: Any = (
+        types.SimpleNamespace(
+            consumes_replay_telemetry=True,
+            telemetry_interval_s=5.0,
+            on_telemetry=lambda sample: None,
+        )
+        if consumes_telemetry
+        else object()
+    )
     lifecycle: list[str] = []
     runtime_kwargs: dict[str, Any] = {}
     bootstrap_calls: list[dict[str, Any]] = []
@@ -788,7 +798,10 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     }
     assert runtime_kwargs["capture_telemetry"] is False
     assert runtime_kwargs["telemetry_sample_interval_ms"] == 5_000.0
-    assert "telemetry_callback" not in runtime_kwargs
+    if consumes_telemetry:
+        assert runtime_kwargs["telemetry_callback"] is engine.on_telemetry
+    else:
+        assert "telemetry_callback" not in runtime_kwargs
     assert (runtime_kwargs["telemetry_jsonl_path"] is not None) is expected_telemetry
     assert result.replay_report.telemetry is None
     assert bool(result.timeline) is expected_telemetry
@@ -1294,3 +1307,37 @@ def test_planner_bootstrap_without_metadata_reads_canonical_engine_dicts(
     )
     assert calls == [(None, prefill), (None, decode)]
     assert metadata[-1]["status"] == "not_configured_load_only"
+
+
+def test_telemetry_consumer_is_opt_in_and_pins_its_cadence(sims_module, monkeypatch):
+    consumer = sims_module._replay_telemetry_consumer
+    # Engines that do not opt in leave the native call unchanged.
+    assert consumer(object(), telemetry_sample_interval_s=5.0) is None
+
+    class Engine:
+        consumes_replay_telemetry = True
+        telemetry_interval_s = 5.0
+
+        def on_telemetry(self, sample):
+            del sample
+
+    engine = Engine()
+    assert consumer(engine, telemetry_sample_interval_s=5.0) == engine.on_telemetry
+    with pytest.raises(ValueError, match="telemetry_sample_interval_s"):
+        consumer(engine, telemetry_sample_interval_s=None)
+    with pytest.raises(ValueError, match="samples every 15 s"):
+        consumer(engine, telemetry_sample_interval_s=15.0)
+
+    def without_callback(trace_files):
+        del trace_files
+
+    without_callback.__text_signature__ = "(trace_files)"
+    monkeypatch.setattr(sims_module, "_run_mocker_trace_replay", without_callback)
+    with pytest.raises(RuntimeError, match="telemetry_callback"):
+        consumer(engine, telemetry_sample_interval_s=5.0)
+
+    class WithoutHook:
+        consumes_replay_telemetry = True
+
+    with pytest.raises(TypeError, match="on_telemetry"):
+        consumer(WithoutHook(), telemetry_sample_interval_s=5.0)
