@@ -528,6 +528,15 @@ class OmniConfig(DynamoRuntimeConfig):
                 "Remove it or unset DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS; use "
                 "--enable-layerwise-offload without a layer-count override."
             )
+        # Omni registers ModelInput.Text and renders prompts itself, so Dynamo's
+        # preprocessor never applies a custom template.
+        if self.custom_jinja_template:
+            raise ValueError(
+                "--custom-jinja-template is not supported by vLLM-Omni workers. "
+                "Remove it or unset DYN_CUSTOM_JINJA_TEMPLATE: Omni workers take "
+                "text input and render prompts with the model's own chat template, "
+                "so the custom template would be ignored."
+            )
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
         if not 0 <= self.image_png_compression_level <= 9:

@@ -230,6 +230,53 @@ def test_removed_layerwise_gpu_layers_rejected(monkeypatch, source, layers):
         config.validate()
 
 
+@pytest.mark.parametrize("source", ["cli", "environment"])
+@pytest.mark.parametrize("mode", [None, "stage_id", "omni_router", "realtime"])
+def test_custom_jinja_template_rejected(monkeypatch, tmp_path, source, mode):
+    template = tmp_path / "template.jinja"
+    template.write_text("{{ messages[0].content }}")
+    monkeypatch.delenv("DYN_CUSTOM_JINJA_TEMPLATE", raising=False)
+    argv = []
+    if source == "environment":
+        monkeypatch.setenv("DYN_CUSTOM_JINJA_TEMPLATE", str(template))
+    else:
+        argv = ["--custom-jinja-template", str(template)]
+    parser = argparse.ArgumentParser()
+    DynamoRuntimeArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    mode_fields = {}
+    if mode is not None:
+        mode_fields = {
+            "stage_configs_path": str(tmp_path / "stages.yaml"),
+            mode: 0 if mode == "stage_id" else True,
+        }
+    config = _make_omni_config(
+        custom_jinja_template=args.custom_jinja_template, **mode_fields
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="--custom-jinja-template.*DYN_CUSTOM_JINJA_TEMPLATE.*ignored",
+    ):
+        config.validate()
+
+
+@pytest.mark.parametrize("source", ["cli", "environment"])
+def test_empty_custom_jinja_template_is_unset(monkeypatch, source):
+    monkeypatch.delenv("DYN_CUSTOM_JINJA_TEMPLATE", raising=False)
+    argv = []
+    if source == "environment":
+        monkeypatch.setenv("DYN_CUSTOM_JINJA_TEMPLATE", "")
+    else:
+        argv = ["--custom-jinja-template", ""]
+    parser = argparse.ArgumentParser()
+    DynamoRuntimeArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    assert args.custom_jinja_template == ""
+
+    _make_omni_config(custom_jinja_template=args.custom_jinja_template).validate()
+
+
 def test_diffusion_bool_option_preserves_explicit_false():
     parser = argparse.ArgumentParser()
     OmniArgGroup().add_arguments(parser)
