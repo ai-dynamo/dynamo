@@ -511,10 +511,8 @@ class TokenspeedLLMEngine(LLMEngine):
         """Forward the cancellation to the engine, whose final chunk then ends
         the request's stream, as vLLM's and TRT-LLM's handlers do. A request
         that already finished is left alone."""
-        # The bridge passes a new Context wrapper here, so identity cannot
-        # find the dispatch. The adapter aborts only once the request's
-        # context stopped or was killed, which a live retry's has not. If two
-        # same-id attempts both stopped, this may pick the other one first.
+        # abort() gets a new Context wrapper, so match by id; only a stopped
+        # or killed attempt qualifies, which spares a live retry.
         state = next(
             (
                 state
