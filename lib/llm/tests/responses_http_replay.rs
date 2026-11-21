@@ -93,6 +93,48 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
     .await;
 }
 
+/// Server-held conversation history returns HTTP 400 before dispatch, unary and streaming.
+/// Explicit `null` values are accepted like omitted fields.
+#[tokio::test]
+#[serial]
+async fn conversation_history_fails_before_dispatch_or_streaming() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            for (field, value) in [
+                ("conversation", json!("conv_1")),
+                ("conversation", json!({"id": "conv_1"})),
+                ("previous_response_id", json!("resp_1")),
+            ] {
+                let mut body = json!({"model": MODEL, "input": "ping", "stream": stream});
+                body[field] = value;
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let error: Value = response.json().await.unwrap();
+                assert!(error["message"].as_str().unwrap().contains(field));
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+
+        for stream in [false, true] {
+            let response = post_responses(
+                &svc,
+                &json!({
+                    "model": MODEL, "input": "ping", "stream": stream,
+                    "conversation": null, "previous_response_id": null,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.text().await.unwrap();
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 /// Unsupported choices return HTTP 400 without dispatch for unary and streaming
 /// requests even when the supplied function tool definitions are valid.
 /// Custom tools now share the function-template adapter while retaining their

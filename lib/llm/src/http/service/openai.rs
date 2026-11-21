@@ -5076,8 +5076,8 @@ async fn responses(
     );
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
-    // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code.
+    // then a field was used that is unsupported. We early return its error: 400 for
+    // conversation history the frontend cannot load, 501 for the other fields.
     if let Some(resp) = validate_response_unsupported_fields(&request) {
         inflight_guard.mark_error(ErrorType::NotImplemented);
         return Ok(resp.into_response());
@@ -5479,6 +5479,15 @@ pub fn validate_response_unsupported_fields(
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
+    // No responses or conversations are stored, so refuse server-held history rather
+    // than answering from `input` alone. Absent and `null` both deserialize to `None`.
+    if inner.conversation.is_some() {
+        return Some(ErrorMessage::unsupported_content_error(
+            VALIDATION_PREFIX.to_string()
+                + "`conversation` is not supported: conversation state is not stored; send the full conversation history in `input`.",
+        ));
+    }
+
     if let Some(field) = request
         .nvext
         .as_ref()
@@ -5500,8 +5509,9 @@ pub fn validate_response_unsupported_fields(
         ));
     }
     if inner.previous_response_id.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
+        return Some(ErrorMessage::unsupported_content_error(
+            VALIDATION_PREFIX.to_string()
+                + "`previous_response_id` is not supported: responses are not stored; send the full conversation history in `input`.",
         ));
     }
     if inner.prompt.is_some() {
@@ -6947,7 +6957,9 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
+    use dynamo_protocols::types::responses::{
+        Conversation, ConversationParam, CreateResponse, Input, PromptConfig,
+    };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -9723,17 +9735,45 @@ mod tests {
         assert!(validate_responses_fields(&request).is_ok());
     }
 
-    #[test]
-    fn test_validate_unsupported_fields_detects_flags() {
+    #[tokio::test]
+    async fn test_validate_unsupported_fields_detects_flags() {
+        // Server-held history (`conversation`, `previous_response_id`) is a
+        // client error (400) pointing at `input`; the other fields stay 501.
         #[allow(clippy::type_complexity)]
-        let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
-            ("background", Box::new(|r| r.background = Some(true))),
+        let unsupported_cases: Vec<(
+            &str,
+            StatusCode,
+            Box<dyn FnOnce(&mut CreateResponse)>,
+        )> = vec![
+            (
+                "conversation",
+                StatusCode::BAD_REQUEST,
+                Box::new(|r| {
+                    r.conversation = Some(ConversationParam::ConversationID("conv_1".into()))
+                }),
+            ),
+            (
+                "conversation",
+                StatusCode::BAD_REQUEST,
+                Box::new(|r| {
+                    r.conversation = Some(ConversationParam::Object(Conversation {
+                        id: "conv_1".into(),
+                    }))
+                }),
+            ),
             (
                 "previous_response_id",
+                StatusCode::BAD_REQUEST,
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
             ),
             (
+                "background",
+                StatusCode::NOT_IMPLEMENTED,
+                Box::new(|r| r.background = Some(true)),
+            ),
+            (
                 "prompt",
+                StatusCode::NOT_IMPLEMENTED,
                 Box::new(|r| {
                     r.prompt = Some(PromptConfig {
                         id: "template-id".into(),
@@ -9742,14 +9782,39 @@ mod tests {
                     })
                 }),
             ),
-            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(5))),
+            (
+                "max_tool_calls",
+                StatusCode::NOT_IMPLEMENTED,
+                Box::new(|r| r.max_tool_calls = Some(5)),
+            ),
         ];
 
-        for (field, set_field) in unsupported_cases {
+        for (field, expected_status, set_field) in unsupported_cases {
             let mut req = make_base_request();
             (set_field)(&mut req.inner);
-            let result = validate_response_unsupported_fields(&req);
-            assert!(result.is_some(), "Expected rejection for `{field}`");
+            let response = validate_response_unsupported_fields(&req)
+                .unwrap_or_else(|| panic!("Expected rejection for `{field}`"))
+                .into_response();
+            assert_eq!(response.status(), expected_status, "status for `{field}`");
+
+            let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+                .await
+                .unwrap();
+            let error: ErrorMessage = serde_json::from_slice(&body).unwrap();
+            assert!(
+                error.message.contains(&format!("`{field}")),
+                "message for `{field}` should name it: {}",
+                error.message
+            );
+            if expected_status == StatusCode::BAD_REQUEST {
+                assert!(
+                    error
+                        .message
+                        .contains("full conversation history in `input`"),
+                    "message for `{field}` should point at `input`: {}",
+                    error.message
+                );
+            }
         }
     }
 
