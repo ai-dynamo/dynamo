@@ -370,7 +370,8 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         "--speedup-ratio",
         type=float,
         default=engine_defaults["speedup_ratio"],
-        help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
+        help="Speedup ratio for mock execution (default: 1.0). "
+        "0 runs at unscaled 1.0x timing; use a large value (e.g. 1000) for near-zero delays.",
     )
     parser.add_argument(
         "--decode-speedup-ratio",
