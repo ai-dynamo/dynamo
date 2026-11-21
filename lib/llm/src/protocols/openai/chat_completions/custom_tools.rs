@@ -24,7 +24,8 @@ pub(crate) struct ChatCustomToolAdapter {
     pending: BTreeMap<(u32, u32), PendingToolCall>,
     // Named function continuations can pass through without being buffered again.
     streamed: HashSet<(u32, u32)>,
-    // Mistral marks calls whose body it closed; unary keeps those on a token limit too.
+    // Mistral marks calls whose body it closed; unary keeps those on a `length` or
+    // `content_filter` finish too.
     keep_parser_confirmed: bool,
     parser_confirmed: HashSet<(u32, u32)>,
 }
@@ -50,7 +51,8 @@ impl ChatCustomToolAdapter {
         })
     }
 
-    /// Keep parser-confirmed calls on a `length` finish, matching unary aggregation.
+    /// Keep parser-confirmed calls on a `length` or `content_filter` finish, matching
+    /// unary aggregation.
     pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
         self.keep_parser_confirmed = keep;
     }
@@ -585,20 +587,24 @@ mod tests {
     }
 
     /// Unary aggregation keeps a Mistral call whose body the parser closed, even when
-    /// the body is not JSON, so the stream must not drop it on a token limit either.
+    /// the body is not JSON, so the stream must not drop it on a cut-off finish either.
     #[tokio::test]
-    async fn chat_custom_stream_length_keeps_only_mistral_confirmed_invalid_input() {
-        for (keep, complete, expected) in [
-            (true, true, Some(r#"{"workspace"}"#)),
-            (true, false, None),
-            (false, true, None),
-        ] {
+    async fn chat_custom_stream_cut_off_keeps_only_mistral_confirmed_invalid_input() {
+        for (finish, keep, complete, expected) in
+            ["length", "content_filter"].into_iter().flat_map(|finish| {
+                [
+                    (finish, true, true, Some(r#"{"workspace"}"#)),
+                    (finish, true, false, None),
+                    (finish, false, true, None),
+                ]
+            })
+        {
             let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
             adapter.keep_parser_confirmed_calls(keep);
             let mut data = chunk(
                 0,
                 json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":r#"{"workspace"}"#}}]),
-                json!("length"),
+                json!(finish),
             );
             data.tool_call_completion
                 .push(super::super::ToolCallCompletion {
@@ -612,7 +618,7 @@ mod tests {
                 .await;
             assert!(out.iter().all(|item| !item.is_error()));
             let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
-            assert_eq!(value["choices"][0]["finish_reason"], "length");
+            assert_eq!(value["choices"][0]["finish_reason"], finish);
             match expected {
                 Some(input) => assert_eq!(
                     value["choices"][0]["delta"]["tool_calls"],
