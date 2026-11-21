@@ -37,6 +37,7 @@ from dynamo.llm.exceptions import (
     WorkerUnavailable,
 )
 
+from .perf_instrumentation import enter_generator, exit_generator
 from .responses_history import responses_tools_request
 from .sglang_prepost import (
     ReasoningParser,
@@ -791,11 +792,6 @@ class SglangProcessor:
                 ),
             )
         if self.debug_perf:
-            from .perf_instrumentation import (  # type: ignore[import-not-found, import-untyped]
-                enter_generator,
-                exit_generator,
-            )
-
             active = enter_generator()
             t_start = time.monotonic()
             logger.info("[perf] sglang generator enter: active_requests=%d", active)
