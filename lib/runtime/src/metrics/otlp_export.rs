@@ -262,9 +262,8 @@ fn to_metric(
     };
 
     // "The Prometheus Metric Name MUST be added as the Name of the OTLP metric.
-    // The name SHOULD NOT be altered." Suffixes like `_total` and `_seconds`
-    // are added when going OTLP -> Prometheus; coming back the other way they
-    // stay put. The unit is carried separately, from UNIT metadata.
+    // The name SHOULD NOT be altered." Python `prometheus_client` counter families
+    // have no `_total`; it is added only at render. Units come from UNIT metadata.
     Some(Metric {
         name: family.name().to_string(),
         description: family.help().to_string(),
@@ -1191,7 +1190,7 @@ mod tests {
 
     /// The spec is explicit that this direction does not rewrite names: the
     /// `_total` and unit suffixes are things OTLP -> Prometheus *adds*, and
-    /// coming back the other way they stay put. Pinned because a plausible
+    /// coming back the other way none is added or stripped. Pinned because a plausible
     /// reading of the reverse-direction rules says otherwise, and acting on it
     /// renames a third of the exported metrics.
     #[test]

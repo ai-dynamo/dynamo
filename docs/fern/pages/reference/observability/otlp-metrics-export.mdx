@@ -42,15 +42,23 @@ Dynamo is a **converter**, not a producer of OTel-native metrics. It follows the
 
 That distinction matters because most metric names are not Dynamo's: engine metrics come from vLLM, SGLang, and TensorRT-LLM, and rewriting a third party's names means guessing at their intent.
 
-### Names are not altered
+### Names are the Prometheus family name
 
-A metric exported over OTLP carries the same name it has at `/metrics`. `dynamo_component_requests_total` stays `dynamo_component_requests_total`; `vllm:request_duration_seconds` stays as it is.
+A metric exported over OTLP is named after its Prometheus metric family. Dynamo does not add, remove, or rewrite suffixes. Info metrics are the one exception: an Info metric exports under its `_info` sample name, so a `prometheus_client` Info metric `example_build` exports as `example_build_info`.
+
+For most metrics this is the name you see at `/metrics`:
+
+- Native Dynamo counters, defined in Rust, render at `/metrics` under their family name, including any `_total`. `dynamo_component_requests_total` stays `dynamo_component_requests_total`.
+- Gauges, histograms, and summaries keep their names. `vllm:request_duration_seconds` stays as it is.
+- Info metrics keep their `_info` name.
+
+Counters that come from the Python `prometheus_client` library are the exception. This covers engine metrics from vLLM, SGLang, and TensorRT-LLM, and Dynamo's own Python metrics. The client reports a counter's family name without `_total` and adds `_total` only when it renders `/metrics`. So `vllm:request_success_total` at `/metrics` is exported over OTLP as `vllm:request_success`.
 
 <Warning>
-  The compatibility specification describes both directions, and they are **not** symmetric. Suffixes such as `_total` and unit words are *added* when converting OTLP to Prometheus. Coming the other way they are left alone. Rules quoted from the *OTLP Metric points to Prometheus* section do not apply here.
+  The compatibility specification describes both directions, and they are **not** symmetric. Suffixes such as `_total` and unit words are *added* when converting OTLP to Prometheus. Dynamo adds none in this direction. The missing `_total` on Python counters comes from their family name, not from a rewrite. Rules quoted from the *OTLP Metric points to Prometheus* section do not apply here.
 </Warning>
 
-Keeping names identical also means a metric can be correlated across both surfaces during a migration, and that a downstream collector re-exporting to Prometheus does not have to reverse a transformation Dynamo applied.
+To correlate a metric across both surfaces during a migration, use the same name, except in two cases. For Python counters, remove `_total` from the `/metrics` name to get the OTLP name. For histograms and summaries, remove the `_bucket`, `_sum`, or `_count` suffix from a `/metrics` series name: OTLP exports one histogram or summary under the base family name. Because Dynamo applies no transformation of its own, a downstream collector re-exporting to Prometheus does not have to reverse one.
 
 ### Units come from UNIT metadata
 
