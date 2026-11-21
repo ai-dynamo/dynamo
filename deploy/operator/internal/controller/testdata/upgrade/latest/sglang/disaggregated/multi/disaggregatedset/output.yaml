@@ -172,11 +172,12 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-component","nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-graph-deployment-name","nvidia.com/dynamo-namespace","nvidia.com/dynamo-worker-hash"],"annotations":["nvidia.com/dynamo-operator-origin-version"]}'
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-component","nvidia.com/dynamo-component-type","nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-graph-deployment-name","nvidia.com/dynamo-namespace","nvidia.com/dynamo-worker-hash"],"annotations":["nvidia.com/dynamo-operator-origin-version"]}'
     nvidia.com/dynamo-operator-origin-version: $var:operator-version
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: decode
+    nvidia.com/dynamo-component-type: "decode"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: workers
@@ -220,11 +221,12 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-component","nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-graph-deployment-name","nvidia.com/dynamo-namespace"],"annotations":["nvidia.com/dynamo-operator-origin-version"]}'
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-component","nvidia.com/dynamo-component-type","nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-graph-deployment-name","nvidia.com/dynamo-namespace"],"annotations":["nvidia.com/dynamo-operator-origin-version"]}'
     nvidia.com/dynamo-operator-origin-version: $var:operator-version
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-component-type: "frontend"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: workers
@@ -266,11 +268,12 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-component","nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-graph-deployment-name","nvidia.com/dynamo-namespace","nvidia.com/dynamo-worker-hash"],"annotations":["nvidia.com/dynamo-operator-origin-version"]}'
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-component","nvidia.com/dynamo-component-type","nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-graph-deployment-name","nvidia.com/dynamo-namespace","nvidia.com/dynamo-worker-hash"],"annotations":["nvidia.com/dynamo-operator-origin-version"]}'
     nvidia.com/dynamo-operator-origin-version: $var:operator-version
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: prefill
+    nvidia.com/dynamo-component-type: "prefill"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: workers

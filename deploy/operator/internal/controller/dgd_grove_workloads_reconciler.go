@@ -28,6 +28,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -150,6 +151,10 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	// Preserve readiness and component observations even when a scale write fails.
 	stableResources, err := r.stableResources.Reconcile(ctx, req, syncedPodCliqueSet)
 	if err != nil {
+		// A pending metadata write must not conceal an independent scaling failure.
+		if scaleErr != nil && errors.Is(err, serviceidentity.ErrCacheObservationPending) {
+			return groveWorkloadResult{}, scaleErr
+		}
 		return groveWorkloadResult{}, errors.Join(scaleErr, err)
 	}
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(

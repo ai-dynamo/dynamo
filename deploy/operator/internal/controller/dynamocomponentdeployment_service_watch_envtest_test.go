@@ -23,6 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
@@ -31,12 +33,6 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 	config := env.OperatorConfig().DeepCopy()
 	config.Namespace.Restricted = env.Namespace()
 	runtimeConfig := &commoncontroller.RuntimeConfig{}
-
-	env.StartManager(func(mgr ctrl.Manager) error {
-		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{
-			Config: config, RuntimeConfig: runtimeConfig,
-		})
-	})
 
 	replicas := int32(1)
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
@@ -56,8 +52,91 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 	}
 	require.NoError(t, env.Client().Create(ctx, dcd))
 
+	t.Log("Reject initial-list and unrelated events while initializing through the real cached reconciler")
 	serviceKey := client.ObjectKey{Namespace: dcd.Namespace, Name: dcd.Name}
+	var cachedClient client.Client
+	var testReconciler *DynamoComponentDeploymentReconciler
+	env.StartManager(func(mgr ctrl.Manager) error {
+		cachedClient = mgr.GetClient()
+		r := &DynamoComponentDeploymentReconciler{
+			Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("dynamocomponentdeployment"), Config: config, RuntimeConfig: runtimeConfig,
+		}
+		testReconciler = r
+		controller, err := r.controllerBuilder(mgr)
+		if err != nil {
+			return err
+		}
+
+		// Only deliberate Service changes or its later deletion may enqueue.
+		return controller.WithEventFilter(predicate.Funcs{
+			CreateFunc:  func(event.CreateEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				service, ok := e.ObjectNew.(*corev1.Service)
+				if !ok || client.ObjectKeyFromObject(service) != serviceKey {
+					return false
+				}
+				labelDrift := e.ObjectOld.GetLabels()[consts.KubeLabelDynamoComponent] != "wrong" && service.Labels[consts.KubeLabelDynamoComponent] == "wrong"
+				annotationWakeup := e.ObjectOld.GetAnnotations()["example.com/identity-retry"] != "wake" && service.Annotations["example.com/identity-retry"] == "wake"
+				return labelDrift || annotationWakeup
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				service, ok := e.Object.(*corev1.Service)
+				return ok && client.ObjectKeyFromObject(service) == serviceKey
+			},
+		}).Complete(r)
+	})
+
+	dynamotesting.Eventually(t, func() (bool, string) {
+		if _, err := testReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dcd)}); err != nil {
+			return false, err.Error()
+		}
+		observed := &corev1.Service{}
+		if err := env.Client().Get(ctx, serviceKey, observed); err != nil {
+			return false, err.Error()
+		}
+		return observed.Labels[consts.KubeLabelDynamoComponent] == "frontend", "waiting for initial reconciliation"
+	}, 10*time.Second, 100*time.Millisecond, "initial direct reconciliation did not finish")
+
 	original := waitForDCDOwnedService(t, ctx, env.Client(), serviceKey, dcd.UID, "")
+
+	t.Log("Metadata-only Service drift requeues its DCD and repairs component identity")
+	original.Labels[consts.KubeLabelDynamoComponent] = "wrong"
+	original.Labels["example.com/team"] = "external"
+	require.NoError(t, env.Client().Update(ctx, original))
+	dynamotesting.Eventually(t, func() (bool, string) {
+		service := &corev1.Service{}
+		if err := env.Client().Get(ctx, serviceKey, service); err != nil {
+			return false, err.Error()
+		}
+		return service.Labels[consts.KubeLabelDynamoComponent] == "frontend" && service.Labels["example.com/team"] == "external", "waiting for Service identity repair"
+	}, 10*time.Second, 100*time.Millisecond, "metadata-only Service changes did not trigger identity repair")
+
+	t.Log("An annotation-only resource-version change can wake an outstanding identity repair")
+	service := &corev1.Service{}
+	require.NoError(t, env.Client().Get(ctx, serviceKey, service))
+	delete(service.Labels, consts.KubeLabelDynamoNamespace)
+	require.NoError(t, env.Client().Update(ctx, service))
+	dynamotesting.Eventually(t, func() (bool, string) {
+		observed := &corev1.Service{}
+		if err := cachedClient.Get(ctx, serviceKey, observed); err != nil {
+			return false, err.Error()
+		}
+		_, present := observed.Labels[consts.KubeLabelDynamoNamespace]
+		return !present, "waiting for the cache to observe the filtered-out label edit"
+	}, 10*time.Second, 100*time.Millisecond, "cache did not observe the Service edit")
+	require.NoError(t, env.Client().Get(ctx, serviceKey, service))
+	service.Annotations["example.com/identity-retry"] = "wake"
+	require.NoError(t, env.Client().Update(ctx, service))
+	dynamotesting.Eventually(t, func() (bool, string) {
+		observed := &corev1.Service{}
+		if err := env.Client().Get(ctx, serviceKey, observed); err != nil {
+			return false, err.Error()
+		}
+		return observed.Labels[consts.KubeLabelDynamoNamespace] == service.Spec.Selector[consts.KubeLabelDynamoNamespace], "waiting for annotation-triggered identity repair"
+	}, 10*time.Second, 100*time.Millisecond, "annotation-only Service update did not trigger identity repair")
+
+	t.Log("Deleting the Service still recreates the DCD-owned endpoint")
 	require.NoError(t, env.Client().Delete(ctx, original))
 
 	waitForDCDOwnedService(t, ctx, env.Client(), serviceKey, dcd.UID, original.UID)

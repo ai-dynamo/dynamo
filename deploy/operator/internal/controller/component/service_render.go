@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -18,6 +19,7 @@ import (
 type ServiceParams struct {
 	ServiceName     string
 	Namespace       string
+	DGDName         string // empty for standalone DCDs
 	ComponentType   string
 	DynamoNamespace string
 	ComponentName   string // original user-provided name, used in selector
@@ -59,8 +61,7 @@ func RenderService(params ServiceParams) (*corev1.Service, error) {
 		}
 	}
 
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
+	labels := serviceidentity.Labels(params.Labels, params.DGDName, params.ComponentName, params.ComponentType, params.DynamoNamespace)
 	if params.IsK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue

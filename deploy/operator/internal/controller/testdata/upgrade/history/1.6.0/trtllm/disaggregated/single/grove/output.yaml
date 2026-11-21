@@ -557,8 +557,12 @@ metadata:
     nvidia.com/last-applied-hash: f8ee59ddec425d17b9c4ac6734ecda436afdc1615937775baa4858698e0e4735
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "decode"
+    nvidia.com/dynamo-component-type: "decode"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-history-1-6-0-trtllm-disaggregated-single-grove-workers"
     nvidia.com/dynamo-worker-hash: 9248506f
   name: workers-decode
   namespace: upgrade-history-1-6-0-trtllm-disaggregated-single-grove
@@ -601,8 +605,12 @@ metadata:
     nvidia.com/last-applied-hash: 7c6510441079ae1acec8559210e64f946c52ef03f95b42bc5f85a3a64b1fcc16
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "frontend"
+    nvidia.com/dynamo-component-type: "frontend"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-history-1-6-0-trtllm-disaggregated-single-grove-workers"
   name: workers-frontend
   namespace: upgrade-history-1-6-0-trtllm-disaggregated-single-grove
   ownerReferences:
@@ -644,8 +652,12 @@ metadata:
     nvidia.com/last-applied-hash: bc1b8ee72fe74a66f35389987321275641c2181c0a3b97ba6f5cfe02f991ce79
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "prefill"
+    nvidia.com/dynamo-component-type: "prefill"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-history-1-6-0-trtllm-disaggregated-single-grove-workers"
     nvidia.com/dynamo-worker-hash: 9248506f
   name: workers-prefill
   namespace: upgrade-history-1-6-0-trtllm-disaggregated-single-grove
