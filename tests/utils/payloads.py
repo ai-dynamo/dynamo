@@ -510,6 +510,137 @@ class ChatPayload(BasePayload):
 
 
 @dataclass
+class MediaAccuracyPayload(ChatPayload):
+    """Native media accuracy and expanded usage through the public frontend."""
+
+    media: str = field(kw_only=True)
+    media_source: Callable[[int], str] = field(kw_only=True, repr=False)
+    expected_colors: tuple[str, str] = ("red", "blue")
+    _iteration: int = field(default=0, init=False, repr=False)
+    _request_body: dict = field(default_factory=dict, init=False, repr=False)
+
+    def body_for_iteration(self, iteration: int) -> dict:
+        self._iteration = iteration
+        body = deepcopy(self.body)
+        part_type = {"image": "image_url", "video": "video_url", "audio": "audio_url"}[
+            self.media
+        ]
+        content = body["messages"][0]["content"]
+        content[0] = {
+            "type": part_type,
+            part_type: {"url": self.media_source(iteration)},
+        }
+        self._request_body = body
+        return body
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        words = re.findall(r"[a-z]+", content.lower())
+        if self.media == "image":
+            colors = [word for word in words if word in ("red", "blue")]
+            assert colors[:2] == list(self.expected_colors), content
+        elif self.media == "video":
+            assert {"triangle", "triangular"}.intersection(words), content
+        else:
+            assert "thoughts affected hester" in " ".join(words), content
+        result = response.json()
+        usage = result["usage"]
+        for name in ("prompt_tokens", "completion_tokens"):
+            assert type(usage.get(name)) is int and usage[name] > 0, usage
+        assert (
+            usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        ), usage
+        assert result["choices"][0]["finish_reason"] in ("stop", "length"), result
+        if self.media != "audio":
+            prompt_ids = result.get("nvext", {}).get("prompt_token_ids")
+            assert isinstance(prompt_ids, list) and prompt_ids, result
+            assert usage["prompt_tokens"] > len(prompt_ids), usage
+
+
+@dataclass
+class ImageCacheIdentityPayload(MediaAccuracyPayload):
+    """Warm one image, isolate aliases, then reject stale identity for changed pixels."""
+
+    cache_block_size: int = 64
+    _observed: list[tuple[int, int, float]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def before_request(self) -> None:
+        if self._iteration != 1:
+            return
+        self._wait_for_complete_prompt(self._observed[0][0])
+
+    def _wait_for_complete_prompt(self, prompt: int) -> None:
+        expected = (prompt // self.cache_block_size) / math.ceil(
+            prompt / self.cache_block_size
+        )
+        probe = deepcopy(self._request_body)
+        # Query-only selections have no final chunk and therefore no timing.
+        probe.update(stream=False, max_tokens=1)
+        probe["nvext"] = {"extra_fields": ["timing", "worker_id"]}
+        deadline = time.monotonic() + 60
+        observed = None
+        while time.monotonic() < deadline:
+            response = requests.post(self.url(), json=probe, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            require_router_worker_id(result)
+            usage = result.get("usage", {})
+            assert usage.get("prompt_tokens") == prompt, result
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            # Fail before a readiness probe can repair missing primary-request caching.
+            complete_tokens = (
+                (prompt - 1) // self.cache_block_size * self.cache_block_size
+            )
+            assert type(cached) is int and cached >= complete_tokens, usage
+            observed = result.get("nvext", {}).get("timing", {}).get("kv_hit_rate")
+            if isinstance(observed, (float, int)) and observed >= expected - 1e-9:
+                return
+            time.sleep(0.1)
+        raise AssertionError(
+            f"Image KV events did not cover complete prompt blocks: {observed} < {expected}"
+        )
+
+    def validate(self, response: Any, content: str) -> None:
+        self.expected_colors = (
+            ("blue", "red") if self._iteration == 3 else ("red", "blue")
+        )
+        super().validate(response, content)
+        result = response.json()
+        usage = result["usage"]
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        assert type(cached) is int and 0 <= cached <= usage["prompt_tokens"], usage
+        hit_rate = result.get("nvext", {}).get("timing", {}).get("kv_hit_rate")
+        assert type(hit_rate) in (float, int) and 0 <= hit_rate <= 1, result
+        prompt = usage["prompt_tokens"]
+        assert prompt >= self.cache_block_size * 2, usage
+        assert len(self._observed) == self._iteration
+        if self._iteration:
+            assert prompt == self._observed[0][0], (prompt, self._observed)
+        if self._iteration == 1:
+            complete_tokens = (
+                (prompt - 1) // self.cache_block_size * self.cache_block_size
+            )
+            expected = (prompt // self.cache_block_size) / math.ceil(
+                prompt / self.cache_block_size
+            )
+            assert cached > self._observed[0][1] and cached >= complete_tokens, usage
+            assert hit_rate >= expected - 1e-9, (hit_rate, expected)
+        elif self._iteration in (2, 3):
+            assert cached < self._observed[1][1], (cached, self._observed)
+            if self._iteration == 2:
+                assert hit_rate < self._observed[1][2], (hit_rate, self._observed)
+        self._observed.append((prompt, cached, hit_rate))
+        if self._iteration == 2:
+            # Alias pixels must publish a complete, independently routable KV chain.
+            self._wait_for_complete_prompt(prompt)
+
+    def final_validation(self) -> None:
+        assert len(self._observed) == 4, "All image identity cases must execute"
+
+
+@dataclass
 class StopStringChatPayload(ChatPayload):
     """End a chat completion on its single stop string.
 

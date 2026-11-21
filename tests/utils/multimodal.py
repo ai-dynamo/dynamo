@@ -2,14 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import hashlib
 import os
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional, Type
+from urllib.request import urlopen
 
 import pytest
+from PIL import Image, ImageOps, PngImagePlugin
+from werkzeug.utils import send_file
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import (
@@ -21,7 +26,13 @@ from tests.serve.conftest import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
-from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
+from tests.utils.payloads import (
+    BasePayload,
+    CachedTokensChatPayload,
+    ChatPayload,
+    ImageCacheIdentityPayload,
+    MediaAccuracyPayload,
+)
 
 # Same triangle clip the http fixtures use (see tests/serve/conftest.py), so the
 # local-file and NVDEC paths describe identical content and can assert the same
@@ -41,6 +52,78 @@ AUDIO_TEST_URL = (
 # ---------------------------------------------------------------------------
 # Payload factories
 # ---------------------------------------------------------------------------
+
+
+_SIDECAR_IMAGE = "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAK0lEQVR4nGP8z0AsYGQgVi0T0WaSAEYNHTV01NBRQ0cNHTV01NBRQwefoQBvcAI3xbX7+QAAAABJRU5ErkJggg=="
+_SIDECAR_VIDEO_SHA256 = (
+    "04171a85ee3ba5ac9118b0a5858adf0892b49474cdf15320e32599a3d1ab9919"
+)
+_SIDECAR_AUDIO_URL = "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/8e35ed77aeece087fa53abf2a68a282dc13efc8c/datasets/mini_en/wav/1221-135766-0002.wav"
+_SIDECAR_AUDIO_SHA256 = (
+    "65b222837919ccbb924a4e1077413ea7cc6af3e68b663b012a9539d5c05850f0"
+)
+
+
+def _sidecar_media_source(media: str) -> str:
+    if media == "image":
+        return "data:image/png;base64," + _SIDECAR_IMAGE
+    if media == "video":
+        data = LOCAL_VIDEO_TEST_PATH.read_bytes()
+        expected, mime = _SIDECAR_VIDEO_SHA256, "video/mp4"
+    else:
+        with urlopen(_SIDECAR_AUDIO_URL, timeout=30) as response:
+            data = response.read(1024 * 1024 + 1)
+        expected, mime = _SIDECAR_AUDIO_SHA256, "audio/wav"
+    assert hashlib.sha256(data).hexdigest() == expected, f"{media} fixture changed"
+    return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+
+
+def make_sidecar_media_payload(media: str) -> MediaAccuracyPayload:
+    """Pinned media accuracy/usage through HTTP; source loading occurs at execution."""
+    routing = media == "image-routing"
+    kind = "image" if routing else media
+    prompt = {
+        "image": "Name the colors from left to right.",
+        "video": "Describe the shape and its motion in this video.",
+        "audio": "",
+    }[kind]
+    if routing:
+        prompt = (
+            "Inspect the image carefully and answer only with the two colors in order. "
+            * 8
+            + prompt
+        )
+    part_type = {"image": "image_url", "video": "video_url", "audio": "audio_url"}[kind]
+    initial_source = {
+        "image": "data:image/png;base64," + _SIDECAR_IMAGE,
+        "video": LOCAL_VIDEO_TEST_URI,
+        "audio": _SIDECAR_AUDIO_URL,
+    }[kind]
+    payload = chat_payload(
+        [
+            {"type": part_type, part_type: {"url": initial_source}},
+            {"type": "text", "text": prompt},
+        ],
+        expected_response=[],
+        temperature=0,
+        extra_body={
+            "nvext": {"extra_fields": ["prompt_token_ids", "worker_id", "timing"]}
+        },
+    )
+    if kind == "image" and not routing:
+        payload.body.pop("max_tokens")
+    else:
+        payload.body["max_tokens"] = 96 if kind == "audio" else 64
+    cls = ImageCacheIdentityPayload if routing else MediaAccuracyPayload
+    return cls(
+        body=payload.body,
+        expected_response=[],
+        expected_log=[],
+        media=kind,
+        media_source=lambda _iteration: _sidecar_media_source(kind),
+        repeat_count=4 if routing else 1,
+        timeout=120,
+    )
 
 
 _MULTIMODAL_COLOR_PROMPT = (
@@ -685,3 +768,42 @@ def make_multimodal_configs(
             )
 
     return configs
+
+
+def make_sidecar_image_identity_payload(server) -> ImageCacheIdentityPayload:
+    """Keep the URL identity stable while replacing the pixels on the last request."""
+    payload = make_sidecar_media_payload("image-routing")
+    encoded = base64.b64decode(payload.media_source(0).split(",", 1)[1])
+    image = Image.open(BytesIO(encoded)).convert("RGB")
+    alias, changed = BytesIO(), BytesIO()
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("cache-alias", "same pixels, different URI")
+    image.save(alias, format="PNG", pnginfo=metadata)
+    ImageOps.mirror(image).save(changed, format="PNG")
+    state = {"pixels": encoded}
+    server.expect_request("/identity.png").respond_with_handler(
+        lambda req: send_file(
+            BytesIO(state["pixels"]),
+            req.environ,
+            mimetype="image/png",
+            conditional=True,
+            etag=False,
+        )
+    )
+    server.expect_request("/alias.png").respond_with_handler(
+        lambda req: send_file(
+            BytesIO(alias.getvalue()),
+            req.environ,
+            mimetype="image/png",
+            conditional=True,
+            etag=False,
+        )
+    )
+
+    def source(iteration):
+        if iteration == 3:
+            state["pixels"] = changed.getvalue()
+        return server.url_for("/alias.png" if iteration == 2 else "/identity.png")
+
+    payload.media_source = source
+    return payload

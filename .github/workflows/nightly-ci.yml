@@ -1160,7 +1160,7 @@ jobs:
       cuda_version: '["13.4"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: 'sidecar and trtllm and gpu_1'
+      gpu_test_markers: 'sidecar and trtllm and gpu_1 and not upstream_trtllm'
       gpu_test_timeout_minutes: 45
       sidecar_backend: trtllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
