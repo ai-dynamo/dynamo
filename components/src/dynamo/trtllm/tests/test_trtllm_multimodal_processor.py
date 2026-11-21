@@ -718,16 +718,12 @@ async def test_uint8_video_next_to_an_image_is_passed_through(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_type", ["qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"]
-)
-async def test_image_and_video_request_is_rejected_for_a_shared_rescale_flag(
-    model_type, image_video_processor, monkeypatch
+async def test_image_and_video_request_is_rejected_for_minicpmv4_6(
+    image_video_processor, monkeypatch
 ) -> None:
-    """These models' processors take one rescale flag for images and videos,
-    so next to float frames the PIL image would go in unscaled (Qwen2/2.5-VL).
-    Refuse the request, before the video is fetched."""
-    processor, _ = image_video_processor(None, model_type)
+    """MiniCPM-V 4.6's processor refuses an image and a video in one request.
+    Refuse it here, before the video is fetched."""
+    processor, _ = image_video_processor(None, "minicpmv4_6")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
 
     with pytest.raises(InvalidArgument) as excinfo:
@@ -737,6 +733,49 @@ async def test_image_and_video_request_is_rejected_for_a_shared_rescale_flag(
 
     assert "cannot take an image and a video in the same request" in str(excinfo.value)
     mmp.fetch_bytes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["nvdec", "vendor"])
+@pytest.mark.parametrize(
+    "video_first", [False, True], ids=["image_first", "video_first"]
+)
+@pytest.mark.parametrize("model_type", ["qwen2_vl", "qwen2_5_vl", "exaone4_5"])
+async def test_image_next_to_float_video_is_handed_over_as_a_float_tensor(
+    model_type, video_first, path, image_video_processor, monkeypatch
+) -> None:
+    """These models' processors take one rescale flag for images and videos
+    and skip rescaling when the video frames are float. Next to such a video
+    the image goes over as the float (3, H, W) [0, 1] tensor trtllm-serve
+    sends, so both are scaled alike; the video and the item order are kept."""
+    processor, pil_image = image_video_processor(None, model_type)
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, path, source)
+
+    processed = await processor.process_openai_request(
+        _request(video_first=video_first),
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    mm_data = processed["multi_modal_data"]
+    (image,) = mm_data["image"]
+    pixels = np.asarray(pil_image, dtype=np.float32)
+    expected = torch.from_numpy(pixels / 255.0).permute(2, 0, 1)
+    assert isinstance(image, torch.Tensor)
+    assert image.dtype == torch.float32 and image.shape == (3, 4, 5)
+    assert torch.equal(image, expected)
+    assert mm_data["video"][0] is source
+    if path == "nvdec":
+        mmp._nvdec_video_data.assert_called_once()
+        mmp.async_load_video.assert_not_awaited()
+    else:
+        mmp._nvdec_video_data.assert_not_called()
+        mmp.async_load_video.assert_awaited_once()
+    order = [("image", 0), ("video", 0)]
+    assert [(e["modality"], e["index"]) for e in processed["mm_item_order"]] == (
+        order[::-1] if video_first else order
+    )
 
 
 @pytest.mark.asyncio
@@ -951,14 +990,19 @@ class _ExpandingInputProcessor:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_format, model_type",
+    [("np", "multimodal"), (None, "qwen2_vl")],
+    ids=["uint8_video", "float_image"],
+)
 async def test_image_and_video_request_after_single_modality_requests_passes_trtllm_hashing(
-    image_video_processor, monkeypatch
+    video_format, model_type, image_video_processor, monkeypatch
 ) -> None:
     """A worker sees image-only and video-only requests first, which settles
     TRT-LLM's hashing as supported; after that a failure in it is raised and
     stops the engine. Image + video requests, in either order, must then hash
     with every item at its own tokens."""
-    processor, _ = image_video_processor("np")
+    processor, _ = image_video_processor(video_format, model_type)
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     input_processor = _ExpandingInputProcessor()
     hashed = create_input_processor_with_hash(input_processor)
