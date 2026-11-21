@@ -24,7 +24,7 @@ spec:
             export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"
             export PATH="$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64"
             /sbin/ldconfig
-            exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
+            exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           command:
           - /bin/sh
           - -c
@@ -48,7 +48,7 @@ spec:
             export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"
             export PATH="$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64"
             /sbin/ldconfig
-            exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
+            exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           command:
           - /bin/sh
           - -c

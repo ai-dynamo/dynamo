@@ -61,6 +61,10 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size
@@ -128,6 +132,8 @@ spec:
             - --trust-remote-code
             - --disaggregation-mode
             - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size

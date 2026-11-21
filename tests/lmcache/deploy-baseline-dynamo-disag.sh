@@ -28,8 +28,10 @@ echo "🔧 Starting dynamo disaggregated serving without LMCache..."
 
 python -m dynamo.frontend &
 
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL --disaggregation-mode decode &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL_URL \
-    --disaggregation-mode prefill
+    --disaggregation-mode prefill \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'

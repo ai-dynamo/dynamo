@@ -29,7 +29,9 @@ echo "🔧 Starting dynamo disaggregated serving with LMCache enabled..."
 
 python -m dynamo.frontend &
 
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL --disaggregation-mode decode &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL --disaggregation-mode decode \
+    --disable-hybrid-kv-cache-manager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
 sleep 20
 
@@ -37,7 +39,10 @@ sleep 20
 LMCACHE_CHUNK_SIZE=256 \
 LMCACHE_LOCAL_CPU=True \
 LMCACHE_MAX_LOCAL_CPU_SIZE=20 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model $MODEL_URL \
-    --disaggregation-mode prefill
+    --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"dynamo.vllm.pd_connector"}'
