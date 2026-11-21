@@ -982,7 +982,10 @@ class TestGenerateLocally:
         return self._make_mock_generation_result_sequence([prompt_logprobs])
 
     def _make_mock_generation_result_sequence(
-        self, prompt_logprobs_per_chunk, cached_tokens=mock.sentinel.unset
+        self,
+        prompt_logprobs_per_chunk,
+        cached_tokens=mock.sentinel.unset,
+        prompt_token_ids=(1, 2, 3),
     ):
         """Mock GenerationResult with cumulative output across streaming chunks."""
         results = []
@@ -997,6 +1000,9 @@ class TestGenerateLocally:
 
             res = MagicMock()
             res.outputs = [output]
+            res.prompt_token_ids = (
+                None if prompt_token_ids is None else list(prompt_token_ids)
+            )
             res.finished = index == last_index
             if cached_tokens is not mock.sentinel.unset:
                 res.cached_tokens = cached_tokens
@@ -1086,6 +1092,89 @@ class TestGenerateLocally:
         ]
 
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
+
+    @pytest.mark.multimodal
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+        ],
+    )
+    async def test_usage_counts_expanded_multimodal_prompt(self, mode):
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        expanded_ids = list(range(104))
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={"prompt_token_ids": expanded_ids, "multi_modal_data": None}
+        )
+        params = SimpleNamespace(
+            request_type="generation_only"
+            if mode == DisaggregationMode.DECODE
+            else "context_only",
+            disagg_request_id=None,
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[]], cached_tokens=96, prompt_token_ids=expanded_ids
+            )
+        )
+        request = {
+            "token_ids": [1, 91, 2],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        usage = chunks[-1]["completion_usage"]
+        assert usage["prompt_tokens"] == 104
+        assert usage["prompt_tokens_details"]["cached_tokens"] == 96
+        assert usage["total_tokens"] == 105
+
+    @pytest.mark.core
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_ids", "engine_prompt_ids"),
+        [
+            ([42], [2, 0]),
+            ([11, 12, 13, 14, 15], [2, 0]),
+            ([11, 12, 13, 14, 15], [11, 12, 13, 14, 15]),
+            ([11, 12, 13, 14, 15], None),
+        ],
+        ids=["encoder-decoder-short", "encoder-decoder", "text", "no-engine-prompt"],
+    )
+    async def test_usage_keeps_request_length_for_text_prompt(
+        self, request_ids, engine_prompt_ids
+    ):
+        # An encoder-decoder engine prompt is only the decoder start tokens.
+        handler = self._make_handler()
+        cached_tokens = len(request_ids) - 1
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[]], cached_tokens=cached_tokens, prompt_token_ids=engine_prompt_ids
+            )
+        )
+        request = {
+            "token_ids": list(request_ids),
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        usage = chunks[-1]["completion_usage"]
+        assert usage["prompt_tokens"] == len(request_ids)
+        assert usage["prompt_tokens_details"]["cached_tokens"] == cached_tokens
+        assert usage["total_tokens"] == len(request_ids) + 1
 
     @pytest.mark.asyncio
     @pytest.mark.multimodal
