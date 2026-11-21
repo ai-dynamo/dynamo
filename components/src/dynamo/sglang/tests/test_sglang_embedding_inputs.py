@@ -171,3 +171,14 @@ async def test_chat_style_messages_are_rejected():
         async for _ in handler.generate(request, _Context()):
             pass
     assert handler.engine.async_encode_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dimensions_below_one_rejected_before_encode():
+    handler = _handler()
+    request = {"model": "embedding-model", "input": "hello", "dimensions": 0}
+
+    with pytest.raises(InvalidArgument, match="dimensions must be >= 1, got 0"):
+        async for _ in handler.generate(request, _Context()):
+            pass
+    assert handler.engine.async_encode_calls == []
