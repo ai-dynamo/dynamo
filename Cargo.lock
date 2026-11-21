@@ -3586,6 +3586,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-tilert-sidecar"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-sidecar-common",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
+ "tracing",
+ "uuid",
+ "vllm-proto",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
