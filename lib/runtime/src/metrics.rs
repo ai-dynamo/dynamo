@@ -23,7 +23,6 @@ use std::sync::Arc;
 
 use crate::component::ComponentBuilder;
 use anyhow;
-use anyhow::Context as _;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::any::Any;
@@ -926,14 +925,16 @@ impl MetricsRegistry {
     /// scrape path and is deliberately independent of the typed path that feeds
     /// OTLP: `/metrics` output stays byte-for-byte what the engine emitted.
     ///
-    /// - Families are merged by name; HELP and TYPE must match.
+    /// - Families are merged by name. The first source to declare a name fixes its
+    ///   HELP and TYPE; a later family that disagrees is warned and skipped, and
+    ///   every other family is still emitted.
     /// - Multiple series for the same name are allowed if labels differ.
     /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
 
-        let merged = FamilyMerger::from_gathered(&registries)?.into_sorted();
+        let merged = FamilyMerger::from_gathered(&registries).into_sorted();
 
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
@@ -975,7 +976,7 @@ impl MetricsRegistry {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
 
-        let mut merger = FamilyMerger::from_gathered(&registries)?;
+        let mut merger = FamilyMerger::from_gathered(&registries);
 
         // The unit travels beside the family, keyed by name: the proto model
         // has no unit field, so it would otherwise be dropped here.
@@ -1175,20 +1176,53 @@ struct FamilyMerger {
     seen_series: HashSet<String>,
 }
 
+/// True the first time a help/type conflict is reported for `name` in this
+/// process, false after that.
+fn first_conflict_for(name: &str) -> bool {
+    static REPORTED: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(name.to_string())
+}
+
 impl FamilyMerger {
-    fn from_gathered(registries: &[MetricsRegistry]) -> anyhow::Result<Self> {
+    /// Merge every registry's families. A family whose help or type conflicts
+    /// with one already merged under its name is logged and skipped, exactly as
+    /// the typed path skips a conflicting typed family: one bad family must not
+    /// take every other family off both `/metrics` and OTLP.
+    fn from_gathered(registries: &[MetricsRegistry]) -> Self {
         let mut merger = Self {
             by_name: HashMap::new(),
             seen_series: HashSet::new(),
         };
         for (idx, registry) in registries.iter().enumerate() {
             for family in registry.get_prometheus_registry().gather() {
-                merger
-                    .add_family(family)
-                    .with_context(|| format!("gathering from registry {idx}"))?;
+                let name = family.name().to_string();
+                if let Err(error) = merger.add_family(family) {
+                    // A conflict persists across gathers, so warn once per
+                    // name rather than at the scrape and export rate.
+                    if first_conflict_for(&name) {
+                        tracing::warn!(
+                            metric_name = %name,
+                            registry_index = idx,
+                            %error,
+                            "skipping metric family; repeats of this conflict are logged at debug"
+                        );
+                    } else {
+                        tracing::debug!(
+                            metric_name = %name,
+                            registry_index = idx,
+                            %error,
+                            "skipping metric family"
+                        );
+                    }
+                }
             }
         }
-        Ok(merger)
+        merger
     }
 
     fn add_family(&mut self, mut family: prometheus::proto::MetricFamily) -> anyhow::Result<()> {
@@ -2322,6 +2356,88 @@ mod test_metric_families_combined {
 
     fn names(fs: &[prometheus::proto::MetricFamily]) -> Vec<&str> {
         fs.iter().map(|f| f.name()).collect()
+    }
+
+    /// Two registries in one tree declare the same family name with different
+    /// types. The first declaration wins, the conflicting one is skipped, and
+    /// every other family survives, on both the scrape and the export.
+    #[test]
+    fn conflicting_family_is_skipped_and_everything_else_survives() {
+        let root = registry();
+        let first =
+            prometheus::IntGauge::new("dynamo_conflict", "Declared first, as a gauge").unwrap();
+        first.set(1);
+        root.add_metric(Box::new(first)).unwrap();
+
+        let child = MetricsRegistry::new();
+        let conflicting =
+            prometheus::IntCounter::new("dynamo_conflict", "Declared again, as a counter").unwrap();
+        conflicting.inc_by(5);
+        child.add_metric(Box::new(conflicting)).unwrap();
+        child
+            .add_metric(Box::new(
+                prometheus::IntCounter::new("dynamo_child_total", "Child counter").unwrap(),
+            ))
+            .unwrap();
+        root.add_child_registry(&child);
+
+        let exported = root
+            .metric_families_combined()
+            .expect("one conflict must not fail the export");
+        assert_eq!(
+            names(&exported.families),
+            [
+                "dynamo_child_total",
+                "dynamo_conflict",
+                "dynamo_native_total",
+                "vllm:num_requests_running"
+            ]
+        );
+        let conflict = exported
+            .families
+            .iter()
+            .find(|family| family.name() == "dynamo_conflict")
+            .unwrap();
+        assert_eq!(
+            conflict.get_field_type(),
+            prometheus::proto::MetricType::GAUGE
+        );
+        assert_eq!(conflict.get_metric().len(), 1);
+        assert_eq!(conflict.get_metric()[0].get_gauge().value(), 1.0);
+
+        let text = root
+            .prometheus_expfmt_combined()
+            .expect("one conflict must not fail the scrape");
+        let declared: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .collect();
+        assert_eq!(
+            declared,
+            [
+                "dynamo_child_total counter",
+                "dynamo_conflict gauge",
+                "dynamo_native_total counter"
+            ],
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| line == "dynamo_conflict 1"),
+            "{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line == "dynamo_conflict 5"),
+            "{text}"
+        );
+    }
+
+    /// A conflict persists across gathers; only the first report per name is
+    /// a warning.
+    #[test]
+    fn conflict_is_reported_once_per_name() {
+        assert!(first_conflict_for("dynamo_test_reported_once"));
+        assert!(!first_conflict_for("dynamo_test_reported_once"));
+        assert!(first_conflict_for("dynamo_test_reported_once_other"));
     }
 
     #[test]
