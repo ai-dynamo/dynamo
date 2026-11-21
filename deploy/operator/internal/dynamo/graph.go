@@ -19,6 +19,8 @@ package dynamo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -805,6 +807,27 @@ func GetDCDResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string
 // dots, such as Services.
 func NormalizeKubeResourceName(name string) string {
 	return strings.ToLower(strings.ReplaceAll(name, ".", "-"))
+}
+
+// TruncateDNSLabelWithHash preserves names within maxLength and shortens longer
+// names with a stable hash suffix. The input must be a DNS subdomain and
+// maxLength must be positive.
+func TruncateDNSLabelWithHash(value string, maxLength int) string {
+	if len(value) <= maxLength {
+		return value
+	}
+
+	// Keep an eight-character hash of the full name so shortened names stay stable.
+	hash := sha256.Sum256([]byte(value))
+	hashText := hex.EncodeToString(hash[:])[:8]
+	if maxLength <= len(hashText) {
+		return hashText[:maxLength]
+	}
+
+	// Drop trailing separators at the cut so each DNS segment ends with a letter or digit.
+	suffix := "-" + hashText
+	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-.")
+	return prefix + suffix
 }
 
 type SecretsRetriever interface {

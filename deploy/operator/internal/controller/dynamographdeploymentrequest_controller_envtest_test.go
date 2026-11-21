@@ -46,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1113,10 +1114,12 @@ spec:
 	})
 
 	Context("When autoApply is enabled", func() {
-		It("Should create DGD after profiling", func() {
+		DescribeTable("Should create DGD after profiling", func(dgdrName, expectedDGDName string) {
+			t := GinkgoT()
 			ctx := context.Background()
-			dgdrName := "test-dgdr-autoapply"
 			namespace := envtestNamespace
+
+			t.Log("Create a request with auto-apply enabled")
 
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Name:      dgdrName,
@@ -1143,11 +1146,11 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			// Update status to Profiling using Status subresource
+			t.Log("Update status to Profiling using Status subresource")
 			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
-			// Create completed profiling job
+			t.Log("Create completed profiling job")
 			jobName := getProfilingJobName(dgdr)
 			job := &batchv1.Job{
 				Name:      jobName,
@@ -1173,16 +1176,14 @@ spec:
 			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, job) }()
 
-			// Update job status to completed using Status subresource
+			t.Log("Update job status to completed using Status subresource")
 			job.Status.Conditions = []batchv1.JobCondition{{
 				Type:   batchv1.JobComplete,
 				Status: corev1.ConditionTrue,
 			}}
 			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
 
-			// Create output ConfigMap
-			// The profiler emits a static name in the YAML, but the operator must override
-			// it with a DGDR-scoped unique name to prevent collisions across DGDRs.
+			t.Log("Create profiler output with a static name that the operator must replace")
 			dgdYAML := `apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -1201,10 +1202,6 @@ spec:
         mainContainer:
           image: registry.example/runtime:other-custom`
 
-			// expectedDGDName is the name the operator should assign: DGDR name + "-dgd",
-			// not the static "vllm-agg" that the profiler emitted.
-			expectedDGDName := dgdrName + "-dgd"
-
 			outputConfigMapName := getOutputConfigMapName(dgdr)
 			cm := &corev1.ConfigMap{
 				Name:      outputConfigMapName,
@@ -1216,13 +1213,13 @@ spec:
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cm) }()
 
-			// Reconcile to generate spec (transitions to Deploying because autoApply=true)
+			t.Log("Reconcile to generate spec (transitions to Deploying because autoApply=true)")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				Name: dgdrName, Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Get updated DGDR and check state is Deploying
+			t.Log("Get updated DGDR and check state is Deploying")
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
@@ -1231,15 +1228,16 @@ spec:
 			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring(`"runtimeVersionOverride":"1.1.0"`))
 			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring(`"runtimeVersionOverride":"1.2.0"`))
 
-			// Reconcile again to create DGD
+			t.Log("Reconcile again to create DGD")
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{
 				Name: dgdrName, Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify beta DGD was created with the DGDR-scoped name (not the profiler's "vllm-agg")
+			t.Log("Verify auto-apply creates the DGD with a stable name that fits Kubernetes labels")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
+			Expect(validation.IsValidLabelValue(dgd.Name)).Should(BeEmpty())
 			Expect(dgd.Spec.Components).Should(HaveLen(2))
 			componentOverrides := map[string]string{}
 			for _, component := range dgd.Spec.Components {
@@ -1250,14 +1248,19 @@ spec:
 				"Worker":   "1.2.0",
 			}))
 
-			// Get final DGDR status
+			t.Log("Get final DGDR status")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.DGDName).Should(Equal(expectedDGDName))
 
-			// Clean up DGD
+			t.Log("Clean up DGD")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
 			_ = k8sClient.Delete(ctx, dgd)
-		})
+		},
+			Entry("short DGDR name", "test-dgdr-autoapply", "test-dgdr-autoapply-dgd"),
+			Entry("59-character DGDR name", strings.Repeat("a", 59), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dgd"),
+			Entry("60-character DGDR name", strings.Repeat("a", 60), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-11ee3912-dgd"),
+			Entry("63-character DGDR name", strings.Repeat("a", 63), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-7d3e74a0-dgd"),
+		)
 
 		It("Should apply the DGDR runtime version to a persisted legacy profiler result", func() {
 			ctx := context.Background()
@@ -2348,6 +2351,36 @@ var _ = Describe("DGDR Helper Functions", func() {
 				Name: "test-dgdr",
 			}
 			Expect(getProfilingJobName(dgdr)).Should(Equal("profile-test-dgdr"))
+		})
+
+		It("Should return a valid, stable Job name for every admitted DGDR name", func() {
+			name55 := strings.Repeat("a", 55)
+			// The cut keeps the first 46 name characters; put a "." at the cut point.
+			dotted := strings.Repeat("a", 45) + "." + strings.Repeat("b", 20)
+			cases := []struct {
+				name string
+				want string // exact Job name, when the name is not shortened
+			}{
+				{name: name55, want: "profile-" + name55},
+				{name: strings.Repeat("a", 56)},
+				{name: "llama-3-3-70b-instruct-fp8-production-us-east-1-profiling"},
+				{name: strings.Repeat("a", 63)},
+				{name: strings.Repeat("a", 253)},
+				{name: dotted},
+			}
+			for _, tc := range cases {
+				dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+					Name: tc.name,
+				}
+				jobName := getProfilingJobName(dgdr)
+				Expect(validation.IsValidLabelValue(jobName)).To(BeEmpty(), "DGDR name %q gave Job name %q", tc.name, jobName)
+				Expect(validation.IsDNS1123Subdomain(jobName)).To(BeEmpty(), "DGDR name %q gave Job name %q", tc.name, jobName)
+				Expect(getProfilingJobName(dgdr)).To(Equal(jobName), "Job name must be stable")
+				Expect(jobName).To(HavePrefix("profile-"))
+				if tc.want != "" {
+					Expect(jobName).To(Equal(tc.want))
+				}
+			}
 		})
 	})
 

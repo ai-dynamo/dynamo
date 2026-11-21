@@ -4,8 +4,6 @@
 package disaggregatedset
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -36,7 +34,7 @@ func Render(dgd *nvidiacomv1beta1.DynamoGraphDeployment, roles []any) *unstructu
 // Name reserves room for child roles, slices, revisions and worker suffixes.
 // dgd must be non-nil.
 func Name(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
-	return truncateDNSLabelWithHash(strings.ToLower(strings.ReplaceAll(dgd.Name, ".", "-")), maxDisaggregatedSetNameLength)
+	return dynamo.TruncateDNSLabelWithHash(strings.ToLower(strings.ReplaceAll(dgd.Name, ".", "-")), maxDisaggregatedSetNameLength)
 }
 
 // Selection identifies the components and replica targets owned by this DisaggregatedSet.
@@ -56,7 +54,6 @@ const (
 	disaggregatedSetChildNameSeparatorLength    = 3 * len("-")
 	disaggregatedSetWorkerRevisionSuffixLength  = 2*len("-") + maxDisaggregatedSetGroupIndexLength + maxDisaggregatedSetWorkerRevisionHashLength
 	maxDisaggregatedSetNameLength               = maxDisaggregatedSetGeneratedNameLength - maxDisaggregatedSetRoleNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - disaggregatedSetChildNameSeparatorLength - disaggregatedSetWorkerRevisionSuffixLength
-	disaggregatedSetNameHashLength              = 8
 )
 
 // Select computes component ownership and replica targets without cluster access.
@@ -132,7 +129,7 @@ func disaggregatedSetRoleName(component *nvidiacomv1beta1.DynamoComponentDeploym
 	if preferred == "" || roleNameUsed(preferred, used) {
 		preferred = dynamo.NormalizeKubeResourceName(component.ComponentName)
 	}
-	preferred = truncateDNSLabelWithHash(preferred, maxDisaggregatedSetRoleNameLength)
+	preferred = dynamo.TruncateDNSLabelWithHash(preferred, maxDisaggregatedSetRoleNameLength)
 	roleName := preferred
 	for i := 2; roleNameUsed(roleName, used); i++ {
 		suffix := fmt.Sprintf("-%d", i)
@@ -151,18 +148,4 @@ func truncateDNSLabel(value string, maxLength int) string {
 		return value
 	}
 	return strings.TrimRight(value[:maxLength], "-")
-}
-
-func truncateDNSLabelWithHash(value string, maxLength int) string {
-	if len(value) <= maxLength {
-		return value
-	}
-	hash := sha256.Sum256([]byte(value))
-	hashText := hex.EncodeToString(hash[:])[:disaggregatedSetNameHashLength]
-	if maxLength <= len(hashText) {
-		return hashText[:maxLength]
-	}
-	suffix := "-" + hashText
-	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-")
-	return prefix + suffix
 }

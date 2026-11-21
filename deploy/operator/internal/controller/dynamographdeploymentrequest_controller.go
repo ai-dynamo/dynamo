@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	runtimejson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -1397,10 +1398,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleFailedPhase(ctx context.C
 	return ctrl.Result{}, nil
 }
 
-// getProfilingJobName returns the job name for a DGDR
+// getProfilingJobName returns "profile-<name>", cut with a stable hash suffix when
+// longer than 63 characters, since Kubernetes copies it into job-name pod labels.
 func getProfilingJobName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
-	// Use "profile-" prefix for all profiling jobs
-	return fmt.Sprintf("profile-%s", dgdr.Name)
+	return dynamo.TruncateDNSLabelWithHash("profile-"+dgdr.Name, validation.DNS1123LabelMaxLength)
 }
 
 // getOutputConfigMapName returns the ConfigMap name for profiling output
@@ -2119,7 +2120,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) getDGDPodImagePullErrors(ctx co
 // computeDGDName returns the Kubernetes name to use for the DGD that a DGDR owns.
 // If the user supplied an explicit name via spec.overrides.dgd.metadata.name that
 // value is returned as-is; otherwise the DGDR's own name is used with a "-dgd"
-// suffix, guaranteeing uniqueness even when two DGDRs have identical specs (which
+// suffix, shortening long names with a stable hash to fit Kubernetes labels.
+// This keeps names distinct even when two DGDRs have identical specs (which
 // would otherwise both produce the same profiler-generated name, e.g. "vllm-agg").
 func computeDGDName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
 	if dgdr.Spec.Overrides != nil && dgdr.Spec.Overrides.DGD != nil && len(dgdr.Spec.Overrides.DGD.Raw) > 0 {
@@ -2132,7 +2134,7 @@ func computeDGDName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string 
 			return meta.Metadata.Name
 		}
 	}
-	return dgdr.Name + "-dgd"
+	return dynamo.TruncateDNSLabelWithHash(dgdr.Name, validation.DNS1123LabelMaxLength-len("-dgd")) + "-dgd"
 }
 
 // generateDGDSpec reads profiling output from the sidecar ConfigMap, extracts the

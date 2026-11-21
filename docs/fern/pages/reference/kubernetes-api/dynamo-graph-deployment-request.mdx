@@ -1131,7 +1131,9 @@ The operator maintains observed state under `status`. See [Lifecycle](#lifecycle
 </ParamField>
 
 <ParamField path="status.profilingJobName" type="string">
-  Name of the Kubernetes Job running the profiler.
+  Name of the Kubernetes Job running the profiler. In `v1beta1`, this is
+  `profile-<DGDR name>`, shortened with a stable hash suffix when it exceeds
+  63 characters so it fits the Job's pod labels.
 </ParamField>
 
 <ParamField path="status.conditions" type="[]metav1.Condition">
@@ -1373,6 +1375,17 @@ kubectl get dgdr my-model -n $NAMESPACE \
   -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
 
 ```
+
+### Generated names in v1beta1
+
+The operator assigns the generated DGD the name `<DGDR name>-dgd`. If the DGDR
+name exceeds 59 characters, the operator shortens it with a stable hash before
+adding `-dgd`, keeping the result within the 63-character label limit. An explicit
+`spec.overrides.dgd.metadata.name` is used as supplied.
+
+These limits do not remove the profiler's limits on DGD and component names. Set
+an explicit shorter DGD name when needed. DGDR names longer than 63 characters
+still exceed the labels used to track resource ownership.
 
 ### Resource ownership
 
