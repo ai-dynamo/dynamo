@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -2285,26 +2286,28 @@ async def _capture_rendered_reasoning_processors(
     backend_defers_grammar,
 ):
     """Use real preprocessing and capture the worker controls and response parser."""
+    original_request = deepcopy(request)
     monkeypatch.setattr(
         module.InputProcessor,
         "assign_request_id",
         lambda request: None,
+    )
+    render_messages = AsyncMock(
+        return_value=(
+            None,
+            {
+                "prompt_token_ids": tokenizer.encode(
+                    prompt_text, add_special_tokens=False
+                )
+            },
+        )
     )
     processor = module.VllmProcessor(
         tokenizer=tokenizer,
         input_processor=SimpleNamespace(
             generation_config_fields={},
             renderer=SimpleNamespace(
-                render_messages_async=AsyncMock(
-                    return_value=(
-                        None,
-                        {
-                            "prompt_token_ids": tokenizer.encode(
-                                prompt_text, add_special_tokens=False
-                            )
-                        },
-                    )
-                ),
+                render_messages_async=render_messages,
                 process_for_engine_async=AsyncMock(return_value={}),
             ),
             process_inputs=lambda request_id, inputs, sampling_params, tasks: (
@@ -2332,6 +2335,19 @@ async def _capture_rendered_reasoning_processors(
     monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
     async for _ in processor._generator_inner(request):
         pass
+
+    render_messages.assert_awaited_once()
+    messages, chat_params = render_messages.await_args.args
+    assert messages == original_request["messages"]
+    template_kwargs = chat_params.chat_template_kwargs
+    expected_tools = [
+        ChatCompletionToolsParam.model_validate(tool).model_dump()
+        for tool in (original_request.get("tools") or [])
+    ]
+    assert template_kwargs["tools"] == (expected_tools or None)
+    for key, value in original_request.get("chat_template_kwargs", {}).items():
+        assert template_kwargs[key] == value
+
     return captured["dynamo_preproc"], captured["post"]
 
 
@@ -2723,7 +2739,9 @@ async def test_glm_hidden_reasoning_replays_scripted_worker_chunks(
                 index=0,
                 text=text,
                 token_ids=tokenizer.encode(text, add_special_tokens=False),
-                finish_reason=worker_finish_reason if index == len(chunks) - 1 else None,
+                finish_reason=worker_finish_reason
+                if index == len(chunks) - 1
+                else None,
                 logprobs=None,
             )
         )
@@ -2741,7 +2759,9 @@ async def test_glm_hidden_reasoning_replays_scripted_worker_chunks(
         for call in delta.get("tool_calls", [])
     ]
     expected_calls = (
-        [("get_weather", {"city": "Paris"})] if expected_finish_reason == "tool_calls" else []
+        [("get_weather", {"city": "Paris"})]
+        if expected_finish_reason == "tool_calls"
+        else []
     )
     assert calls == expected_calls
     assert choice is not None
