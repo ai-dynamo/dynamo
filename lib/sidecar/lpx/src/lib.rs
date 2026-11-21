@@ -49,23 +49,10 @@ pub fn serve(
         runtime_config,
         async { Ok(bootstrap.await.map_err(SidecarStartupError::from)?) },
         |drt, (engine, config), shutdown| async move {
-            let engine = Arc::new(engine);
-            let worker = Worker::new(engine.clone(), config).run_with_drt(drt, shutdown.clone());
-            tokio::pin!(worker);
-            // A signal shutdown that has begun ends with the Worker's own
-            // result, even when the load goes stale while it drains.
-            tokio::select! {
-                biased;
-                result = &mut worker => result.map_err(Into::into),
-                _ = shutdown.cancelled() => worker.await.map_err(Into::into),
-                error = engine.load_lost() => {
-                    shutdown.cancel();
-                    if let Err(stopped) = worker.await {
-                        tracing::warn!(error = %stopped, "Worker shutdown failed");
-                    }
-                    Err(error.into())
-                }
-            }
+            Worker::new(Arc::new(engine), config)
+                .run_with_drt(drt, shutdown)
+                .await
+                .map_err(Into::into)
         },
     )
 }
