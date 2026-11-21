@@ -1192,6 +1192,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
                 WorkerWithDpRank::new(worker, 0),
                 &RECURRENT_GROUPS,
                 1,
+                0,
             );
         }
     }

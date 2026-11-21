@@ -38,6 +38,7 @@ pub(crate) fn group_tag(group: u32) -> KvCacheGroupTag {
         kind: KvCacheGroupKind::Mamba,
         expected_group_count: Some(RECURRENT_GROUPS.len() as u32),
         alignment_blocks: Some(1),
+        eagle_margin_blocks: None,
     }
 }
 
