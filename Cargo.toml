@@ -124,7 +124,7 @@ dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.8.0" }
 
 
 # velo
-velo = { version = "=0.21.0", default-features = false }
+velo = { version = "=0.22.1", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -148,7 +148,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"] }
+cudarc = { version = "=0.19.10", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
 moka = { version = "0.12", features = ["future"] }
 derive_builder = { version = "0.20" }

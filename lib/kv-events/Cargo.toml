@@ -19,6 +19,7 @@ dynamo-router-protocol = { workspace = true }
 rmp-serde = { workspace = true }
 rustc-hash = "2.1.1"
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -244,7 +244,8 @@ impl DistributedRuntime {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
-            Some(mode) => mode,
+            // An explicit Velo falls back to tcp under TLS, as the configured one does.
+            Some(mode) => mode.tcp_under_tls(),
             None => ResponsePlaneMode::configured()?,
         };
 
@@ -905,13 +906,6 @@ mod parser_env_tests {
                 busy_port.as_str(),
                 "Failed to pre-bind TCP listener",
             ),
-            // Velo has no TLS, so TLS settings must not be silently ignored.
-            (
-                "DYN_TCP_TLS_CERT_PATH",
-                "/nonexistent/cert.pem",
-                "DYN_TCP_TLS_CERT_PATH",
-            ),
-            ("DYN_TCP_TLS_INSECURE", "true", "DYN_TCP_TLS_INSECURE"),
         ];
         if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
             cases.push(("DYN_VELO_RESPONSE_TRANSPORT", "ucx", "velo-ucx"));
@@ -934,6 +928,25 @@ mod parser_env_tests {
             })
             .await;
         }
+    }
+
+    /// Velo has no TLS, so a runtime asked for Velo under TLS runs on tcp.
+    #[tokio::test]
+    async fn distributed_runtime_uses_tcp_for_velo_under_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_uses_tcp_for_velo_under_tls"
+            ),
+            &[("DYN_TCP_TLS_INSECURE", "true")],
+        ) {
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let mut config = DistributedConfig::process_local();
+        config.response_plane = Some(ResponsePlaneMode::Velo);
+        let drt = DistributedRuntime::new(runtime, config).await.unwrap();
+        assert_eq!(drt.response_plane(), ResponsePlaneMode::Tcp);
     }
 
     #[tokio::test]

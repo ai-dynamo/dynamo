@@ -141,7 +141,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
-                let (raw_token_ids, is_eagle) = match (token_ids, trtllm_routing) {
+                let (mut raw_token_ids, is_eagle) = match (token_ids, trtllm_routing) {
                     (MapTokenIds::Plain(ids), None) => normalize_token_ids(ids),
                     (ids, Some(metadata)) => {
                         let Some(tokens) = trtllm::token_ids(
@@ -160,6 +160,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let medium = normalize_medium(medium.unwrap_or(None));
                 let lora_name = lora_name.unwrap_or(None);
                 let extra_keys = extra_keys.unwrap_or(None);
+                mark_first_raw_key_block(&mut raw_token_ids, block_size, extra_keys.as_deref());
                 let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
                 });
@@ -264,10 +265,11 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let cache_namespace = cache_namespace.or_else(|| {
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
                 });
+                let (mut raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
+                mark_first_raw_key_block(&mut raw_token_ids, block_size, extra_keys.as_deref());
                 let block_mm_infos = parsed
                     .block_mm_infos
                     .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
-                let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
 
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
@@ -526,6 +528,29 @@ fn normalize_medium(medium: Option<String>) -> Option<String> {
 
 fn narrow_token_id(token_id: u64) -> u32 {
     u32::try_from(token_id).unwrap_or(WIDE_TOKEN_SENTINEL)
+}
+
+/// A raw binary key, such as vLLM's prompt-embeds digest, is an identity that the
+/// block's tokens do not carry and a request cannot reproduce. Marking the first such
+/// block makes `mm_exclusion` keep it and the blocks chained after it out of the index.
+fn mark_first_raw_key_block(
+    token_ids: &mut [u32],
+    block_size: usize,
+    extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
+) {
+    let first_block = extra_keys.and_then(|blocks| {
+        blocks.iter().position(|keys| {
+            keys.iter()
+                .flatten()
+                .any(|key| matches!(key, ExtraKeyItem::Bytes(_)))
+        })
+    });
+    if let Some(token) = first_block
+        .and_then(|block| block.checked_mul(block_size))
+        .and_then(|start| token_ids.get_mut(start))
+    {
+        *token = WIDE_TOKEN_SENTINEL;
+    }
 }
 
 fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {

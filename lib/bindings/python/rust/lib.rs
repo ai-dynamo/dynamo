@@ -1547,6 +1547,13 @@ impl DistributedRuntime {
         self.inner.shutdown();
     }
 
+    /// The response transport this runtime uses ("tcp", "quic" or "velo"),
+    /// after the default and the TLS fallback are applied.
+    #[getter]
+    fn response_plane(&self) -> &'static str {
+        self.inner.response_plane().name()
+    }
+
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }

@@ -796,7 +796,7 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         "--response-plane",
         type=str,
         choices=["tcp", "quic", "velo"],
-        default=environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        default=environ.get("DYN_RESPONSE_PLANE"),
         help="Select the response transport. Frontend and workers must match.",
     )
     parser.add_argument(
