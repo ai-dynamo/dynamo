@@ -23,12 +23,20 @@ def configure_worker_drain(
     terminal_event,
     *,
     enable_admin=True,
+    disaggregated=False,
+    scheduler_idle=None,
 ):
     """Install LLM admission fencing, with optional administrative HTTP controls."""
 
     def pending_engine_requests() -> int | None:
         states = getattr(handler.engine.tokenizer_manager, "rid_to_state", None)
         return len(states) if isinstance(states, Mapping) else None
+
+    enable_admin = (
+        enable_admin
+        and (not disaggregated or scheduler_idle is not None)
+        and runtime.system_status_server_url() is not None
+    )
 
     controller = WorkerDrain(
         handler.generate_endpoint,
@@ -39,10 +47,11 @@ def configure_worker_drain(
         is_paused=lambda: bool(handler.engine.tokenizer_manager.is_pause),
         grace_period=get_grace_period_seconds(),
         pending_engine_requests=pending_engine_requests if enable_admin else None,
+        scheduler_idle=scheduler_idle if enable_admin else None,
     )
 
     handler._worker_drain = controller
-    if not enable_admin or runtime.system_status_server_url() is None:
+    if not enable_admin:
         return controller
     for descriptor in parse_engine_route_descriptors(
         handler.config.dynamo_args.engine_routes

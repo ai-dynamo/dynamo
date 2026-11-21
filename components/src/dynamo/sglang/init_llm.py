@@ -20,11 +20,13 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import supports_fpm_idle_heartbeat
 from dynamo.sglang.args import Config
 from dynamo.sglang.drain_controls import (
     configure_worker_drain,
     unregister_worker_drain_controls,
 )
+from dynamo.sglang.drain_scheduler import scheduler_idle_probe
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
     gateway_child_index,
@@ -338,8 +340,12 @@ async def init_decode(
             ready_event,
             shutdown_event,
             terminal_event or shutdown_event,
-            enable_admin=(
-                decode_worker_type == WorkerType.Aggregated and attached_engine is None
+            enable_admin=attached_engine is None,
+            disaggregated=decode_worker_type == WorkerType.Decode,
+            scheduler_idle=(
+                scheduler_idle_probe(handler, supports_fpm_idle_heartbeat)
+                if attached_engine is None and decode_worker_type == WorkerType.Decode
+                else None
             ),
         )
         handler.register_engine_routes(runtime)
@@ -516,7 +522,13 @@ async def init_prefill(
             ready_event,
             shutdown_event,
             terminal_event or shutdown_event,
-            enable_admin=False,
+            enable_admin=attached_engine is None,
+            disaggregated=True,
+            scheduler_idle=(
+                scheduler_idle_probe(handler, supports_fpm_idle_heartbeat)
+                if attached_engine is None
+                else None
+            ),
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:
@@ -527,6 +539,10 @@ async def init_prefill(
                 drain.wrap(handler.generate),
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
+                track_response_completion=(
+                    getattr(handler, "_drain_controls_enabled", False)
+                    and dynamo_args.response_plane == "tcp"
+                ),
                 health_check_payload=health_check_payload,
             ),
             load_lora_endpoint.serve_endpoint(
