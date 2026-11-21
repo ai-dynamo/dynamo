@@ -1,0 +1,38 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: verl Integration
+---
+
+import { TerminalDemo } from "@/components/TerminalDemo";
+
+<Warning title="Experimental">
+Integrations with external RL frameworks are under development/testing and subject to change.
+</Warning>
+
+[verl](https://github.com/verl-project/verl) is an RL framework that supports training through FSDP, FSDP2, and Megatron-LM, rollout inference through vLLM and SGLang, and orchestration with Ray. The Dynamo integration is a verl recipe that integrates both the Dynamo frontend and Dynamo vLLM/SGLang backend in the standard RL loop. Dynamo handles the inference and rollouts and is started through the same Ray job as the trainer.
+
+## Tutorial: Train Qwen2.5-7B-Instruct with verl + Dynamo
+
+This tutorial covers how to train Qwen2.5-7B-Instruct to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm. The RL loop runs on verl through KubeRay, and Fully Sharded Data Parallel (FSDP) trains the model. verl usually generates rollouts with vLLM engines that it manages itself. Here, the recipe's Dynamo backend starts a Dynamo frontend and four vLLM engines inside the same job instead, so every rollout request goes through Dynamo's KV-aware router. The engines and the trainer share one node's 8 GPUs, and no DynamoGraphDeployment is involved.
+
+<CardGroup cols={2}>
+  <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
+    Install KubeRay, then build verl onto a shared volume and download the model and dataset.
+  </Card>
+  <Card title="2. Train with verl + KubeRay" icon="regular brain" href="train.mdx">
+    Run GRPO for 15 steps in a RayJob that starts its own Dynamo frontend and vLLM engines.
+  </Card>
+</CardGroup>
+
+## Seeing it in action
+
+<TerminalDemo
+  src="../../../../assets/verl-rl-demo.cast"
+  title="Qwen2.5-7B-Instruct · GRPO on GSM8K · 15 steps on 8 GPUs"
+  chrome="macos"
+  theme="fern-code"
+  cols={100}
+  rows={25}
+  idleTimeLimit={1.5}
+/>
