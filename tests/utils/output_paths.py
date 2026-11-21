@@ -8,7 +8,9 @@ This module provides centralized logic for determining where test output
 output out of the git working tree by default.
 """
 
+import glob
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Union
@@ -59,3 +61,44 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
         os.path.join(tempfile.gettempdir(), "dynamo_tests"),
     )
     return os.path.join(log_root, path_str)
+
+
+# File timestamps use a coarse kernel clock that can trail time.time() by a
+# few milliseconds, so output just created this session must not look stale.
+_STALE_OUTPUT_MARGIN_S = 1.0
+
+
+def prepare_test_output_dir(log_dir: str, session_start: float) -> None:
+    """Create an empty output directory for one execution of a test.
+
+    Output last modified before ``session_start`` is left from an earlier
+    session and is removed. Output written during this session belongs to an
+    earlier attempt of this test, retried by Datadog or pytest-rerunfailures,
+    or to a same-named test in another file or xdist worker; it is moved to the
+    first free ``<log_dir>.attempt<N>`` so it is uploaded too. Checking the
+    time instead of counting attempts gives the same answer in every xdist
+    worker, because the workers share the output directory.
+    """
+    for path in [log_dir, *glob.glob(f"{glob.escape(log_dir)}.attempt*")]:
+        try:
+            stale = os.path.getmtime(path) < session_start - _STALE_OUTPUT_MARGIN_S
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(path, ignore_errors=True)
+    attempt = 1
+    while os.path.exists(log_dir):
+        archive = f"{log_dir}.attempt{attempt}"
+        attempt += 1
+        try:
+            # mkdir claims the slot atomically, so two workers cannot pick the
+            # same one; rename then replaces the claimed empty directory.
+            os.mkdir(archive)
+        except FileExistsError:
+            continue
+        try:
+            os.rename(log_dir, archive)
+        except FileNotFoundError:
+            os.rmdir(archive)
+        break
+    os.makedirs(log_dir, exist_ok=True)
