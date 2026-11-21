@@ -671,6 +671,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                             | dynamo_runtime::error::ErrorClass::BackendProtocol
                                     ) {
                                         tracing::error!(
+                                            parent: inflight_guard.span(),
                                             class = %error.class(),
                                             reason = %error.reason(),
                                             diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
@@ -678,6 +679,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                         );
                                     } else {
                                         tracing::debug!(
+                                            parent: inflight_guard.span(),
                                             class = %error.class(),
                                             reason = %error.reason(),
                                             diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
@@ -685,10 +687,20 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                         );
                                     }
                                 } else {
-                                    tracing::error!(%error_type, %err, "Streaming failure");
+                                    tracing::error!(
+                                        parent: inflight_guard.span(),
+                                        %error_type,
+                                        %err,
+                                        "Streaming failure"
+                                    );
                                 }
                             } else {
-                                tracing::error!(%error_type, %err, "Streaming failure");
+                                tracing::error!(
+                                    parent: inflight_guard.span(),
+                                    %error_type,
+                                    %err,
+                                    "Streaming failure"
+                                );
                             }
                             yield Event::default().data(error_body);
                             if emit_done_sentinel {
@@ -718,8 +730,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     // Client disconnects kill the context; graceful stops keep draining.
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
-                    // the enclosing span by ResponseMetricCollector::Drop.
+                    // the request span by ResponseMetricCollector::Drop.
                     tracing::warn!(
+                        parent: inflight_guard.span(),
                         request_id = %inflight_guard.request_id(),
                         model = %inflight_guard.model(),
                         endpoint = %inflight_guard.endpoint(),
@@ -760,6 +773,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     }
                     stream_handle.disarm();
                     tracing::warn!(
+                        parent: inflight_guard.span(),
                         request_id = %inflight_guard.request_id(),
                         model = %inflight_guard.model(),
                         endpoint = %inflight_guard.endpoint(),
@@ -997,6 +1011,63 @@ mod tests {
             assert_eq!(body, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n");
             assert_eq!(metrics.get_inflight_count(model), 0);
         }
+    }
+
+    /// The response body polls the monitor outside the request span, so its failure events
+    /// must name the request span themselves.
+    #[tokio::test]
+    async fn stream_failure_events_are_parented_to_the_request_span() {
+        use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        /// The span each ERROR event is emitted in.
+        struct ErrorSpans(Arc<std::sync::Mutex<Vec<Option<&'static str>>>>);
+
+        impl<S> Layer<S> for ErrorSpans
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, ctx: LayerContext<'_, S>) {
+                if *event.metadata().level() == tracing::Level::ERROR {
+                    let span = ctx.event_span(event).map(|span| span.name());
+                    self.0.lock().unwrap().push(span);
+                }
+            }
+        }
+
+        let spans = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _interest = crate::test_utils::tracing_interest_guard();
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(ErrorSpans(spans.clone())),
+        );
+        let model = "span-parent";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard_in(
+            tracing::info_span!("http-request"),
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-span",
+        );
+        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let stream = futures::stream::iter([Err(axum::Error::new("backend failed"))]);
+        let body = collect_sse_body(monitor_for_disconnects_with_timeout(
+            stream,
+            context,
+            guard,
+            ConnectionHandle::create_disabled(tx),
+            None,
+        ))
+        .await;
+
+        assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
+        let spans = spans.lock().unwrap();
+        assert!(!spans.is_empty());
+        assert!(
+            spans.iter().all(|span| *span == Some("http-request")),
+            "{spans:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
