@@ -7,11 +7,13 @@ use tonic_v14 as tonic;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::EngineType;
 use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -163,13 +165,24 @@ impl SidecarFixture for Fixture {
             "--grpc-connections".into(),
             self.config.connections.to_string(),
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            TEST_STARTUP_TIMEOUT.as_secs().to_string(),
             "--grpc-connect-attempt-timeout-secs".into(),
             "1".into(),
         ];
-        tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)).unwrap().0)
-            .await
-            .unwrap()
+        let started = Instant::now();
+        tokio::task::spawn_blocking(move || {
+            VllmSidecarEngine::from_args(Some(argv))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "vLLM fixture startup failed after {:?} with a {:?} budget: {error:?}",
+                        started.elapsed(),
+                        TEST_STARTUP_TIMEOUT
+                    )
+                })
+                .0
+        })
+        .await
+        .unwrap()
     }
 
     fn eof_error() -> BackendError {

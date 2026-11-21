@@ -5,10 +5,12 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -80,14 +82,23 @@ impl Fixture {
             "--grpc-connections".into(),
             self.config.connections.to_string(),
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            TEST_STARTUP_TIMEOUT.as_secs().to_string(),
             "--grpc-connect-attempt-timeout-secs".into(),
             "1".into(),
         ];
         if let Some(context_length) = context_length {
             args.extend(["--context-length".into(), context_length.to_string()]);
         }
-        TrtllmSidecarEngine::from_args(args).unwrap().0
+        let started = Instant::now();
+        TrtllmSidecarEngine::from_args(args)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "TensorRT-LLM fixture startup failed after {:?} with a {:?} budget: {error:?}",
+                    started.elapsed(),
+                    TEST_STARTUP_TIMEOUT
+                )
+            })
+            .0
     }
 
     pub fn respond(&self, request_id: &str, responses: Vec<pb::GenerateResponse>) {

@@ -12,7 +12,7 @@ use dynamo_backend_common::{
     LLMEngineOutput, OutputOptions, PrefillResult, PreprocessedRequest, PromptTokensDetails,
     SamplingOptions, StopConditions, WorkerConfig,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, TEST_STARTUP_TIMEOUT};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
@@ -113,7 +113,7 @@ fn transport() -> GrpcTransportConfig {
     GrpcTransportConfig {
         connections: NonZeroUsize::MIN,
         retry_interval: Duration::from_millis(10),
-        startup_deadline: Duration::from_secs(5),
+        startup_deadline: TEST_STARTUP_TIMEOUT,
         ..Default::default()
     }
 }

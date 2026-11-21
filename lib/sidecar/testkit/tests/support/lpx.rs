@@ -18,7 +18,9 @@ use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedReques
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_lpx_sidecar::LpxSidecarEngine;
 use dynamo_mocker::common::protocols::EngineType;
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, struct_to_json, struct_to_json_v14};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, TEST_STARTUP_TIMEOUT, struct_to_json, struct_to_json_v14,
+};
 use dynamo_sidecar_testkit::control::{Controller, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -140,10 +142,20 @@ impl SidecarFixture for Fixture {
             "--grpc-retry-interval-secs".into(),
             "1".into(),
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            TEST_STARTUP_TIMEOUT.as_secs().to_string(),
         ];
+        let started = Instant::now();
         let (_, bootstrap) = LpxSidecarEngine::try_from_args_async(argv).unwrap();
-        bootstrap.await.unwrap().0
+        bootstrap
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "LPX fixture startup failed after {:?} with a {:?} budget: {error:?}",
+                    started.elapsed(),
+                    TEST_STARTUP_TIMEOUT
+                )
+            })
+            .0
     }
 
     fn eof_error() -> BackendError {
