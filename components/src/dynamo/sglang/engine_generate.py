@@ -154,10 +154,31 @@ def build_native_generate_request(
 async def native_generate_stream(
     engine: Any, request: GenerateReqInput
 ) -> AsyncIterator[dict[str, Any]]:
-    """Dispatch exactly as SGLang native ``/generate`` handler does."""
-    async for response in engine.tokenizer_manager.generate_request(request, None):
-        # The router counts output from token_ids; clients get the opaque response.
-        yield {
-            "token_ids": response.get("output_ids") or [],
-            "engine_data": {"sglang_response": response},
-        }
+    """Forward native responses and close the owned SGLang request iterator."""
+    responses = engine.tokenizer_manager.generate_request(request, None)
+    try:
+        async for response in responses:
+            # The router counts output from token_ids; clients get the opaque response.
+            yield {
+                "token_ids": response.get("output_ids") or [],
+                "engine_data": {"sglang_response": response},
+            }
+    except GeneratorExit:
+        # An explicit outer close must surface a failed inner close.
+        await responses.aclose()
+        raise
+    except BaseException as engine_error:
+        # Preserve engine failures and cancellation if cleanup also fails.
+        try:
+            await responses.aclose()
+        except BaseException as cleanup_error:
+            try:
+                engine_error.add_note(
+                    f"SGLang native iterator cleanup also failed: {type(cleanup_error).__name__}"
+                )
+            except BaseException:
+                # A broken note sink must not replace the primary exception.
+                pass
+        raise
+    else:
+        await responses.aclose()
