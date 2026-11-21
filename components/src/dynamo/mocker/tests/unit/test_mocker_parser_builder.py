@@ -72,7 +72,7 @@ def test_reads_only_the_given_env(monkeypatch):
 
     assert namespace.discovery_backend == "mem"
     assert namespace.request_plane == "tcp"
-    assert namespace.response_plane == "tcp"
+    assert namespace.response_plane is None
     assert namespace.event_plane is None
     assert namespace.router_mode is None
     assert dict(os.environ) == before

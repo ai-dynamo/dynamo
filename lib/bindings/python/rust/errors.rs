@@ -11,6 +11,9 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
+use dynamo_llm::preprocessor::media::{
+    IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE,
+};
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, RetryHint};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
@@ -395,6 +398,8 @@ pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<D
 /// `test_video_public_message_matches_binding_allowlist` fails if they diverge.
 const PUBLIC_HTTP_MESSAGES: &[&str] = &[
     "Unsupported video media",
+    IMAGE_FETCH_FORBIDDEN_MESSAGE,
+    IMAGE_FETCH_NOT_FOUND_MESSAGE,
     "Image exceeds the decoded pixel limit",
 ];
 
