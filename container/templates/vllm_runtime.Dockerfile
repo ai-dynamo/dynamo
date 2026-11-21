@@ -518,6 +518,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
+
+# LMCache 0.5.6 fails on vLLM 0.34; remove once the pin moves to a release that supports it.
+RUN --mount=type=bind,source=./container/deps/vllm/patch_lmcache.py,target=/tmp/patch_lmcache.py \
+    python3 /tmp/patch_lmcache.py
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an

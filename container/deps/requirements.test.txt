@@ -38,7 +38,10 @@ hf-xet>=1.5.2
 # instead of silently downgrading the hub underneath diffusers.
 # The ceiling keeps transformers importable in the TensorRT-LLM test image:
 # this file installs into /opt/dynamo/venv there, which shadows the system
-# site where transformers requires huggingface-hub>=1.5.0,<2.0.
+# site where transformers requires huggingface-hub>=1.5.0,<2.0. vLLM 0.34 requires
+# hub 2, so its test image runs hub 1.x. When trtllm's runtime_image_tag in
+# context.yaml moves, check its Transformers: from 5.18.0 it accepts hub 2, so
+# remove the ceiling and rerun the TensorRT-LLM tests.
 huggingface-hub>=1.23.0,<2.0
 # Kustomize recipe template renderer
 jinja2==3.1.6
