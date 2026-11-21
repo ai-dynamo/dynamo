@@ -112,6 +112,22 @@ tests:
     asserts:
       - notFailedTemplate: {}
 
+  - it: should reject a boolean false KAI scheduler name with the bundled scheduler
+    set:
+      global.kai-scheduler.install: true
+      global.kai-scheduler.schedulerName: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "schedulerName \"false\" requires an externally managed KAI-compatible scheduler"
+
+  - it: should reject a numeric zero KAI scheduler name with the bundled scheduler
+    set:
+      global.kai-scheduler.install: true
+      global.kai-scheduler.schedulerName: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "schedulerName \"0\" requires an externally managed KAI-compatible scheduler"
+
   - it: should allow a custom KAI scheduler name with an externally managed scheduler
     set:
       global.kai-scheduler.install: false

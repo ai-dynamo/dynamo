@@ -126,8 +126,14 @@ Volcano:
   (index .Values.global "kai-scheduler").install
 }}
 {{- if $kaiInstalled }}
-  {{- /* The operator treats a missing or empty name as "kai-scheduler"; match it so "" is not rejected. */ -}}
-  {{- $kaiSchedulerName := default "kai-scheduler" (dig "kai-scheduler" "schedulerName" "" (.Values.global | default dict)) | toString }}
+  {{- /* The operator treats a missing, null or empty name as "kai-scheduler"; match it so those are not rejected.
+       Only those count as unset: `default` would also turn false or 0 into "kai-scheduler",
+       while operator-config.yaml renders them as "false" or "0". */ -}}
+  {{- $kaiSchedulerNameValue := dig "kai-scheduler" "schedulerName" "" (.Values.global | default dict) }}
+  {{- $kaiSchedulerName := "kai-scheduler" }}
+  {{- if not (or (kindIs "invalid" $kaiSchedulerNameValue) (eq (toString $kaiSchedulerNameValue) "")) }}
+    {{- $kaiSchedulerName = toString $kaiSchedulerNameValue }}
+  {{- end }}
   {{- if ne $kaiSchedulerName "kai-scheduler" }}
     {{- fail (printf `
 CONFIGURATION ERROR: global.kai-scheduler.schedulerName %q requires an externally managed KAI-compatible scheduler.
