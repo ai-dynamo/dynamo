@@ -29,7 +29,7 @@ use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     entrypoint::{RouterConfig, RouterModeSetting},
     kv_router::{
-        RolePolicy, RouterLoadSource, RoutingHost, RoutingLoadContext, RoutingPolicy,
+        RoleInputs, RolePolicy, RouterLoadSource, RoutingHost, RoutingLoadContext, RoutingPolicy,
         SelectionPolicySource,
         role_routing::{self, DecodeRouting},
     },
@@ -50,6 +50,8 @@ struct PrefillAdvertisement {
     /// keyed on. The decode set's value would index this pool at the wrong
     /// granularity if the two ever differ.
     kv_cache_block_size: u32,
+    /// Whether any of the prefill workers advertises routing taints.
+    has_taints: bool,
 }
 
 /// Read the prefill worker set's advertisement from its cards. The first card
@@ -73,6 +75,9 @@ fn resolve_advertisement_from_cards(
         router_config: first.router_config.clone(),
         is_eagle: first.runtime_config.enable_eagle,
         kv_cache_block_size: first.kv_cache_block_size,
+        has_taints: cards
+            .iter()
+            .any(|card| !card.runtime_config.taints.is_empty()),
     };
 
     // Only legacy explicit endpoints can supply multiple cards here; managed
@@ -136,6 +141,8 @@ impl PrefillRouter {
             kv_cache_block_size,
             kv_router_config,
             SelectionPolicySource::Registry,
+            // Callers of this constructor book prefill workers with `reserve_prefill_worker`.
+            true,
             prefill_load_estimator,
             session_affinity_ttl_secs,
             session_affinity_mode,
@@ -162,6 +169,7 @@ impl PrefillRouter {
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
             selection_policy: None,
+            reserves_workers: false,
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
@@ -190,6 +198,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         selection_policy: SelectionPolicySource,
+        reserves_workers: bool,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
@@ -221,6 +230,7 @@ impl PrefillRouter {
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
             selection_policy: Some(selection_policy),
+            reserves_workers,
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode: decode_router_mode.into(),
@@ -340,6 +350,25 @@ impl PrefillRouter {
         )
         .await?;
 
+        let role_policy = role_routing::role_policy(
+            &prefill_router_mode,
+            &RoleInputs {
+                role: crate::worker_type::WorkerType::Prefill,
+                config: &routing.kv_router_config.clone().unwrap_or_default(),
+                model_name: Some(&context.model_name),
+                selection: context.selection_policy.clone(),
+                // The prefill hop runs no request classifier.
+                has_request_classifier: false,
+                lora_enabled: context.model_manager.lora_enabled(),
+                reserves_workers: context.reserves_workers,
+                busy_thresholds: context.load_thresholds.is_configured(),
+                workers_have_taints: advertisement.has_taints,
+                // Its prefill-load probe reads this hop's `KvRouter`, whatever configuration
+                // the prefill workers advertise.
+                fronts_conditional_disagg: context.conditional_disagg_enabled,
+            },
+        )?;
+
         // Logged once per activation, and deliberately the *resolved* values
         // rather than what the card asked for. An advertisement replaces the
         // decode set's configuration rather than merging with it, so a worker
@@ -347,30 +376,31 @@ impl PrefillRouter {
         // this line is what makes that answerable without a rebuild.
         tracing::info!(
             ?prefill_router_mode,
+            policy = role_policy.name(),
+            kv_router = role_policy.has_kv_router(),
+            kv_router_needed_by = role_policy.kv_needed_by().map(tracing::field::display),
             decode_router_mode = ?context.decode_router_mode,
             advertised = routing.is_advertised,
             is_eagle = advertisement.is_eagle,
             block_size = prefill_block_size,
             session_affinity_ttl = ?routing.session_affinity_ttl,
             session_affinity_mode = ?routing.session_affinity_mode,
-            kv_tuning = ?routing.kv_router_config,
+            kv_tuning = ?routing
+                .kv_router_config
+                .as_ref()
+                .filter(|_| role_policy.has_kv_router()),
             "Activating prefill router"
         );
 
-        let policy = match role_routing::role_policy(
-            &prefill_router_mode,
-            crate::worker_type::WorkerType::Prefill,
-            &routing.kv_router_config.clone().unwrap_or_default(),
-            Some(&context.model_name),
-        )? {
-            RolePolicy::Kv { selection } => {
+        let policy = match role_policy {
+            RolePolicy::Kv { selection, .. } => {
                 // Create KV chooser using the endpoint (this is a prefill router)
                 let kv_chooser = context
                     .model_manager
                     .kv_chooser_for_with_policy_and_client(
                         client.clone(),
                         prefill_block_size,
-                        selection.unwrap_or_else(|| context.selection_policy.clone()),
+                        selection,
                         routing.kv_router_config,
                         context.prefill_load_estimator.clone(),
                         Some(crate::worker_type::WorkerType::Prefill),
@@ -511,6 +541,8 @@ impl PrefillRouter {
                     .selection_policy
                     .clone()
                     .expect("enabled prefill router has a selection policy"),
+                reserves_workers: router_ref.reserves_workers,
+                conditional_disagg_enabled: router_ref.conditional_disagg_policy.is_enabled(),
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 session_affinity_mode: router_ref.session_affinity_mode,
@@ -922,11 +954,12 @@ mod tests {
             16,
             None,
             SelectionPolicySource::Registry,
+            false,
             None,
             None,
             SessionAffinityMode::Hard,
             "test-model".into(),
-            namespace,
+            namespace.clone(),
             LoadThresholdHandle::new(Default::default()),
             drt.child_token(),
             None,
@@ -1068,6 +1101,75 @@ mod tests {
             .expect("retired prefill admission must fail promptly")
             .is_err()
         );
+
+        // A hop whose policy is only a picker runs without a KV router, except behind the
+        // public constructor: its callers book prefill workers with `reserve_prefill_worker`.
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "worker_selection:\n  prefill: round-robin\n",
+        )
+        .unwrap();
+        let picker_only = Arc::new(card(Some(RouterConfig::new(
+            RouterMode::KV,
+            KvRouterConfig {
+                router_policy_config: Some(policy_file.path().display().to_string()),
+                ..kv_config.clone()
+            },
+        ))));
+        for reserves_workers in [false, true] {
+            let manager = Arc::new(ModelManager::new());
+            let thresholds = LoadThresholdHandle::new(Default::default());
+            let hop = if reserves_workers {
+                PrefillRouter::new(
+                    oneshot::channel().1,
+                    manager,
+                    RouterMode::RoundRobin,
+                    16,
+                    None,
+                    None,
+                    None,
+                    SessionAffinityMode::Hard,
+                    "test-model".into(),
+                    namespace.clone(),
+                    thresholds,
+                    drt.child_token(),
+                )
+            } else {
+                PrefillRouter::new_with_selection_policy(
+                    None,
+                    manager,
+                    RouterMode::RoundRobin,
+                    false,
+                    16,
+                    None,
+                    SelectionPolicySource::Registry,
+                    false,
+                    None,
+                    None,
+                    SessionAffinityMode::Hard,
+                    "test-model".into(),
+                    namespace.clone(),
+                    thresholds,
+                    drt.child_token(),
+                    None,
+                )
+            };
+            let (_admissions, admitted_ids) = watch::channel(vec![ids[2]]);
+            hop.set_target(Some(WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint: endpoint.clone(),
+                group: endpoint.id().to_string(),
+                generation: 3,
+                card: picker_only.clone(),
+                admitted_ids,
+            })));
+            await_activation(&hop, 2).await;
+            let binding = hop.binding.load_full().unwrap();
+            assert_eq!(
+                binding.router.kv_router_if_enabled().is_some(),
+                reserves_workers
+            );
+        }
 
         drop(router);
         for worker in workers {
@@ -1230,6 +1332,7 @@ mod tests {
             64,
             None,
             SelectionPolicySource::Registry,
+            false,
             None,
             None,
             SessionAffinityMode::Hard,
@@ -1548,6 +1651,7 @@ mod tests {
             64,
             None,
             SelectionPolicySource::Registry,
+            false,
             None,
             None,
             SessionAffinityMode::Hard,
@@ -1750,6 +1854,7 @@ mod tests {
                 16,
                 None,
                 SelectionPolicySource::Registry,
+                false,
                 None,
                 None,
                 SessionAffinityMode::Hard,

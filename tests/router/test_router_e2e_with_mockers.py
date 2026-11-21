@@ -105,6 +105,13 @@ ROUTER_AIS_CONFIG = {
     "worker_type": "aggregated",
 }
 
+_PREFILL_TOKENS_OVERLOAD = {
+    "blocks_threshold": "None",
+    "tokens_threshold": 1,
+    "tokens_threshold_frac": "None",
+    "router_queue_threshold": "None",
+    "max_tokens": 1,
+}
 ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
@@ -113,16 +120,7 @@ ROUTER_OVERLOAD_529_CASES = (
         },
         id="decode-blocks",
     ),
-    pytest.param(
-        {
-            "blocks_threshold": "None",
-            "tokens_threshold": 1,
-            "tokens_threshold_frac": "None",
-            "router_queue_threshold": "None",
-            "max_tokens": 1,
-        },
-        id="prefill-tokens",
-    ),
+    pytest.param(_PREFILL_TOKENS_OVERLOAD, id="prefill-tokens"),
 )
 # Speed isolation: only the *gated* stage is slow (speedup_ratio 0.01); the
 # non-gated stage is orders of magnitude faster (100.0) so its latency never
@@ -733,6 +731,34 @@ def test_mocker_kv_router_overload_529(
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             **overload_config,
+        )
+
+
+@pytest.mark.timeout(45)
+def test_busy_threshold_keeps_picker_only_role_on_kv_path(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """A busy threshold keeps a picker-only policy-file role on the KV path.
+
+    The prefill-token threshold is judged against the load a KV router books,
+    so a ``round-robin`` role that ran without one would stop returning 529.
+    """
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("worker_selection:\n  aggregated: round-robin\n")
+    mocker_args = {"speedup_ratio": 0.01, "block_size": 4, "num_gpu_blocks": 64}
+
+    with MockerProcess(request, mocker_args=mocker_args, num_mockers=1) as mockers:
+        _test_router_overload_529(
+            engine_workers=mockers,
+            block_size=4,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            router_policy_config=str(policy_file),
+            **_PREFILL_TOKENS_OVERLOAD,
         )
 
 
@@ -1374,16 +1400,31 @@ def test_mocker_disagg_router_overload_529(
         )
 
 
+@pytest.mark.parametrize(
+    "decode_policy",
+    [None, "round-robin"],
+    ids=["default-policy", "picker-only-decode"],
+)
 @pytest.mark.timeout(180)
 def test_disagg_topology_required_prefill_pin_match_and_mismatch(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     tmp_path,
+    decode_policy,
 ):
-    """Validate required KV-transfer topology policy from pinned prefill workers."""
+    """Validate required KV-transfer topology policy from pinned prefill workers.
+
+    Only a KV router filters workers by the required taint, so decode workers
+    that advertise topology keep one under a picker-only policy too.
+    """
     logger.info("Starting disaggregated topology-aware prefill pin test")
     _ = (runtime_services_dynamic_ports, predownload_tokenizers)
+    router_policy_config = None
+    if decode_policy is not None:
+        policy_file = tmp_path / "policy.yaml"
+        policy_file.write_text(f"worker_selection:\n  decode: {decode_policy}\n")
+        router_policy_config = str(policy_file)
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
@@ -1458,6 +1499,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     prefill_zone_b_id=prefill_zone_b_id,
                     shared_namespace=shared_namespace,
                     request_plane="tcp",
+                    router_policy_config=router_policy_config,
                 )
 
 
@@ -1589,7 +1631,7 @@ def test_disagg_per_role_policy_file(
         num_decode_mockers=2,
         enable_disagg_bootstrap=False,
     ) as (prefill_workers, decode_workers):
-        _test_disagg_per_role_router_modes(
+        frontend_log = _test_disagg_per_role_router_modes(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
             block_size=BLOCK_SIZE,
@@ -1599,6 +1641,73 @@ def test_disagg_per_role_policy_file(
             request_plane="nats",
             router_policy_config=str(policy_file),
         )
+
+    # Each role takes the path its own policy needs: the cost function keeps a
+    # KV router, and round-robin runs without one.
+    assert re.search(
+        r'Activating prefill router .* policy="dynamo-default-cost-fn" kv_router=true ',
+        frontend_log,
+    )
+    assert re.search(
+        r'Activating router .* policy="round-robin" kv_router=false ', frontend_log
+    )
+    assert not re.search(r"KvRouter scheduling .* worker_type=decode", frontend_log)
+
+
+@pytest.mark.timeout(180)
+def test_policy_file_picker_only_roles_run_without_kv_router(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """A role whose policy-file type is only a picker runs without a KV router.
+
+    ``random`` and ``round-robin`` read no cache or load state, so the frontend
+    routes both hops the way ``--router-mode`` would and builds no KV router.
+    """
+    num_requests = 6
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text(
+        "worker_selection:\n  prefill: random\n  decode: round-robin\n"
+    )
+
+    with launch_disagg_workers(
+        request,
+        f"test-namespace-{generate_random_suffix()}",
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as worker_groups:
+        worker_ids, frontend_log = _test_router_mode_policy_type(
+            worker_groups=list(worker_groups),
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            policy_type=None,
+            num_requests=num_requests,
+            router_policy_config=str(policy_file),
+        )
+
+    assert re.search(
+        r'Activating prefill router .* policy="random" kv_router=false ', frontend_log
+    )
+    assert re.search(
+        r'Activating router .* policy="round-robin" kv_router=false ', frontend_log
+    )
+    assert "KV Routing initialized" not in frontend_log
+    # The transport picks the worker and names each role's policy.
+    for policy in ("random", "round-robin"):
+        selected = frontend_log.count(f'Selected worker router_mode="{policy}"')
+        assert selected >= num_requests, f"{policy}: {selected} selections"
+    assert 'Selected worker router_mode="kv"' not in frontend_log
+    decode_ids = [ids["decode_worker_id"] for ids in worker_ids]
+    assert all(a != b for a, b in zip(decode_ids, decode_ids[1:])), decode_ids
 
 
 @pytest.mark.timeout(180)

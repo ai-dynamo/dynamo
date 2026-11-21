@@ -167,6 +167,60 @@ file, `DYN_ROUTER_WORKER_SELECTION_POLICY`, `--router-prefill-policy`, `--router
 `--router-mode kv` selects the default policy. `direct` and `device-aware-weighted` are router
 modes, not policy types, so only `--router-mode` selects them.
 
+#### Which Roles Run a KV Router
+
+The frontend builds a KV router for a role only when the role needs one. A role whose policy is
+only a picker, such as `round-robin`, `random`, or `least-loaded`, runs without one, as it does
+under `--router-mode round-robin`. This holds whether a policy file or `--router-mode <type>`
+selects the policy, and each role is decided on its own: with `prefill: dynamo-default-cost-fn` and
+`decode: round-robin`, the prefill role runs a KV router and the decode role does not. A linked
+policy type is only a picker when it has no filters and no scorers and reads at most the active
+request count of each worker.
+
+A role without a KV router has no router queue and no per-worker load tracking:
+
+- It reports no series for `dynamo_frontend_worker_active_requests`,
+  `dynamo_frontend_worker_active_prefill_tokens`, `dynamo_frontend_worker_active_decode_blocks`,
+  the `dynamo_frontend_router_queue_*` and `dynamo_frontend_router_admission_*` metrics,
+  `dynamo_component_router_worker_registered`, or the `dynamo_component_router_kv_*_tokens_total`,
+  `dynamo_component_router_active_sequence_*`, and `dynamo_component_router_approximate_*` metrics.
+  The request metrics, such as `dynamo_component_router_requests_total`, and
+  `dynamo_frontend_router_workers` are still reported.
+- Its `Selected worker` log line names the policy, for example `router_mode="round-robin"`, and
+  has no `dp_rank` or score. The role picks a worker and leaves the data-parallel rank to it, so
+  `nvext.worker_id` in the response has no `decode_dp_rank` or `prefill_dp_rank`.
+- `GET /router_policy` does not list it.
+- It does not filter workers by taint. A request that requires taints, through
+  `nvext.routing_constraints.required_taints` or
+  [topology-aware KV transfer](topology-aware-kv-transfer.md), fails with no endpoint. Preferred
+  taints are ignored.
+- A request annotated `query_instance_id` is executed. Only a KV router answers it with a worker
+  selection.
+- Busy thresholds first set through [`POST /busy_threshold`](../../../../reference/components/frontend-configuration.mdx#admin)
+  apply only the decode-block threshold, to the load its workers report. The prefill-token
+  thresholds need the load a KV router books.
+
+A role whose policy is only a picker keeps its KV router when it uses something that only the KV
+router provides:
+
+| The role uses | Set by |
+|---|---|
+| Policy classes for its model, or a queue threshold | `policy_classes` in the policy file, or `--router-queue-threshold` |
+| A busy threshold | `--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, or `--active-prefill-tokens-threshold-frac` at startup |
+| A request classifier | `request_classifier` in the policy file |
+| Hints | `hints` under the role in `worker_selection` |
+| Conditional disaggregation | `--router-conditional-disagg` |
+| LoRA serving | `DYN_LORA_ENABLED` |
+| Worker taints | Workers that advertise routing taints or topology domains (`DYN_TOPOLOGY_ENABLED`) when the role's pipeline is built |
+| Active-sequence sync, when the policy reads active request counts | `--router-replica-sync` |
+| A prefill load model | `--router-prefill-load-model` |
+
+The `Activating router` and `Activating prefill router` log lines show each role's `policy` and
+whether it runs a KV router (`kv_router`), with `kv_router_needed_by` when one of these settings
+keeps it. The router modes `round-robin`, `random`, and `least-loaded` never run a KV router and
+ignore these settings, as before. They also still ignore required taints instead of failing the
+request.
+
 #### Configure the Default Policy
 
 Set the default policy’s scoring parameters in the YAML passed to `--router-policy-config`:

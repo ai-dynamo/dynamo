@@ -49,6 +49,12 @@ RoutingHost
  └─ request_metrics
 ```
 
+`role_routing::role_policy` chooses the variant when a worker set's pipeline is built. The router modes `round-robin`, `random`, `least-loaded`, `direct` and `device-aware-weighted` name theirs. Under `kv`, or a policy type that the router mode names, the role's worker-selection policy decides: a policy that is only a picker (no filters, no scorers, inputs of at most `ACTIVE_REQUESTS`) runs as `Hosted`, and any other policy as `Kv`. The choice is per role, so a `Hosted` prefill hop can front a `Kv` decode set.
+
+A picker-only role still gets a `KvRouter` when it uses something only the KV path provides. `KvPathReason` in `role_routing.rs` is the one list: policy classes or a queue threshold, a busy threshold, a request classifier, hints listed for the role, conditional disaggregation, LoRA serving, workers that advertise routing taints, replica sync under a picker that reads active requests, a prefill load model, and reservations that a caller books itself (the Runtime EPP's `reserve_prefill_worker`).
+
+That list is decided when the pipeline is built. What a request asks for is not: such a `Hosted` role fails a request that requires worker taints (the error a `Kv` role returns when no worker has them), executes a `query_instance_id` request, and returns no data-parallel rank. The router modes are unchanged and still ignore required taints.
+
 An optional hosted candidate policy selects a worker before dispatch. The legacy LoRA policy intersects eligible workers with currently available capacity and keeps its attempt lease in the request guard; transport fallback stays within those candidates. Hosted requests without a policy selection continue through the usual affinity and occupancy paths. KV routing uses a separate admission policy in its availability callback; the KV routing host holds no hosted candidate policy.
 
 What a KV request does in `RoutingHost::generate` (call order):

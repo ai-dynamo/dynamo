@@ -270,6 +270,9 @@ pub struct PrefillRouter {
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
     selection_policy: Option<SelectionPolicySource>,
+    /// Whether callers book prefill workers with `reserve_prefill_worker`, as the Runtime
+    /// EPP does. A reservation is a booking in the hop's `KvRouter`.
+    reserves_workers: bool,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     /// Mode of the decode set that owns this router. Governs decode-side
@@ -313,6 +316,9 @@ struct PrefillBuildContext {
     /// Fallback mode for the prefill hop when the prefill card advertises none.
     decode_router_mode: RouterModeSetting,
     selection_policy: SelectionPolicySource,
+    reserves_workers: bool,
+    /// Whether the decode set that owns the hop runs conditional disaggregation.
+    conditional_disagg_enabled: bool,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
