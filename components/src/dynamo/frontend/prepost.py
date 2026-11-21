@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import weakref
@@ -39,9 +40,19 @@ from vllm.tool_parsers.structural_tag_registry import (
 )
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
+from vllm.v1.structured_output.backend_xgrammar import (
+    has_xgrammar_unsupported_json_features,
+)
 from xgrammar import StructuralTag
 
-from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.common.utils.guided_json import (
+    admits_only_empty_object,
+    reject_nonprogressing_guided_json_ref_cycles,
+)
+from dynamo.common.utils.structural_tag import (
+    structural_tag_backend_compatible,
+    structural_tag_backend_error,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_template, responses_tools_request
@@ -58,6 +69,8 @@ from .utils import legacy_guided_decoding
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+logger = logging.getLogger(__name__)
 
 
 class _Renderer(Protocol):
@@ -273,6 +286,22 @@ def _request_for_vllm_structural_tag(
         for tool in request.tools or []
     ]
     return request.model_copy(update={"tools": tools})
+
+
+def _tool_fallback_preserves_schema_policy(
+    request: ChatCompletionRequest, schema_mode: str
+) -> bool:
+    choice = request.tool_choice
+    named_tool = (
+        choice.function.name
+        if isinstance(choice, ChatCompletionNamedToolChoiceParam)
+        else None
+    )
+    return all(
+        effective_tool_strict(tool.function.strict, schema_mode)
+        for tool in request.tools or []
+        if named_tool is None or tool.function.name == named_tool
+    )
 
 
 def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
@@ -639,6 +668,133 @@ def _prompt_leaves_reasoning_open(
     return tail.rstrip().endswith(start)
 
 
+def _can_start_bare_tool_guidance(
+    prompt_token_ids: list[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+    request_for_sampling: ChatCompletionRequest,
+) -> bool:
+    # A prompt can continue an open reasoning block without ending in its opener.
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        return not glm_open
+    if not _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs):
+        return True
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    return parser.is_reasoning_end(prompt_token_ids)
+
+
+def _reasoning_block_until(
+    end: str, tokenizer: TokenizerLike, parser: ReasoningParser
+) -> dict[str, Any]:
+    """Structural-tag element for free reasoning up to and including ``end``.
+
+    When ``end`` is one vocabulary token, match that token rather than its text.
+    The grammar would otherwise also accept ``end`` spelled with ordinary tokens,
+    which the streaming reasoning parsers do not treat as the end of reasoning,
+    so the JSON would stream as reasoning. For the same reason, no other token
+    the parser reads as the end of reasoning (a tool-call opener, for example)
+    may appear inside the block.
+    """
+    end_ids = tokenizer.encode(end, add_special_tokens=False)
+    if len(end_ids) != 1:
+        return {"type": "tag", "begin": "", "content": {"type": "any_text"}, "end": end}
+    excluded = set(end_ids) | set(getattr(parser, "reasoning_end_token_ids", ()))
+    return {
+        "type": "tag",
+        "begin": "",
+        "content": {"type": "any_tokens", "exclude_tokens": sorted(excluded)},
+        "end": {"type": "token", "token": end_ids[0]},
+    }
+
+
+def _response_format_after_reasoning(
+    guided_decoding: dict[str, Any],
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+    request_id: str | None = None,
+) -> dict[str, Any] | None:
+    """A ``response_format`` JSON constraint that starts after the reasoning block.
+
+    vLLM holds a grammar back until reasoning ends only when its engine has a
+    reasoning parser. With the parser configured on the frontend only (the
+    vLLM chat processor), a prompt that opens reasoning gets the JSON grammar
+    from the first token: the model writes the JSON inside the reasoning block
+    and ``content`` comes back empty. Accept free text up to the parser's end
+    marker, then the JSON, as vLLM's own tool-call structural tags do with
+    ``reasoning=True``. Returns None when the constraint should stay as is.
+    """
+    schema = guided_decoding.get("json")
+    if schema is None or set(guided_decoding) != {"json"}:
+        return None
+    # vLLM checks these features only in a plain JSON constraint, and falls back
+    # to another backend or rejects the request. In a structural tag, xgrammar
+    # would drop them silently.
+    if has_xgrammar_unsupported_json_features(schema):
+        return None
+    # Same gate as the parser that will read the output: without it, the
+    # reasoning block would be returned as content.
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return None
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = parser.reasoning_start_str
+    if not isinstance(start, str) or not start:
+        return None
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    if not tail.rstrip().endswith(start):
+        return None
+    end = parser.reasoning_end_str
+    if not isinstance(end, str) or not end:
+        logger.warning(
+            "request %s: reasoning parser %s has no reasoning end marker: "
+            "response_format is constrained from the first token, inside the "
+            "reasoning block. Give the worker's engine the same reasoning parser "
+            "(--reasoning-parser).",
+            request_id,
+            reasoning_parser_class.__name__,
+        )
+        return None
+    # The worker rejects these schemas only in ``guided_decoding.json``.
+    reject_nonprogressing_guided_json_ref_cycles(schema)
+    return {
+        "structural_tag": {
+            "type": "structural_tag",
+            "format": {
+                "type": "sequence",
+                "elements": [
+                    _reasoning_block_until(end, tokenizer, parser),
+                    {"type": "json_schema", "json_schema": schema},
+                ],
+            },
+        }
+    }
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -856,6 +1012,9 @@ async def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
+    backend_defers_grammar: bool = False,
+    structural_tag_backend: str | None = None,
+    request_id: str | None = None,
 ) -> PreprocessResult:
     """Render a validated chat request and select its engine guidance and parsers."""
     validated_request = _validate_chat_completion_request(request)
@@ -1000,8 +1159,71 @@ async def preprocess_chat_request(
         guided_decoding = adjusted_structured_guidance
     elif assistant_guided_decoding is not None and not is_forced_tool_choice:
         guided_decoding = assistant_guided_decoding
+        # A JSON response_format applies to the answer. When the engine will not
+        # hold it back until reasoning ends, start it after the reasoning block.
+        response_format = validated_request.response_format
+        response_format_type = response_format.type if response_format else None
+        if (
+            not backend_defers_grammar
+            and not has_explicit_output_constraint
+            and response_format_type in ("json_object", "json_schema")
+        ):
+            guided_decoding = (
+                _response_format_after_reasoning(
+                    guided_decoding,
+                    tokens,
+                    tokenizer=tokenizer,
+                    reasoning_parser_class=reasoning_parser_class,
+                    chat_template_kwargs=chat_template_kwargs,
+                    model_config=model_config,
+                    request_id=request_id,
+                )
+                or guided_decoding
+            )
     else:
         guided_decoding = tool_guided_decoding
+    if (
+        guided_decoding is not None
+        and "structural_tag" in guided_decoding
+        and not structural_tag_backend_compatible(
+            guided_decoding["structural_tag"], structural_tag_backend
+        )
+    ):
+        # Only replace a generated tool constraint. Caller/reasoning-parser
+        # constraints have already won precedence and must never be discarded.
+        if (
+            guided_decoding is tool_guided_decoding
+            and is_forced_tool_choice
+            and not reasoning_rewrote_guidance
+            # Outlines and LM Format Enforcer can silently drop argument
+            # constraints such as numeric bounds when given a JSON schema.
+            and structural_tag_backend == "guidance"
+            and _tool_fallback_preserves_schema_policy(
+                request_for_sampling, structural_tag_schema
+            )
+            # The generic bare-JSON decoder expects tool arguments from the
+            # first output token, even when the engine can defer enforcement.
+            and _can_start_bare_tool_guidance(
+                tokens,
+                tokenizer=tokenizer,
+                reasoning_parser_class=reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+                request_for_sampling=request_for_sampling,
+            )
+            and (tool_parser is None or tool_parser.supports_required_and_named)
+        ):
+            fallback = build_tool_call_guided_decoding(
+                request_for_sampling, tool_parser
+            )
+            if fallback is not None and (
+                parser_guided_decoding is None or parser_guided_decoding == fallback
+            ):
+                guided_decoding = tool_guided_decoding = fallback
+                # The alternate matches the generic decoder's wire format.
+                parser_guided_decoding = None
+        if guided_decoding is not None and "structural_tag" in guided_decoding:
+            raise InvalidArgument(structural_tag_backend_error(structural_tag_backend))
     # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema
     # when a forced tool choice has no parser-provided grammar.  That can happen
     # both without a parser and with parsers (for example Hermes) whose

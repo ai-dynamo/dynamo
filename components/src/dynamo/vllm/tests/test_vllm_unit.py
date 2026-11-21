@@ -2849,6 +2849,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
     for name in (
         "ModelRuntimeConfig",
         "publish_vllm_structural_tag_reasoning_policy",
+        "publish_vllm_structural_tag_backend",
         "publish_vllm_qwen_video_processor_contract",
         "publish_vllm_nemotron_video_processor_contract",
         "apply_data_parallel_runtime_config",
@@ -2897,3 +2898,27 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
     )
 
     assert order == ["freeze_gc_heap", "register_model"]
+
+
+@pytest.mark.parametrize(
+    "backend,expected",
+    [
+        ("auto", True),
+        ("xgrammar", True),
+        ("guidance", False),
+        ("outlines", False),
+        ("lm-format-enforcer", False),
+        ("future", None),
+    ],
+)
+def test_publish_structural_tag_backend(backend, expected):
+    main = _load_vllm_main()
+    runtime = SimpleNamespace(set_engine_specific=Mock())
+    main.publish_vllm_structural_tag_backend(
+        runtime,
+        SimpleNamespace(structured_outputs_config=SimpleNamespace(backend=backend)),
+    )
+    assert runtime.set_engine_specific.call_args_list == [
+        (("vllm_structured_output_backend", json.dumps(backend)),),
+        (("vllm_structural_tag_format_supported", json.dumps(expected)),),
+    ]

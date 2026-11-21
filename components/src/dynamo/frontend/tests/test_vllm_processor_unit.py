@@ -926,7 +926,10 @@ class TestReasoningParserMetadata:
         assert metadata.response_reasoning_ended is None
         assert metadata.parser_kwargs is None
 
-    def test_include_reasoning_false_only_marks_engine_reasoning_ended(self):
+    @pytest.mark.parametrize("backend_defers_grammar", [False, True])
+    def test_include_reasoning_false_preserves_configured_json_deferral(
+        self, backend_defers_grammar
+    ):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
         class FakeReasoningParser:
@@ -943,9 +946,11 @@ class TestReasoningParserMetadata:
             {"reasoning_effort": "low"},
             SimpleNamespace(include_reasoning=False),
             [1, 2, 3],
+            guided_decoding={"json": {"type": "object"}},
+            backend_defers_grammar=backend_defers_grammar,
         )
 
-        assert metadata.engine_reasoning_ended is True
+        assert metadata.engine_reasoning_ended is not backend_defers_grammar
         assert metadata.response_reasoning_ended is False
         assert metadata.parser_kwargs == {
             "chat_template_kwargs": {"reasoning_effort": "low"}
@@ -3780,6 +3785,7 @@ class TestPreprocessRawRequestControls:
                 "messages": [{"role": "user", "content": "Hello"}],
                 "chat_template_args": {"enable_thinking": False},
             },
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=self._renderer(),
             tool_parser_class=None,
@@ -3796,6 +3802,7 @@ class TestPreprocessRawRequestControls:
                 "messages": [{"role": "user", "content": "Hello"}],
                 "thinking": True,
             },
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=self._renderer(),
             tool_parser_class=None,
@@ -3867,6 +3874,10 @@ class _FakeStructuralTagReasoningParser:
     structural tag its model actually speaks.
     """
 
+    # ReasoningParser's defaults: no markers.
+    reasoning_start_str = None
+    reasoning_end_str = None
+
     def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
         del tokenizer, chat_template_kwargs
         self._model_config = model_config
@@ -3932,6 +3943,7 @@ class TestReasoningParserGuidanceForwarding:
         kwargs.setdefault("tool_parser_class", None)
         return await prepost_module.preprocess_chat_request(
             request if request is not None else self._request(),
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=self._renderer(),
             **kwargs,
@@ -4706,6 +4718,7 @@ class TestToolCallGuidedDecoding:
     ):
         result = await prepost_module.preprocess_chat_request(
             {**TOOL_REQUEST, "tool_choice": "required"},
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -4732,6 +4745,7 @@ class TestToolCallGuidedDecoding:
     ):
         result = await prepost_module.preprocess_chat_request(
             {**TOOL_REQUEST, "tool_choice": "required"},
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -4790,6 +4804,7 @@ class TestToolCallGuidedDecoding:
         }
         result = await prepost_module.preprocess_chat_request(
             request,
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -4854,6 +4869,7 @@ class TestToolCallGuidedDecoding:
                 "tool_choice": "auto",
                 **assistant_constraint,
             },
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -4946,6 +4962,7 @@ class TestToolCallGuidedDecoding:
                 "tool_choice": tool_choice,
                 "response_format": response_format,
             },
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -5092,6 +5109,7 @@ class TestToolCallGuidedDecoding:
 
         result = await prepost_module.preprocess_chat_request(
             request,
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -6224,12 +6242,19 @@ class _ReasoningRecordingToolParser(_FakeStructuralTagParser):
 def _prompt_reasoning_parser(start: str | None = "<think>"):
     class PromptReasoningParser:
         reasoning_start_str = start
+        reasoning_end_str = None
 
         def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
-            del tokenizer, chat_template_kwargs, model_config
+            self.tokenizer = tokenizer
 
         def adjust_request(self, request):
             return request
+
+        def is_reasoning_end(self, prompt_token_ids):
+            if start is None:
+                return True
+            prompt = self.tokenizer.decode(prompt_token_ids, skip_special_tokens=False)
+            return prompt.rfind(start) <= prompt.rfind("</think>")
 
     return PromptReasoningParser
 
@@ -6270,6 +6295,7 @@ class TestToolCallGrammarReasoningStart:
             request["chat_template_kwargs"] = chat_template_kwargs
         result = await prepost_module.preprocess_chat_request(
             request,
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -6381,6 +6407,7 @@ class TestToolCallGrammarReasoningStart:
         )
         result = await prepost_module.preprocess_chat_request(
             {**TOOL_REQUEST, "tool_choice": "auto"},
+            structural_tag_backend="auto",
             tokenizer=tokenizer,
             renderer=SimpleNamespace(
                 render_messages_async=AsyncMock(
@@ -6472,3 +6499,534 @@ def test_prepare_request_preserves_responses_native_tools(native, choice, exclud
     )
     assert selected_template == (default if excluded else template)
     assert request["tools"][0]["function"]["name"] == "read"
+
+
+def _prompt_reasoning_parser_with_end(
+    start: str | None = "<think>", end: str | None = "</think>"
+):
+    class PromptReasoningParser(_prompt_reasoning_parser(start)):
+        reasoning_end_str = end
+
+    return PromptReasoningParser
+
+
+_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {"city": {"type": "string"}},
+    "required": ["city"],
+}
+
+
+class TestResponseFormatReasoningStart:
+    """A JSON response_format applies to the answer, after the reasoning block.
+
+    With the reasoning parser on the frontend only, the worker engine has no
+    reasoner and applies a grammar from the first token. A prompt that opens
+    reasoning then forces the model to write the JSON inside the reasoning
+    block (content null). The frontend must start the JSON after the parser's
+    end marker unless the engine already holds the grammar back.
+    """
+
+    @staticmethod
+    async def _guided(
+        tokenizer,
+        *,
+        prompt_text,
+        reasoning_parser_class,
+        structural_tag_excludes_reasoning=False,
+        response_format=None,
+        extra=None,
+        extra_kwargs=None,
+        structural_tag_backend="auto",
+        backend_defers_grammar=None,
+    ):
+        """Preprocess a JSON request whose rendered prompt is ``prompt_text``.
+
+        Returns the guided decoding that the frontend sends to the engine.
+        """
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Weather city as JSON"}],
+            "response_format": response_format or {"type": "json_object"},
+            **(extra or {}),
+        }
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            structural_tag_backend=structural_tag_backend,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(
+                        None,
+                        {
+                            "prompt_token_ids": tokenizer.encode(
+                                prompt_text, add_special_tokens=False
+                            )
+                        },
+                    )
+                )
+            ),
+            tool_parser_class=None,
+            reasoning_parser_class=reasoning_parser_class,
+            structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
+            backend_defers_grammar=(
+                structural_tag_excludes_reasoning
+                if backend_defers_grammar is None
+                else backend_defers_grammar
+            ),
+            **(extra_kwargs or {}),
+        )
+        return result.guided_decoding
+
+    @staticmethod
+    def _after_reasoning(schema, end):
+        """Expected tag; ``end`` is a token id, or the text of a multi-token end."""
+        if isinstance(end, int):
+            reasoning = {
+                "type": "tag",
+                "begin": "",
+                "content": {"type": "any_tokens", "exclude_tokens": [end]},
+                "end": {"type": "token", "token": end},
+            }
+        else:
+            reasoning = {
+                "type": "tag",
+                "begin": "",
+                "content": {"type": "any_text"},
+                "end": end,
+            }
+        return {
+            "structural_tag": {
+                "type": "structural_tag",
+                "format": {
+                    "type": "sequence",
+                    "elements": [
+                        reasoning,
+                        {"type": "json_schema", "json_schema": schema},
+                    ],
+                },
+            }
+        }
+
+    @pytest.mark.parametrize(
+        ("prompt_text", "parser", "excludes_reasoning", "wrapped"),
+        [
+            # The template opened reasoning and the engine has no reasoner.
+            (
+                "<|im_start|>assistant\n<think>",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                True,
+            ),
+            (
+                "<|im_start|>assistant\n<think>\n",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                True,
+            ),
+            # The worker engine already holds the grammar until reasoning ends.
+            (
+                "<|im_start|>assistant\n<think>",
+                _prompt_reasoning_parser_with_end(),
+                True,
+                False,
+            ),
+            # Thinking off: the template already closed reasoning.
+            (
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                False,
+            ),
+            # No reasoning marker in the prompt: the model emits its own opener.
+            (
+                "<|im_start|>assistant\n",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                False,
+            ),
+            # A parser without an end marker cannot bound the reasoning block.
+            (
+                "<|im_start|>assistant\n<think>",
+                _prompt_reasoning_parser_with_end(end=None),
+                False,
+                False,
+            ),
+            ("<|im_start|>assistant\n<think>", None, False, False),
+        ],
+        ids=[
+            "prompt-opened",
+            "prompt-opened-trailing-newline",
+            "engine-gated",
+            "prompt-closed",
+            "marker-free-prompt",
+            "parser-without-end",
+            "no-reasoning-parser",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_json_object(
+        self, tokenizer, prompt_text, parser, excludes_reasoning, wrapped
+    ):
+        """json_object starts after reasoning only when the prompt opened it."""
+        guided = await self._guided(
+            tokenizer,
+            prompt_text=prompt_text,
+            reasoning_parser_class=parser,
+            structural_tag_excludes_reasoning=excludes_reasoning,
+        )
+        plain = {"json": {"type": "object"}}
+        end = tokenizer.convert_tokens_to_ids("</think>")
+        assert guided == (
+            self._after_reasoning(plain["json"], end) if wrapped else plain
+        )
+
+    @pytest.mark.asyncio
+    async def test_json_schema_keeps_the_schema(self, tokenizer):
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "city", "schema": _JSON_SCHEMA},
+            },
+        )
+        assert guided == self._after_reasoning(
+            _JSON_SCHEMA, tokenizer.convert_tokens_to_ids("</think>")
+        )
+
+    @pytest.mark.asyncio
+    async def test_multi_token_end_marker_is_matched_as_text(self, tokenizer):
+        assert len(tokenizer.encode("<|end_of_thought|>", add_special_tokens=False)) > 1
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(
+                end="<|end_of_thought|>"
+            ),
+        )
+        assert guided == self._after_reasoning(
+            {"type": "object"}, end="<|end_of_thought|>"
+        )
+
+    @pytest.mark.asyncio
+    async def test_other_reasoning_end_tokens_are_excluded(self, tokenizer):
+        # The parser also ends reasoning at a tool-call opener; the block must
+        # not contain it, or grammar and parser disagree on where JSON starts.
+        end = tokenizer.convert_tokens_to_ids("</think>")
+        tool_call = tokenizer.convert_tokens_to_ids("<tool_call>")
+
+        class Parser(_prompt_reasoning_parser_with_end()):
+            reasoning_end_token_ids = frozenset({end, tool_call})
+
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=Parser,
+        )
+        reasoning = guided["structural_tag"]["format"]["elements"][0]
+        assert reasoning["content"]["exclude_tokens"] == sorted({end, tool_call})
+        assert reasoning["end"] == {"type": "token", "token": end}
+
+    @pytest.mark.asyncio
+    async def test_nonprogressing_ref_cycle_is_rejected(self, tokenizer):
+        # Wrapped, the schema is no longer in guided_decoding.json, where the
+        # worker rejects it.
+        with pytest.raises(HttpError) as exc_info:
+            await self._guided(
+                tokenizer,
+                prompt_text="<|im_start|>assistant\n<think>",
+                reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "loop", "schema": {"$ref": "#"}},
+                },
+            )
+        assert exc_info.value.code == 400
+
+    @pytest.mark.asyncio
+    async def test_schema_xgrammar_cannot_enforce_is_not_wrapped(self, tokenizer):
+        # Unwrapped, vLLM falls back to a backend that enforces multipleOf.
+        schema = {
+            "type": "object",
+            "properties": {"count": {"type": "integer", "multipleOf": 5}},
+        }
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "count", "schema": schema},
+            },
+        )
+        assert guided == {"json": schema}
+
+    @pytest.mark.asyncio
+    async def test_missing_end_marker_warning_names_the_request(
+        self, tokenizer, caplog
+    ):
+        with caplog.at_level("WARNING"):
+            guided = await self._guided(
+                tokenizer,
+                prompt_text="<|im_start|>assistant\n<think>",
+                reasoning_parser_class=_prompt_reasoning_parser_with_end(end=None),
+                extra_kwargs={"request_id": "req-123"},
+            )
+        assert guided == {"json": {"type": "object"}}
+        assert "request req-123: reasoning parser" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_thinking_disabled_by_request_is_not_wrapped(self, tokenizer):
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            extra={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        assert guided == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_explicit_guided_json_is_not_wrapped(self, tokenizer):
+        # Legacy guided_json takes precedence over response_format and
+        # constrains the whole token stream.
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            extra={"guided_json": _JSON_SCHEMA},
+        )
+        assert guided == {"json": _JSON_SCHEMA}
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer", None, "future"],
+)
+@pytest.mark.parametrize("schema", [False, True])
+@pytest.mark.parametrize("defers", [False, True])
+@pytest.mark.asyncio
+async def test_response_format_backend_support(tokenizer, backend, schema, defers):
+    response_format = (
+        {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": _JSON_SCHEMA},
+        }
+        if schema
+        else {"type": "json_object"}
+    )
+    kwargs = dict(
+        prompt_text="<think>",
+        reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+        response_format=response_format,
+        structural_tag_backend=backend,
+        backend_defers_grammar=defers,
+    )
+    if not defers and backend not in ("auto", "xgrammar"):
+        with pytest.raises(InvalidArgument, match="backend.*structural tag"):
+            await TestResponseFormatReasoningStart._guided(tokenizer, **kwargs)
+    else:
+        guidance = await TestResponseFormatReasoningStart._guided(tokenizer, **kwargs)
+        assert set(guidance) == ({"json"} if defers else {"structural_tag"})
+
+
+@pytest.mark.asyncio
+async def test_reasoning_boundary_override_is_not_engine_deferral(tokenizer):
+    with pytest.raises(InvalidArgument, match="backend.*structural tag"):
+        await TestResponseFormatReasoningStart._guided(
+            tokenizer,
+            prompt_text="<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            structural_tag_backend="guidance",
+            structural_tag_excludes_reasoning=True,
+            backend_defers_grammar=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "backend", ["guidance", "outlines", "lm-format-enforcer", None]
+)
+@pytest.mark.asyncio
+async def test_closed_reasoning_keeps_native_json_on_incompatible_backend(
+    tokenizer, backend
+):
+    guidance = await TestResponseFormatReasoningStart._guided(
+        tokenizer,
+        prompt_text="<think>done</think>\n",
+        reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+        structural_tag_backend=backend,
+    )
+    assert guidance == {"json": {"type": "object"}}
+
+
+class _BackendTestToolParser(_ReasoningRecordingToolParser):
+    supports_required_and_named = True
+
+
+class _BackendNativeToolParser(_BackendTestToolParser):
+    supports_required_and_named = False
+
+
+class _BackendBareJsonToolParser(_BackendTestToolParser):
+    def adjust_request(self, request):
+        request.structured_outputs = StructuredOutputsParams(
+            json=prepost_module.get_json_schema_from_tools(
+                request.tool_choice, request.tools
+            )
+        )
+        return request
+
+
+class _BackendDifferentJsonToolParser(_BackendTestToolParser):
+    def adjust_request(self, request):
+        request.structured_outputs = StructuredOutputsParams(json={"type": "object"})
+        return request
+
+
+@pytest.mark.parametrize(
+    "choice", ["required", {"type": "function", "function": {"name": "get_weather"}}]
+)
+@pytest.mark.parametrize(
+    "backend,prompt,defers,parser,rejected",
+    [
+        ("guidance", "Answer:", False, _BackendTestToolParser, False),
+        ("guidance", "Answer:", False, _BackendBareJsonToolParser, False),
+        ("guidance", "Answer:", False, _BackendDifferentJsonToolParser, True),
+        ("guidance", "<think>", False, _BackendTestToolParser, True),
+        ("guidance", "<think>partial reasoning", False, _BackendTestToolParser, True),
+        ("guidance", "<think>", True, _BackendTestToolParser, True),
+        ("guidance", "Answer:", False, _BackendNativeToolParser, True),
+        ("outlines", "Answer:", False, _BackendTestToolParser, True),
+        ("lm-format-enforcer", "Answer:", False, _BackendTestToolParser, True),
+        (None, "Answer:", False, _BackendTestToolParser, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_forced_tool_backend_fallback_preserves_boundary(
+    tokenizer, monkeypatch, choice, backend, prompt, defers, parser, rejected
+):
+    monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+    request = deepcopy({**TOOL_REQUEST, "tool_choice": choice})
+    request["tools"][0]["function"]["parameters"] = {
+        "type": "object",
+        "properties": {"n": {"type": "integer", "minimum": 5}},
+        "required": ["n"],
+        "additionalProperties": False,
+    }
+    kwargs = dict(
+        tokenizer=tokenizer,
+        renderer=SimpleNamespace(
+            render_messages_async=AsyncMock(
+                return_value=(
+                    None,
+                    {
+                        "prompt_token_ids": tokenizer.encode(
+                            prompt,
+                            add_special_tokens=False,
+                        )
+                    },
+                )
+            )
+        ),
+        tool_parser_class=parser,
+        reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+        structural_tag_mode="on",
+        structural_tag_backend=backend,
+        backend_defers_grammar=defers,
+        structural_tag_excludes_reasoning=defers,
+    )
+    if rejected:
+        with pytest.raises(InvalidArgument, match="backend.*structural tag"):
+            await prepost_module.preprocess_chat_request(request, **kwargs)
+    else:
+        result = await prepost_module.preprocess_chat_request(request, **kwargs)
+        assert set(result.guided_decoding) == {"json"}
+        assert result.uses_dynamo_json_tool_call_fallback is True
+        assert result.guided_decoding[
+            "json"
+        ] == prepost_module.get_json_schema_from_tools(
+            result.request_for_sampling.tool_choice, result.request_for_sampling.tools
+        )
+
+
+@pytest.mark.parametrize("schema_mode", ["auto", "strict"])
+@pytest.mark.asyncio
+async def test_tool_fallback_respects_explicitly_relaxed_arguments(
+    tokenizer, monkeypatch, schema_mode
+):
+    monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+    request = deepcopy({**TOOL_REQUEST, "tool_choice": "required"})
+    request["tools"][0]["function"]["strict"] = False
+    kwargs = dict(
+        tokenizer=tokenizer,
+        renderer=TestPreprocessRawRequestControls._renderer(),
+        tool_parser_class=_BackendTestToolParser,
+        structural_tag_mode="on",
+        structural_tag_schema=schema_mode,
+        structural_tag_backend="guidance",
+    )
+    if schema_mode == "auto":
+        with pytest.raises(InvalidArgument, match="'guidance'.*structural tag"):
+            await prepost_module.preprocess_chat_request(request, **kwargs)
+    else:
+        result = await prepost_module.preprocess_chat_request(request, **kwargs)
+        assert set(result.guided_decoding) == {"json"}
+        assert result.uses_dynamo_json_tool_call_fallback
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.asyncio
+async def test_backend_check_after_tool_guidance_precedence(
+    tokenizer, monkeypatch, explicit
+):
+    monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+    request = {**TOOL_REQUEST, "tool_choice": "auto"}
+    if explicit:
+        request["guided_json"] = _JSON_SCHEMA
+    kwargs = dict(
+        tokenizer=tokenizer,
+        renderer=TestPreprocessRawRequestControls._renderer(),
+        tool_parser_class=_BackendTestToolParser,
+        structural_tag_mode="on",
+        structural_tag_scope="always",
+        structural_tag_backend="guidance",
+    )
+    if explicit:
+        result = await prepost_module.preprocess_chat_request(request, **kwargs)
+        assert result.guided_decoding == {"json": _JSON_SCHEMA}
+    else:
+        with pytest.raises(InvalidArgument, match="backend.*structural tag"):
+            await prepost_module.preprocess_chat_request(request, **kwargs)
+
+
+@pytest.mark.parametrize("parser_generated", [False, True])
+@pytest.mark.asyncio
+async def test_backend_rejects_surviving_caller_and_parser_tags(
+    tokenizer, parser_generated
+):
+    request = TestReasoningParserGuidanceForwarding._request()
+    if not parser_generated:
+        request.pop("response_format")
+        request["structured_outputs"] = {
+            "structural_tag": json.dumps(
+                {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "json_schema",
+                        "json_schema": {"type": "object"},
+                    },
+                }
+            )
+        }
+    with pytest.raises(InvalidArgument, match="backend.*structural tag"):
+        await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=TestPreprocessRawRequestControls._renderer(),
+            tool_parser_class=None,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser
+            if parser_generated
+            else None,
+            structural_tag_backend="guidance",
+        )

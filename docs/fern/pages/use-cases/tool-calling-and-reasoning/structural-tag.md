@@ -320,6 +320,12 @@ activation scope still attempts the tag, but cannot enforce the native tool
 envelope for that request. Set schema mode to `strict` to override the opt-out
 and let vLLM build the tag.
 
+For the Python vLLM chat processor, modern structural tags require the worker's `auto` or `xgrammar` structured-output backend. The frontend checks worker support from model discovery after selecting the request's effective constraint. A required tag on `guidance`, `outlines`, `lm-format-enforcer`, or a worker with unknown support returns HTTP `400` before dispatch. On `guidance`, required and named tool calls can use native JSON or regex guidance when the parser supports the alternate format and it preserves the tool choice, argument constraints, and reasoning boundary. Caller-supplied constraints keep their existing precedence. Integrated workers also validate the final tag against their own configuration before engine submission. The `guidance` backend accepts legacy tags with `triggers` and `structures`.
+
+Backend tag support is separate from delaying grammar enforcement until reasoning ends. JSON `response_format` requests retain native JSON guidance when the worker delays enforcement or the prompt starts outside reasoning. A frontend reasoning-boundary override alone does not establish that the worker delays enforcement.
+
+Upgrade workers before the frontend so discovery advertises backend support. Keep backend and reasoning settings consistent within each model route. During a rolling upgrade, use separate routes for incompatible configurations; the selected worker's final check protects against stale discovery metadata.
+
 ## `tool_choice="none"` and Token Banning
 
 On the Rust frontend preprocessing path, when `tool_choice="none"` and
