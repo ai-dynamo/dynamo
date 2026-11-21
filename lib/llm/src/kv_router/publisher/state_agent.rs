@@ -136,6 +136,8 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
+    /// The cache owner's inventory dies with the attached engine.
+    pub process_local_inventory: bool,
     /// Sockets shared with sibling slots; `Default::default()` binds dedicated ones.
     pub sockets: KvStateAgentSockets,
 }
@@ -159,6 +161,7 @@ struct Attachment {
     vllm_zmq_endpoint: String,
     raw_topic: String,
     ingress_protocol: KvStateIngressProtocol,
+    process_local_inventory: bool,
     ready: bool,
     ready_at_outbound_cursor: u64,
 }
@@ -389,14 +392,14 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     .context("failed to establish Worker reset barrier before attach");
             }
         };
-        if attachment.ingress_protocol.has_process_local_inventory() {
+        if attachment.process_local_inventory {
             barrier_cursor = match self
                 .apply_and_publish_reset(attachment.worker, ResidencyDomain::CacheOwner)
                 .await
             {
                 Ok(cursor) => cursor,
                 Err(error) => {
-                    self.fail_cache_owner(attachment.generation, "HiCache attach reset failed");
+                    self.fail_cache_owner(attachment.generation, "KVCR attach reset failed");
                     return Err(error).context("failed to reset process-local KVCR inventory");
                 }
             };
@@ -423,7 +426,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             anyhow::bail!("stale attachment generation {generation}");
         }
         attachment.ready = false;
-        if attachment.ingress_protocol.has_process_local_inventory() {
+        if attachment.process_local_inventory {
             self.cache_owner_domain_failed = true;
         }
         self.publish_status();
@@ -457,7 +460,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 return Err(error).context("failed to publish final Worker detach barrier");
             }
         };
-        if attachment.ingress_protocol.has_process_local_inventory() {
+        if attachment.process_local_inventory {
             cursor = self
                 .apply_and_publish_reset(attachment.worker, ResidencyDomain::CacheOwner)
                 .await
@@ -581,7 +584,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         if self
             .attachment
             .as_ref()
-            .is_some_and(|attachment| attachment.ingress_protocol.has_process_local_inventory())
+            .is_some_and(|attachment| attachment.ingress_protocol.retires_source_on_cursor_gap())
         {
             tracing::error!(
                 generation = batch.generation,
@@ -853,7 +856,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             attachment: self.attachment.as_ref().map(Attachment::status),
             cache_owner_ready: !self.cache_owner_domain_failed
                 && self.attachment.as_ref().is_none_or(|attachment| {
-                    !attachment.ingress_protocol.has_process_local_inventory() || attachment.ready
+                    !attachment.process_local_inventory || attachment.ready
                 }),
             outbound_cursor: self.outbound_cursor(),
         });
@@ -873,6 +876,7 @@ pub struct KvStateAgent {
     kv_block_size: u32,
     slot_dp_rank: u32,
     ingress_protocol: KvStateIngressProtocol,
+    process_local_inventory: bool,
     recovery_target: dynamo_runtime::component::Instance,
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
@@ -935,7 +939,7 @@ impl KvStateAgent {
         let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
-            cache_owner_ready: !config.ingress_protocol.has_process_local_inventory(),
+            cache_owner_ready: !config.process_local_inventory,
             outbound_cursor: 0,
         }));
 
@@ -1030,6 +1034,7 @@ impl KvStateAgent {
             kv_block_size: config.kv_block_size,
             slot_dp_rank: config.slot.global_dp_rank,
             ingress_protocol: config.ingress_protocol,
+            process_local_inventory: config.process_local_inventory,
             recovery_target,
             identity,
             control_tx,
@@ -1125,6 +1130,7 @@ impl KvStateAgent {
                 vllm_zmq_endpoint: vllm_source.endpoint.clone(),
                 raw_topic: vllm_source.topic.clone(),
                 ingress_protocol: vllm_source.ingress_protocol,
+                process_local_inventory: self.process_local_inventory,
                 ready: false,
                 ready_at_outbound_cursor: 0,
             },
@@ -2016,6 +2022,7 @@ mod tests {
             vllm_zmq_endpoint: endpoint.to_string(),
             raw_topic: "kv-events-v2".to_string(),
             ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+            process_local_inventory: false,
             ready: false,
             ready_at_outbound_cursor: 0,
         }
@@ -2866,6 +2873,7 @@ mod tests {
         };
         let mut attachment = test_attachment(worker, "tcp://framework");
         attachment.ingress_protocol = protocol;
+        attachment.process_local_inventory = protocol.has_process_local_inventory();
         coordinator.attach(&mut attachment).await.unwrap();
 
         let mut removal = store(worker, ResidencyDomain::Worker, None, 101, 11);
@@ -2913,16 +2921,21 @@ mod tests {
 
     #[tokio::test]
     async fn detach_accepts_cache_owner_ingress_after_readiness_withdrawal() {
-        check_detach_lifetime(KvStateIngressProtocol::VllmResidencyV1).await;
+        check_detach_lifetime(KvStateIngressProtocol::VllmResidencyV1, false).await;
     }
 
     #[tokio::test]
     async fn sglang_inventory_is_cleared_on_detach_and_retires_on_gaps() {
-        check_detach_lifetime(KvStateIngressProtocol::SglangHiCacheV1).await;
+        check_detach_lifetime(KvStateIngressProtocol::SglangHiCacheV1, true).await;
     }
 
-    async fn check_detach_lifetime(protocol: KvStateIngressProtocol) {
-        let process_local = protocol == KvStateIngressProtocol::SglangHiCacheV1;
+    #[tokio::test]
+    async fn in_process_vllm_inventory_is_cleared_on_detach_and_tolerates_gaps() {
+        check_detach_lifetime(KvStateIngressProtocol::VllmResidencyV1, true).await;
+    }
+
+    async fn check_detach_lifetime(protocol: KvStateIngressProtocol, process_local: bool) {
+        let retires_on_gap = protocol.retires_source_on_cursor_gap();
         let owner = cache_owner_id();
         let worker = WorkerWithDpRank::new(17, 3);
         let identity = KvStateAgentIdentity {
@@ -2968,6 +2981,7 @@ mod tests {
         };
         let mut attachment = test_attachment(worker, "tcp://framework");
         attachment.ingress_protocol = protocol;
+        attachment.process_local_inventory = process_local;
         coordinator.attach(&mut attachment).await.unwrap();
 
         coordinator.begin_detach(attachment.generation).unwrap();
@@ -3037,6 +3051,7 @@ mod tests {
 
         let mut replacement = test_attachment(worker, "tcp://framework-2");
         replacement.ingress_protocol = protocol;
+        replacement.process_local_inventory = process_local;
         coordinator.attach(&mut replacement).await.unwrap();
         coordinator
             .handle_ingress(IngressBatch {
@@ -3065,7 +3080,7 @@ mod tests {
                 cache_owner_fault: None,
             })
             .await;
-        if process_local {
+        if retires_on_gap {
             assert!(result.is_err());
             assert_eq!(coordinator.outbound_cursor(), cursor_before_gap);
             assert!(!coordinator.status.load().cache_owner_ready);
