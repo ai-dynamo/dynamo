@@ -5896,6 +5896,34 @@ mod tests {
         assert_eq!(prepared_queue.prepared_selections(), 0);
     }
 
+    /// A soft target whose named rank is full stops restricting selection, though its worker
+    /// still has an idle rank.
+    #[tokio::test]
+    async fn exclusive_affinity_target_rank_is_released_once_that_rank_is_full() {
+        let prepared_queue = make_prepared_queue_with(2, 2, true, Box::new(LeastLoaded));
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        let target = WorkerWithDpRank::new(0, 0);
+        hold_prefill(queue, "held", target, 48).await;
+
+        let (mut request, rx) = make_request("request", 16);
+        request.affinity_target = Some(dynamo_session_affinity::WorkerAffinityTarget::new(
+            target.worker_id,
+            Some(target.dp_rank),
+        ));
+        queue.enqueue(request).await;
+        let selected = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("selection must not wait on the full target rank")
+            .unwrap()
+            .unwrap()
+            .best_worker;
+        assert_ne!(
+            selected, target,
+            "the full target rank must not restrict selection"
+        );
+    }
+
     #[tokio::test]
     async fn prepared_rows_recount_the_best_cached_prefix_without_full_workers() {
         let prepared_queue = make_prepared_queue();
