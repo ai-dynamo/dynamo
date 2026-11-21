@@ -1365,6 +1365,12 @@ class HandlerBase(BaseGenerativeHandler):
             }
             generate_async = self.engine.llm.generate_async
             try:
+                if self._request_has_images(processed_input):
+                    # generate_async would preprocess images or video here, which
+                    # blocks the event loop, so preprocess them on a thread first.
+                    generate_kwargs["inputs"] = await self.engine.preprocess(
+                        processed_input, sampling_params, disaggregated_params
+                    )
                 generation_result = generate_async(**generate_kwargs)
             except RequestError as e:
                 # The engine owns request validation, including its token budget.
