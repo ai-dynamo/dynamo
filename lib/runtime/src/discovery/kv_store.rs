@@ -678,10 +678,11 @@ impl Discovery for KVStoreDiscovery {
 
         let key = kv::Key::new(key_path.clone());
 
-        // Delete the entry from the bucket
-        bucket.delete(&key).await?;
-
-        Ok(())
+        // Admin drain or an earlier teardown may already have withdrawn it.
+        match bucket.delete(&key).await {
+            Ok(()) | Err(kv::StoreError::MissingKey(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {

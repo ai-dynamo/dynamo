@@ -174,6 +174,30 @@ must validate tool input before executing it. If the token limit interrupts the
 wrapper, Dynamo preserves `finish_reason: "length"` without emitting the
 truncated input.
 
+## Limit the Tools Available for a Turn
+
+For `/v1/chat/completions`, keep the full function catalog in `tools` and select
+a subset by name in `tool_choice.allowed_tools`. Use `auto` to allow a text
+response or `required` to require a call from the subset.
+
+```json
+{
+  "type": "allowed_tools",
+  "allowed_tools": {
+    "mode": "required",
+    "tools": [{"type": "function", "function": {"name": "lookup"}}]
+  }
+}
+```
+
+Use this object as the value of `tool_choice`. Every selected name must occur
+in the declared catalog. Dynamo uses the full catalog for prompt rendering and
+the selected tools for tool-call constraints. If the model returns a call
+outside the subset, Dynamo returns an error before exposing that call to the
+client, including during streaming. Use the standard SSE tool-call deltas
+with this option. Dynamo omits the optional early `tool_call_dispatch` event
+for requests with an allowlist.
+
 ## Supported Tool Call Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.

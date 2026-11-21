@@ -133,9 +133,27 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
+        let config = self.build_internal()?;
+        let runtime = config.endpoint.drt().runtime();
+        let token = runtime.child_token();
+        // The caller can disappear while discovery is committing the write.
+        // Keep registration and rollback together, and stop the endpoint if
+        // nobody receives the handle.
+        let cancel_on_drop = token.clone().drop_guard();
+        let started = runtime.primary().spawn(config.register(token)).await??;
+        cancel_on_drop.disarm();
+        Ok(started)
+    }
+}
+
+impl EndpointConfig {
+    async fn register(self, endpoint_shutdown_token: CancellationToken) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+            self.dissolve();
         let runtime = endpoint.drt().runtime().clone();
+        // Enroll before checking the shutdown fence, so teardown also waits
+        // for an endpoint that is still installing its transport.
+        let graceful_task = graceful_shutdown.then(|| endpoint.drt().register_graceful_task());
         let _registration = runtime.endpoint_registration_guard().await?;
         if endpoint.track_response_completion
             && endpoint.drt().response_plane() != ResponsePlaneMode::Tcp
@@ -153,10 +171,6 @@ impl EndpointConfigBuilder {
         handler.bind_endpoint(&endpoint);
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
-
-        // This creates a child token of the runtime's endpoint_shutdown_token. That token is
-        // cancelled first as part of graceful shutdown. See Runtime::shutdown.
-        let endpoint_shutdown_token = endpoint.drt().child_token();
 
         let system_health = endpoint.drt().system_health();
 
@@ -225,19 +239,6 @@ impl EndpointConfigBuilder {
             )
             .await?;
 
-        let tracker_clone = if graceful_shutdown {
-            tracing::debug!(
-                "Registering endpoint '{}' with graceful shutdown tracker",
-                endpoint.name
-            );
-            let tracker = endpoint.drt().graceful_shutdown_tracker();
-            tracker.register_endpoint();
-            Some(tracker)
-        } else {
-            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
-            None
-        };
-
         // Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
         // consistent registration/discovery across the system.
@@ -260,15 +261,10 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Unable to register service for discovery"
                 );
-                // No shutdown in progress on this path, so this resolves to the
-                // runtime default.
                 let drain_timeout = endpoint.drt().endpoint_drain_timeout();
                 let _ = server
                     .unregister_endpoint_instance(&endpoint_id, connection_id, drain_timeout)
                     .await;
-                if let Some(tracker) = tracker_clone {
-                    tracker.unregister_endpoint();
-                }
                 anyhow::bail!(
                     "Unable to register service for discovery. Check discovery service status"
                 );
@@ -287,6 +283,7 @@ impl EndpointConfigBuilder {
 
         let drt_for_cleanup = endpoint.drt().clone();
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let _graceful_task = graceful_task;
             cancel_token_for_cleanup.cancelled().await;
 
             // Read *after* cancellation: the bound is published when the
@@ -321,11 +318,6 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Failed to unregister endpoint"
                 );
-            }
-
-            if let Some(tracker) = tracker_clone {
-                tracing::debug!("Unregister endpoint from graceful shutdown tracker");
-                tracker.unregister_endpoint();
             }
 
             anyhow::Ok(())
