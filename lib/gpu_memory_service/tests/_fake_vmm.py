@@ -30,7 +30,7 @@ class FakeVMM(VMMDevice):
         granularity: int = 4096,
     ):
         self._handles = itertools.count(1000)
-        self._vas = itertools.count(0x100000, 0x10000)
+        self._next_va = 0x100000
         self._devices = devices if devices is not None else [0]
         self._granularity = granularity
         self.calls: list[tuple] = []
@@ -80,18 +80,33 @@ class FakeVMM(VMMDevice):
         self.imports.add(handle)
         return handle
 
+    @staticmethod
+    def _overlaps(ranges, va, size):
+        return any(start < va + size and va < start + n for start, n in ranges)
+
     def address_reserve(self, size, granularity):
-        va = next(self._vas)
+        va = -(-self._next_va // granularity) * granularity
+        self._next_va = va + size + 0x10000
         self.reservations[va] = size
         return va
 
     def address_free(self, va, size):
+        if self._overlaps(((v, n) for v, (n, _) in self.mapped.items()), va, size):
+            raise AssertionError("freeing a reservation that is still mapped")
         if self.reservations.pop(va) != size:
             raise AssertionError("reservation size mismatch")
 
     def map(self, va, size, handle):
         if handle not in self.imports and handle not in self.server_handles:
             raise AssertionError("unknown handle")
+        # cuMemMap: the range must sit inside one reservation and be unmapped.
+        if not any(
+            start <= va and va + size <= start + n
+            for start, n in self.reservations.items()
+        ):
+            raise AssertionError(f"map 0x{va:x}+0x{size:x} outside any reservation")
+        if self._overlaps(((v, n) for v, (n, _) in self.mapped.items()), va, size):
+            raise AssertionError(f"map 0x{va:x}+0x{size:x} overlaps a live mapping")
         self.mapped[va] = size, handle
 
     def unmap(self, va, size):

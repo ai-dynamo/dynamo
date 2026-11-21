@@ -301,20 +301,26 @@ sequenceDiagram
     R->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
     R->>C: mgr.connect(RO)
     C->>S: HandshakeRequest(lock_type=RO)
-    S-->>C: HandshakeResponse(success=true, committed=true)
+    S-->>C: HandshakeResponse(success=true, committed=true, capabilities=[...])
 
-    R->>C: mgr.metadata_list()
-    S-->>C: keys=[...]
+    R->>C: mgr.metadata_get_all()
+    loop Until the last page
+        C->>S: MetadataGetAllRequest(start_after)
+        S-->>C: items=[(key, allocation_id, offset, value), ...]
+    end
+
+    R->>C: mgr.import_allocations(referenced allocation_ids)
+    Note over C,S: Export, import and map in chunks, then set access
 
     loop For each tensor key
-        R->>C: mgr.metadata_get(key)
-        S-->>C: allocation_id, offset, shape
         R->>C: mgr.create_mapping(allocation_id=allocation_id)
-        Note over C,S: See Memory Import Flow above
+        Note over C: Returns the VA mapped above
     end
 
     Note over R,C: Keep connection open during inference
 ```
+
+The reader imports only the allocations its metadata references. With bulk import off, it skips `import_allocations` and each `create_mapping` imports its allocation as in the Memory Import Flow above. Against a server that does not advertise `metadata_get_all`, `metadata_get_all()` reads with `MetadataListRequest` and one `MetadataGetRequest` per key instead.
 
 ### Unmap/Remap Flow (Memory Pressure)
 
@@ -461,6 +467,12 @@ Weight values can be modified in-place (e.g., RL training updates) as long as th
 └──────────────┴────────────────────────────────────────┘
 ```
 
+### Capabilities
+
+`HandshakeResponse.capabilities` lists the optional requests a server understands beyond the base protocol. Today that is `metadata_get_all` (`MetadataGetAllRequest`, which returns metadata entries under a prefix in key order, one page per round trip).
+
+A server cannot decode a request type it does not know, and it drops the connection, and the client's lock with it, instead of answering. A client must therefore send an optional request only when the handshake advertised it. A server from before the field sends no capabilities, and a client from before the field ignores it.
+
 ### FD Passing
 
 File descriptors are passed out-of-band using Unix socket `SCM_RIGHTS`:
@@ -484,7 +496,7 @@ The API is organized in two tiers. **Tier 2 (convenience)** is what integrations
 
 ```python
 class GMSClientMemoryManager:
-    def __init__(socket_path: str, *, device: int = 0): ...
+    def __init__(socket_path: str, *, device: int = 0, bulk_import: Optional[bool] = None): ...
 
     # Properties
     @property granted_lock_type: Optional[GrantedLockType]
@@ -515,16 +527,24 @@ class GMSClientMemoryManager:
     def metadata_put(key: str, allocation_id: str, offset_bytes: int, value: bytes) -> bool
     def metadata_get(key: str) -> Optional[Tuple[str, int, bytes]]
     def metadata_list(prefix: str = "") -> List[str]
+    def metadata_get_all(prefix: str = "") -> List[Tuple[str, str, int, bytes]]  # (key, allocation_id, offset_bytes, value), batched when the server supports it
     def metadata_delete(key: str) -> bool
 
     # --- Tier 2: Convenience ---
     def create_mapping(allocation_id=None, size=0, tag="default") -> int  # Allocate or import
+    def import_allocations(allocation_ids: Iterable[str]) -> None    # Import and map many allocations in bulk; all or nothing
     def destroy_mapping(va: int) -> None
     def unmap_all_vas() -> None          # Sync + unmap all, preserve VA reservations
     def remap_all_vas() -> None          # Re-import at preserved VAs (checks layout hash)
     def reallocate_all_handles(tag="default") -> None  # Fresh server handles for preserved VAs
     def close() -> None
 ```
+
+#### Bulk import
+
+By default, the read-only attach (`materialize_module_from_gms`) and `remap_all_vas()` map allocations in bulk: they export a chunk of up to 256 allocations, import the chunk, map it, and set access once every chunk is mapped. This makes the same driver calls as importing one allocation at a time, without alternating between client and server for each allocation. A bulk import holds up to 256 exported file descriptors at once, fewer when the process is close to its `RLIMIT_NOFILE`, and a failed one leaves nothing mapped.
+
+To import one allocation at a time instead, pass `bulk_import=False` to the constructor or set `DYN_GMS_BULK_IMPORT` to `0`, `false`, `no` or `off` in the engine's environment. The constructor argument takes precedence.
 
 ---
 

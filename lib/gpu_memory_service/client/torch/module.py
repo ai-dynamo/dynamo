@@ -178,6 +178,12 @@ def materialize_module_from_gms(
         device_index: CUDA device index.
     """
     specs = GMSTensorSpec.load_all(gms_client_memory_manager)
+    # Importing before any tensor is bound leaves the model untouched if the
+    # import fails; spec.materialize then reuses the cached mappings.
+    if gms_client_memory_manager.bulk_import:
+        gms_client_memory_manager.import_allocations(
+            spec.allocation_id for spec in specs.values()
+        )
 
     for name, spec in specs.items():
         tensor = spec.materialize(gms_client_memory_manager, device_index)

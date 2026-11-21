@@ -14,14 +14,16 @@ import asyncio
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
 import time
+import typing
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
-from _deps import HAS_CUDA, HAS_GMS, HAS_PYNVML, HAS_XPU
+from _deps import HAS_CUDA, HAS_GMS, HAS_PYNVML, HAS_TORCH, HAS_XPU
 
 if not HAS_GMS:
     pytest.skip(
@@ -33,7 +35,11 @@ if HAS_PYNVML:
     import pynvml
 
 import gpu_memory_service.common.vmm as _vmm_module
+import gpu_memory_service.server.gms as server_gms
+import gpu_memory_service.server.rpc as server_rpc
+import msgspec
 from _fake_vmm import FakeVMM
+from gpu_memory_service.client import memory_manager
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -41,16 +47,30 @@ from gpu_memory_service.client.memory_manager import (
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.protocol import messages, wire
 from gpu_memory_service.common.protocol.messages import (
+    CAPABILITY_METADATA_GET_ALL,
     GetEventHistoryRequest,
     GetEventHistoryResponse,
     GetRuntimeStateRequest,
     GetRuntimeStateResponse,
+    HandshakeResponse,
+    MetadataGetAllRequest,
+    MetadataGetAllResponse,
 )
+from gpu_memory_service.common.utils import ENV_BULK_IMPORT
 from gpu_memory_service.common.vmm import VMMDeviceType
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer
+
+if HAS_TORCH:
+    import torch
+    from gpu_memory_service.client.torch import tensor as gms_tensor
+    from gpu_memory_service.client.torch.module import materialize_module_from_gms
+    from gpu_memory_service.client.torch.tensor import TensorMetadata
+
+requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="torch is required")
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -767,13 +787,14 @@ def test_remap_all_vas_rejects_stale_layout_after_new_layout_commit(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("bulk_import", [True, False])
 def test_remap_all_vas_accepts_new_layout_with_same_structural_layout(
-    running_gms,
+    running_gms, bulk_import
 ):
     _, socket_path = running_gms
 
     first_writer = GMSClientMemoryManager(socket_path, device=0)
-    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader = GMSClientMemoryManager(socket_path, device=0, bulk_import=bulk_import)
     second_writer = GMSClientMemoryManager(socket_path, device=0)
     try:
         first_writer.connect(RequestedLockType.RW)
@@ -798,7 +819,9 @@ def test_remap_all_vas_accepts_new_layout_with_same_structural_layout(
         reader.remap_all_vas()
 
         assert reader.mappings[imported_va].va == imported_va
+        assert reader.mappings[imported_va].handle != 0
         assert reader.mappings[imported_va].allocation_id == second_allocation_id
+        assert reader.create_mapping(allocation_id=second_allocation_id) == imported_va
         assert reader.metadata_get("tensor.0") == (second_allocation_id, 0, b"shape")
     finally:
         second_writer.close()
@@ -1254,3 +1277,491 @@ def test_content_commit_path_is_unchanged(gms_thread):
         assert len(reader.list_allocations()) == 1
     finally:
         reader.close()
+
+
+# ---- bulk import ----
+
+
+def _publish(socket_path, sizes, tag="weights"):
+    """Commit one layout with allocations of ``sizes``; return allocation ids by slot."""
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    ids = [
+        writer.mappings[writer.create_mapping(size=s, tag=tag)].allocation_id
+        for s in sizes
+    ]
+    assert writer.commit()
+    writer.close()
+    return ids
+
+
+def _fake_vmm():
+    return _vmm_module._vmm_instance
+
+
+def _open_pipe_count() -> int:
+    """Open pipes in this process; every fd the fake VMM exports is one."""
+    count = 0
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            count += stat.S_ISFIFO(os.fstat(int(name)).st_mode)
+        except OSError:
+            # The fd that listed the directory is closed by now.
+            continue
+    return count
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "value,enabled",
+    [
+        (None, True),
+        ("", True),
+        ("1", True),
+        ("unrecognized", True),
+        ("0", False),
+        ("false", False),
+        ("No", False),
+        ("OFF", False),
+    ],
+)
+def test_bulk_import_follows_the_environment_unless_passed(
+    running_gms, monkeypatch, value, enabled
+):
+    _, socket_path = running_gms
+    if value is None:
+        monkeypatch.delenv(ENV_BULK_IMPORT, raising=False)
+    else:
+        monkeypatch.setenv(ENV_BULK_IMPORT, value)
+
+    assert GMSClientMemoryManager(socket_path, device=0).bulk_import is enabled
+    explicit = GMSClientMemoryManager(socket_path, device=0, bulk_import=not enabled)
+    assert explicit.bulk_import is not enabled
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("limited_by", ["chunk size", "fd headroom"])
+def test_bulk_import_holds_at_most_one_chunk_of_exported_fds(
+    running_gms, monkeypatch, limited_by
+):
+    _, socket_path = running_gms
+    ids = _publish(socket_path, [4096] * 7)
+    vmm = _fake_vmm()
+    if limited_by == "chunk size":
+        monkeypatch.setattr(GMSClientMemoryManager, "_BULK_CHUNK", 3)
+    else:
+        # Close to RLIMIT_NOFILE, a chunk takes only what the process can open.
+        headroom = GMSClientMemoryManager._BULK_FD_MARGIN + 3
+        monkeypatch.setattr(memory_manager, "_fd_headroom", lambda: headroom)
+    reader = GMSClientMemoryManager(socket_path, device=0, bulk_import=True)
+    held = max_held = 0
+    real_export = reader.export_handle
+    real_import = vmm.import_shareable_handle_close_fd
+
+    def export(allocation_id):
+        nonlocal held, max_held
+        held += 1
+        max_held = max(max_held, held)
+        return real_export(allocation_id)
+
+    def import_(fd, import_size=0):
+        nonlocal held
+        held -= 1
+        return real_import(fd, import_size=import_size)
+
+    monkeypatch.setattr(reader, "export_handle", export)
+    monkeypatch.setattr(vmm, "import_shareable_handle_close_fd", import_)
+    try:
+        reader.connect(RequestedLockType.RO)
+        reader.import_allocations(ids)
+        assert len(reader.mappings) == 7
+        assert max_held == 3
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_bulk_remap_failure_leaves_the_manager_remappable(running_gms, monkeypatch):
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 4096, 4096))
+    vmm = _fake_vmm()
+    reader = GMSClientMemoryManager(socket_path, device=0, bulk_import=True)
+    try:
+        reader.connect(RequestedLockType.RO)
+        reader.import_allocations(ids)
+        reader.unmap_all_vas()
+        reader.abort()
+        reader.connect(RequestedLockType.RO)
+        real_map = vmm.map
+        calls = 0
+
+        def flaky_map(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise RuntimeError("injected map failure")
+            return real_map(*args)
+
+        monkeypatch.setattr(vmm, "map", flaky_map)
+        with pytest.raises(RuntimeError, match="injected"):
+            reader.remap_all_vas()
+        assert vmm.mapped == {} and vmm.imports == set()
+        assert all(m.handle == 0 for m in reader.mappings.values())
+        monkeypatch.setattr(vmm, "map", real_map)
+        reader.remap_all_vas()
+        assert all(m.handle != 0 for m in reader.mappings.values())
+    finally:
+        reader.close()
+
+
+# ---- read-only attach (materialize_module_from_gms) with bulk import ----
+
+
+def _publish_module_layout(socket_path):
+    """Publish four allocations: two parameters at different offsets of one, a
+    parameter and its alias on another, a buffer and a tensor attribute on a
+    third, and one allocation no tensor references. Returns allocation ids."""
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    ids = [
+        writer.mappings[writer.create_mapping(size=s, tag="weights")].allocation_id
+        for s in (2 * 4096, 4096, 4096, 4096)
+    ]
+
+    def put(key, allocation, offset, shape, tensor_type="parameter"):
+        stride = (shape[1], 1) if len(shape) == 2 else (1,)
+        meta = TensorMetadata(tuple(shape), torch.float32, stride, tensor_type)
+        assert writer.metadata_put(key, allocation, offset, meta.to_bytes())
+
+    put("a.weight", ids[0], 0, (4, 4))
+    put("a.bias", ids[0], 4096, (4,))
+    put("b.weight", ids[1], 0, (4, 4))
+    put("b.tied", ids[1], 0, (4, 4))
+    put("b.scale", ids[2], 0, (4,), "buffer")
+    put("b.extra", ids[2], 64, (4,), "tensor_attr")
+    assert writer.commit()
+    writer.close()
+    return ids
+
+
+def _meta_module():
+    model = torch.nn.Module()
+    with torch.device("meta"):
+        model.a = torch.nn.Linear(4, 4)
+        model.b = torch.nn.Linear(4, 4, bias=False)
+        model.b.tied = torch.nn.Parameter(torch.empty(4, 4))
+        model.b.register_buffer("scale", torch.empty(4))
+    return model
+
+
+def _attach(socket_path, monkeypatch, bulk_import):
+    """Run the read-only attach with GPU tensors faked by the pointer they
+    alias. Returns (reader, model, per-tensor pointers, client RPC counts)."""
+    pointers = {}
+
+    def fake_tensor(ptr, shape, stride, dtype, device_index):
+        t = torch.zeros(shape, dtype=dtype)
+        pointers[id(t)] = ptr
+        return t
+
+    monkeypatch.setattr(gms_tensor, "_tensor_from_pointer", fake_tensor)
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", bulk_import=bulk_import
+    )
+    reader.connect(RequestedLockType.RO)
+    rpcs = {"get_handle_info": 0, "export_handle": 0, "metadata_get": 0}
+    for name in rpcs:
+        real = getattr(reader, name)
+
+        def counted(*args, _real=real, _name=name):
+            rpcs[_name] += 1
+            return _real(*args)
+
+        monkeypatch.setattr(reader, name, counted)
+    model = _meta_module()
+    by_name = {}
+    real_materialize = gms_tensor.GMSTensorSpec.materialize
+
+    def materialize(spec, manager, device_index):
+        t = real_materialize(spec, manager, device_index)
+        by_name[spec.name] = pointers[id(t)]
+        return t
+
+    monkeypatch.setattr(gms_tensor.GMSTensorSpec, "materialize", materialize)
+    try:
+        materialize_module_from_gms(reader, model, device_index=0)
+    finally:
+        monkeypatch.setattr(gms_tensor.GMSTensorSpec, "materialize", real_materialize)
+    return reader, model, by_name, rpcs
+
+
+def _attach_view(reader, by_name):
+    """Mappings and tensor placement independent of where the driver put VAs."""
+
+    def where(ptr):
+        for va, m in reader.mappings.items():
+            if va <= ptr < va + m.aligned_size:
+                return m.allocation_id, ptr - va
+        raise AssertionError(f"0x{ptr:x} is not in any mapping")
+
+    mappings = sorted(
+        (m.allocation_id, m.size, m.aligned_size, m.tag, m.layout_slot)
+        for m in reader.mappings.values()
+    )
+    return mappings, {name: where(ptr) for name, ptr in by_name.items()}
+
+
+@requires_torch
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_ro_attach_maps_the_same_with_bulk_import_on_and_off(running_gms, monkeypatch):
+    """With bulk import the attach issues no per-allocation handle-info request,
+    and gives the same mappings, tensor placement, aliases and read-only access
+    as one create_mapping per allocation. Either way it reads the metadata in
+    batches, not one request per tensor."""
+    _, socket_path = running_gms
+    ids = _publish_module_layout(socket_path)
+    vmm = _fake_vmm()
+    views = {}
+    for bulk in (False, True):
+        reader, model, by_name, rpcs = _attach(socket_path, monkeypatch, bulk)
+        try:
+            # The allocation no tensor references stays unmapped on both paths.
+            assert {m.allocation_id for m in reader.mappings.values()} == set(ids[:3])
+            assert rpcs == {
+                "get_handle_info": 0 if bulk else 3,
+                "export_handle": 3,
+                "metadata_get": 0,
+            }
+            assert set(vmm.access.values()) == {GrantedLockType.RO}
+            assert set(vmm.access) == set(reader.mappings)
+            assert by_name["b.tied"] == by_name["b.weight"]
+            assert not any(p.is_meta for p in model.parameters())
+            assert not any(b.is_meta for b in model.buffers())
+            views[bulk] = _attach_view(reader, by_name)
+        finally:
+            reader.close()
+    assert views[True] == views[False]
+    _, placement = views[True]
+    assert placement["a.bias"] == (ids[0], 4096)
+    assert placement["b.extra"] == (ids[2], 64)
+
+
+@requires_torch
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("fail_at", ["export", "import", "map", "set_access"])
+def test_bulk_attach_failure_is_all_or_nothing(running_gms, monkeypatch, fail_at):
+    """A failure partway through the bulk attach leaves no fd, reservation,
+    handle or mapping behind and the model untouched; the same manager can
+    attach again afterwards."""
+    _, socket_path = running_gms
+    _publish_module_layout(socket_path)
+    vmm = _fake_vmm()
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", bulk_import=True
+    )
+    reader.connect(RequestedLockType.RO)
+    reservations = dict(vmm.reservations)
+    pipes = _open_pipe_count()
+    decoy: list[int] = []
+    calls = 0
+
+    def failing(real):
+        def wrapped(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                if fail_at == "import":
+                    # The import consumes the fd even when it fails, and the
+                    # number can be reused at once: the unwind must not close it.
+                    os.close(args[0])
+                    decoy.extend(os.pipe())
+                raise RuntimeError(f"injected {fail_at} failure")
+            return real(*args, **kwargs)
+
+        return wrapped
+
+    owner = reader if fail_at == "export" else vmm
+    name = {
+        "export": "export_handle",
+        "import": "import_shareable_handle_close_fd",
+    }.get(fail_at, fail_at)
+    real = getattr(owner, name)
+    monkeypatch.setattr(owner, name, failing(real))
+    monkeypatch.setattr(
+        gms_tensor,
+        "_tensor_from_pointer",
+        lambda ptr, shape, stride, dtype, device_index: torch.zeros(shape, dtype=dtype),
+    )
+    model = _meta_module()
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            materialize_module_from_gms(reader, model, device_index=0)
+        assert all(p.is_meta for p in model.parameters())
+        assert all(b.is_meta for b in model.buffers())
+        assert reader.mappings == {}
+        assert vmm.mapped == {} and vmm.imports == set()
+        assert vmm.reservations == reservations
+        # The server closes its copy of an exported fd before it reads the
+        # next request, so after this round trip only leaked fds remain.
+        reader.list_handles()
+        assert _open_pipe_count() == pipes + len(decoy)
+
+        monkeypatch.setattr(owner, name, real)
+        materialize_module_from_gms(reader, model, device_index=0)
+        assert len(reader.mappings) == 3
+        assert set(vmm.access) == set(reader.mappings)
+        assert not any(p.is_meta for p in model.parameters())
+        assert not any(b.is_meta for b in model.buffers())
+    finally:
+        for fd in decoy:
+            os.close(fd)
+        reader.close()
+    assert vmm.reservations == reservations
+
+
+# ---- batched metadata reads across old and new peers ----
+
+
+class _DecoderWithoutBatchedMetadata:
+    """The message decoder of a server from before MetadataGetAllRequest."""
+
+    def __init__(self) -> None:
+        new_types = (MetadataGetAllRequest, MetadataGetAllResponse)
+        old_types = tuple(
+            t for t in typing.get_args(messages.Message) if t not in new_types
+        )
+        self._decoder = msgspec.msgpack.Decoder(typing.Union[old_types])
+        self.rejected: list[str] = []
+
+    def decode(self, data):
+        try:
+            return self._decoder.decode(data)
+        except msgspec.ValidationError as exc:
+            self.rejected.append(str(exc))
+            raise
+
+
+def _publish_metadata(socket_path, entries):
+    """Commit one allocation carrying ``entries`` as its metadata."""
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    allocation_id = writer.mappings[writer.create_mapping(size=4096)].allocation_id
+    for key, value in entries.items():
+        assert writer.metadata_put(key, allocation_id, 0, value)
+    assert writer.commit()
+    writer.close()
+
+
+@pytest.fixture
+def metadata_pages(monkeypatch):
+    """(frame bytes, keys) of every MetadataGetAllResponse the server sends."""
+    pages: list[tuple[int, list[str]]] = []
+    real_frame = wire._frame_message
+
+    def recording_frame(msg):
+        frame = real_frame(msg)
+        if isinstance(msg, MetadataGetAllResponse):
+            pages.append((len(frame), [item.key for item in msg.items]))
+        return frame
+
+    monkeypatch.setattr(wire, "_frame_message", recording_frame)
+    return pages
+
+
+def test_handshake_response_decodes_without_capabilities_and_with_unknown_fields():
+    response = HandshakeResponse(
+        success=True,
+        committed=True,
+        granted_lock_type=GrantedLockType.RO,
+        capabilities=[CAPABILITY_METADATA_GET_ALL],
+    )
+    fields = msgspec.msgpack.decode(messages.encode_message(response))
+
+    # A server from before the field does not send it.
+    without = {k: v for k, v in fields.items() if k != "capabilities"}
+    decoded = messages.decode_message(msgspec.msgpack.encode(without))
+    assert decoded.capabilities == []
+
+    # A client from before the field sees it as a field it does not know;
+    # the decoder has to keep ignoring those.
+    with_unknown = {**fields, "added_later": 1}
+    assert messages.decode_message(msgspec.msgpack.encode(with_unknown)) == response
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_client_falls_back_to_per_key_reads_on_a_server_without_batched_metadata(
+    running_gms, monkeypatch
+):
+    server, socket_path = running_gms
+    _publish_metadata(socket_path, {"w.0": b"a", "w.1": b"b"})
+    monkeypatch.setattr(server_rpc, "SERVER_CAPABILITIES", ())
+    decoder = _DecoderWithoutBatchedMetadata()
+    monkeypatch.setattr(messages, "_decoder", decoder)
+
+    with _GMSClientSession(socket_path, RequestedLockType.RO, None) as reader:
+        assert not reader.supports(CAPABILITY_METADATA_GET_ALL)
+        got = reader.metadata_get_all()
+        assert [(key, value) for key, _, _, value in got] == [
+            ("w.0", b"a"),
+            ("w.1", b"b"),
+        ]
+        assert decoder.rejected == []
+        assert reader.is_connected
+        assert server._gms._sessions.snapshot().ro_session_count == 1
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_server_without_batched_metadata_drops_a_session_that_requests_it(
+    running_gms, monkeypatch
+):
+    """Why the client checks the capability first: an older server cannot decode
+    the request, so it drops the connection and the reader's lock with it."""
+    server, socket_path = running_gms
+    _publish_metadata(socket_path, {"w.0": b"a"})
+    decoder = _DecoderWithoutBatchedMetadata()
+    monkeypatch.setattr(messages, "_decoder", decoder)
+
+    with _GMSClientSession(socket_path, RequestedLockType.RO, None) as reader:
+        with pytest.raises(ConnectionError):
+            reader._transport.request(MetadataGetAllRequest(), MetadataGetAllResponse)
+        assert len(decoder.rejected) == 1
+        assert "metadata_get_all_request" in decoder.rejected[0]
+        _wait_for_ro_session_count(server, 0)
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("prefix", ["", "layer.01"])
+def test_metadata_get_all_pages_in_key_order(
+    running_gms, monkeypatch, metadata_pages, prefix
+):
+    _, socket_path = running_gms
+    entries = {f"layer.{i:04d}.weight": bytes([i % 251]) * 300 for i in range(400)}
+    entries[""] = b"empty-key"
+    _publish_metadata(socket_path, entries)
+    page_budget = 8 * 1024
+    monkeypatch.setattr(server_gms, "METADATA_GET_ALL_PAGE_BYTES", page_budget)
+    expected = [
+        (key, entries[key]) for key in sorted(entries) if key.startswith(prefix)
+    ]
+
+    with _GMSClientSession(socket_path, RequestedLockType.RO, None) as reader:
+        assert reader.supports(CAPABILITY_METADATA_GET_ALL)
+        got = reader.metadata_get_all(prefix)
+        assert [(key, value) for key, _, _, value in got] == expected
+        # The per-key path used against an older server returns the same.
+        assert reader._metadata_get_all_by_key(prefix) == got
+    assert len(metadata_pages) > 1
+    assert max(size for size, _ in metadata_pages) <= page_budget
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_metadata_entry_larger_than_a_page_is_sent_alone(
+    running_gms, monkeypatch, metadata_pages
+):
+    _, socket_path = running_gms
+    _publish_metadata(socket_path, {"a": b"1", "b": b"x" * 4096, "c": b"3"})
+    monkeypatch.setattr(server_gms, "METADATA_GET_ALL_PAGE_BYTES", 1024)
+
+    with _GMSClientSession(socket_path, RequestedLockType.RO, None) as reader:
+        assert [key for key, *_ in reader.metadata_get_all()] == ["a", "b", "c"]
+    assert [keys for _, keys in metadata_pages] == [["a"], ["b"], ["c"]]

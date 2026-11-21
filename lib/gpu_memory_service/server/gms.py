@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import logging
 from collections import deque
@@ -38,8 +39,11 @@ from gpu_memory_service.common.protocol.messages import (
     ListAllocationsResponse,
     MetadataDeleteRequest,
     MetadataDeleteResponse,
+    MetadataGetAllRequest,
+    MetadataGetAllResponse,
     MetadataGetRequest,
     MetadataGetResponse,
+    MetadataItem,
     MetadataListRequest,
     MetadataListResponse,
     MetadataPutRequest,
@@ -58,6 +62,15 @@ class MetadataEntry:
     allocation_id: str
     offset_bytes: int
     value: bytes
+
+
+# Target encoded size of one MetadataGetAllResponse page, so the reply for a
+# model with tens of thousands of tensors is split across several frames. An
+# entry larger than the target is sent alone.
+METADATA_GET_ALL_PAGE_BYTES = 256 * 1024
+# Upper bound on msgpack overhead per MetadataItem beyond its key, allocation id
+# and value bytes: map header, the four field names, string/bin headers, offset.
+_METADATA_ITEM_OVERHEAD_BYTES = 80
 
 
 class GMS:
@@ -248,6 +261,39 @@ class GMS:
                 )
             )
         await self._sessions.finish_cleanup(conn)
+
+    def _metadata_get_all_page(
+        self, msg: MetadataGetAllRequest
+    ) -> MetadataGetAllResponse:
+        keys = sorted(key for key in self._metadata if key.startswith(msg.prefix))
+        start = (
+            0 if msg.start_after is None else bisect.bisect_right(keys, msg.start_after)
+        )
+        items: list[MetadataItem] = []
+        budget = METADATA_GET_ALL_PAGE_BYTES
+        for key in keys[start:]:
+            entry = self._metadata[key]
+            size = (
+                len(key.encode())
+                + len(entry.allocation_id.encode())
+                + len(entry.value)
+                + _METADATA_ITEM_OVERHEAD_BYTES
+            )
+            # Always make progress: an oversized entry goes out alone.
+            if items and size > budget:
+                return MetadataGetAllResponse(
+                    items=items, next_start_after=items[-1].key
+                )
+            budget -= size
+            items.append(
+                MetadataItem(
+                    key=key,
+                    allocation_id=entry.allocation_id,
+                    offset_bytes=entry.offset_bytes,
+                    value=entry.value,
+                )
+            )
+        return MetadataGetAllResponse(items=items)
 
     async def handle_request(
         self,
@@ -467,5 +513,8 @@ class GMS:
                     key for key in self._metadata if key.startswith(msg.prefix)
                 )
             return MetadataListResponse(keys=keys), -1, False
+
+        if msg_type is MetadataGetAllRequest:
+            return self._metadata_get_all_page(msg), -1, False
 
         raise ValueError(f"Unknown request: {msg_type.__name__}")

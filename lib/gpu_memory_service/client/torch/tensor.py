@@ -208,13 +208,8 @@ class GMSTensorSpec:
         """
         specs: Dict[str, GMSTensorSpec] = {}
 
-        for key in gms_client_memory_manager.metadata_list():
-            got = gms_client_memory_manager.metadata_get(key)
-            if got is None:
-                raise RuntimeError(f"Metadata key disappeared: {key}")
-
-            allocation_id, offset_bytes, value = got
-
+        entries = gms_client_memory_manager.metadata_get_all()
+        for key, allocation_id, offset_bytes, value in entries:
             if key in specs:
                 raise RuntimeError(f"Duplicate tensor name: {key}")
 
