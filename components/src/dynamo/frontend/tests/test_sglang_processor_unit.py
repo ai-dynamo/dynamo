@@ -480,6 +480,90 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         }
         assert request == original
 
+    @pytest.mark.router
+    @pytest.mark.parametrize(
+        ("request_data", "expected_routing", "expected_extra_args"),
+        [
+            pytest.param(
+                {"routing": {"cache_salt": "internal"}},
+                {"cache_salt": "internal"},
+                None,
+                id="internal_routing_hint_is_not_public",
+            ),
+            pytest.param({"cache_salt": ""}, None, None, id="empty_legacy"),
+            pytest.param(
+                {"cache_salt": "legacy"},
+                {"cache_salt": "legacy"},
+                {"nvext": {"cache_salt": "legacy"}},
+                id="legacy",
+            ),
+            pytest.param(
+                {"cache_salt": "legacy", "nvext": {"cache_salt": None}},
+                {"cache_salt": "legacy"},
+                {"nvext": {"cache_salt": "legacy"}},
+                id="null_canonical_falls_back",
+            ),
+            pytest.param(
+                {"cache_salt": "legacy", "nvext": {"cache_salt": ""}},
+                {"cache_salt": "legacy"},
+                {"nvext": {"cache_salt": "legacy"}},
+                id="empty_canonical_falls_back",
+            ),
+            pytest.param(
+                {"cache_salt": "legacy", "nvext": {"cache_salt": "canonical"}},
+                {"cache_salt": "canonical"},
+                {"nvext": {"cache_salt": "canonical"}},
+                id="canonical_wins",
+            ),
+            pytest.param(
+                {
+                    "nvext": {
+                        "cache_salt": "tenant-a",
+                        "decode_worker_id": 7,
+                        "agent_hints": {"priority": 10},
+                    },
+                    "routing": {"cache_salt": "internal", "priority": 3},
+                },
+                {
+                    "cache_salt": "tenant-a",
+                    "decode_worker_id": 7,
+                    "priority": 3,
+                    "priority_jump": 10.0,
+                },
+                {"nvext": {"cache_salt": "tenant-a"}},
+                id="with_routing_hints",
+            ),
+            pytest.param(
+                {
+                    "nvext": {
+                        "cache_salt": "tenant-a",
+                        "metadata_upload": {"url": "s3://bucket/root"},
+                        "extra_fields": ["worker_id"],
+                    },
+                },
+                {"cache_salt": "tenant-a"},
+                {
+                    "nvext": {
+                        "cache_salt": "tenant-a",
+                        "metadata_upload": {"url": "s3://bucket/root"},
+                        "extra_fields": ["worker_id"],
+                    }
+                },
+                id="with_nvext_passthrough",
+            ),
+        ],
+    )
+    def test_cache_salt_is_projected(
+        self, request_data, expected_routing, expected_extra_args
+    ):
+        """The public salt reaches routing and the worker; the request is unchanged."""
+        request = {"model": "test", "messages": [], **request_data}
+        original = copy.deepcopy(request)
+        result = _build_dynamo_preproc(request, [1], "test", None)
+        assert result["routing"] == expected_routing
+        assert result.get("extra_args") == expected_extra_args
+        assert request == original
+
     def test_agent_hints_are_projected_to_routing(self):
         result = _build_dynamo_preproc(
             {
@@ -5537,17 +5621,18 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    ("requested", "pin_workers"),
+    ("requested", "pin_workers", "cache_salt"),
     [
-        pytest.param(None, False, id="omitted"),
-        pytest.param(True, False, id="true"),
-        pytest.param(False, False, id="false"),
-        pytest.param(None, True, id="pinned"),
+        pytest.param(None, False, None, id="omitted"),
+        pytest.param(True, False, None, id="true"),
+        pytest.param(False, False, None, id="false"),
+        pytest.param(None, True, None, id="pinned"),
+        pytest.param(None, True, "tenant-a", id="pinned_salted"),
     ],
 )
 @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
 def test_generator_preserves_decode_and_routing_options(
-    requested, use_pool, pin_workers, monkeypatch
+    requested, use_pool, pin_workers, cache_salt, monkeypatch
 ):
     class SpecialTokenTokenizer:
         chat_template = ""
@@ -5577,6 +5662,8 @@ def test_generator_preserves_decode_and_routing_options(
     }
     if pin_workers:
         request["nvext"] = worker_routing.copy()
+    if cache_salt is not None:
+        request.setdefault("nvext", {})["cache_salt"] = cache_salt
 
     if use_pool:
         # Run the real worker through the pool branch without loading a model
@@ -5617,7 +5704,13 @@ def test_generator_preserves_decode_and_routing_options(
     assert engine.requests[0]["output_options"]["skip_special_tokens"] is (
         requested is not False
     )
-    assert engine.requests[0]["routing"] == (worker_routing if pin_workers else None)
+    expected_routing = worker_routing.copy() if pin_workers else None
+    expected_extra_args = None
+    if cache_salt is not None:
+        expected_routing = {**(expected_routing or {}), "cache_salt": cache_salt}
+        expected_extra_args = {"nvext": {"cache_salt": cache_salt}}
+    assert engine.requests[0]["routing"] == expected_routing
+    assert engine.requests[0].get("extra_args") == expected_extra_args
 
 
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text

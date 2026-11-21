@@ -53,6 +53,10 @@ class PreprocessedRequest(BaseModel):
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
+    # Encode workers forward this model to PD workers, so keep the fields that
+    # carry the resolved cache salt.
+    routing: Optional[Dict[str, Any]] = None
+    extra_args: Optional[Dict[str, Any]] = None
 
     @field_validator("token_ids", mode="before")
     @classmethod

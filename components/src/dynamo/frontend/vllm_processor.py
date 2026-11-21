@@ -69,6 +69,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
+    request_cache_salt,
     request_id_from_context,
     resolve_chat_template,
 )
@@ -692,16 +693,6 @@ def _inject_routing_metadata(
         target["mm_routing_info"] = mm_routing_info
 
 
-def _request_cache_salt(request: dict[str, Any]) -> str | None:
-    """Match the public precedence of Rust's ``request_cache_salt``."""
-    nvext = request.get("nvext")
-    salt = nvext.get("cache_salt") if isinstance(nvext, dict) else None
-    if isinstance(salt, str) and salt:
-        return salt
-    salt = request.get("cache_salt")
-    return salt if isinstance(salt, str) and salt else None
-
-
 async def _build_engine_inputs(
     renderer: Any,
     engine_prompt: dict[str, Any],
@@ -1115,7 +1106,7 @@ class VllmProcessor:
         # below. Prefer the OpenAI-compatible root-level field, fall back to the
         # legacy nvext passthrough.
         thinking_token_budget = resolve_thinking_token_budget(request)
-        cache_salt = _request_cache_salt(request)
+        cache_salt = request_cache_salt(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed

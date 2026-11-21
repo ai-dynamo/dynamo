@@ -36,7 +36,16 @@ async def test_diffusion_rejects_thinking_budget_before_engine_generation(budget
 
 
 @pytest.mark.asyncio
-async def test_diffusion_without_budget_keeps_existing_generation():
+@pytest.mark.parametrize(
+    "salt_fields",
+    [
+        {},
+        {"routing": {"cache_salt": "tenant-a"}},
+        {"extra_args": {"nvext": {"cache_salt": "tenant-a"}}},
+    ],
+    ids=["unsalted", "routing", "extra_args"],
+)
+async def test_diffusion_without_budget_keeps_existing_generation(salt_fields):
     handler = object.__new__(DiffusionWorkerHandler)
     handler.engine = SimpleNamespace(async_generate=AsyncMock(return_value=object()))
     handler.enable_trace = False
@@ -48,7 +57,13 @@ async def test_diffusion_without_budget_keeps_existing_generation():
         yield {"token_ids": [2]}
 
     handler._process_token_stream = stream
-    output = [chunk async for chunk in handler.generate({"token_ids": [1]}, Mock())]
+    request = {"token_ids": [1], **salt_fields}
+    output = [chunk async for chunk in handler.generate(request, Mock())]
 
     assert output == [{"token_ids": [2]}]
     handler.engine.async_generate.assert_awaited_once()
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    if salt_fields:
+        assert kwargs["cache_salt"] == "tenant-a"
+    else:
+        assert "cache_salt" not in kwargs
