@@ -1,6 +1,9 @@
 package dynamo
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -1015,6 +1018,50 @@ func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
+		})
+	}
+}
+
+// Runs the generated leader wrapper under a real shell with a stub launcher that
+// prints its argv, so quoting bugs show up as changed argv rather than as string diffs.
+func TestTRTLLMBackend_LeaderShellScriptQuoting(t *testing.T) {
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\nfor a do printf '%s\\0' \"$a\"; done\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "trtllm-llmapi-launch"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("X", "val")
+
+	tests := []struct {
+		name    string
+		script  string   // sh -c script in Args (the branch the issue hits)
+		command []string // if set, Command-only container: the non-Python fallback branch
+		want    []string
+	}{
+		{name: "plain", script: `plain`, want: []string{"plain"}},
+		{name: "single quote json (issue repro)", script: `--x '{"a": 1}'`, want: []string{"--x", `{"a": 1}`}},
+		{name: "double quote", script: `"say \"hi\""`, want: []string{`say "hi"`}},
+		{name: "dollar var", script: `'$X' "$X"`, want: []string{"$X", "val"}},
+		{name: "backslash", script: `'a\b' "c\\d"`, want: []string{`a\b`, `c\d`}},
+		{name: "backtick", script: "'`id`' \"`echo hi`\"", want: []string{"`id`", "hi"}},
+		{name: "embedded newline", script: "'a\nb'", want: []string{"a\nb"}},
+		{name: "empty arg", script: `'' x`, want: []string{"", "x"}},
+		{name: "escaped quote adjacency", script: `it\'s 'a\'`, want: []string{"it's", `a\`}},
+		{name: "single quote command-only fallback", command: []string{"run", "'it s'"}, want: []string{"run", "it s"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{Command: []string{"/bin/sh", "-c"}, Args: []string{tt.script}}
+			if tt.command != nil {
+				container = &corev1.Container{Command: tt.command}
+			}
+			backend := &TRTLLMBackend{}
+			backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, 1, false)
+			// The bash -c wrapper is the last token of the mpirun line.
+			_, wrapper, found := strings.Cut(container.Args[0], "bash -c ")
+			require.True(t, found)
+			out, err := exec.Command("sh", "-c", "bash -c "+wrapper).CombinedOutput()
+			require.NoError(t, err, "shell output: %s", out)
+			require.Equal(t, strings.Join(append(tt.want, ""), "\x00"), string(out))
 		})
 	}
 }
