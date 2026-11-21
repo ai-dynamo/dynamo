@@ -114,6 +114,7 @@ STUB_MODULES = [
     "dynamo._core",
     "psutil",
     "requests",
+    "urllib3",
     "numpy",
     "aisim",
     "aisim.capacity",
