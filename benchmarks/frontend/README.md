@@ -200,6 +200,12 @@ All flags for `sweep_runner.py`:
 
 ---
 
+## Benchmark Failure Handling
+
+Local and Kubernetes sweeps report failure when AIPerf exits unsuccessfully or required aggregate JSON/CSV files are missing, unreadable, or malformed. Count-only runs check successful plus failed requests against the requested count; request errors alone do not invalidate the exported results. When count and duration limits are combined, either limit may stop the run, so exact count equality is not required.
+
+The local benchmark script retains a nonzero status while continuing its existing capture finalization and remaining models. Surviving artifacts remain available for diagnosis; their presence alone does not make a failed run successful. The sweep CLI returns nonzero if a run fails; skipped runs do not independently change its exit status.
+
 ## Artifact Structure
 
 Each sweep produces a timestamped output directory:

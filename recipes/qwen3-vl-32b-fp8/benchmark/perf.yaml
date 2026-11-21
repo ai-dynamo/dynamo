@@ -22,13 +22,13 @@ spec:
       restartPolicy: Never
       containers:
       - command:
-        - /bin/sh
+        - /bin/bash
         - -c
         - |
-          set -e
+          set -euo pipefail
           apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
 
-          pip install aiperf==0.12.0
+          pip install aiperf==0.13.0
           echo "aiperf installation completed"
 
           export COLUMNS=200
@@ -54,6 +54,7 @@ spec:
 
           # ── Core benchmark function ─────────────────────────────────────────
           # Args: <request_rate_qps> <concurrency> <request_count>
+          # BEGIN benchmark-function
           run_perf() {
             local qps=$1
             local concurrency=$2
@@ -95,10 +96,30 @@ spec:
               --ui simple \
               2>&1 | tee "${ARTIFACT_DIR}/aiperf_qps${qps}_con${concurrency}.txt"
 
+            python3 - "$ARTIFACT_DIR" "$req_count" <<'PY'
+          import csv
+          import json
+          import pathlib
+          import sys
+
+          directory = pathlib.Path(sys.argv[1])
+          with (directory / "profile_export_aiperf.json").open() as stream:
+              summary = json.load(stream)
+          successful = summary["request_count"]["avg"]
+          errors = summary.get("error_request_count", {"avg": 0})["avg"]
+          if successful + errors != int(sys.argv[2]):
+              raise ValueError("Benchmark request count does not match the requested count")
+          with (directory / "profile_export_aiperf.csv").open(newline="") as stream:
+              counts = [float(row[1]) for row in csv.reader(stream, strict=True)
+                        if row and row[0] == "Request Count"]
+          if counts != [successful]:
+              raise ValueError("Benchmark CSV request count does not match JSON")
+          PY
             echo "Done: $key"
             ls -la "$ARTIFACT_DIR"
           }
 
+          # END benchmark-function
           # ── Main execution ──────────────────────────────────────────────────
           wait_for_model_ready
 
