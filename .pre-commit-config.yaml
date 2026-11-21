@@ -75,6 +75,12 @@ repos:
 # and give it visiblity into all the local and third_party packages expected.
 - repo: local
   hooks:
+    - id: test-stage-crates
+      name: Test external Cargo publication references
+      entry: python .github/scripts/test_stage_crates.py
+      language: python
+      files: ^(Cargo\.toml|\.github/scripts/(stage_crates|test_stage_crates)\.py|\.github/workflows/release\.yml)$
+      pass_filenames: false
     - id: operator-upgrade-history
       name: Check operator upgrade history version and provenance
       entry: python3 deploy/operator/hack/generate_upgrade_fixtures.py --check
