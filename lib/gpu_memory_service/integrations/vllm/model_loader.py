@@ -282,14 +282,24 @@ def _load_read_mode(
 ) -> torch.nn.Module:
     """Load model by importing weights from GMS (RO mode).
 
+    With ``gms_reconstruction_mode=load_diff`` the model's Python-side state
+    is rebuilt from the writer's load diff instead of by post-processing a
+    meta model; see ``load_diff.reader``.
+
     When MX is active, registers materialized tensors with NIXL so this
     node is discoverable as a P2P source (e.g. for shadow engine failover).
     """
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     try:
-        model = _create_meta_model(vllm_config, model_config)
-        materialize_module_from_gms(gms_client, model, device_index=device_index)
+        if load_diff_writer.selected(vllm_config):
+            # Imports vLLM, which this module must not need at import time.
+            from gpu_memory_service.integrations.vllm.load_diff.reader import restore
+
+            model = restore(gms_client, vllm_config, model_config, device_index)
+        else:
+            model = _create_meta_model(vllm_config, model_config)
+            materialize_module_from_gms(gms_client, model, device_index=device_index)
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
