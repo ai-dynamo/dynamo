@@ -298,6 +298,14 @@ spec:
   name. Shell wrappers such as `/bin/sh -c ...` and non-Python launchers are
   rejected.
 - The module name is not restricted.
+- A DynamoGraphDeployment is checked when you apply it. Admission checks the
+  launch the operator renders, not only the authored `command`, and rejects the
+  DynamoGraphDeployment if that launch is not a direct `python -m <module>`. This
+  happens when `command` is omitted, because the default launch is a shell, and
+  when the operator wraps a vLLM Ray launch in a shell, for example
+  `--enable-elastic-ep --data-parallel-backend ray`.
+- An existing DynamoGraphDeployment whose rendered launch does not change can
+  still be updated, for example to change `replicas`.
 
 <Warning>
 Admission cannot inspect your module, so it does not verify the contract. A module

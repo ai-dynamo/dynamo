@@ -444,7 +444,9 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 
   Set `enabled: true` without `checkpointRef` for DGD-managed capture through a `SnapshotJob`. Set `checkpointRef` to restore an existing compatible `PodSnapshot` in the same namespace. Omit the deprecated `mode` and `identity` fields.
 
-  Restore admission accepts a worker container only if it directly runs `python -m <module>`. Enabling checkpointing makes the module responsible for calling `maybe_run_restore_standby_mode()` before importing runtime or backend code; no additional annotation is needed. Shell wrappers and non-Python launchers are rejected. See [Use a Custom Worker Entrypoint](../../kubernetes/model-deployment/model-loading/snapshot.mdx#use-a-custom-worker-entrypoint).
+  Restore admission accepts a worker container only if it directly runs `python -m <module>`. Enabling checkpointing makes the module responsible for calling `maybe_run_restore_standby_mode()` before importing runtime or backend code; no additional annotation is needed. Shell wrappers and non-Python launchers are rejected. In a DGD, admission rejects the DGD on apply when the launch the operator renders for a restore destination, after defaults and backend rewrites, is not a direct `python -m <module>`; an update that leaves an existing rendered launch unchanged is still accepted. See [Use a Custom Worker Entrypoint](../../kubernetes/model-deployment/model-loading/snapshot.mdx#use-a-custom-worker-entrypoint).
+
+  To bound admission memory use, restore launch rendering generates at most 1,024 MPI hostnames for an operator-managed multinode TensorRT-LLM leader. Above this limit, the DGD is rejected as unrenderable. An existing DGD can still change `replicas` when its other render inputs are unchanged. This limit does not apply to role-authored launches or components without checkpointing.
 </ParamField>
 
 <Warning>

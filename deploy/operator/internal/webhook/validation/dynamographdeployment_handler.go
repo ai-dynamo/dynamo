@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -40,18 +41,21 @@ const (
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
 type DynamoGraphDeploymentHandler struct {
 	mgr               manager.Manager
+	operatorConfig    *configv1alpha1.OperatorConfiguration
 	operatorPrincipal string
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-// mgr must not be nil. operatorPrincipal is the full Kubernetes SA username
-// used to authorize operator-owned updates.
+// mgr and operatorConfig must not be nil. operatorPrincipal is the full Kubernetes SA
+// username used to authorize operator-owned updates.
 func NewDynamoGraphDeploymentHandler(
 	mgr manager.Manager,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
 	operatorPrincipal string,
 ) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
+		operatorConfig:    operatorConfig,
 		operatorPrincipal: operatorPrincipal,
 	}
 }
@@ -67,7 +71,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj *
 	logger.Info("validate create", "name", obj.Name, "namespace", obj.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidator(h.mgr)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.operatorConfig)
 	warnings, err := validator.Validate(
 		ctx,
 		obj,
@@ -93,7 +97,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	logger.Info("validate update", "name", newObj.Name, "namespace", newObj.Namespace)
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidator(h.mgr)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.operatorConfig)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 	// Get user info from admission request context for identity-based validation
 	var terminatingUserInfo *authenticationv1.UserInfo

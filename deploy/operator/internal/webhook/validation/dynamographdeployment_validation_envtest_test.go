@@ -20,7 +20,9 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -29,11 +31,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -60,9 +64,12 @@ type dgdAdmissionTestCase struct {
 	seedWithoutWebhook bool                             // seeds oldDeployment without validating it
 	terminating        bool                             // deletes the seeded object so the update runs while it terminates
 	username           string                           // supplies the admission request identity
+	claimReadError     error
 
 	wantSchemaErr          string
 	wantCELErr             string
+	wantStatusError        string
+	wantStatusCode         int32
 	wantAdmissionErrs      []string
 	wantWebhookErrs        []string
 	wantWarnings           []string
@@ -81,6 +88,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const unrelatedInitContainerName = "setup"
 	const customSidecarImage = "runtime:custom"
 	const trtllmBackendFramework = "trtllm"
+	fileLimitError := &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("socket: %w", syscall.EMFILE)}
+	memoryError := &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("socket: %w", syscall.ENOMEM)}
 
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
@@ -126,7 +135,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{name: "snapshot failover rejects conflicting backend selection", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
-		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"}},
+		}), wantWebhookErrs: []string{
+			"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend",
+			`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: failed to determine backend framework for component worker: backend framework mismatch: detected "sglang" from command but explicitly configured as "vllm"`,
+		}},
 		{name: "automatic snapshot failover cannot use Immediate startup", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			worker := dgd.GetComponentByName("worker")
@@ -2038,7 +2050,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 valid checkpoint configuration reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+				worker := betaWorkerComponent(dgd)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
 			}),
@@ -2059,7 +2073,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "checkpoint configuration requires operator feature gate",
 			checkpointOff: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+				worker := betaWorkerComponent(dgd)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
 						Enabled: true,
 						Job: &nvidiacomv1beta1.ComponentCheckpointJobConfig{
@@ -2072,6 +2088,332 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				"spec.components[1].experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration",
 				"spec.components[1].experimental.checkpoint.job.gmsClientContainers: Forbidden: requires gpuMemoryService to be set",
 			},
+		},
+
+		// Restore launch rules: a checkpoint-enabled component's rendered restore launch must directly invoke python -m.
+		{
+			name:       "restore launch accepts a custom python module",
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "my_worker"}, nil, nil),
+		},
+		{
+			name:       "restore launch rejects an omitted command because the default launch is a shell",
+			deployment: checkpointWorkerDGDForAdmission(nil, []string{"--model", "Qwen/Qwen3-0.6B"}, nil),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "main", restoreLaunchDefaultNote),
+			},
+		},
+		{
+			name:       "restore launch rejects an authored shell wrapper",
+			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "main", ""),
+			},
+		},
+		{
+			name: "restore launch rejects single-node elastic EP that the operator rewrites for Ray",
+			deployment: checkpointWorkerDGDForAdmission(
+				[]string{"python3", "-m", "dynamo.vllm"},
+				[]string{"--enable-elastic-ep", "--data-parallel-backend", "ray"},
+				nil,
+			),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "main", restoreLaunchRewriteNote),
+			},
+		},
+		{
+			name: "restore launch accepts elastic EP without Ray",
+			deployment: checkpointWorkerDGDForAdmission(
+				[]string{"python3", "-m", "dynamo.vllm"},
+				[]string{"--enable-elastic-ep"},
+				nil,
+			),
+		},
+		{
+			name: "restore launch accepts direct launches in role PodTemplates",
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, nil, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoleTemplates(worker, 2)
+			}),
+		},
+		{
+			name: "restore launch rejects a shell launch in a role PodTemplate",
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, nil, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoleTemplates(worker, 2)
+				worker.Roles[0].PodTemplate.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
+				worker.Roles[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm"}
+			}),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].roles[0].podTemplate.spec.containers[0].command", "main", "leader", ""),
+			},
+		},
+		{
+			name: "restore launch checks main for intra-pod failover engines",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaSnapshotFailover(worker, "vllm")
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
+				worker.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --tensor-parallel-size 2"}
+			}),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "main", ""),
+			},
+		},
+		{
+			name: "Grove restore launch follows metadata annotations over spec annotations",
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, []string{"--tensor-parallel-size", "16"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("8")}
+			}),
+			mutateRequest: setRequestVLLMExecutorBackends("mp", "ray"),
+		},
+		{
+			name: "component restore launch follows spec annotations over metadata annotations",
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, []string{"--tensor-parallel-size", "16"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("8")}
+			}),
+			groveDisabled: true,
+			mutateRequest: setRequestVLLMExecutorBackends("mp", "ray"),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "leader", restoreLaunchRewriteNote),
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "worker", restoreLaunchRewriteNote),
+			},
+		},
+		{
+			name:               "legacy unsupported restore launch survives an unrelated replica update",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Replicas = new(int32(3))
+			}),
+		},
+		{
+			name:               "legacy unsupported restore launch survives a sidecar inserted before main",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.PodTemplate.Spec.Containers = append([]corev1.Container{{Name: "helper", Image: "registry.example/helper:1.0.0"}}, worker.PodTemplate.Spec.Containers...)
+			}),
+		},
+		{
+			name: "enabling checkpointing on an unsupported restore launch is rejected on update",
+			oldDeployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental.Checkpoint.Enabled = false
+			}),
+			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "main", ""),
+			},
+		},
+		{
+			name:               "changing a legacy unsupported restore launch to another one is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			deployment:         checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm --enforce-eager"}, nil),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "main", ""),
+			},
+		},
+		{
+			name:               "retargeting a legacy restore to an unsupported container is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental.Checkpoint.TargetContainerName = "helper"
+				worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers, corev1.Container{
+					Name: "helper", Image: "registry.example/helper:1.0.0", Command: []string{"/bin/sh", "-c"}, Args: []string{"python3 -m dynamo.vllm"},
+				})
+			}),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[1].command", "helper", "main", ""),
+			},
+		},
+		{
+			name:               "an unrenderable restore launch survives a replica update",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, nil),
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Replicas = new(int32(3))
+			}),
+		},
+		{
+			name:               "changing an unrenderable restore launch is rejected even when the old one failed the same way",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, nil),
+			deployment:         checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, []string{"--model-path", "other"}, nil),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: failed to determine backend framework for component worker: backend framework mismatch: detected "sglang" from command but explicitly configured as "vllm"`,
+			},
+		},
+		{
+			name:               "fixing a legacy unsupported restore launch is accepted",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			deployment:         checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, nil, nil),
+		},
+		{
+			name:               "disabling checkpointing on a legacy unsupported restore launch is accepted",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, nil),
+			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental.Checkpoint.Enabled = false
+			}),
+		},
+
+		// API read failures are server errors, including when identical old/new render inputs would ratchet an input error.
+		{
+			name:            "restore admission reports socket file exhaustion as a server error",
+			deployment:      checkpointVLLMDRAForAdmission(),
+			claimReadError:  fileLimitError,
+			wantStatusError: "cannot read a restore launch dependency",
+			wantStatusCode:  500,
+		},
+		{
+			name:               "restore update does not waive socket file exhaustion",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointVLLMDRAForAdmission(),
+			deployment:         checkpointVLLMDRAForAdmission(),
+			claimReadError:     fileLimitError,
+			wantStatusError:    "cannot read a restore launch dependency",
+			wantStatusCode:     500,
+		},
+		{
+			name:            "restore admission reports socket memory exhaustion as a server error",
+			deployment:      checkpointVLLMDRAForAdmission(),
+			claimReadError:  memoryError,
+			wantStatusError: "cannot read a restore launch dependency",
+			wantStatusCode:  500,
+		},
+		{
+			name:               "restore update does not waive socket memory exhaustion",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointVLLMDRAForAdmission(),
+			deployment:         checkpointVLLMDRAForAdmission(),
+			claimReadError:     memoryError,
+			wantStatusError:    "cannot read a restore launch dependency",
+			wantStatusCode:     500,
+		},
+		{
+			name:            "restore admission still reports a missing GPU template as an input error",
+			deployment:      checkpointVLLMDRAForAdmission(),
+			claimReadError:  apierrors.NewNotFound(schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceclaimtemplates"}, "restore-gpu-template"),
+			wantStatusError: "spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch",
+			wantStatusCode:  422,
+		},
+
+		// Repair one role without losing another role's unchanged legacy launch.
+		{
+			name:               "Grove keeps a legacy leader launch while repairing worker GPU claims",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, false),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("worker", false, false),
+		},
+		{
+			name:               "Grove keeps a legacy worker launch while repairing leader GPU claims",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("leader", true, false),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("leader", false, false),
+		},
+		{
+			name:               "component keeps a legacy leader launch while repairing worker GPU claims",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, true),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("worker", false, true),
+		},
+		{
+			name:               "component keeps a legacy worker launch while repairing leader GPU claims",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("leader", true, true),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("leader", false, true),
+		},
+		{
+			name:               "Grove rejects a changed legacy launch while repairing worker GPU claims",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, false),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := checkpointSGLangRoleRepairDGDForAdmission("worker", false, false)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.sglang --model-path other"}
+				return dgd
+			}(),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].roles[0].podTemplate.spec.containers[0].command", "main", "leader", ""),
+			},
+		},
+		{
+			name:               "component rejects a changed legacy launch while repairing worker GPU claims",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, true),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := checkpointSGLangRoleRepairDGDForAdmission("worker", false, true)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.sglang --model-path other"}
+				return dgd
+			}(),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].roles[0].podTemplate.spec.containers[0].command", "main", "leader", ""),
+			},
+		},
+
+		// Bound MPI host generation without changing authored role launches or replica-only updates.
+		{
+			name:          "Grove restore launch rejects an oversized MPI hostname list",
+			groveDisabled: false,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "worker", restoreLaunchRewriteNote),
+			},
+		},
+		{
+			name:               "Grove restore launch keeps an oversized MPI launch during a replica update",
+			groveDisabled:      false,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483647, true, false, false),
+		},
+		{
+			name:               "Grove restore launch rejects a changed oversized MPI node count",
+			groveDisabled:      false,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483646, false, false, false),
+			wantWebhookErrs:    []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
+		},
+		{
+			name:          "Grove restore launch accepts large node counts with authored role launches",
+			groveDisabled: false,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, true, false),
+		},
+		{
+			name:          "component restore launch rejects an oversized MPI hostname list",
+			groveDisabled: true,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "worker", restoreLaunchRewriteNote),
+			},
+		},
+		{
+			name:               "component restore launch keeps an oversized MPI launch during a replica update",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483647, true, false, true),
+		},
+		{
+			name:               "component restore launch rejects a changed oversized MPI node count",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483646, false, false, true),
+			wantWebhookErrs:    []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
+		},
+		{
+			name:          "component restore launch accepts large node counts with authored role launches",
+			groveDisabled: true,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, true, true),
 		},
 
 		// KV-transfer CEL rules.
@@ -2397,6 +2739,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaIntraPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
 		},
@@ -2408,6 +2751,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaInterPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
 			wantWebhookErrs: []string{
@@ -4282,8 +4626,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				terminating:        tt.terminating,
 				username:           tt.username,
+				claimReadError:     tt.claimReadError,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
+				wantStatusError:    tt.wantStatusError,
+				wantStatusCode:     tt.wantStatusCode,
 				wantAdmissionErrs:  tt.wantAdmissionErrs,
 				wantWebhookErrors:  tt.wantWebhookErrs,
 				wantWarnings:       tt.wantWarnings,
@@ -5078,4 +5425,106 @@ func multinodeSidecarDCDForAdmission(t *testing.T, backend string, alpha, roles,
 		return spoke
 	}
 	return dcd
+}
+
+const (
+	restoreLaunchDefaultNote = "; no command is authored, so this is the operator's default launch"
+	restoreLaunchRewriteNote = "; the operator rewrote the authored command into this form"
+)
+
+func checkpointWorkerDGDForAdmission(
+	command []string,
+	args []string,
+	mutate func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		worker := betaWorkerComponent(dgd)
+		worker.PodTemplate.Spec.Containers[0].Command = command
+		worker.PodTemplate.Spec.Containers[0].Args = args
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+		}
+		if mutate != nil {
+			mutate(worker)
+		}
+	})
+}
+
+// setRequestVLLMExecutorBackends sets the vLLM executor backend in the request's metadata and
+// spec annotations, after fixture annotations are applied.
+func setRequestVLLMExecutorBackends(metadataValue, specValue string) func(*testing.T, map[string]any) {
+	return func(t *testing.T, request map[string]any) {
+		t.Helper()
+		if err := unstructured.SetNestedField(request, metadataValue, "metadata", "annotations", consts.KubeAnnotationVLLMDistributedExecutorBackend); err != nil {
+			t.Fatalf("set metadata annotation: %v", err)
+		}
+		if err := unstructured.SetNestedField(request, specValue, "spec", "annotations", consts.KubeAnnotationVLLMDistributedExecutorBackend); err != nil {
+			t.Fatalf("set spec annotation: %v", err)
+		}
+	}
+}
+
+func unsupportedRestoreLaunchError(path, container, role, note string) string {
+	return fmt.Sprintf(
+		"%s: Forbidden: checkpoint restore destination container %q (role %s) must directly invoke python -m <module>, "+
+			`and the module must call maybe_run_restore_standby_mode(); rendered command=["/bin/sh" "-c"]%s`,
+		path, container, role, note,
+	)
+}
+
+func checkpointTRTLLMDGDForAdmission(nodeCount int32, scale, roleTemplates, groveDisabled bool) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.trtllm"}, nil, nil)
+	dgd.Spec.BackendFramework = "trtllm"
+	if groveDisabled {
+		dgd.Annotations = map[string]string{consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse}
+	}
+	worker := betaWorkerComponent(dgd)
+	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+	if scale {
+		worker.Replicas = new(int32(3))
+	}
+	if roleTemplates {
+		setBetaExplicitMultinodeRoleTemplates(worker, nodeCount)
+	}
+	return dgd
+}
+
+func checkpointSGLangRoleRepairDGDForAdmission(failedRole string, missingClaim, groveDisabled bool) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, nil)
+	dgd.Spec.BackendFramework = sglangBackendFramework
+	if groveDisabled {
+		dgd.Annotations = map[string]string{consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse}
+	}
+	worker := betaWorkerComponent(dgd)
+	setBetaExplicitMultinodeRoleTemplates(worker, 2)
+	for i := range worker.Roles {
+		role := &worker.Roles[i]
+		main := &role.PodTemplate.Spec.Containers[0]
+		main.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+		}}
+		main.Env = append(main.Env,
+			corev1.EnvVar{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"},
+			corev1.EnvVar{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+		)
+		main.Ports = []corev1.ContainerPort{{Name: consts.DynamoNixlPortName, ContainerPort: 20000}}
+		if role.Name != failedRole {
+			main.Command = []string{"/bin/sh", "-c"}
+			main.Args = []string{"python3 -m dynamo.sglang"}
+		} else if missingClaim {
+			main.Resources = corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}
+			role.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{
+				Name: "gpu", ResourceClaimTemplateName: new("missing-restore-gpu-template"),
+			}}
+		}
+	}
+	return dgd
+}
+
+func checkpointVLLMDRAForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	return checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, []string{"--tensor-parallel-size", "2"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		worker.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}
+		worker.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: new("restore-gpu-template")}}
+	})
 }
