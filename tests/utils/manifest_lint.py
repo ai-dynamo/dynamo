@@ -10,7 +10,6 @@ fixed DGD path, so the same code reads v1alpha1
 (``spec.components[].podTemplate.spec.containers[]``) and plain pod specs.
 """
 
-import shlex
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -51,36 +50,131 @@ def iter_containers(node: Any, location: str = "") -> Iterator[tuple[str, dict]]
             yield from iter_containers(item, f"{location}[{name or index}]")
 
 
-def split_shell(text: str) -> list[str]:
-    """Split a shell command into tokens, falling back to whitespace on bad quoting."""
-    try:
-        return shlex.split(text)
-    except ValueError:
-        return text.split()
+# Characters that end a simple command outside quotes. ``&`` right after a
+# redirection (``2>&1``) belongs to the redirection instead.
+_COMMAND_SEPARATORS = ";&|()\n"
 
 
-def container_argv(container: Mapping) -> list[str]:
-    """Return the combined ``command`` + ``args`` tokens of a container.
+def _split_simple_commands(text: str) -> list[list[str]]:
+    """Split shell text into simple commands, each a list of unquoted words.
 
-    A string ``command``/``args``, and any list item that follows a short
-    option group containing ``c`` (the ``sh -c``, ``bash -lc`` and ``sh -ec``
-    ``"<script>"`` forms, whether the script sits in ``command`` or ``args``),
-    is shell-split so its flags are visible as separate tokens.
+    Handles single and double quotes, backslash escapes and line continuations,
+    ``#`` comments that start a word, ``$(...)`` substitutions (kept inside
+    their word), and the ``;``, ``&``, ``|``, ``(``, ``)`` and newline
+    separators. Expansions are not performed; an unterminated quote runs to
+    the end of the text.
+    """
+    commands: list[list[str]] = []
+    words: list[str] = []
+    word: list[str] = []
+    in_word = False
+    quote = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        i += 1
+        if quote:
+            if ch == quote:
+                quote = ""
+            elif ch == "\\" and quote == '"' and i < len(text):
+                nxt = text[i]
+                i += 1
+                if nxt not in '"\\$`\n':
+                    word.append(ch)
+                if nxt != "\n":
+                    word.append(nxt)
+            else:
+                word.append(ch)
+        elif ch == "\\":
+            if i < len(text) and text[i] != "\n":
+                word.append(text[i])
+                in_word = True
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+            in_word = True
+        elif ch == "$" and text[i : i + 1] == "(":
+            depth = 0
+            start = i - 1
+            while i < len(text):
+                depth += {"(": 1, ")": -1}.get(text[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+            word.append(text[start:i])
+            in_word = True
+        elif ch == "&" and word and word[-1] in "<>":
+            word.append(ch)
+        elif ch == "#" and not in_word:
+            newline = text.find("\n", i)
+            i = len(text) if newline < 0 else newline
+        elif ch in " \t\r" or ch in _COMMAND_SEPARATORS:
+            if in_word:
+                words.append("".join(word))
+                word = []
+                in_word = False
+            if ch in _COMMAND_SEPARATORS and words:
+                commands.append(words)
+                words = []
+        else:
+            word.append(ch)
+            in_word = True
+    if in_word:
+        words.append("".join(word))
+    if words:
+        commands.append(words)
+    return commands
+
+
+def _is_script_option(word: str) -> bool:
+    """Return whether ``word`` is a short option group containing ``c``, as in
+    ``sh -c``, ``bash -lc`` and ``sh -ec``, so the next word is a script."""
+    return word.startswith("-") and not word.startswith("--") and "c" in word
+
+
+def argv_commands(argv: list[str]) -> list[list[str]]:
+    """Return ``argv`` followed by the commands of every script operand in it.
+
+    A script operand is the word after a ``-c``-style option group; its
+    commands are found with :func:`shell_commands`, so nested wrappers are
+    unwrapped too.
+    """
+    commands = [argv]
+    for option, operand in zip(argv, argv[1:]):
+        if _is_script_option(option):
+            commands.extend(shell_commands(operand))
+    return commands
+
+
+def shell_commands(text: str) -> list[list[str]]:
+    """Return every simple command in shell text as a list of words, including
+    the commands inside ``sh -c``/``bash -lc`` script operands.
+
+    Each command keeps its own words, so a flag in one command (or in a
+    comment) never counts for another.
+    """
+    commands: list[list[str]] = []
+    for argv in _split_simple_commands(text):
+        commands.extend(argv_commands(argv))
+    return commands
+
+
+def container_commands(container: Mapping) -> list[list[str]]:
+    """Return the commands a container runs, each as a list of words.
+
+    A list ``command`` + ``args`` is one argv, followed by the commands of any
+    script operand in it (the script may sit in ``command`` or ``args``). A
+    string ``command`` or ``args`` is read as shell text.
     """
     argv: list[str] = []
+    scripts: list[list[str]] = []
     for key in ("command", "args"):
         value = container.get(key)
         if isinstance(value, str):
-            argv.extend(split_shell(value))
+            scripts.extend(shell_commands(value))
         elif isinstance(value, list):
-            for item in value:
-                item = str(item)
-                prev = argv[-1] if argv else ""
-                if prev.startswith("-") and not prev.startswith("--") and "c" in prev:
-                    argv.extend(split_shell(item))
-                else:
-                    argv.append(item)
-    return argv
+            argv.extend(str(item) for item in value)
+    return (argv_commands(argv) if argv else []) + scripts
 
 
 def has_flag(argv: list[str], flag: str, value: str | None = None) -> bool:
