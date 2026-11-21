@@ -151,11 +151,8 @@ func (p *componentProgram) Reconcile(
 		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
-	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
-		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {
-			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
-			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
-		}
+	if err := p.scalingAdapters.ReconcileUnlessWaitingForCheckpoint(ctx, req.DGD, result); err != nil {
+		return programResult, err
 	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
