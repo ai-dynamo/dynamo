@@ -292,6 +292,14 @@ impl EndpointConfig {
             // clock than the Phase 2 wait for it.
             let drain_timeout = drt_for_cleanup.endpoint_drain_timeout();
 
+            // A terminal withdrawal may have exhausted its allowance waiting
+            // for a resume. Its cleanup DELETE must observe the same fence.
+            if drt_for_cleanup.runtime().is_shutting_down() {
+                drt_for_cleanup
+                    .runtime()
+                    .close_endpoint_registration()
+                    .await;
+            }
             if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
                 tracing::warn!(%error, "Failed to unregister endpoint from discovery");
             }
@@ -399,6 +407,11 @@ impl Endpoint {
     /// and should not receive any requests.
     pub async fn unregister_endpoint_instance(&self) -> anyhow::Result<()> {
         let drt = self.drt();
+        if drt.runtime().is_shutting_down() {
+            // No terminal withdrawal may overtake an admitted publication.
+            // The caller bounds this wait inside its unregister allowance.
+            drt.runtime().close_endpoint_registration().await;
+        }
         let instance_id = drt.connection_id();
         let endpoint_id = self.id();
 
@@ -442,8 +455,17 @@ impl Endpoint {
     /// to send requests to this worker again. Use this when a worker wakes up
     /// and should start receiving requests.
     pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
+        let endpoint = self.clone();
+        self.drt()
+            .runtime()
+            .publish_endpoint_registration(
+                async move { endpoint.publish_endpoint_instance().await },
+            )
+            .await
+    }
+
+    async fn publish_endpoint_instance(&self) -> anyhow::Result<()> {
         let drt = self.drt();
-        let _registration = drt.runtime().endpoint_registration_guard().await?;
         let instance_id = drt.connection_id();
         let endpoint_id = self.id();
 

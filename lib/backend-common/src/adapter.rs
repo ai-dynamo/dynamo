@@ -34,6 +34,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::disagg::DisaggregationMode;
 use crate::engine::{FinishReason, FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
+use crate::lifecycle::{RequestGuard, RequestTracker};
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -129,7 +130,8 @@ fn record_itl_distribution(span: &tracing::Span, samples: &mut [f64]) {
 /// Holds a dropped engine stream until abort completes or its deadline expires.
 struct CancelMonitorGuard<T> {
     stream: Option<BoxStream<'static, T>>,
-    drop_tx: Option<oneshot::Sender<BoxStream<'static, T>>>,
+    drop_tx: Option<oneshot::Sender<(BoxStream<'static, T>, RequestGuard)>>,
+    request_guard: Option<RequestGuard>,
 }
 
 impl<T> Stream for CancelMonitorGuard<T> {
@@ -145,8 +147,13 @@ impl<T> Stream for CancelMonitorGuard<T> {
 
 impl<T> Drop for CancelMonitorGuard<T> {
     fn drop(&mut self) {
-        if let (Some(drop_tx), Some(stream)) = (self.drop_tx.take(), self.stream.take()) {
-            let _ = drop_tx.send(stream);
+        if let (Some(drop_tx), Some(stream), Some(request_guard)) = (
+            self.drop_tx.take(),
+            self.stream.take(),
+            self.request_guard.take(),
+        ) {
+            // Keep shutdown draining until abort has released the engine stream.
+            let _ = drop_tx.send((stream, request_guard));
         }
     }
 }
@@ -155,15 +162,26 @@ pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
     first_token_source: Option<FirstTokenSource>,
+    request_tracker: Arc<RequestTracker>,
     engine_cleanup: CancellationToken,
 }
 
 impl EngineAdapter {
+    #[cfg(test)]
     pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
+        Self::with_request_tracker(engine, mode, RequestTracker::new())
+    }
+
+    pub(crate) fn with_request_tracker(
+        engine: Arc<dyn LLMEngine>,
+        mode: DisaggregationMode,
+        request_tracker: Arc<RequestTracker>,
+    ) -> Self {
         Self {
             engine,
             mode,
             first_token_source: None,
+            request_tracker,
             engine_cleanup: CancellationToken::new(),
         }
     }
@@ -255,6 +273,19 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
     }
 }
 
+/// Send the admission error as a terminal stream item so the router receives
+/// its worker-unavailable reason and draining retry hint directly.
+fn draining_response<T>(
+    ctx: Arc<dyn AsyncEngineContext>,
+    error: DynamoError,
+) -> ManyOut<Annotated<T>>
+where
+    T: dynamo_runtime::pipeline::Data + for<'de> serde::Deserialize<'de>,
+{
+    let item = Annotated::from_err(error);
+    ResponseStream::new(Box::pin(futures::stream::once(async move { item })), ctx)
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for EngineAdapter
@@ -265,6 +296,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let request_guard = match self.request_tracker.try_acquire() {
+            Ok(guard) => guard,
+            Err(error) => return Ok(draining_response(ctx, error)),
+        };
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -448,6 +483,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let guard = CancelMonitorGuard {
             stream: Some(chunks),
             drop_tx: Some(drop_tx),
+            request_guard: Some(request_guard),
         };
 
         let stream_ctx = ctx.clone();
@@ -605,11 +641,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 /// `JsonProbeAdapter` wrapper needed.
 pub(crate) struct RawEngineAdapter {
     engine: Arc<dyn RawEngine>,
+    request_tracker: Arc<RequestTracker>,
 }
 
 impl RawEngineAdapter {
+    #[cfg(test)]
     pub(crate) fn new(engine: Arc<dyn RawEngine>) -> Self {
-        Self { engine }
+        Self::with_request_tracker(engine, RequestTracker::new())
+    }
+
+    pub(crate) fn with_request_tracker(
+        engine: Arc<dyn RawEngine>,
+        request_tracker: Arc<RequestTracker>,
+    ) -> Self {
+        Self {
+            engine,
+            request_tracker,
+        }
     }
 }
 
@@ -623,6 +671,10 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let request_guard = match self.request_tracker.try_acquire() {
+            Ok(guard) => guard,
+            Err(error) => return Ok(draining_response(ctx, error)),
+        };
 
         // Per-request span (nests under the runtime's `handle_payload`). No
         // token-level attributes here — just the request id.
@@ -690,6 +742,7 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         let guard = CancelMonitorGuard {
             stream: Some(chunks),
             drop_tx: Some(drop_tx),
+            request_guard: Some(request_guard),
         };
 
         let stream_ctx = ctx.clone();
@@ -734,6 +787,7 @@ mod tests {
     use crate::engine::{EngineConfig, FinishReason, LLMEngineOutputExt, chunk, usage};
     use crate::error::{BackendError, DynamoError, ErrorType};
     use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_runtime::error::RetryHint;
     use dynamo_runtime::pipeline::Context;
     use futures::StreamExt;
     use futures::stream::BoxStream;
@@ -865,6 +919,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draining_rejection_keeps_its_type_as_a_stream_item() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(11)]);
+        let tracker = RequestTracker::new();
+        let adapter = EngineAdapter::with_request_tracker(
+            engine,
+            DisaggregationMode::Aggregated,
+            Arc::clone(&tracker),
+        );
+        tracker.stop_accepting();
+
+        let stream = adapter
+            .generate(Context::new(make_request(vec![1, 2, 3])))
+            .await
+            .expect("a closed gate must answer with a stream, not a pre-stream error");
+        let collected: Vec<_> = stream.collect().await;
+
+        assert_eq!(collected.len(), 1, "one terminal item and nothing else");
+        let wire = serde_json::to_vec(&collected[0]).unwrap();
+        let received: Annotated<LLMEngineOutput> = serde_json::from_slice(&wire).unwrap();
+        assert!(received.data.is_none(), "no tokens may be emitted");
+        let error = received.err().expect("the item carries the rejection");
+        assert_eq!(error.error_type(), ErrorType::WorkerUnavailable);
+        assert_eq!(error.reason().as_str(), "backend.worker_unavailable");
+        assert_eq!(error.retry_hint(), Some(RetryHint::Draining));
+    }
+
+    #[tokio::test]
+    async fn adapter_tracks_request_until_response_stream_is_dropped() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(11)]);
+        let tracker = RequestTracker::new();
+        let adapter = EngineAdapter::with_request_tracker(
+            engine,
+            DisaggregationMode::Aggregated,
+            Arc::clone(&tracker),
+        );
+
+        let input = Context::new(make_request(vec![1]));
+        let stream = adapter.generate(input).await.unwrap();
+        assert_eq!(tracker.inflight(), 1);
+
+        tracker.stop_accepting();
+        let rejected = adapter
+            .generate(Context::new(make_request(vec![2])))
+            .await
+            .expect("a closed gate answers with a stream");
+        let rejected: Vec<_> = rejected.collect().await;
+        assert!(rejected.len() == 1 && rejected[0].err().is_some());
+        assert_eq!(tracker.inflight(), 1);
+
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.inflight(), 0);
+    }
+
+    #[tokio::test]
     async fn adapter_cancellation_triggers_engine_abort() {
         for is_kill in [false, true] {
             // Exercise different select orders with cancellation and drop both ready.
@@ -908,7 +1017,12 @@ mod tests {
             let started = Arc::new(Notify::new());
             Arc::get_mut(&mut engine).unwrap().pending_abort = Some(started.clone());
             let abort_calls_at_drop = engine.abort_calls_at_stream_drop.clone();
-            let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+            let tracker = RequestTracker::new();
+            let adapter = EngineAdapter::with_request_tracker(
+                engine,
+                DisaggregationMode::Aggregated,
+                tracker.clone(),
+            );
             let input = Context::new(make_request(vec![1]));
             let ctrl = input.context();
             let mut stream = adapter.generate(input).await.unwrap();
@@ -923,10 +1037,12 @@ mod tests {
                 started.notified().await;
             }
             tokio::time::advance(ABORT_TIMEOUT - Duration::from_millis(1)).await;
+            assert_eq!(tracker.inflight(), 1, "abort still owns the engine stream");
             assert_eq!(abort_calls_at_drop.load(Ordering::SeqCst), usize::MAX);
 
             tokio::time::advance(Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
+            assert_eq!(tracker.inflight(), 0);
             assert_eq!(
                 abort_calls_at_drop.load(Ordering::SeqCst),
                 0,
