@@ -116,7 +116,11 @@ data:
       aggregated: dynamo-two-tier-cost-fn
 ```
 
-Mount it on the Frontend and point `--router-policy-config` at the mounted file:
+Since v1.8 the file selects each role's policy, so the Frontend takes no `--router-mode`.
+`--router-mode kv` from the first step may stay, and an image from an earlier release needs it:
+without it, that Frontend ignores the file and routes round-robin.
+
+Mount the `ConfigMap` on the Frontend and point `--router-policy-config` at the mounted file:
 
 ```yaml
 spec:
@@ -136,8 +140,6 @@ spec:
           - -m
           - dynamo.frontend
           args:
-          - --router-mode
-          - kv
           - --router-policy-config
           - /etc/dynamo/router/worker-selection.yaml
           volumeMounts:

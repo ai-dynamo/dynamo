@@ -134,7 +134,9 @@ worker_selection:
 ```
 
 `aggregated`, `prefill`, `decode`, and `encode` each select a policy, so prefill and decode pools
-can run different policies. An omitted role falls back to the built-in selector; one role never
+can run different policies; see the tested
+[KV prefill, round-robin decode sample](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policies/kv-prefill-round-robin-decode.yaml).
+An omitted role falls back to the built-in selector; one role never
 inherits another role's selection. A bare string is a policy type from the table above with its
 default parameters. To tune a policy, write a mapping with `type` and `parameters` instead (see
 [Configure the Default Policy](#configure-the-default-policy)).
@@ -233,7 +235,7 @@ router:
   router_predicted_ttl_secs: null
 ```
 
-Start with `--router-mode kv --router-policy-config worker-selection.yaml`. The default policy then routes by load without requesting cache inputs.
+Start with `--router-policy-config worker-selection.yaml`. The default policy then routes by load without requesting cache inputs.
 
 #### Tune a Policy
 
@@ -433,7 +435,6 @@ the router uses a synthetic `default` class, which queues only when
 
 ```bash
 python -m dynamo.frontend \
-    --router-mode kv \
     --router-policy-config examples/router/policy-class-queues.yaml
 ```
 
