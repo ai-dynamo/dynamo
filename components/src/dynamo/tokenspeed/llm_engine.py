@@ -513,7 +513,8 @@ class TokenspeedLLMEngine(LLMEngine):
         that already finished is left alone."""
         # The bridge passes a new Context wrapper here, so identity cannot
         # find the dispatch. The adapter aborts only once the request's
-        # context stopped or was killed, which a live retry's has not.
+        # context stopped or was killed, which a live retry's has not. If two
+        # same-id attempts both stopped, this may pick the other one first.
         state = next(
             (
                 state

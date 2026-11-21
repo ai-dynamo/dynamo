@@ -1222,8 +1222,9 @@ async def test_overlapping_attempts_with_one_public_id_get_their_own_output(nati
     first_chunk = asyncio.ensure_future(anext(first))
     second_chunk = asyncio.ensure_future(anext(second))
     try:
-        while len(native.submitted) < 2:
+        for _ in range(3):
             await asyncio.sleep(0)
+        assert len(native.submitted) == 2
         first_rid, second_rid = [r.rid for r in native.submitted]
         assert first_rid != second_rid
         assert first_rid.startswith("same-id-")
@@ -1252,12 +1253,13 @@ async def test_aborting_a_failed_attempt_leaves_its_retry_running(native):
         drain(engine.generate({"token_ids": [11]}, context("same-id")))
     )
     try:
-        while len(native.submitted) < 2:
+        for _ in range(3):
             await asyncio.sleep(0)
+        assert len(native.submitted) == 2
         first_rid, second_rid = [r.rid for r in native.submitted]
         assert first_rid != second_rid
-        failed.stopped = True
-        # The bridge hands abort() a new wrapper around the stopped context.
+        failed.is_killed = lambda: True
+        # The bridge hands abort() a new wrapper around the failed context.
         await engine.abort(context("same-id", stopped=True))
         assert native.aborted == [first_rid]
         assert (await first)[-1]["finish_reason"] == "cancelled"
