@@ -88,6 +88,7 @@ from dynamo.frontend.utils import (
     random_uuid,
 )
 from dynamo.llm.exceptions import (
+    Cancelled,
     InvalidArgument,
     RoutedEngineError,
     Unknown,
@@ -1315,6 +1316,8 @@ def _qwen_guided_request_without_separation(tool_choice):
     "failure,from_stream",
     [
         ("unavailable", False),
+        ("cancelled", False),
+        ("cancelled", True),
         ("capacity", False),
         ("internal", False),
         (403, False),
@@ -1327,6 +1330,9 @@ def test_routed_engine_rejection_keeps_its_semantic_error(
     if failure == "unavailable":
         routed_error = WorkerUnavailable("prefill routing is still activating")
         expected = WorkerUnavailable
+    elif failure == "cancelled":
+        routed_error = Cancelled("request cancelled")
+        expected = Cancelled
     elif failure == "capacity":
         routed_error = RoutedEngineError("worker pool at capacity")
         expected = RoutedEngineError

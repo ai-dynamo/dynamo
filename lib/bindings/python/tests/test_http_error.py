@@ -5,7 +5,7 @@ import pytest
 
 from dynamo._core import _raise_routed_http_error
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import RoutedEngineError
+from dynamo.llm.exceptions import Cancelled, RoutedEngineError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -49,6 +49,15 @@ def test_routed_engine_error_is_a_value_error():
     with pytest.raises(RoutedEngineError) as raised:
         _raise_routed_http_error(503, "worker busy")
     assert isinstance(raised.value, ValueError)
+
+
+def test_routed_engine_stream_keeps_cancelled_typed():
+    # Chat processors re-raise `Cancelled`, so the client gets 499, not 500.
+    with pytest.raises(Cancelled):
+        _raise_routed_http_error(499, "client went away")
+    with pytest.raises(ValueError) as raised:
+        _raise_routed_http_error(499, "client went away", routed_engine=False)
+    assert type(raised.value) is ValueError
 
 
 def test_only_a_routed_engine_stream_raises_routed_engine_error():

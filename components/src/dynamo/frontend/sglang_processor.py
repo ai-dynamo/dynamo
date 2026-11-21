@@ -31,6 +31,7 @@ from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import (
+    Cancelled,
     InvalidArgument,
     RoutedEngineError,
     Unknown,
@@ -1323,7 +1324,14 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield finalize_terminal(pending_terminal)
-        except (InvalidArgument, RoutedEngineError, Unknown, WorkerUnavailable):
+        except (
+            Cancelled,
+            InvalidArgument,
+            RoutedEngineError,
+            Unknown,
+            WorkerUnavailable,
+        ):
+            # Cancelled keeps HTTP 499; wrapping it in Unknown would make it a 500.
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)

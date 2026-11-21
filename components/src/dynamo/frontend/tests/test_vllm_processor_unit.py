@@ -38,6 +38,7 @@ from dynamo.frontend.prepost import (
     build_tool_call_guided_decoding,
 )
 from dynamo.llm.exceptions import (
+    Cancelled,
     HttpError,
     InvalidArgument,
     RoutedEngineError,
@@ -2818,7 +2819,15 @@ class TestRoutedEnginePath:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "status,from_stream", [(None, False), (403, False), (404, True), (503, True)]
+        "status,from_stream",
+        [
+            (None, False),
+            (499, False),
+            (499, True),
+            (403, False),
+            (404, True),
+            (503, True),
+        ],
     )
     async def test_routed_error_is_raised_not_enveloped(
         self, vllm_processor_module, status, from_stream
@@ -2827,7 +2836,8 @@ class TestRoutedEnginePath:
             rejection = WorkerUnavailable("prefill routing is still activating")
         else:
             message = IMAGE_FETCH_ERROR_MESSAGES.get(status, "worker unavailable")
-            with pytest.raises(RoutedEngineError) as backend:
+            expected = Cancelled if status == 499 else RoutedEngineError
+            with pytest.raises(expected) as backend:
                 _raise_routed_http_error(status, message)
             rejection = backend.value
 
@@ -2854,7 +2864,8 @@ class TestRoutedEnginePath:
         self, vllm_processor_module, rejected_after_frames, http_status
     ):
         # Keep cancellation (499) and capacity (529) errors before or during a stream.
-        with pytest.raises(RoutedEngineError) as raised:
+        expected = Cancelled if http_status == 499 else RoutedEngineError
+        with pytest.raises(expected) as raised:
             _raise_routed_http_error(http_status, "worker rejected request")
         rejection = raised.value
 
@@ -2876,7 +2887,7 @@ class TestRoutedEnginePath:
         )
         processor = _make_processor(vllm_processor_module, routed_engine)
 
-        with pytest.raises(RoutedEngineError) as caught:
+        with pytest.raises(expected) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 
