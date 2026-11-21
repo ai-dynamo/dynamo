@@ -1948,11 +1948,35 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					ReadyReplicas:        new(int32(3)),
 					AvailableReplicas:    new(int32(3)),
 					RuntimeNamespace:     "dynamo-oldhash1",
+					RuntimeNamespaces:    []string{"dynamo-newhash1", "dynamo-oldhash1"},
 					ServedModelName:      "old-model",
 					RuntimeComponentName: "old-prefill",
 					GPUPowerLimitWatts:   new(int64(300)),
 					GPUsPerEngine:        new(int64(4)),
 					GPUsPerReplica:       new(int64(5)),
+				},
+			},
+		},
+		{
+			name: "lists the namespaces of every old generation and the new one",
+			componentStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+				"prefill": {
+					ComponentNames:   []string{"dgd-prefill-newhash1"},
+					RuntimeNamespace: "dynamo-newhash1",
+				},
+			},
+			oldWorkerStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+				"prefill": {
+					ComponentNames:    []string{"dgd-prefill-oldhash1", "dgd-prefill-oldhash2"},
+					RuntimeNamespace:  "dynamo-oldhash2",
+					RuntimeNamespaces: []string{"dynamo-oldhash1", "dynamo-oldhash2"},
+				},
+			},
+			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+				"prefill": {
+					ComponentNames:    []string{"dgd-prefill-newhash1", "dgd-prefill-oldhash1", "dgd-prefill-oldhash2"},
+					RuntimeNamespace:  "dynamo-oldhash2",
+					RuntimeNamespaces: []string{"dynamo-newhash1", "dynamo-oldhash1", "dynamo-oldhash2"},
 				},
 			},
 		},
@@ -1975,6 +1999,8 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
 				"decode": {
 					ComponentNames: []string{"dgd-decode-newhash1", "dgd-decode-oldhash1"},
+					// The new revision's namespace is known even when the old one is not.
+					RuntimeNamespaces: []string{"dynamo-newhash1"},
 				},
 			},
 		},
@@ -3704,6 +3730,8 @@ func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) 
 	assert.Len(t, statuses["worker"].ComponentNames, 2)
 	// The full runtime projection comes from the older generation that still has a replica target.
 	assert.Equal(t, "runtime-a", statuses["worker"].RuntimeNamespace)
+	// Both old generations may still have replicas, so both namespaces are listed.
+	assert.Equal(t, []string{"runtime-a", "runtime-b"}, statuses["worker"].RuntimeNamespaces)
 	assert.Equal(t, "model-a", statuses["worker"].ServedModelName)
 	assert.Equal(t, "worker-a", statuses["worker"].RuntimeComponentName)
 	assert.Equal(t, new(int64(300)), statuses["worker"].GPUPowerLimitWatts)

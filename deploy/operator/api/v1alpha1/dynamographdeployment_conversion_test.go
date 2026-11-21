@@ -985,6 +985,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 					ComponentKind:        v1beta1.ComponentKindDeployment,
 					ComponentNames:       []string{"dgd-worker-0", "dgd-worker-1"},
 					RuntimeNamespace:     "ns-status-worker-abc123",
+					RuntimeNamespaces:    []string{"ns-status-worker-abc123", "ns-status-worker-def456"},
 					ServedModelName:      "Qwen/Qwen3-8B",
 					RuntimeComponentName: "custom-worker",
 					GPUPowerLimitWatts:   new(int64(300)),

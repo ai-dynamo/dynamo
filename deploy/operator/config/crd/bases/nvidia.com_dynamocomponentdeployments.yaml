@@ -19970,10 +19970,22 @@ spec:
                     runtimeNamespace:
                       description: |-
                         RuntimeNamespace is the effective Dynamo runtime namespace for this
-                        component. Worker components may include a generation suffix; non-workers and
-                        Grove-backed workers use the base namespace. During rolling updates, worker
-                        status keeps the old active revision namespace until cutover completes.
+                        component. Worker components may include a generation suffix; non-workers use
+                        the base namespace. During rolling updates, worker status keeps the old
+                        active revision namespace until cutover completes, and RuntimeNamespaces also
+                        lists the new revision's.
                       type: string
+                    runtimeNamespaces:
+                      description: |-
+                        RuntimeNamespaces lists every effective Dynamo runtime namespace in which
+                        this component may have replicas, while RuntimeNamespace alone does not
+                        name them all. During a rolling update of a worker component, it holds the
+                        namespaces of the old revisions and of the new one, so that a consumer
+                        that must see every replica, such as a DynamoPoolRelay, can follow both
+                        before cutover. It is omitted otherwise.
+                      items:
+                        type: string
+                      type: array
                     scheduledReplicas:
                       description: |-
                         ScheduledReplicas is the number of replicas the backend scheduler has
@@ -37183,8 +37195,20 @@ spec:
                         runtimeNamespace is the effective Dynamo runtime namespace for this
                         component. Worker components may include a generation suffix; non-workers
                         use the base namespace. During rolling updates, worker status keeps the old
-                        active revision namespace until cutover completes.
+                        active revision namespace until cutover completes, and runtimeNamespaces
+                        also lists the new revision's.
                       type: string
+                    runtimeNamespaces:
+                      description: |-
+                        runtimeNamespaces lists every effective Dynamo runtime namespace in which
+                        this component may have replicas, while runtimeNamespace alone does not
+                        name them all. During a rolling update of a worker component, it holds the
+                        namespaces of the old revisions and of the new one, so that a consumer
+                        that must see every replica, such as a DynamoPoolRelay, can follow both
+                        before cutover. It is omitted otherwise.
+                      items:
+                        type: string
+                      type: array
                     scheduledReplicas:
                       description: |-
                         scheduledReplicas is the number of replicas the backend scheduler has

@@ -489,7 +489,11 @@ Replica information for a single component, keyed by component name in `status.c
 </ParamField>
 
 <ParamField path="runtimeNamespace" type="string">
-  Effective Dynamo runtime namespace for the component. Workers may include a generation suffix; non-workers use the base namespace. During a rolling update, worker status retains the old active revision's namespace until cutover completes.
+  Effective Dynamo runtime namespace for the component. Workers may include a generation suffix; non-workers use the base namespace. During a rolling update, worker status retains the old active revision's namespace until cutover completes, and `runtimeNamespaces` also lists the new revision's.
+</ParamField>
+
+<ParamField path="runtimeNamespaces" type="[]string">
+  Every effective Dynamo runtime namespace in which the component may have replicas, while `runtimeNamespace` alone does not name them all. During a rolling update of a worker component, it holds the namespaces of the old revisions and of the new one, so that a consumer that must see every replica, such as a `DynamoPoolRelay`, can follow both before cutover. Omitted otherwise.
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
