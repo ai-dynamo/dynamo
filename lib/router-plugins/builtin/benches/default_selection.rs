@@ -283,6 +283,40 @@ fn shared_cache(c: &mut Criterion) {
     }
 }
 
+// Tracked rows add raw-reuse accounting; query_only is the negative control.
+fn tracked_rows(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tracked_rows");
+    group
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_millis(500))
+        .sample_size(30)
+        .nresamples(1_000);
+    for count in [8, 1024, 4096] {
+        let policy = default_policy(SelectionConfig::default(), "prefill");
+        for (arm, tracked) in [("query_only", false), ("tracked", true)] {
+            let (workers, mut request) = support::fixture(count, 2048);
+            if tracked {
+                request.mode = ScheduleMode::Tracked {
+                    request_id: "bench".into(),
+                };
+            }
+            let mut select = || {
+                black_box(
+                    policy
+                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .unwrap(),
+                );
+            };
+            let count_allocs = allocations(&mut select);
+            eprintln!(
+                "allocations per 100 warm selections: arm={arm} workers={count} allocations={count_allocs}"
+            );
+            group.bench_function(BenchmarkId::new(arm, count), |b| b.iter(&mut select));
+        }
+    }
+    group.finish();
+}
+
 /// A KVCR-style worker: hint capable, a source, and in an island of eight.
 /// Like the selection service's config, it caches its hashed keys.
 struct HintWorker {
@@ -403,5 +437,12 @@ fn kv_transfer(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache, kv_transfer);
+criterion_group!(
+    benches,
+    bench,
+    stacked,
+    shared_cache,
+    tracked_rows,
+    kv_transfer
+);
 criterion_main!(benches);

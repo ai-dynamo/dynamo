@@ -102,6 +102,40 @@ pub struct TierOverlapBlocks {
     pub disk: FxHashMap<WorkerWithDpRank, usize>,
 }
 
+impl TierOverlapBlocks {
+    /// This rank's device, host-pinned and disk block counts, each read once.
+    #[inline]
+    pub(crate) fn counts_for(&self, worker: WorkerWithDpRank) -> (usize, usize, usize) {
+        (
+            self.device.get(&worker).copied().unwrap_or(0),
+            self.host_pinned.get(&worker).copied().unwrap_or(0),
+            self.disk.get(&worker).copied().unwrap_or(0),
+        )
+    }
+
+    /// Raw router-visible overlap in tokens; each tier addition and the blocks-to-tokens
+    /// multiplication saturate.
+    #[inline]
+    pub(crate) fn raw_tokens_for(&self, worker: WorkerWithDpRank, block_size: u32) -> usize {
+        let (device, host_pinned, disk) = self.counts_for(worker);
+        tier_blocks_to_tokens(device, host_pinned, disk, block_size)
+    }
+}
+
+/// Sum a rank's tier block counts and convert them to tokens, saturating at each step.
+#[inline]
+pub(crate) fn tier_blocks_to_tokens(
+    device: usize,
+    host_pinned: usize,
+    disk: usize,
+    block_size: u32,
+) -> usize {
+    device
+        .saturating_add(host_pinned)
+        .saturating_add(disk)
+        .saturating_mul(block_size as usize)
+}
+
 /// Downstream matches must include a wildcard arm because this enum is non-exhaustive.
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
@@ -490,15 +524,9 @@ impl SchedulingRequest {
     }
 
     pub(crate) fn raw_cached_tokens_for(&self, worker: WorkerWithDpRank, block_size: u32) -> usize {
-        let tiers = &self.overlap.tier_overlap_blocks;
-        let blocks = tiers
-            .device
-            .get(&worker)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(tiers.host_pinned.get(&worker).copied().unwrap_or(0))
-            .saturating_add(tiers.disk.get(&worker).copied().unwrap_or(0));
-        blocks.saturating_mul(block_size as usize)
+        self.overlap
+            .tier_overlap_blocks
+            .raw_tokens_for(worker, block_size)
     }
 
     /// The prefix a KV fetch would extend on `worker`: its device and
