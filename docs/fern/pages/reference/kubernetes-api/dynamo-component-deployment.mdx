@@ -133,6 +133,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   By default, the operator merges Dynamo command, environment, port, probe, resource, and volume-mount defaults into `spec.podTemplate.spec.containers[name=main]`. Declaring `spec.podTemplate.spec.initContainers[name=runtime]` enables [Dynamo Sidecar Mode](#dynamo-sidecar-mode). The main container runs the inference engine, and the runtime init container receives Dynamo environment, identity, system port, and probe defaults. The operator does not create the runtime init container. Its declaration must include a non-empty `image` and `restartPolicy: Always`.
 
+  A container-level `DYN_SYSTEM_PORT` override also configures its named system port and generated probes. See [System Port Configuration](#system-port-configuration) for sourced values and port ownership.
+
   Other containers require their own configuration, including an `image`. The `frontendSidecar` field can select a regular container to receive frontend defaults. See [Runtime Version Compatibility](#runtime-version-compatibility) for runtime image version requirements. This field replaces the separate per-component fields (`resources`, `envs`, `livenessProbe`, and others) from `v1alpha1`.
 
   For `type: frontend`, a non-empty `main.command` replaces the default frontend invocation. Only the supplied `main.args` are passed to that command; omitted or empty `args` produce no arguments. The same rule applies to the container selected by `frontendSidecar`. Other component types retain their generated arguments when an authored command omits `args` or sets `args: []`, including legacy Go EPP components with `eppConfig`.
@@ -204,7 +206,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">
-  References a model served by this component. When set, a headless service is created for endpoint discovery.
+  References a model served by this component. When set, a headless service is created for endpoint discovery. Its `targetPort` selects the container's named `system` port. Model and LoRA management use the resolved port from each EndpointSlice; they skip slices without a resolved TCP system port instead of assuming `9090`.
 </ParamField>
 
 <Indent>
@@ -279,6 +281,21 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   See: [ExperimentalSpec](#experimentalspec)
 </ParamField>
+
+## System Port Configuration
+
+Set `DYN_SYSTEM_PORT` on the runtime container: `main` in standard mode, or the `runtime` init container in [sidecar mode](#dynamo-sidecar-mode). The same rules apply to component and role templates.
+
+| Container override | Operator behavior |
+|---|---|
+| Positive literal, `1`–`32767` | Aligns the named `system` container port and, for host networking, its host port. For example, `12345` declares port `12345`; generated probes follow the named port. |
+| `valueFrom` or `$(...)` expansion | Requires an explicit named `system` container port in the same range. Ensure the resolved environment value matches that declaration; the operator cannot resolve it before scheduling. |
+| `0` or a negative value | `0` requests an ephemeral runtime port; negative values disable the listener. Removes generated fixed system-port declarations and probes. Explicitly authored system ports and probes remain. |
+| No override | Retains the existing component defaults. |
+
+Authored probes remain unchanged, so update any numeric probe ports yourself. An explicit `ports: []` suppresses generated port declarations and leaves their configuration to you. Frontend and EPP ports are independent; LPX host-network runtime templates own their ports and probes.
+
+System Services can retain their client-facing port `9090`: their named target resolves to the actual container port. Intra-pod failover has a stricter [two-port contract](#experimentalspec). Correcting previously mismatched generated declarations can roll existing Pods during an operator upgrade.
 
 ## Dynamo Sidecar Mode
 
@@ -416,6 +433,10 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 
 <ParamField path="failover" type="FailoverSpec">
   Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+
+  Intra-pod failover uses `DYN_SYSTEM_PORT` as the first engine's system port and the next port for the second engine. For example, `12345` allocates `12345` and `12346`; both must be available. The default base is `9090`. An override must be a literal integer from `1` through `32766`; `valueFrom`, environment expansion, disabled listeners and ephemeral ports are rejected because the operator must declare both ports before startup. Probes follow each engine's named port, and host-network Pods reserve both host ports.
+
+  The primary engine declares `system`; the standby declares `system-1`. Model discovery continues to select only the primary engine; this does not add standby LoRA lifecycle management. Upgrading from an operator that names the primary port `system-0` rolls every intra-pod failover Pod, including deployments using the default port, because the port and probe names change. Update custom PodMonitors that select `system-0`. The bundled chart accepts both primary names during migration and scrapes each engine once.
 </ParamField>
 
 <Indent>

@@ -181,7 +181,7 @@ func generateHeadlessServiceForModel(
 				{
 					Name:       commonconsts.DynamoSystemPortName,
 					Port:       commonconsts.DynamoSystemPort,
-					TargetPort: intstr.FromInt32(commonconsts.DynamoSystemPort),
+					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},

@@ -1676,6 +1676,15 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		return nil, err
 	}
 
+	// LPX host-network roles own their declarations and probes instead of operator defaults.
+	_, templateRuntime := componentDefaults.(*podTemplateRuntimeDefaults)
+	hostNetwork := component.PodTemplate != nil && component.PodTemplate.Spec.HostNetwork
+	if !nativeSidecar && !(templateRuntime && hostNetwork) && component.ComponentType != v1beta1.ComponentTypeFrontend && component.ComponentType != v1beta1.ComponentTypeEPP {
+		if err := configureSystemPort(&container, GetMainContainer(component), hostNetwork); err != nil {
+			return nil, err
+		}
+	}
+
 	// Preserve legacy environment rendering before backend-specific additions.
 	container.Env = MergeEnvs(nil, container.Env)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
@@ -1762,6 +1771,11 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if runtime := findRuntimeInitContainer(&podSpec); runtime != nil {
 		if err := mergeDynamoSidecarDefaults(runtime, componentContext); err != nil {
 			return nil, err
+		}
+		if !(templateRuntime && hostNetwork) {
+			if err := configureSystemPort(runtime, GetDynamoSidecar(component), hostNetwork); err != nil {
+				return nil, err
+			}
 		}
 		addMultinodeTopologyEnvVars(runtime, numberOfNodes, serviceName, multinodeDeployer, annotations)
 	}
