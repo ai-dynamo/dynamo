@@ -224,7 +224,10 @@ def test_registration_requires_a_hint_forwarding_hicache_worker(
     register_model = AsyncMock()
     monkeypatch.setattr(register, "register_model", register_model)
     dynamo_args = SimpleNamespace(
-        use_sglang_tokenizer=False, model_source_uri=None, custom_jinja_template=None
+        use_sglang_tokenizer=False,
+        model_source_uri=None,
+        custom_jinja_template=None,
+        systemone_serial=False,
     )
     kwargs = {"forwards_kv_hints": True} if forwards_kv_hints else {}
     engine = engine_type()
