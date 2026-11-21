@@ -18,7 +18,9 @@ YAML schema:
       license: GPL-2.0-only           # SPDX expression
       source: https://github.com/checkpoint-restore/criu
       license_text_path: /legal/CRIU/COPYING   # optional; inline the
-                                               # text in NOTICES
+                                               # text in NOTICES. Relative
+                                               # paths resolve against the
+                                               # YAML's directory.
       images:                          # which final images contain
         - snapshot-agent               # this component. Used to
                                        # filter via --native-image at
@@ -81,6 +83,12 @@ def collect_components(
         text_path_str = pkg.get("license_text_path")
         if text_path_str:
             text_path = Path(text_path_str)
+            if not text_path.is_absolute():
+                # Relative paths resolve against the YAML's own directory so
+                # the same entry works wherever the compliance tree is mounted
+                # (/opt/compliance in most images, /src/container/compliance
+                # in the sidecar licenses stage).
+                text_path = yaml_path.parent / text_path
             if text_path.is_file():
                 try:
                     license_text = text_path.read_text(
