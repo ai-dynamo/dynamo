@@ -137,12 +137,48 @@ runs:
           exit 0
         fi
 
+        # Drain pods first: if pods are still terminating on the namespace
+        # controller's first pass, it may not retry before the wait below times out.
+        echo "Pods in ${NAMESPACE} before namespace deletion:"
+        kubectl get pods -n "${NAMESPACE}" --request-timeout=30s -o wide || true
+        if ! kubectl delete pods --all -n "${NAMESPACE}" \
+          --ignore-not-found \
+          --request-timeout=30s \
+          --wait=true \
+          --timeout=180s; then
+          echo "::warning::Pods in ${NAMESPACE} did not terminate within 180s"
+        fi
+        remaining_pods=$(kubectl get pods -n "${NAMESPACE}" --request-timeout=30s -o name 2>/dev/null || true)
+        if [ -n "${remaining_pods}" ]; then
+          echo "::warning::Force-deleting pods still present in ${NAMESPACE}"
+          kubectl get pods -n "${NAMESPACE}" --request-timeout=30s -o wide || true
+          kubectl delete pods --all -n "${NAMESPACE}" \
+            --grace-period=0 \
+            --force \
+            --ignore-not-found \
+            --request-timeout=30s \
+            --wait=true \
+            --timeout=60s || true
+        fi
+
         if ! kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=300s; then
-          echo "::error::Namespace ${NAMESPACE} did not delete cleanly"
-          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
-          kubectl get all -n "${NAMESPACE}" -o wide || true
-          kubectl describe namespace "${NAMESPACE}" || true
-          exit 1
+          # A namespace still Terminating is not proof of cleanup, so give the
+          # controller a second, bounded window instead of failing here.
+          echo "::warning::Namespace ${NAMESPACE} still deleting after 300s; waiting up to 600s more"
+          kubectl get pods -n "${NAMESPACE}" --request-timeout=30s -o wide || true
+          kubectl delete pods --all -n "${NAMESPACE}" \
+            --grace-period=0 \
+            --force \
+            --ignore-not-found \
+            --request-timeout=30s \
+            --wait=false || true
+          if ! kubectl wait --for=delete "namespace/${NAMESPACE}" --timeout=600s; then
+            echo "::error::Namespace ${NAMESPACE} did not delete cleanly"
+            kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+            kubectl get all -n "${NAMESPACE}" -o wide || true
+            kubectl describe namespace "${NAMESPACE}" || true
+            exit 1
+          fi
         fi
 
         namespace=$(get_namespace)
