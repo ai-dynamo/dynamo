@@ -303,6 +303,11 @@ struct DpBudget {
     metrics_rxs: Vec<watch::Receiver<MockerMetrics>>,
     total_requests: Vec<u64>,
     total_tokens: Vec<u64>,
+    /// Dispatched requests the scheduler has not admitted yet. SGLang counts its bootstrap and
+    /// prealloc queues as waiting, but a mocker request only reaches the scheduler's counts
+    /// once it is admitted, which for a handoff waits on the bootstrap session. A refresh adds
+    /// these back instead of erasing them.
+    pending_requests: Vec<u64>,
     /// Prompt tokens of dispatched requests that have not produced output yet. SGLang's token
     /// load includes its waiting queue, but the scheduler snapshot only reports allocated KV
     /// blocks, so a refresh adds these back instead of erasing queued demand.
@@ -325,6 +330,7 @@ impl DpBudget {
         let ranks = dp_size as usize;
         self.total_requests.resize(ranks, 0);
         self.total_tokens.resize(ranks, 0);
+        self.pending_requests.resize(ranks, 0);
         self.queued_tokens.resize(ranks, 0);
         if self.metrics_rxs.is_empty()
             && let Some(engines) = engines
@@ -338,7 +344,9 @@ impl DpBudget {
             let metrics = metrics_rx.borrow_and_update();
             let rank = metrics.dp_rank as usize;
             if rank < ranks {
-                self.total_requests[rank] = metrics.running_requests + metrics.waiting_requests;
+                self.total_requests[rank] = metrics.running_requests
+                    + metrics.waiting_requests
+                    + self.pending_requests[rank];
                 self.total_tokens[rank] =
                     metrics.active_decode_blocks * block_size as u64 + self.queued_tokens[rank];
             }
@@ -357,18 +365,30 @@ impl DpBudget {
         };
         self.total_requests[target] += 1;
         self.total_tokens[target] += estimated_tokens as u64;
+        self.pending_requests[target] += 1;
         self.queued_tokens[target] += estimated_tokens as u64;
         target as u32
     }
 
+    /// Undoes a dispatch whose request never reached the scheduler.
     fn release(&mut self, rank: usize, estimated_tokens: u64) {
-        if let Some(requests) = self.total_requests.get_mut(rank) {
+        for (load, amount) in [
+            (&mut self.total_requests, 1),
+            (&mut self.total_tokens, estimated_tokens),
+            (&mut self.pending_requests, 1),
+            (&mut self.queued_tokens, estimated_tokens),
+        ] {
+            if let Some(load) = load.get_mut(rank) {
+                *load = load.saturating_sub(amount);
+            }
+        }
+    }
+
+    /// The scheduler admitted a pending request, so its snapshots count it from now on.
+    fn admit(&mut self, rank: usize) {
+        if let Some(requests) = self.pending_requests.get_mut(rank) {
             *requests = requests.saturating_sub(1);
         }
-        if let Some(tokens) = self.total_tokens.get_mut(rank) {
-            *tokens = tokens.saturating_sub(estimated_tokens);
-        }
-        self.release_queued(rank, estimated_tokens);
     }
 
     fn release_queued(&mut self, rank: usize, estimated_tokens: u64) {
@@ -378,50 +398,58 @@ impl DpBudget {
     }
 }
 
-/// A `DpBudget` charge for one dispatched request. Dropping it without `commit` undoes the
-/// charge, so a request rejected before it reaches the scheduler leaves no phantom load that
-/// no later snapshot would clear.
+/// A `DpBudget` charge for one dispatched request. The request stays pending until the
+/// scheduler admits it, and its prompt stays queued until its first output. Dropping the
+/// charge before admission undoes it, so a request that never reaches the scheduler leaves no
+/// phantom load that no later snapshot would clear.
 #[must_use]
 struct DpCharge {
-    /// `None` once committed.
-    budget: Option<Arc<parking_lot::Mutex<DpBudget>>>,
+    budget: Arc<parking_lot::Mutex<DpBudget>>,
     rank: usize,
     estimated_tokens: u64,
+    admitted: bool,
+    prefilled: bool,
 }
 
 impl DpCharge {
-    /// Keeps the charge once the scheduler accepts the request. The returned guard keeps the
-    /// prompt counted as queued until it is dropped at the request's first output.
-    fn commit(mut self) -> QueuedDpTokens {
-        QueuedDpTokens {
-            budget: self.budget.take().expect("DpCharge is committed once"),
-            rank: self.rank,
-            estimated_tokens: self.estimated_tokens,
+    fn new(budget: &Arc<parking_lot::Mutex<DpBudget>>, rank: u32, estimated_tokens: usize) -> Self {
+        Self {
+            budget: Arc::clone(budget),
+            rank: rank as usize,
+            estimated_tokens: estimated_tokens as u64,
+            admitted: false,
+            prefilled: false,
+        }
+    }
+
+    fn admit(&mut self) {
+        if !self.admitted {
+            self.admitted = true;
+            self.budget.lock().admit(self.rank);
+        }
+    }
+
+    /// The request produced output, so the rank's KV snapshot now carries its prompt.
+    fn prefilled(&mut self) {
+        self.admit();
+        if !self.prefilled {
+            self.prefilled = true;
+            self.budget
+                .lock()
+                .release_queued(self.rank, self.estimated_tokens);
         }
     }
 }
 
 impl Drop for DpCharge {
     fn drop(&mut self) {
-        if let Some(budget) = self.budget.take() {
-            budget.lock().release(self.rank, self.estimated_tokens);
+        if !self.admitted {
+            self.budget.lock().release(self.rank, self.estimated_tokens);
+        } else if !self.prefilled {
+            self.budget
+                .lock()
+                .release_queued(self.rank, self.estimated_tokens);
         }
-    }
-}
-
-/// Queued prompt tokens of an admitted request. Dropping it removes them from the rank's queued
-/// load, after which the rank's KV snapshot accounts for the request.
-struct QueuedDpTokens {
-    budget: Arc<parking_lot::Mutex<DpBudget>>,
-    rank: usize,
-    estimated_tokens: u64,
-}
-
-impl Drop for QueuedDpTokens {
-    fn drop(&mut self) {
-        self.budget
-            .lock()
-            .release_queued(self.rank, self.estimated_tokens);
     }
 }
 
@@ -520,8 +548,7 @@ impl MockerExecutionContext {
         }
     }
 
-    /// Charges a request to `DpBudget` and returns the chosen rank with the charge to commit
-    /// once the scheduler accepts the request.
+    /// Charges a request to `DpBudget` and returns the chosen rank with its charge.
     fn charge_dp_budget(
         &self,
         method: DpLoadBalanceMethod,
@@ -537,17 +564,12 @@ impl MockerExecutionContext {
             estimated_tokens,
             forced_rank,
         );
-        let charge = DpCharge {
-            budget: Some(Arc::clone(&self.dp_budget)),
-            rank: rank as usize,
-            estimated_tokens: estimated_tokens as u64,
-        };
-        (rank, charge)
+        (rank, DpCharge::new(&self.dp_budget, rank, estimated_tokens))
     }
 
     /// Picks the data-parallel rank for a request. An explicit `dp_rank` hint wins; otherwise
-    /// the configured load-balance method decides. The load-based methods also return a
-    /// `DpCharge` that the caller commits once the request is admitted.
+    /// the configured load-balance method decides. The load-based methods also return the
+    /// request's `DpCharge`, which the caller keeps for the life of the request.
     fn resolve_dp_rank(
         &self,
         request: &PreprocessedRequest,
@@ -1099,7 +1121,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         let native_sglang_terminal = native_sglang.is_some();
 
-        let (dp_rank, dp_charge) = match self.resolve_dp_rank(&request) {
+        let (dp_rank, mut dp_charge) = match self.resolve_dp_rank(&request) {
             Ok(resolved) => resolved,
             Err(message) => {
                 return Ok(error_stream(
@@ -1364,8 +1386,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .await
                 .map_err(|error| Error::msg(error.to_string()))?;
         }
-        // The scheduler has the request now, so its snapshots account for this load.
-        let mut queued_dp_tokens = dp_charge.map(DpCharge::commit);
+        // The request stays pending in `DpBudget` until the scheduler admits it, which for a
+        // handoff happens only once its bootstrap session submits it.
+        let dp_admission = live_request.admission();
 
         let async_context = ctx.context();
         let reasoning = self.engine_args.runtime.reasoning.clone();
@@ -1391,9 +1414,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut context_stopped = async_context.stopped();
             let stream_closed = stream_tx.closed();
             tokio::pin!(stream_closed);
+            tokio::pin!(dp_admission);
+            let mut awaiting_dp_admission = dp_charge.is_some();
 
             loop {
                 tokio::select! {
+                    admitted = &mut dp_admission, if awaiting_dp_admission => {
+                        awaiting_dp_admission = false;
+                        if admitted && let Some(charge) = dp_charge.as_mut() {
+                            charge.admit();
+                        }
+                    }
                     source_completion = async {
                         source_completion_rx
                             .as_mut()
@@ -1467,8 +1498,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         }
 
-                        // The prompt has been prefilled, so its KV blocks now carry its load.
-                        drop(queued_dp_tokens.take());
+                        if let Some(mut charge) = dp_charge.take() {
+                            charge.prefilled();
+                            awaiting_dp_admission = false;
+                        }
 
                         if let Some(cached) = signal.cached_tokens {
                             cached_prefix_tokens = Some(cached);
@@ -1815,11 +1848,13 @@ mod tests {
     }
 
     impl MockerExecutionContext {
-        fn resolve_committed_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32, String> {
+        fn resolve_admitted_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32, String> {
             let (rank, charge) = self.resolve_dp_rank(request)?;
-            // Tests model requests still waiting in the queue, so keep their tokens queued.
-            if let Some(charge) = charge {
-                std::mem::forget(charge.commit());
+            // Tests model admitted requests still waiting for prefill, so keep their tokens
+            // queued.
+            if let Some(mut charge) = charge {
+                charge.admit();
+                std::mem::forget(charge);
             }
             Ok(rank)
         }
@@ -1848,7 +1883,7 @@ mod tests {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
         for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
             assert_eq!(
-                engine.resolve_committed_dp_rank(&dp_rank_request(Some(room), None)),
+                engine.resolve_admitted_dp_rank(&dp_rank_request(Some(room), None)),
                 Ok(expected),
                 "room={room}"
             );
@@ -1866,11 +1901,11 @@ mod tests {
         );
         for engine in [auto, explicit] {
             let error = engine
-                .resolve_committed_dp_rank(&dp_rank_request(None, None))
+                .resolve_admitted_dp_rank(&dp_rank_request(None, None))
                 .unwrap_err();
             assert!(error.contains("bootstrap room"), "{error}");
             assert_eq!(
-                engine.resolve_committed_dp_rank(&dp_rank_request(Some(6), None)),
+                engine.resolve_admitted_dp_rank(&dp_rank_request(Some(6), None)),
                 Ok(2)
             );
         }
@@ -1881,7 +1916,7 @@ mod tests {
         // SGLang only runs its data-parallel controller for dp_size > 1.
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 1);
         assert_eq!(
-            engine.resolve_committed_dp_rank(&dp_rank_request(None, None)),
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, None)),
             Ok(0)
         );
     }
@@ -1890,16 +1925,16 @@ mod tests {
     fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
         assert_eq!(
-            engine.resolve_committed_dp_rank(&dp_rank_request(None, Some(3))),
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, Some(3))),
             Ok(3)
         );
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Decode, 4);
         assert_eq!(
-            engine.resolve_committed_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            engine.resolve_admitted_dp_rank(&dp_rank_request(Some(10), Some(3))),
             Ok(3)
         );
         assert_eq!(
-            engine.resolve_committed_dp_rank(&dp_rank_request(None, None)),
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, None)),
             Ok(0)
         );
     }
@@ -1916,7 +1951,7 @@ mod tests {
             .into_iter()
             .map(|room| {
                 engine
-                    .resolve_committed_dp_rank(&dp_rank_request(room, None))
+                    .resolve_admitted_dp_rank(&dp_rank_request(room, None))
                     .unwrap()
             })
             .collect();
@@ -1934,7 +1969,7 @@ mod tests {
         let ranks: Vec<_> = (0..5)
             .map(|_| {
                 engine
-                    .resolve_committed_dp_rank(&dp_rank_request(None, None))
+                    .resolve_admitted_dp_rank(&dp_rank_request(None, None))
                     .unwrap()
             })
             .collect();
@@ -1953,7 +1988,7 @@ mod tests {
             .into_iter()
             .map(|rank| {
                 engine
-                    .resolve_committed_dp_rank(&dp_rank_request(None, rank))
+                    .resolve_admitted_dp_rank(&dp_rank_request(None, rank))
                     .unwrap()
             })
             .collect();
@@ -1976,7 +2011,7 @@ mod tests {
         assert_eq!(rank, 0);
         drop(charge);
         assert_eq!(
-            engine.resolve_committed_dp_rank(&dp_rank_request(None, None)),
+            engine.resolve_admitted_dp_rank(&dp_rank_request(None, None)),
             Ok(0)
         );
     }
@@ -1994,7 +2029,7 @@ mod tests {
             .map(|len| {
                 let mut request = dp_rank_request(None, None);
                 request.token_ids = vec![1; len].into();
-                engine.resolve_committed_dp_rank(&request).unwrap()
+                engine.resolve_admitted_dp_rank(&request).unwrap()
             })
             .collect();
         // Loads after each step: [8,0,0] [8,2,0] [8,2,4] [8,3,4] then rank 1 again.
@@ -2018,13 +2053,8 @@ mod tests {
                 None,
             )
         };
-        let charge = |estimated_tokens| DpCharge {
-            budget: Some(Arc::clone(&budget)),
-            rank: dispatch(estimated_tokens) as usize,
-            estimated_tokens: estimated_tokens as u64,
-        };
-
-        let queued = charge(100).commit();
+        let mut queued = DpCharge::new(&budget, dispatch(100), 100);
+        queued.admit();
         assert_eq!(queued.rank, 0);
         // Rank 0 reports the request as waiting with no KV yet; its 100 queued tokens still
         // outweigh rank 1's 40 KV tokens.
@@ -2032,10 +2062,47 @@ mod tests {
         assert_eq!(dispatch(10), 1);
 
         // After prefill, the KV snapshot carries the load and the queued charge is gone.
-        drop(queued);
+        queued.prefilled();
         rank0_tx.send_replace(MockerMetrics::from_parts(0, 25, 128, 1, 0, 0, 0, 0));
         assert_eq!(dispatch(0), 1);
         assert_eq!(budget.lock().total_tokens, [100, 50]);
+    }
+
+    #[test]
+    fn total_requests_snapshot_keeps_pending_requests() {
+        let budget = Arc::new(parking_lot::Mutex::new(DpBudget::default()));
+        let (rank0_tx, rank0_rx) = watch::channel(MockerMetrics::new(0, 0, 128));
+        let (rank1_tx, rank1_rx) = watch::channel(MockerMetrics::new(1, 0, 128));
+        budget.lock().metrics_rxs = vec![rank0_rx, rank1_rx];
+        let running =
+            |rank, requests| MockerMetrics::from_parts(rank, 0, 128, requests, 0, 0, 0, 0);
+        let charge = || {
+            let rank =
+                budget
+                    .lock()
+                    .dispatch(DpLoadBalanceMethod::TotalRequests, None, 2, 4, 0, None);
+            DpCharge::new(&budget, rank, 0)
+        };
+
+        rank1_tx.send_replace(running(1, 1));
+        let waiting_on_bootstrap = charge();
+        assert_eq!(waiting_on_bootstrap.rank, 0);
+        // A rank 0 snapshot taken before the scheduler admits the first request must not erase
+        // it, or the next request would tie with rank 1 and land on rank 0 as well.
+        rank0_tx.send_replace(running(0, 1));
+        let mut admitted = charge();
+        assert_eq!(admitted.rank, 1);
+
+        // Rejecting the pending request removes only its own charge from the snapshot load.
+        drop(waiting_on_bootstrap);
+        assert_eq!(budget.lock().total_requests, [1, 2]);
+
+        // Once admitted, the request is counted by rank 1's snapshot alone.
+        admitted.admit();
+        rank1_tx.send_replace(running(1, 2));
+        let next = charge();
+        assert_eq!(next.rank, 0);
+        assert_eq!(budget.lock().total_requests, [2, 2]);
     }
 
     #[test]
@@ -2049,7 +2116,7 @@ mod tests {
                 .into_iter()
                 .map(|room| {
                     engine
-                        .resolve_committed_dp_rank(&dp_rank_request(Some(room), None))
+                        .resolve_admitted_dp_rank(&dp_rank_request(Some(room), None))
                         .unwrap()
                 })
                 .collect();
