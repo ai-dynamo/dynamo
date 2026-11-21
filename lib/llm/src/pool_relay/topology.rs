@@ -17,6 +17,7 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, KvQuerySemantics, ModelTarget,
     PoolCatalogSnapshot, WorkerRole,
 };
+use super::load::PoolDeployment;
 use crate::discovery::readiness::{ReadinessUnit, evaluate_readiness};
 use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
@@ -59,6 +60,11 @@ pub struct TopologyEntry {
 pub struct TopologySnapshot {
     pub revision: u64,
     pub entries: Vec<TopologyEntry>,
+    /// Serving capacity per (namespace, base model) over every member, from
+    /// the members' runtime configurations; `None` while a member's config
+    /// is invalid. Published with the entries so a reader sees one
+    /// generation of both.
+    pub(crate) capacities: HashMap<(String, String), Option<PoolDeployment>>,
 }
 
 #[derive(Default)]
@@ -103,6 +109,10 @@ struct TopologyProjectionInputs {
     availability: HashMap<EndpointId, Option<HashSet<WorkerId>>>,
     availability_owners: HashMap<EndpointId, u64>,
     pools: HashMap<(EndpointId, CanonicalModelId), PoolLink>,
+    /// [`model_capacities`] of `membership`, computed when it changes.
+    capacities: HashMap<(String, String), Option<PoolDeployment>>,
+    /// The generation of each endpoint whose invalid config was logged.
+    warned_invalid: HashMap<EndpointId, u64>,
     revision: u64,
 }
 
@@ -124,12 +134,20 @@ impl TopologyPublisher {
     pub(crate) fn new(membership: DcMembershipView, catalog: &PoolCatalogSnapshot) -> Self {
         let pools = pool_links(catalog);
         let entries = derive_topology(&membership, &HashMap::new(), &pools);
+        let mut warned_invalid = HashMap::new();
+        let capacities = model_capacities(&membership, &mut warned_invalid);
         let revision = 1;
-        let (sender, _) = watch::channel(Arc::new(TopologySnapshot { revision, entries }));
+        let (sender, _) = watch::channel(Arc::new(TopologySnapshot {
+            revision,
+            entries,
+            capacities: capacities.clone(),
+        }));
         Self {
             state: Mutex::new(TopologyProjectionInputs {
                 membership,
                 pools,
+                capacities,
+                warned_invalid,
                 revision,
                 ..TopologyProjectionInputs::default()
             }),
@@ -145,6 +163,16 @@ impl TopologyPublisher {
         self.sender.borrow().clone()
     }
 
+    /// The published snapshot's capacities. Membership alone decides them:
+    /// a member that has not materialized a pool, because no worker
+    /// publishes KV events yet, still counts, so the catalog stays free of
+    /// phantom pools while the serving-load stream can still say how many
+    /// requests the model's workers run at once.
+    #[cfg(test)]
+    pub(crate) fn model_capacities(&self) -> HashMap<(String, String), Option<PoolDeployment>> {
+        self.sender.borrow().capacities.clone()
+    }
+
     pub(crate) fn replace_membership(&self, membership: DcMembershipView) {
         let mut state = self.state.lock();
         if state.membership == membership {
@@ -157,6 +185,13 @@ impl TopologyPublisher {
             .availability_owners
             .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
         state.membership = membership;
+        let TopologyProjectionInputs {
+            membership,
+            capacities,
+            warned_invalid,
+            ..
+        } = &mut *state;
+        *capacities = model_capacities(membership, warned_invalid);
         publish_if_changed(&mut state, &self.sender);
     }
 
@@ -189,6 +224,8 @@ impl TopologyPublisher {
         state.availability.clear();
         state.availability_owners.clear();
         state.pools.clear();
+        state.capacities.clear();
+        state.warned_invalid.clear();
         publish_if_changed(&mut state, &self.sender);
     }
 
@@ -227,13 +264,17 @@ fn publish_if_changed(
     sender: &watch::Sender<Arc<TopologySnapshot>>,
 ) {
     let entries = derive_topology(&state.membership, &state.availability, &state.pools);
-    if sender.borrow().entries == entries {
-        return;
+    {
+        let current = sender.borrow();
+        if current.entries == entries && current.capacities == state.capacities {
+            return;
+        }
     }
     state.revision = state.revision.saturating_add(1);
     sender.send_replace(Arc::new(TopologySnapshot {
         revision: state.revision,
         entries,
+        capacities: state.capacities.clone(),
     }));
 }
 
@@ -359,6 +400,77 @@ fn derive_topology(
             }
         })
         .collect()
+}
+
+/// `max_concurrency` is `None` as soon as one member worker does not declare
+/// its limit, and the whole capacity is `None` as soon as one member's configs
+/// fail the pool view's validation: unknown rather than wrong, with the model
+/// still listed. An invalid config is logged once per endpoint generation,
+/// tracked in `warned`.
+fn model_capacities(
+    membership: &DcMembershipView,
+    warned: &mut HashMap<EndpointId, u64>,
+) -> HashMap<(String, String), Option<PoolDeployment>> {
+    let mut capacities = HashMap::<(String, String), PoolDeployment>::new();
+    let mut invalid = HashSet::new();
+    warned.retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
+    for endpoint_membership in membership.endpoints.values() {
+        if endpoint_membership.has_serving_topology_conflict() {
+            continue;
+        }
+        let deployment = PoolDeployment::validated(&endpoint_membership.runtime_configs);
+        let base_models = endpoint_membership
+            .registrations
+            .iter()
+            .filter_map(|registration| match registration.target() {
+                ModelTarget::Base { base_model } => Some(base_model.as_str().to_string()),
+                ModelTarget::Lora { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for base_model in base_models {
+            let key = (endpoint_membership.namespace.clone(), base_model);
+            let deployment = match &deployment {
+                Ok(deployment) => *deployment,
+                Err(error) => {
+                    let generation = endpoint_membership.generation;
+                    if warned.insert(endpoint_membership.endpoint.clone(), generation)
+                        != Some(generation)
+                    {
+                        tracing::warn!(
+                            endpoint = %endpoint_membership.endpoint,
+                            generation,
+                            %error,
+                            "a member's runtime config is invalid; its model's capacity is unknown"
+                        );
+                    }
+                    invalid.insert(key);
+                    continue;
+                }
+            };
+            match capacities.entry(key) {
+                Entry::Occupied(mut entry) => {
+                    let total = entry.get_mut();
+                    total.live_workers = total.live_workers.saturating_add(deployment.live_workers);
+                    total.max_concurrency =
+                        match (total.max_concurrency, deployment.max_concurrency) {
+                            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+                            _ => None,
+                        };
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(deployment);
+                }
+            }
+        }
+    }
+    let mut capacities = capacities
+        .into_iter()
+        .map(|(key, deployment)| (key, Some(deployment)))
+        .collect::<HashMap<_, _>>();
+    for key in invalid {
+        capacities.insert(key, None);
+    }
+    capacities
 }
 
 fn compatible_pool_id(
@@ -507,6 +619,7 @@ mod tests {
     };
     use super::super::resolution::resolve_indexer_domain;
     use super::*;
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::model_card::ModelDeploymentCard;
 
     fn model(value: &str) -> CanonicalModelId {
@@ -1616,5 +1729,112 @@ mod tests {
         let after = publisher.snapshot();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.entries[0].members[0].pool_id, pool_id);
+    }
+
+    /// Capacity follows membership, not the catalog: endpoints without a pool
+    /// link still count, grouped by (namespace, base model), and one worker
+    /// without a declared limit makes the group's limit unknown.
+    #[test]
+    fn model_capacities_follow_membership_not_the_catalog() {
+        let limited = |max_num_seqs: Option<u64>, ranks: u32| ModelRuntimeConfig {
+            max_num_seqs,
+            data_parallel_size: ranks,
+            ..ModelRuntimeConfig::default()
+        };
+        let mut decode = endpoint(
+            "ns.decode.generate",
+            "llama",
+            1,
+            Some(WorkerType::Decode),
+            vec![],
+        );
+        decode.runtime_configs =
+            HashMap::from([(1, limited(Some(8), 2)), (2, limited(Some(4), 1))]);
+        let mut prefill = endpoint(
+            "ns.prefill.generate",
+            "llama",
+            3,
+            Some(WorkerType::Prefill),
+            vec![],
+        );
+        prefill.runtime_configs = HashMap::from([(3, limited(Some(16), 1))]);
+        let mut other = endpoint(
+            "other.agg.generate",
+            "llama",
+            4,
+            Some(WorkerType::Aggregated),
+            vec![],
+        );
+        other.runtime_configs = HashMap::from([(4, limited(None, 1))]);
+        let view = view(vec![decode, prefill, other]);
+        let publisher = TopologyPublisher::new(view, &catalog(&DcMembershipView::default(), 1));
+
+        let capacities = publisher.model_capacities();
+        assert_eq!(
+            capacities.get(&("ns".to_string(), "llama".to_string())),
+            Some(&Some(PoolDeployment {
+                live_workers: 3,
+                max_concurrency: Some(36),
+            }))
+        );
+        assert_eq!(
+            capacities.get(&("other".to_string(), "llama".to_string())),
+            Some(&Some(PoolDeployment {
+                live_workers: 1,
+                max_concurrency: None,
+            }))
+        );
+        assert_eq!(capacities.len(), 2);
+
+        // The capacities ride in the published snapshot, one generation
+        // with the entries.
+        assert_eq!(publisher.snapshot().capacities, capacities);
+
+        publisher.clear();
+        assert!(publisher.model_capacities().is_empty());
+    }
+
+    /// A config the pool view rejects (here a zero data-parallel size) makes
+    /// its model's capacity unknown instead of a wrong number; the model
+    /// stays listed.
+    #[test]
+    fn model_capacities_leave_a_model_with_an_invalid_member_config_unknown() {
+        let config = |max_num_seqs: u64, ranks: u32| ModelRuntimeConfig {
+            max_num_seqs: Some(max_num_seqs),
+            data_parallel_size: ranks,
+            ..ModelRuntimeConfig::default()
+        };
+        let mut decode = endpoint(
+            "ns.decode.generate",
+            "llama",
+            1,
+            Some(WorkerType::Decode),
+            vec![],
+        );
+        decode.runtime_configs = HashMap::from([(1, config(8, 2)), (2, config(4, 0))]);
+        let mut other = endpoint(
+            "other.agg.generate",
+            "llama",
+            3,
+            Some(WorkerType::Aggregated),
+            vec![],
+        );
+        other.runtime_configs = HashMap::from([(3, config(16, 1))]);
+        let view = view(vec![decode, other]);
+        let publisher = TopologyPublisher::new(view, &catalog(&DcMembershipView::default(), 1));
+
+        let capacities = publisher.model_capacities();
+        assert_eq!(
+            capacities.get(&("ns".to_string(), "llama".to_string())),
+            Some(&None)
+        );
+        assert_eq!(
+            capacities.get(&("other".to_string(), "llama".to_string())),
+            Some(&Some(PoolDeployment {
+                live_workers: 1,
+                max_concurrency: Some(16),
+            }))
+        );
+        assert_eq!(capacities.len(), 2);
     }
 }

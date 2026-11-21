@@ -24,7 +24,7 @@ use futures::Stream;
 use tokio_stream::StreamMap;
 
 use super::super::identity::{CanonicalModelId, PoolCatalogSnapshot};
-use super::super::load::Coverage;
+use super::super::load::{Coverage, PoolDeployment};
 use super::super::topology::TopologySnapshot;
 use super::{ModelServingLoad, SOURCE_RETENTION, freshness};
 use crate::frontend_load::{
@@ -309,17 +309,22 @@ impl FrontendReports {
         });
     }
 
-    /// One view per model a catalog pool registers or a fresh frontend serves.
+    /// One view per model a catalog pool registers, the topology serves, or a
+    /// fresh frontend serves.
     ///
     /// Frontends without an exact namespace publish in `relay_namespace` but
     /// serve every namespace's models, so their load of a model the catalog
-    /// registers in exactly one other namespace counts there.
+    /// registers, or the topology serves, in exactly one other namespace
+    /// counts there.
     ///
-    /// `registered` holds, per namespace with a known roster, the frontend
-    /// publishers expected besides those with a fresh frame.
+    /// `capacities` is the topology's serving capacity per (namespace,
+    /// model); it attaches to the model's view whether or not a catalog pool
+    /// exists. `registered` holds, per namespace with a known roster, the
+    /// frontend publishers expected besides those with a fresh frame.
     pub(super) fn model_loads(
         &self,
         catalog: &PoolCatalogSnapshot,
+        capacities: &HashMap<(String, String), Option<PoolDeployment>>,
         relay_namespace: &str,
         registered: &HashMap<String, HashSet<u64>>,
         now: Instant,
@@ -337,6 +342,16 @@ impl FrontendReports {
                     .insert(pool.pool_id());
                 homes.entry(model).or_default().insert(namespace);
             }
+        }
+        let capacities = capacities
+            .iter()
+            .map(|((namespace, model), deployment)| {
+                ((namespace.as_str(), model.as_str()), *deployment)
+            })
+            .collect::<HashMap<_, _>>();
+        for &(namespace, model) in capacities.keys() {
+            models.entry((namespace, model)).or_default();
+            homes.entry(model).or_default().insert(namespace);
         }
         for ((namespace, _), source) in &self.frontends {
             if !source.is_fresh(now) {
@@ -383,6 +398,7 @@ impl FrontendReports {
                     observed_frontends: model_coverage.observed,
                     ready_frontends: aggregate.ready_frontends,
                     serving_pools: aggregate.serving_pools.into_iter().collect(),
+                    deployment: capacities.get(&(namespace, model)).copied().flatten(),
                 }
             })
             .collect()
@@ -447,8 +463,8 @@ impl FrontendReports {
     }
 }
 
-/// The one other namespace whose catalog pools register `model`, where load
-/// heard in `relay_namespace` counts.
+/// The one other namespace whose catalog pools register `model`, or whose
+/// topology serves it, where load heard in `relay_namespace` counts.
 fn relay_home<'a>(
     homes: &HashMap<&str, BTreeSet<&'a str>>,
     model: &str,
@@ -606,8 +622,13 @@ mod tests {
         reports: &FrontendReports,
         discovered: &HashMap<String, HashSet<u64>>,
     ) -> ModelServingLoad {
-        let mut models =
-            reports.model_loads(&catalog(Vec::new()), RELAY_NS, discovered, Instant::now());
+        let mut models = reports.model_loads(
+            &catalog(Vec::new()),
+            &HashMap::new(),
+            RELAY_NS,
+            discovered,
+            Instant::now(),
+        );
         assert_eq!(models.len(), 1);
         models.pop().unwrap()
     }
@@ -791,8 +812,13 @@ mod tests {
         // "other" has a discovered frontend that never published.
         let mut discovered = listed(&[PUBLISHER]);
         discovered.insert("other".to_string(), HashSet::from([2, 3]));
-        let models =
-            reports.model_loads(&catalog(Vec::new()), RELAY_NS, &discovered, Instant::now());
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &HashMap::new(),
+            RELAY_NS,
+            &discovered,
+            Instant::now(),
+        );
         let keys = models
             .iter()
             .map(|model| (model.namespace.as_str(), model.model.as_str()))
@@ -818,8 +844,13 @@ mod tests {
         other.is_serving_ready = false;
         record(&mut reports, 2, other);
 
-        let models =
-            reports.model_loads(&catalog(Vec::new()), RELAY_NS, &listed(&[]), Instant::now());
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &HashMap::new(),
+            RELAY_NS,
+            &listed(&[]),
+            Instant::now(),
+        );
         let (a, b) = (&models[0], &models[1]);
         assert_eq!(a.observed_frontends, 2);
         assert_eq!(a.ready_frontends, 1);
@@ -844,7 +875,13 @@ mod tests {
     fn catalog_models_without_frontends_are_unavailable_with_zero_totals() {
         let reports = FrontendReports::default();
         let catalog = catalog(vec![pool(NS, "a")]);
-        let models = reports.model_loads(&catalog, RELAY_NS, &listed(&[]), Instant::now());
+        let models = reports.model_loads(
+            &catalog,
+            &HashMap::new(),
+            RELAY_NS,
+            &listed(&[]),
+            Instant::now(),
+        );
         assert_eq!(models.len(), 1);
         assert_eq!(
             (models[0].namespace.as_str(), models[0].model.as_str()),
@@ -854,6 +891,106 @@ mod tests {
         assert_eq!(models[0].serving_pools, [catalog.pools()[0].pool_id()]);
         assert_eq!(models[0].totals, RequestTotals::default());
         assert_eq!(models[0].expected_frontends, 0);
+        assert_eq!(models[0].deployment, None);
+    }
+
+    #[test]
+    fn topology_capacity_publishes_a_model_without_pools_or_frontends() {
+        let reports = FrontendReports::default();
+        let capacities = HashMap::from([(
+            (NS.to_string(), "a".to_string()),
+            Some(PoolDeployment {
+                live_workers: 2,
+                max_concurrency: Some(16),
+            }),
+        )]);
+
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &capacities,
+            RELAY_NS,
+            &listed(&[]),
+            Instant::now(),
+        );
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!((model.namespace.as_str(), model.model.as_str()), (NS, "a"));
+        assert_eq!(model.gauges, Coverage::Missing);
+        assert_eq!(model.serving_pools, []);
+        assert_eq!(model.totals, RequestTotals::default());
+        assert_eq!((model.expected_frontends, model.ready_frontends), (0, 0));
+        assert_eq!(
+            model.deployment,
+            Some(PoolDeployment {
+                live_workers: 2,
+                max_concurrency: Some(16),
+            })
+        );
+    }
+
+    #[test]
+    fn relay_namespace_frontends_count_under_the_models_topology_namespace() {
+        let mut reports = FrontendReports::default();
+        reports.record(
+            RELAY_NS.to_string(),
+            event(PUBLISHER, frame(1, 1, vec![model_load("a", 2, 5)])),
+        );
+        let capacities = HashMap::from([(
+            (NS.to_string(), "a".to_string()),
+            Some(PoolDeployment {
+                live_workers: 1,
+                max_concurrency: Some(8),
+            }),
+        )]);
+        let registered = HashMap::from([
+            (NS.to_string(), HashSet::new()),
+            (RELAY_NS.to_string(), HashSet::from([PUBLISHER])),
+        ]);
+
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &capacities,
+            RELAY_NS,
+            &registered,
+            Instant::now(),
+        );
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!((model.namespace.as_str(), model.model.as_str()), (NS, "a"));
+        assert_eq!(awaiting(model), Some(2));
+        assert_eq!(model.deployment.map(|d| d.max_concurrency), Some(Some(8)));
+    }
+
+    /// A model the topology lists with an unknown capacity is still a model:
+    /// its relay-namespace frontends are homed under its namespace, and its
+    /// `deployment` is `None`.
+    #[test]
+    fn a_model_with_unknown_capacity_is_listed_without_a_deployment() {
+        let mut reports = FrontendReports::default();
+        reports.record(
+            RELAY_NS.to_string(),
+            event(PUBLISHER, frame(1, 1, vec![model_load("a", 2, 5)])),
+        );
+        let capacities = HashMap::from([((NS.to_string(), "a".to_string()), None)]);
+        let registered = HashMap::from([
+            (NS.to_string(), HashSet::new()),
+            (RELAY_NS.to_string(), HashSet::from([PUBLISHER])),
+        ]);
+
+        let models = reports.model_loads(
+            &catalog(Vec::new()),
+            &capacities,
+            RELAY_NS,
+            &registered,
+            Instant::now(),
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            (models[0].namespace.as_str(), models[0].model.as_str()),
+            (NS, "a")
+        );
+        assert_eq!(models[0].observed_frontends, 1);
+        assert_eq!(models[0].deployment, None);
     }
 
     /// A frontend without an exact namespace publishes in the Relay's
@@ -871,7 +1008,13 @@ mod tests {
             (RELAY_NS.to_string(), HashSet::from([PUBLISHER])),
         ]);
 
-        let models = reports.model_loads(&catalog, RELAY_NS, &registered, Instant::now());
+        let models = reports.model_loads(
+            &catalog,
+            &HashMap::new(),
+            RELAY_NS,
+            &registered,
+            Instant::now(),
+        );
         assert_eq!(models.len(), 1);
         let model = &models[0];
         assert_eq!((model.namespace.as_str(), model.model.as_str()), (NS, "a"));
@@ -970,6 +1113,7 @@ mod tests {
         let catalog = catalog(vec![pool("pools", "a")]);
         let topology = TopologySnapshot {
             revision: 1,
+            capacities: HashMap::new(),
             entries: vec![TopologyEntry {
                 namespace: "models".to_string(),
                 model: CanonicalModelId::new("b").unwrap(),
