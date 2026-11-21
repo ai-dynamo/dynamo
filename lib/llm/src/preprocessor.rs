@@ -965,9 +965,8 @@ struct ReasoningState {
     // An emitted response with choices, reused as the envelope to carry any
     // text the parsers are still buffering when the upstream stream ends. Only
     // retained when an end-of-stream flush may follow, to keep the per-token
-    // clone off the common reasoning hot path: under
-    // `defer_reasoning_for_nonempty_content` it is the latest such response;
-    // under `finalize_parser_at_finish` alone it is cloned once, while a parsed
+    // clone off the common reasoning hot path: with nonempty-content deferral
+    // it is the latest such response; otherwise it is cloned once while a
     // choice's parser is unfinished. Chunks with no choices (the trailing
     // usage-only chunk) are never retained — that envelope has no delta slot
     // to attach the flushed bytes to, so the flush would be dropped.
@@ -1003,14 +1002,6 @@ struct ReasoningState {
     // into `content` in the first place. Scoped to the flag so no other parser
     // pays it.
     defer_reasoning_for_nonempty_content: bool,
-    // Finalize each choice's parser on its terminal chunk even without the
-    // deferral above, for parsers that retain undecided text until EOF
-    // (MiniMax M3), and at end of stream for a choice whose parser is still
-    // unfinished: it sent no `finish_reason`, or its terminal chunk carried
-    // content parts. Otherwise a turn whose output never shows a marker, such
-    // as grammar-constrained output under an adaptive prompt, is dropped
-    // whole with the parser state. See `is_minimax_m3_reasoning_parser`.
-    finalize_parser_at_finish: bool,
     // Set once the backend has sent an error annotation. The end-of-stream
     // flush must not run after that: an error is terminal, and emitting
     // recovered reasoning as ordinary `content` after it would put text on the
@@ -6357,13 +6348,7 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
-        // Only a force_nonempty_content request needs the deferral and the EOF
-        // flush of a truncated `<think>` prefix; gating on the request keeps the
-        // per-token clone and the finish_reasoning_stream() flush off every
-        // other request's path (a MiniMax M3 parser is still finalized on its
-        // terminal chunk, or at end of stream without one; see
-        // `finalize_parser_at_finish`). Same predicate the aggregator uses, so
-        // the streaming and non-streaming paths cannot disagree.
+        // Every active reasoning parser can hold undecided marker bytes at EOF.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
@@ -6380,18 +6365,13 @@ impl OpenAIPreprocessor {
         } else {
             stream
         };
-        // A MiniMax M3 parser can also release held text in an end-of-stream
-        // chunk (see `finalize_parser_at_finish`), so its usage is held too.
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
-            || should_strip_disabled_reasoning_start
-            || (should_parse_reasoning
-                && (reasoning_parser == Some("glm45")
-                    || Self::is_minimax_m3_reasoning_parser(reasoning_parser)))
-        {
-            Box::pin(Self::hold_usage_until_stream_end(stream))
-        } else {
-            stream
-        };
+        // Usage follows any text recovered at EOF by the parser or prefix filter.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_parse_reasoning || should_strip_disabled_reasoning_start {
+                Box::pin(Self::hold_usage_until_stream_end(stream))
+            } else {
+                stream
+            };
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(annotate_reasoning_usage(stream))
         } else {
@@ -8118,8 +8098,6 @@ impl OpenAIPreprocessor {
     {
         // Parsers and bypass decisions are created lazily per `choice.index`
         // inside the unfold loop, so `n > 1` choices never share state.
-        let finalize_parser_at_finish = parser_name == "glm45"
-            || Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
         let state = ReasoningState {
             stream: Box::pin(stream),
             parser_name,
@@ -8128,7 +8106,6 @@ impl OpenAIPreprocessor {
             choices: HashMap::new(),
             last_response: None,
             defer_reasoning_for_nonempty_content,
-            finalize_parser_at_finish,
             saw_terminal_error: false,
         };
 
@@ -8152,34 +8129,20 @@ impl OpenAIPreprocessor {
                         bypass_bare_guided_json,
                         choices,
                         defer_reasoning_for_nonempty_content,
-                        finalize_parser_at_finish,
                         ..
                     } = &mut state;
                     let parser_name = &*parser_name;
                     let prompt_injected_reasoning = *prompt_injected_reasoning;
                     let bypass_bare_guided_json = *bypass_bare_guided_json;
                     let defer_reasoning = *defer_reasoning_for_nonempty_content;
-                    let finalize_parser_at_finish = *finalize_parser_at_finish;
 
                     response.map_data(|mut data| {
                         for choice in data.inner.choices.iter_mut() {
                             let choice_state = choices.entry(choice.index).or_insert_with(|| {
-                                let mut parser: Box<dyn ReasoningParser> = if parser_name == "glm45"
-                                {
-                                    Box::new(
-                                        dynamo_parsers::reasoning::BasicReasoningParser::new(
-                                            "<think>".into(),
-                                            "</think>".into(),
-                                            false,
-                                            true,
-                                        )
-                                        .with_single_char_marker_buffering(),
-                                    )
-                                } else {
+                                let mut parser =
                                     Box::new(ReasoningParserType::get_reasoning_parser_from_name(
                                         parser_name,
-                                    ))
-                                };
+                                    ));
                                 if prompt_injected_reasoning {
                                     parser.set_in_reasoning(true);
                                 }
@@ -8346,7 +8309,6 @@ impl OpenAIPreprocessor {
                             // the same terminal delta and under the same
                             // conditions; see `finish_reasoning_parser`.
                             if !defer_reasoning
-                                && finalize_parser_at_finish
                                 && choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
@@ -8387,8 +8349,7 @@ impl OpenAIPreprocessor {
                 // carry no delta slot, so using one as the flush envelope would
                 // drop the very bytes the flush exists to preserve.
                 let retain_envelope = state.defer_reasoning_for_nonempty_content
-                    || (state.finalize_parser_at_finish
-                        && state.last_response.is_none()
+                    || (state.last_response.is_none()
                         && state.choices.values().any(|choice_state| {
                             choice_state.guided_json_bypass_decision == Some(false)
                                 && !choice_state.parser_finished
@@ -8402,9 +8363,7 @@ impl OpenAIPreprocessor {
                     state.last_response = Some(processed_response.clone());
                 }
                 Some((processed_response, state))
-            } else if state.saw_terminal_error
-                || !(state.defer_reasoning_for_nonempty_content || state.finalize_parser_at_finish)
-            {
+            } else if state.saw_terminal_error || state.last_response.is_none() {
                 // After a backend error the buffered bytes are dropped rather
                 // than surfaced: the request failed, so there is no answer to
                 // complete. See `saw_terminal_error`.
@@ -8416,14 +8375,8 @@ impl OpenAIPreprocessor {
                 // fallback for a stream that ends without any `finish_reason` —
                 // an aborted or truncated generation. The synthetic chunk it
                 // builds is the only case where recovered bytes arrive after the
-                // last upstream chunk, which is unavoidable when there was no
-                // terminal chunk to attach them to. Only the
-                // force_nonempty_content path and a parser finalized at finish
-                // (MiniMax M3) reach this branch; every other parser took the
-                // `None` branch above and keeps its original no-flush EOF
-                // behavior. Taking the envelope below rather than cloning it
-                // makes this branch one-shot: once it is gone the next poll ends
-                // the stream.
+                // last upstream chunk when there was no terminal chunk to
+                // carry them. Taking the envelope makes this branch one-shot.
                 // Sorted so the emitted choice order is deterministic rather
                 // than following HashMap iteration order.
                 let defer_reasoning = state.defer_reasoning_for_nonempty_content;
