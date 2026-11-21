@@ -21,6 +21,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+rustc-hash = "2.1.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
@@ -31,7 +32,6 @@ tokio-util = { workspace = true }
 dynamo-kv-hints = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"] }
 dynamo-scheduler = { workspace = true, features = ["bench"] }
-rustc-hash = "2.1.1"
 criterion = "0.5"
 tempfile = { workspace = true }
 

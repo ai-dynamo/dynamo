@@ -4,12 +4,13 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom catalog
-//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, and ThunderAgent
-//! providers through `register`. The default itself uses the same public candidate inputs and scorer/picker
-//! dispatch as external policies. Sequence tracking, eligibility, and admission remain in
-//! dynamo-kv-router.
+//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, KV-capacity-aware, and
+//! ThunderAgent providers through `register`. The default itself uses the same public candidate
+//! inputs and scorer/picker dispatch as external policies. Sequence tracking, eligibility, and
+//! admission remain in dynamo-kv-router.
 
 mod default;
+mod kv_capacity_aware;
 pub mod kv_fetch;
 mod output_length;
 pub mod router_modes;
@@ -49,6 +50,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
+    kv_capacity_aware::register(registry)?;
     thunderagent::register(registry)?;
     output_length::register(registry)?;
     Ok(())
@@ -137,6 +139,51 @@ worker_selection:
         ] {
             factory(&SelectionConfig::from(&config), worker_type, partition);
         }
+    }
+
+    /// The KV-capacity-aware decode policy resolves from the YAML its documentation shows, and a
+    /// misspelled parameter fails startup like the other policies.
+    #[test]
+    fn resolves_kv_capacity_aware_for_decode() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_fraction: 1.0
+      count_priority: true
+      decode_active_request_weight: 0
+      capacity_blocks: 20000
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured policy resolves to a factory");
+        factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Decode,
+            RoutingPartitionRef::new("model", "default"),
+        );
+
+        let (_config, resolved) = resolve(
+            r#"
+worker_selection:
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_ceiling: 20000
+"#,
+        );
+        let Err(error) = resolved else {
+            panic!("an unknown parameter must fail resolution");
+        };
+        assert!(
+            matches!(&error, WorkerSelectionPolicyRegistryError::Provider { policy_type, .. }
+                if policy_type == kv_capacity_aware::POLICY_TYPE),
+            "unexpected error: {error}"
+        );
+        assert!(error.to_string().contains("capacity_ceiling"), "{error}");
     }
 
     /// `kvcr` resolves by type name and takes the default's parameters.
