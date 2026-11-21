@@ -1839,6 +1839,9 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		} else {
 			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework)
 		}
+		if err == nil && component.Experimental.Failover.EngineLauncher {
+			err = applyEngineLauncher(&podSpec, numberOfNodes, snapshotEnabled)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}

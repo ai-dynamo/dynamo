@@ -1559,6 +1559,11 @@ GraphArchive mounts a pod-local emptyDir into both engine containers and points 
 See [GraphArchiveSpec](#grapharchivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="engineLauncher" type="boolean">
+EngineLauncher starts each engine container through the pre-imported engine launcher (`python3 -m dynamo.vllm.launcher -- <args>`), which replaces a dead engine in the same container. Same as the v1beta1 field.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="frontendsidecarspec" title="FrontendSidecarSpec">
@@ -3876,6 +3881,11 @@ numShadows is the number of shadow (standby) engine containers per rank. Reserve
 <ParamField path="graphArchive" type="GraphArchiveSpec">
 graphArchive mounts a pod-local `emptyDir` into both engine containers and points `dynamo.vllm --gms-graph-archive` at it. The first read-only shadow engine saves its CUDA graphs there, and later replacement engines load them. Setting it (even as an empty object, `graphArchive: \{\}`) enables the archive, which never outlives the pod. Supported only for single-node intra-pod cold-start (snapshot-less) failover with the vLLM backend (enforced by the validation webhook). See ExperimentalSpec for the stability caveat.
 See [GraphArchiveSpec](#v1beta1-grapharchivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="engineLauncher" type="boolean">
+engineLauncher starts each engine container with `python3 -m dynamo.vllm.launcher -- <args>` instead of `python3 -m dynamo.vllm <args>`. The launcher imports the engine's modules once and forks the engine from that process. When the engine dies, the launcher starts its replacement in the same container, so the container no longer restarts for an engine failure. Requires intra-pod failover without a checkpoint, a single node, the vLLM backend, and a main container that runs `python3 -m dynamo.vllm` directly. The launcher runs the engine's HTTP liveness probe itself and replaces a hung engine; the container's liveness probe checks the launcher instead. The engine containers get OPENBLAS_NUM_THREADS=1 unless their env sets it. The runtime image must ship `dynamo.vllm.launcher`, and the engine containers need a writable /tmp.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

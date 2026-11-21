@@ -188,6 +188,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
 	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, dynamo.ValidateFailoverGraphArchive(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
+	allErrs = append(allErrs, dynamo.ValidateEngineLauncher(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
