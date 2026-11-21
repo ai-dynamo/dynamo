@@ -260,17 +260,19 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 
 Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
 
-`dynamo-sita` accepts band parameters and score-shaping parameters:
+`dynamo-sita` is available in `dev` builds only; it is not in a released version yet. It accepts
+band parameters and score-shaping parameters. This example selects it for aggregated workers:
 
 ```yaml
-    - name: dynamo-sita
-      type: dynamo-sita
-      parameters:
-        boundary_1: 1024
-        boundary_2: 8192
-        small_band_share: 0.5
-        osl_weight: 0.0
-        spill_threshold: 0.85
+worker_selection:
+  aggregated:
+    type: dynamo-sita
+    parameters:
+      boundary_1: 1024
+      boundary_2: 8192
+      small_band_share: 0.5
+      osl_weight: 0.0
+      spill_threshold: 0.85
 ```
 
 | Parameter | Default | Meaning |
@@ -279,17 +281,23 @@ Each worker pool keeps its own bindings, so prefill and decode stages bind sessi
 | `boundary_2` | `8192` | Upper size of band 1, in tokens. `0` leaves a two-band split at `boundary_1`; otherwise must exceed `boundary_1`. |
 | `small_band_share` | `0.5` | Fraction of the pool, ordered by worker ID, that serves band 0. Must be strictly between `0.0` and `1.0`. |
 | `osl_weight` | `0.0` | Weight on the request's declared `expected_output_tokens` in its size estimate. `0.0` sizes by prefill alone. |
-| `spill_threshold` | `0.85` | Relative band occupancy above which a band spills into a quieter neighbor or borrows an idle band 0. `1.0` confines requests strictly to their band. Must be in `[0.5, 1.0]`. |
+| `spill_threshold` | `0.85` | Relative band occupancy above which a band spills into a quieter neighbor or borrows an idle band 0. `1.0` turns off spill and borrowing. Must be in `[0.5, 1.0]`. |
 | `score_overlap_weight` | `1.0` | Multiplier on the cache credit. Must be in `[0.25, 4.0]`. |
 | `score_overlap_gamma` | `1.0` | Exponent on the fraction of the prompt a worker holds; above `1.0` favors near-full hits. Must be in `[0.5, 2.0]`. |
 | `score_min_overlap_frac` | `0.0` | Fraction below which a worker earns no local cache credit. Shared-cache credit is unaffected. Must be in `[0.0, 0.5]`. |
 | `score_load_weight` | `1.0` | Multiplier on the decode-side load term. Must be in `[0.25, 4.0]`. |
 | `score_load_gamma` | `1.0` | Convexity of decode-side load relative to the candidate mean; above `1.0` charges busier workers superlinearly. Must be in `[1.0, 2.0]`. |
 
-A request's size counts only cache held inside its band, so a request whose cached prefix sits on
-another band's worker moves to the band its uncached size implies. A long request with no cached
-prefix in its band may use every non-short worker. With the `score_*` parameters at their defaults,
-workers inside a band are ranked exactly as `dynamo-default-cost-fn` ranks them.
+A request's size counts only cache held by its band's own workers, and the request goes to the
+smallest band it still fits after counting that cache. A cached prefix on another band's worker
+therefore never sends a request cold to a smaller band. A long request with no cached prefix in its
+band may use every non-short worker, even at `spill_threshold: 1.0`; band 0 is never lent at `1.0`.
+
+`dynamo-sita` also accepts every `dynamo-default-cost-fn` parameter (`overlap_score_credit`,
+`prefill_load_scale`, `router_temperature`, and the rest), with the same defaults and validation.
+With the `score_*` parameters at their defaults, workers inside a band are ranked as
+`dynamo-default-cost-fn` ranks them when both use the same effective cost weights. Parameters set on
+another policy instance don't carry over, so repeat any cost overrides under `dynamo-sita`.
 
 #### Override the Selection
 

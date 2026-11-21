@@ -147,16 +147,17 @@ worker_selection:
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-sita
-  instances:
-    - name: dynamo-sita
-      type: dynamo-sita
-      parameters:
-        boundary_1: 1024
-        boundary_2: 8192
-        small_band_share: 0.5
-        spill_threshold: 0.85
-        score_load_gamma: 1.2
+  aggregated:
+    type: dynamo-sita
+    parameters:
+      boundary_1: 1024
+      boundary_2: 8192
+      small_band_share: 0.5
+      spill_threshold: 0.85
+      score_load_gamma: 1.2
+      overlap_score_credit: 1.0
+  prefill: dynamo-sita
+  decode: dynamo-sita
 "#,
         );
         let factory = resolved

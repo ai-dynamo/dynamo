@@ -18,19 +18,23 @@
 //! the rest. Each request then picks the minimum-cost worker inside its band, with the default's
 //! uniform tie-breaking and temperature sampling.
 //!
-//! Strict confinement has costs, so three relief valves widen the band (all driven by
-//! `spill_threshold`, where `1.0` turns every one of them off):
+//! Strict confinement has costs, so three relief valves widen the band, all driven by
+//! `spill_threshold`:
 //!
 //! - **Spill.** A band whose relative occupancy exceeds `spill_threshold` widens into an adjacent,
 //!   quieter band: upward when one exists, otherwise the top band widens down into band 1, never
 //!   into band 0.
 //! - **Borrow.** A saturated long band may also borrow band 0 while band 0 is measurably idle.
+//!   The borrowed band 0 is added as its own range, so it never re-admits a band in between.
 //! - **Uncached widening.** A long request with no cached prefix in its band has no affinity to
 //!   preserve, so it may use every non-short worker, and band 0 too under a looser idleness bar.
 //!
-//! Cache only shrinks a request's size when the band's own workers hold it. A request whose only
-//! cached prefix sits on a worker outside the would-be band moves to the band its cold prefill
-//! size implies instead of landing cold on a small-band worker.
+//! `spill_threshold: 1.0` turns off spill and borrowing. Uncached widening still sends an uncached
+//! long request to the whole non-short pool, but band 0 is never lent at `1.0`.
+//!
+//! Cache only shrinks a request's size when the band's own workers hold it. The request goes to
+//! the smallest band it still fits after counting that band's own cache, so a prefix cached on
+//! another band's worker never sends it cold to a small-band worker.
 //!
 //! The scorer reproduces the default cost from the same `SelectionConfig` weights, optionally
 //! reshaped by the `score_*` parameters:
@@ -52,7 +56,9 @@ use std::sync::Arc;
 
 use dynamo_kv_router::plugins::prelude::*;
 
-/// Policy type selected by `worker_selection.instances[].type`.
+use crate::default::softmax_sample_index;
+
+/// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-sita";
 
 /// Tunables for [`POLICY_TYPE`].
@@ -73,7 +79,7 @@ struct Parameters {
     /// requests by prefill alone.
     osl_weight: f64,
     /// Relative occupancy above which a band may spill or borrow, in `[0.5, 1.0]`. `1.0` disables
-    /// every relief valve and confines requests strictly to their band.
+    /// spill and borrowing; uncached long requests still widen to the non-short pool.
     spill_threshold: f64,
     /// Multiplier on the overlap credit. Above `1.0` chases cache locality harder.
     score_overlap_weight: f64,
@@ -86,6 +92,16 @@ struct Parameters {
     /// Convexity of the decode-side load relative to the candidate mean. Above `1.0` charges an
     /// already-busy worker superlinearly.
     score_load_gamma: f64,
+    // The default cost's parameters, with the same names, meaning and resolution as on
+    // `dynamo-default-cost-fn`. Each falls back to the router setting when omitted.
+    overlap_score_credit: Option<f64>,
+    overlap_score_credit_decay: Option<f64>,
+    prefill_load_scale: Option<f64>,
+    decode_active_request_weight: Option<f64>,
+    host_cache_hit_weight: Option<f64>,
+    disk_cache_hit_weight: Option<f64>,
+    shared_cache_multiplier: Option<f64>,
+    router_temperature: Option<f64>,
 }
 
 impl Default for Parameters {
@@ -101,6 +117,14 @@ impl Default for Parameters {
             score_min_overlap_frac: 0.0,
             score_load_weight: 1.0,
             score_load_gamma: 1.0,
+            overlap_score_credit: None,
+            overlap_score_credit_decay: None,
+            prefill_load_scale: None,
+            decode_active_request_weight: None,
+            host_cache_hit_weight: None,
+            disk_cache_hit_weight: None,
+            shared_cache_multiplier: None,
+            router_temperature: None,
         }
     }
 }
@@ -143,6 +167,29 @@ impl Parameters {
             if !value.is_finite() || !(low..=high).contains(&value) {
                 return Err(WorkerSelectionPolicyProviderError::new(format!(
                     "{name} must be a finite number between {low} and {high}"
+                )));
+            }
+        }
+        // Validated as `dynamo-default-cost-fn` validates them.
+        for (name, value) in [
+            ("overlap_score_credit", self.overlap_score_credit),
+            (
+                "overlap_score_credit_decay",
+                self.overlap_score_credit_decay,
+            ),
+            ("prefill_load_scale", self.prefill_load_scale),
+            (
+                "decode_active_request_weight",
+                self.decode_active_request_weight,
+            ),
+            ("host_cache_hit_weight", self.host_cache_hit_weight),
+            ("disk_cache_hit_weight", self.disk_cache_hit_weight),
+            ("shared_cache_multiplier", self.shared_cache_multiplier),
+            ("router_temperature", self.router_temperature),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                return Err(WorkerSelectionPolicyProviderError::new(format!(
+                    "{name} must be finite and non-negative"
                 )));
             }
         }
@@ -228,16 +275,20 @@ fn band_occupancy(loads: &[f64], slice: Slice) -> f64 {
 /// short ones, the head-of-line blocking SITA exists to prevent. So the band above is preferred,
 /// and the top band falls back to band 1, never band 0. Without that downward valve the top band
 /// would be a saturation sink, receiving spill from below and never shedding it.
+///
+/// Returns up to two ranges: the band, widened by its neighbor when that neighbor qualifies, and
+/// band 0 when it is borrowed. They stay separate so borrowing band 0 never re-admits a band that
+/// the spill check rejected in between.
 fn apply_spill(
     band: usize,
     band_count: usize,
     slices: &[Slice; 3],
     loads: &[f64],
     spill_threshold: f64,
-) -> Slice {
+) -> Vec<Slice> {
     let target = slices[band];
     if spill_threshold >= 1.0 || band_occupancy(loads, target) <= spill_threshold {
-        return target;
+        return vec![target];
     }
     let neighbor_band = if band + 1 < band_count {
         Some(band + 1)
@@ -254,26 +305,27 @@ fn apply_spill(
         }
         _ => target,
     };
-    borrow_idle_short_band(widened, slices, loads, spill_threshold)
+    let mut ranges = vec![widened];
+    if borrows_idle_short_band(widened, slices, loads, spill_threshold) {
+        ranges.push(slices[0]);
+    }
+    ranges
 }
 
-/// Let a saturated long band borrow band 0's workers while band 0 is measurably idle.
+/// Whether a saturated long band may borrow band 0's workers: only while band 0 is measurably
+/// idle.
 ///
 /// The short-band reservation is only free while short requests use it. Fencing it off
 /// unconditionally starves the long bands of KV capacity, and their tail end-to-end latency blows
 /// up even though time-to-first-token is unchanged. `spill_threshold` sets both sides of the
 /// dial: a band is saturated above it and idle below its complement.
-fn borrow_idle_short_band(
+fn borrows_idle_short_band(
     target: Slice,
     slices: &[Slice; 3],
     loads: &[f64],
     spill_threshold: f64,
-) -> Slice {
-    let short = slices[0];
-    if target.0 <= short.0 || band_occupancy(loads, short) >= 1.0 - spill_threshold {
-        return target;
-    }
-    (short.0, target.1)
+) -> bool {
+    target.0 > slices[0].0 && band_occupancy(loads, slices[0]) < 1.0 - spill_threshold
 }
 
 /// Widen a long request with no cached prefix in its band to every non-short worker, and to band
@@ -285,6 +337,9 @@ fn borrow_idle_short_band(
 /// longest decodes, so confining them to a slice multiplies the decode contention there. Such a
 /// request is also the cheapest possible borrower of band 0: lending it a worker costs the short
 /// band only the load it brings, never a lost cache hit, so it gets a doubled idleness allowance.
+///
+/// This applies at every `spill_threshold`, including `1.0`: an uncached long request always gets
+/// the whole non-short pool. At `1.0` the idleness allowance is zero, so band 0 is never lent.
 fn widen_uncached_long_band(
     band: usize,
     slices: &[Slice; 3],
@@ -363,13 +418,24 @@ impl Pool {
             .unwrap_or(0)
     }
 
-    /// Inclusive worker-ID bounds of the band this request may route to, or `None` when the pool
-    /// is too small to partition.
-    fn band_bounds(
+    /// Whether `worker_id` falls in one of `ranges`, which index into the sorted worker list.
+    fn contains(&self, ranges: &[Slice], worker_id: WorkerId) -> bool {
+        self.worker_ids
+            .binary_search(&worker_id)
+            .is_ok_and(|index| {
+                ranges
+                    .iter()
+                    .any(|&(start, end)| (start..end).contains(&index))
+            })
+    }
+
+    /// Ranges of the sorted worker list this request may route to, or `None` when the pool is too
+    /// small to partition.
+    fn band_ranges(
         &self,
         parameters: &Parameters,
         context: &WorkerSelectionContext<'_>,
-    ) -> Option<(WorkerId, WorkerId)> {
+    ) -> Option<Vec<Slice>> {
         let worker_count = self.worker_ids.len();
         if worker_count < 2 {
             return None;
@@ -388,51 +454,51 @@ impl Pool {
         let band_count = if parameters.boundary_2 == 0 { 2 } else { 3 };
         let slices = band_slices(worker_count, parameters.small_band_share, band_count);
 
-        // Start from the best cache anywhere, then check that the band's own workers can deliver
-        // it. If they cannot, the request would prefill cold there, so move it to the band its
-        // real size implies. Size only grows as cache is lost, so this climbs at most to the top.
-        let mut band = band_for(size_with_cache(self.best_cached_in((0, worker_count))));
-        let mut best_cached_tokens = self.best_cached_in(slices[band]);
-        let mut size = size_with_cache(best_cached_tokens);
-        loop {
-            let actual_band = band_for(size);
-            if actual_band <= band {
-                break;
-            }
-            band = actual_band;
-            best_cached_tokens = self.best_cached_in(slices[band]);
-            size = size_with_cache(best_cached_tokens);
-        }
+        // Cache only shrinks a request in a band whose own workers hold it, so a band qualifies
+        // when the request still fits it after counting that band's best cache. Starting from the
+        // smallest band the best cache anywhere could allow, take the first band that qualifies:
+        // the request stays in the smallest band it genuinely fits, which keeps it out of longer
+        // bands even when one of them holds a deeper prefix. The top band always qualifies.
+        let smallest = band_for(size_with_cache(self.best_cached_in((0, worker_count))));
+        let band = (smallest..band_count)
+            .find(|&band| band_for(size_with_cache(self.best_cached_in(slices[band]))) <= band)
+            .unwrap_or(band_count - 1);
+        let best_cached_tokens = self.best_cached_in(slices[band]);
+        let size = size_with_cache(best_cached_tokens);
 
-        let spilled = apply_spill(
+        let mut ranges = apply_spill(
             band,
             band_count,
             &slices,
             &self.loads,
             parameters.spill_threshold,
         );
-        let widened = widen_uncached_long_band(
+        ranges.push(widen_uncached_long_band(
             band,
             &slices,
             worker_count,
             best_cached_tokens,
             &self.loads,
             parameters.spill_threshold,
-        );
-        let (start, end) = if widened.1 - widened.0 > spilled.1 - spilled.0 {
-            widened
-        } else {
-            spilled
-        };
+        ));
+        let start = ranges.iter().map(|range| range.0).min().unwrap_or(0);
+        let end = ranges
+            .iter()
+            .map(|range| range.1)
+            .max()
+            .unwrap_or(worker_count);
         tracing::debug!(
             request_id = context.request_id().unwrap_or("-"),
             size,
             band,
-            "SITA band restricted routing to worker ids [{}, {}]",
-            self.worker_ids[start],
-            self.worker_ids[end - 1],
+            min_worker_id = self.worker_ids[start],
+            max_worker_id = self.worker_ids[end - 1],
+            allowed_workers = (start..end)
+                .filter(|index| ranges.iter().any(|&(s, e)| (s..e).contains(index)))
+                .count(),
+            "SITA restricted candidate workers"
         );
-        Some((self.worker_ids[start], self.worker_ids[end - 1]))
+        Some(ranges)
     }
 }
 
@@ -454,7 +520,9 @@ struct CostWeights {
 }
 
 impl CostWeights {
-    fn new(config: &SelectionConfig, role: WorkerType) -> Self {
+    /// Resolve each weight from the instance parameter when set, else from the router setting,
+    /// exactly as `dynamo-default-cost-fn` does.
+    fn new(config: &SelectionConfig, role: WorkerType, parameters: &Parameters) -> Self {
         // Plain disaggregated decode is load-only; conditional decode retains cache credit.
         if role == WorkerType::Decode && !config.conditional_disagg_enabled {
             return Self {
@@ -462,30 +530,46 @@ impl CostWeights {
                 host_cache_hit_weight: 0.0,
                 disk_cache_hit_weight: 0.0,
                 shared_cache_multiplier: 0.0,
-                ..Self::new(config, WorkerType::Aggregated)
+                ..Self::new(config, WorkerType::Aggregated, parameters)
             };
         }
-        // Legacy load-only configs retain tier weights for host accounting only.
+        let overlap_score_credit = parameters
+            .overlap_score_credit
+            .unwrap_or(config.overlap_score_credit);
+        // Legacy load-only configs retain tier weights for host accounting only. Only explicit
+        // parameters enable tier scoring independently of device credit.
         let inherited = |weight: f64| {
-            if config.overlap_score_credit == 0.0 {
+            if overlap_score_credit == 0.0 {
                 0.0
             } else {
                 weight
             }
         };
         Self {
-            overlap_score_credit: config.overlap_score_credit,
-            overlap_score_credit_decay: config.overlap_score_credit_decay,
-            prefill_load_scale: config.prefill_load_scale,
-            decode_active_request_weight: config.decode_active_request_weight,
-            host_cache_hit_weight: inherited(config.host_cache_hit_weight),
-            disk_cache_hit_weight: inherited(config.disk_cache_hit_weight),
-            shared_cache_multiplier: inherited(config.shared_cache_multiplier.unwrap_or(
-                match config.shared_cache_type {
-                    SharedCacheType::None => 0.0,
-                    SharedCacheType::Hicache => 0.5,
-                },
-            )),
+            overlap_score_credit,
+            overlap_score_credit_decay: parameters
+                .overlap_score_credit_decay
+                .unwrap_or(config.overlap_score_credit_decay),
+            prefill_load_scale: parameters
+                .prefill_load_scale
+                .unwrap_or(config.prefill_load_scale),
+            decode_active_request_weight: parameters
+                .decode_active_request_weight
+                .unwrap_or(config.decode_active_request_weight),
+            host_cache_hit_weight: parameters
+                .host_cache_hit_weight
+                .unwrap_or(inherited(config.host_cache_hit_weight)),
+            disk_cache_hit_weight: parameters
+                .disk_cache_hit_weight
+                .unwrap_or(inherited(config.disk_cache_hit_weight)),
+            shared_cache_multiplier: parameters.shared_cache_multiplier.unwrap_or_else(|| {
+                inherited(config.shared_cache_multiplier.unwrap_or(
+                    match config.shared_cache_type {
+                        SharedCacheType::None => 0.0,
+                        SharedCacheType::Hicache => 0.5,
+                    },
+                ))
+            }),
         }
     }
 }
@@ -707,24 +791,38 @@ impl WorkerPicker for SitaPicker {
             return Ok(0);
         }
         // Without KV state there is nothing to size the request by, so every row stays eligible.
-        let bounds = match (input.cache(), input.load()) {
-            (Some(cache), Some(load)) => Pool::new(candidates, cache, load, context.block_size())
-                .band_bounds(&self.parameters, context),
+        let pool = match (input.cache(), input.load()) {
+            (Some(cache), Some(load)) => {
+                Some(Pool::new(candidates, cache, load, context.block_size()))
+            }
             _ => None,
         };
-        let in_band = |row: &usize| {
-            bounds.is_none_or(|(low, high)| {
-                (low..=high).contains(&candidates[*row].worker().worker_id)
-            })
+        let ranges = pool
+            .as_ref()
+            .and_then(|pool| pool.band_ranges(&self.parameters, context));
+        let in_band = |row: &usize| match (&pool, &ranges) {
+            (Some(pool), Some(ranges)) => {
+                pool.contains(ranges, candidates[*row].worker().worker_id)
+            }
+            _ => true,
         };
 
         if self.temperature != 0.0 {
             let rows: Vec<usize> = (0..candidates.len()).filter(in_band).collect();
-            return Ok(rows[softmax_sample(
-                rows.iter().map(|&row| candidates[row].cost()),
+            if rows.is_empty() {
+                return Err(WorkerSelectionPolicyError::failed(
+                    "no eligible worker in band",
+                ));
+            }
+            let mut probabilities = Vec::new();
+            let index = softmax_sample_index(
+                &rows,
+                |&row| candidates[row].cost(),
                 self.temperature,
                 fastrand::f64(),
-            )]);
+                &mut probabilities,
+            );
+            return Ok(rows[index]);
         }
         let mut best_row = None;
         let mut best_cost = f64::INFINITY;
@@ -746,46 +844,6 @@ impl WorkerPicker for SitaPicker {
     }
 }
 
-/// Softmax-sample an index from `costs`, lower cost more likely, normalized by the cost range the
-/// same way the default picker does.
-fn softmax_sample(
-    costs: impl Iterator<Item = f64> + Clone,
-    temperature: f64,
-    sample: f64,
-) -> usize {
-    let (min_cost, max_cost) = costs
-        .clone()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), cost| {
-            (lo.min(cost), hi.max(cost))
-        });
-    let count = costs.clone().count();
-    let weights: Vec<f64> = if min_cost == max_cost {
-        vec![1.0; count]
-    } else {
-        let range = max_cost - min_cost;
-        let magnitude = if range.is_finite() {
-            1.0
-        } else {
-            min_cost.abs().max(max_cost.abs())
-        };
-        let min_normalized = min_cost / magnitude;
-        let scale = -1.0 / ((max_cost / magnitude - min_normalized) * temperature);
-        let max_scaled = min_normalized * scale;
-        costs
-            .map(|cost| (cost / magnitude * scale - max_scaled).exp())
-            .collect()
-    };
-    let sum: f64 = weights.iter().sum();
-    let mut cumulative = 0.0;
-    for (index, weight) in weights.iter().enumerate() {
-        cumulative += weight / sum;
-        if sample <= cumulative {
-            return index;
-        }
-    }
-    count - 1
-}
-
 // ---------------------------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------------------------
@@ -800,13 +858,15 @@ fn policy(
         config.clone(),
         worker_label,
         vec![Box::new(ShapedCostScorer {
-            weights: CostWeights::new(config, role),
+            weights: CostWeights::new(config, role, &parameters),
             parameters,
             is_decode: worker_label == "decode",
         })],
         Box::new(SitaPicker {
             parameters,
-            temperature: config.router_temperature,
+            temperature: parameters
+                .router_temperature
+                .unwrap_or(config.router_temperature),
         }),
     )
     .with_exclusive_affinity(true)
@@ -992,7 +1052,7 @@ mod tests {
             config.clone(),
             label,
             vec![Box::new(ShapedCostScorer {
-                weights: CostWeights::new(config, role),
+                weights: CostWeights::new(config, role, &parameters),
                 parameters,
                 is_decode: label == "decode",
             })],
@@ -1052,17 +1112,37 @@ mod tests {
             set_cache(&mut request, b, b_cached);
             set_decode(&mut request, a, a_decode);
             set_decode(&mut request, b, b_decode);
-            let config = SelectionConfig::default();
             let workers = HashMap::from([(a, TestWorker), (b, TestWorker)]);
-            let stock = select_on(&default_policy(config.clone(), "test"), &workers, &request);
-            let (shaped, _) = score(
-                &config,
-                WorkerType::Aggregated,
-                Parameters::default(),
-                &request,
-                &[a, b],
-            );
-            assert_eq!(shaped, stock, "diverged from the default on {a}/{b}");
+            // Stock weights, then cost overrides: a weight set as a `dynamo-sita` parameter must
+            // rank workers as the same weight does on the default policy.
+            for (credit, prefill_scale) in [(None, None), (Some(0.0), Some(2.0)), (Some(2.5), None)]
+            {
+                let default_config = SelectionConfig {
+                    overlap_score_credit: credit
+                        .unwrap_or(SelectionConfig::default().overlap_score_credit),
+                    prefill_load_scale: prefill_scale
+                        .unwrap_or(SelectionConfig::default().prefill_load_scale),
+                    ..SelectionConfig::default()
+                };
+                let stock = select_on(&default_policy(default_config, "test"), &workers, &request);
+                let parameters = Parameters {
+                    overlap_score_credit: credit,
+                    prefill_load_scale: prefill_scale,
+                    ..Parameters::default()
+                };
+                let (shaped, _) = score(
+                    &SelectionConfig::default(),
+                    WorkerType::Aggregated,
+                    parameters,
+                    &request,
+                    &[a, b],
+                );
+                assert_eq!(
+                    shaped, stock,
+                    "diverged from the default on {a}/{b} with credit {credit:?}, \
+                     prefill scale {prefill_scale:?}"
+                );
+            }
         }
     }
 
@@ -1088,8 +1168,58 @@ mod tests {
         assert!(chosen >= 4, "routed to cold band-0 worker {chosen}");
     }
 
+    /// A pool of eight workers with the given per-worker loads and cached tokens.
+    fn pool(loads: [f64; 8], cached_tokens: [usize; 8]) -> Pool {
+        Pool {
+            worker_ids: (0..8).collect(),
+            loads: loads.to_vec(),
+            cached_tokens: cached_tokens.to_vec(),
+        }
+    }
+
+    fn allowed(pool: &Pool, parameters: Parameters, isl_tokens: usize) -> Vec<u64> {
+        let context = WorkerSelectionContext::new(isl_tokens, BLOCK_SIZE);
+        let ranges = pool.band_ranges(&parameters, &context).unwrap();
+        (0..8).filter(|&id| pool.contains(&ranges, id)).collect()
+    }
+
+    #[test]
+    fn request_goes_to_the_smallest_band_its_own_cache_fits() {
+        // 10,000 tokens. Band 0 holds nothing (cold size 10,000 maps to band 2). Band 1's worker 4
+        // holds 2,000 (size 8,000 fits band 1). Band 2's worker 6 holds 9,500. The first band that
+        // fits is band 1, so the request must not skip it for band 2's deeper hit.
+        let pool = pool([0.0; 8], [0, 0, 0, 0, 2_000, 0, 9_500, 0]);
+        assert_eq!(allowed(&pool, strict(), 10_000), [4, 5]);
+
+        // Without band 1's cache, the request falls through to band 2.
+        let pool = super::Pool {
+            cached_tokens: vec![0, 0, 0, 0, 0, 0, 9_500, 0],
+            ..pool
+        };
+        assert_eq!(allowed(&pool, strict(), 10_000), [6, 7]);
+    }
+
+    #[test]
+    fn borrowing_band_0_does_not_readmit_a_rejected_middle_band() {
+        // share 0.75 over 8 workers => band 0 = 0..6, band 1 = 6..7, band 2 = 7..8. Band 2
+        // occupancy = 950 / (950 + 1000/7) = 0.87 > 0.85, so it seeks relief. Band 1 is busier
+        // (1,000), so spill rejects it; band 0 is idle, so it is borrowed as a separate range.
+        let mut loads = [0.0; 8];
+        loads[6] = 1_000.0;
+        loads[7] = 950.0;
+        let pool = pool(loads, [64; 8]);
+        let parameters = Parameters {
+            small_band_share: 0.75,
+            ..Parameters::default()
+        };
+        assert_eq!(allowed(&pool, parameters, 9_000), [0, 1, 2, 3, 4, 5, 7]);
+    }
+
     #[test]
     fn uncached_long_request_widens_beyond_its_band() {
+        // Uncached widening is intentionally kept at `spill_threshold: 1.0` (`strict()`): an
+        // uncached long request always gets the whole non-short pool, and only band 0 stays
+        // reserved.
         // Saturate the top band; spilling is off, so only the uncached widening can move it.
         let saturate = |request: &mut SchedulingRequest| {
             for id in 6..8 {
