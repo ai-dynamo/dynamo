@@ -41,11 +41,13 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
 import dynamo.frontend.sglang_prompt_renderer as sglang_prompt_renderer_module
+from dynamo._core import _raise_routed_http_error
 from dynamo.common.backend.logprobs import (
     build_sglang_logprob_kwargs,
     extract_from_sglang_meta,
     extract_prompt_logprobs_from_sglang_meta,
 )
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -1310,19 +1312,43 @@ def _qwen_guided_request_without_separation(tool_choice):
 
 
 @pytest.mark.parametrize(
-    ("routed_error", "expected"),
+    "failure,from_stream",
     [
-        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
-        (RoutedEngineError("worker pool at capacity"), RoutedEngineError),
-        (RuntimeError("worker crashed"), Unknown),
+        ("unavailable", False),
+        ("capacity", False),
+        ("internal", False),
+        (403, False),
+        (404, True),
     ],
 )
-def test_routed_engine_rejection_keeps_worker_unavailable(
-    tokenizer, routed_error, expected
+def test_routed_engine_rejection_keeps_its_semantic_error(
+    tokenizer, failure, from_stream
 ):
+    if failure == "unavailable":
+        routed_error = WorkerUnavailable("prefill routing is still activating")
+        expected = WorkerUnavailable
+    elif failure == "capacity":
+        routed_error = RoutedEngineError("worker pool at capacity")
+        expected = RoutedEngineError
+    elif failure == "internal":
+        routed_error = RuntimeError("worker crashed")
+        expected = Unknown
+    else:
+        with pytest.raises(RoutedEngineError) as backend:
+            _raise_routed_http_error(failure, IMAGE_FETCH_ERROR_MESSAGES[failure])
+        routed_error = backend.value
+        expected = RoutedEngineError
+
     class RejectingRoutedEngine(FakeRoutedEngine):
         async def generate(self, preprocessed, **kwargs):
-            raise routed_error
+            if not from_stream:
+                raise routed_error
+
+            async def stream():
+                raise routed_error
+                yield  # pragma: no cover
+
+            return stream()
 
     processor = SglangProcessor(
         tokenizer=tokenizer,
@@ -5627,6 +5653,56 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         def decode(self, token_ids, *, skip_special_tokens):
             del skip_special_tokens
             return bytes(token_ids).decode("utf-8", errors="replace")
+
+    @pytest.mark.parametrize("batch_size", [512, 7])
+    @pytest.mark.parametrize("name", ["lookup", "other_tool"])
+    def test_catalogued_calls_reach_http_allowlist(self, batch_size, name):
+        tokenizer = self.ByteTokenizer()
+        lookup, other = (
+            {"type": "function", "function": {"name": tool_name}}
+            for tool_name in ("lookup", "other_tool")
+        )
+        request = {
+            "tools": [lookup],
+            "chat_template_tools": [lookup, other],
+            "tool_choice": "auto",
+        }
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=FakeRoutedEngine(items=[]),
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+        parser, reasoner = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        post = processor._build_postprocessor(
+            request,
+            {"sampling_options": {"guided_decoding": None}},
+            tool_call_parser=parser,
+            reasoning_parser=reasoner,
+            named_zero_arg_tool=None,
+            prompt_token_ids=[],
+        )
+        text = (
+            "<tool_call>\n"
+            + json.dumps({"name": name, "arguments": {}})
+            + "\n</tool_call>"
+        )
+        token_ids = list(text.encode())
+
+        for start in range(0, len(token_ids), batch_size):
+            end = start + batch_size
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[start:end],
+                    "finish_reason": "stop" if end >= len(token_ids) else None,
+                }
+            )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"]["name"] == name
 
     def test_basic_decode(self, tokenizer):
         """Tokens decode to expected text."""

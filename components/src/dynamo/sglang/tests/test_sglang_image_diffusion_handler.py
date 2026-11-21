@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
+from dynamo.common.http.base import HttpStatusError
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
     ImageDiffusionWorkerHandler,
@@ -618,8 +620,9 @@ class TestImageDiffusionWorkerHandler:
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [403, 404, 415])
     async def test_generate_i2i_maps_a_4xx_fetch_to_invalid_argument(
-        self, handler, mock_context, tmp_path, monkeypatch
+        self, handler, mock_context, monkeypatch, status
     ):
         """A 4xx from the origin the client chose is the client's problem.
 
@@ -628,14 +631,12 @@ class TestImageDiffusionWorkerHandler:
         URL is not echoed back -- it has no length limit and the video handler
         puts str(exc) straight in its response body.
         """
-        from dynamo.common.http.base import HttpStatusError
-
         handler.generator.generate = Mock()
         monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
-        url = "http://example.com/" + "u" * 5000
+        url = "http://127.0.0.1/" + "u" * 5000
 
         async def fake_fetch(u, timeout, *, policy=None, max_bytes=None):
-            raise HttpStatusError(404, "Not Found", u)
+            raise HttpStatusError(status, "private origin details", u)
 
         monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
         request = {
@@ -646,11 +647,16 @@ class TestImageDiffusionWorkerHandler:
             "input_reference": url,
         }
 
-        with pytest.raises(InvalidArgument, match="HTTP 404") as excinfo:
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler.generate(request, mock_context):
                 pass
 
         assert "uuuu" not in str(excinfo.value)
+        assert "private origin details" not in str(excinfo.value)
+        assert str(excinfo.value) == (
+            IMAGE_FETCH_ERROR_MESSAGES.get(status)
+            or f"input_reference could not be fetched (HTTP {status})"
+        )
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio

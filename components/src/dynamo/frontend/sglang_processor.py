@@ -845,7 +845,9 @@ class SglangProcessor:
             history_tool_calls_count=_get_history_tool_calls_count(
                 request.get("messages", [])
             ),
-            sglang_tools=convert_tools(request.get("tools")),
+            sglang_tools=convert_tools(
+                request.get("chat_template_tools") or request.get("tools")
+            ),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=named_zero_arg_tool,
             guided_json_is_content=_guided_json_is_content(dynamo_preproc),
