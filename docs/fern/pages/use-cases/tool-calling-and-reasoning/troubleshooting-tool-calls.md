@@ -132,6 +132,38 @@ response provides them, and compare it against `message.content` and
 `message.tool_calls` to decide whether the issue is in the model output,
 the parser configuration, or the parser logic.
 
+## Custom-Tool Grammar Constraints
+
+If generated custom-tool input does not match its declared regex or Lark
+grammar, check the endpoint's decoding contract. Dynamo's Responses endpoint
+accepts these descriptors as **advisory** metadata. The model generates a
+freeform `input` string; decoding does not enforce the grammar. This also
+applies to tools grouped under a named namespace and tool declarations supplied
+by a client-side tool-search result. The response retains the descriptor.
+
+The frontend logs this exact warning once per process:
+
+```text
+Responses custom-tool grammars are advisory; decoding does not enforce regex or Lark constraints
+```
+
+Validate each generated custom-tool input before executing it. An HTTP 200
+response or echoed descriptor does not establish grammar enforcement. If your
+client requires constrained output, use an endpoint that enforces that grammar.
+Function-tool and response-format guided decoding use separate constraints; see
+[Structural Tags](structural-tag.md).
+
+Older frontends can reject a Responses custom-tool grammar with:
+
+```text
+Custom tool grammar formats are not supported
+```
+
+If freeform input is acceptable, replace the custom tool's format with
+`{"type":"text"}` and validate the generated input in your application. This
+workaround does not enforce the original grammar. Chat Completions also rejects
+grammar formats; use its `text` format for freeform custom tools.
+
 ## Parser Generation Routing
 
 Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on workers that build parser-dependent guidance. Workers publish `--dyn-tool-call-parser` and `--dyn-reasoning-parser`; the frontend runs parsing. Restart after changing the environment because version selection is cached. For release-specific parser versions, inspect `Cargo.toml` and `Cargo.lock` in your release checkout. The development [Cargo.toml](https://github.com/ai-dynamo/dynamo/blob/main/Cargo.toml) and [Cargo.lock](https://github.com/ai-dynamo/dynamo/blob/main/Cargo.lock) links track `main`. The frontend-crates library examples may target a newer release.

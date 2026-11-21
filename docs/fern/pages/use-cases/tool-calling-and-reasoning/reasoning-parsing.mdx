@@ -112,6 +112,45 @@ Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before 
   </Step>
 </Steps>
 
+## Responses Reasoning Replay
+
+Set `DYN_RESPONSES_LEGACY_REASONING_REPLAY=1` on the frontend to enable the
+TensorRT-LLM-compatible replay format below. With this setting,
+`include: ["reasoning.encrypted_content"]` returns replay data.
+Without this setting, Dynamo omits the replay field. Requests that include only
+the replay field receive no reasoning text.
+
+Setting `reasoning.summary` returns the full reasoning text as `reasoning_text`
+parts in the item's `content`. The `summary` array stays empty.
+
+The replay payload is `trtllm-reasoning-v1:` followed by standard base64 of the
+exact UTF-8 reasoning text. For example, `hello` becomes
+`trtllm-reasoning-v1:aGVsbG8=`. The prefix identifies the versioned replay
+format; Dynamo retains it for compatibility with existing conversation history,
+including when the frontend serves another backend.
+
+<Warning>
+This payload is **not encryption**. Anyone who has the blob can read the
+reasoning. Store, transmit, and log it with the same protections as plaintext
+reasoning.
+</Warning>
+
+On replay, nonempty readable `content` takes precedence. Dynamo accepts this
+format even when replay output is disabled. It returns HTTP 400 for malformed base64 or
+invalid UTF-8. If no readable content or recognized payload is available,
+Dynamo falls back to readable `summary` text. Other providers' opaque encodings
+are not decoded or forwarded as reasoning to the backend; do not rely on them
+to preserve conversation reasoning.
+
+Without either request option, the serving deployment controls whether Dynamo
+returns raw reasoning by default. Set `responses_emit_raw_reasoning` in the
+model deployment card's runtime data to `true` or `false` to set that policy.
+Set the same value on every worker in the deployment.
+If the setting is absent, the Kimi K3 and GLM 4.7 families retain their existing
+default when selected by the reasoning parser, or by the tool parser when no
+reasoning parser is configured. Explicit request options continue to work
+independently of that default.
+
 ## Deployment-Level Thinking Default
 
 Set `--dyn-default-thinking-mode` on a backend worker to choose the thinking

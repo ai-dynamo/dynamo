@@ -116,7 +116,8 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+    MediaRequestExt, PromptToolHistory, apply_continue_final_message, prompt_formatter_from_mdc,
+    prompt_formatter_with_history_from_mdc,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -2094,6 +2095,7 @@ impl EmbeddingTokenizerState {
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
+    prompt_tool_history: PromptToolHistory,
     tokenizer: Arc<dyn Tokenizer>,
     /// Present only for token-input embedding pipelines. The two tokenizer
     /// variants are initialized independently on demand.
@@ -2987,11 +2989,26 @@ impl OpenAIPreprocessor {
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
-        match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
-        }
+        Self::new_with_model_formatter(mdc, tokenizer, None)
+    }
+
+    pub(crate) fn new_with_model_formatter(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
+        let (PromptFormatter::OAI(formatter), prompt_tool_history) =
+            prompt_formatter_with_history_from_mdc(&mdc)?;
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            prompt_tool_history,
+            None,
+            speculative_prefill_cancel,
+            true,
+        )
     }
 
     /// Build the preprocessor used by token-input embedding pipelines.
@@ -3007,6 +3024,7 @@ impl OpenAIPreprocessor {
             mdc,
             formatter,
             tokenizer,
+            PromptToolHistory::AsProvided,
             Some(embedding_tokenizers),
             None,
             false,
@@ -3018,7 +3036,15 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            PromptToolHistory::AsProvided,
+            None,
+            None,
+            false,
+        )
     }
 
     pub fn new_with_parts(
@@ -3040,6 +3066,7 @@ impl OpenAIPreprocessor {
             mdc,
             formatter,
             tokenizer,
+            PromptToolHistory::AsProvided,
             None,
             speculative_prefill_cancel,
             true,
@@ -3050,6 +3077,7 @@ impl OpenAIPreprocessor {
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
+        prompt_tool_history: PromptToolHistory,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
         validate_chat_parsers: bool,
@@ -3465,6 +3493,7 @@ impl OpenAIPreprocessor {
 
         Ok(Arc::new(Self {
             formatter,
+            prompt_tool_history,
             tokenizer,
             embedding_tokenizers,
             model_info,
@@ -8821,8 +8850,12 @@ impl
             self.runtime_config.reasoning_parser.as_deref(),
         ));
         request
-            .normalize_responses_tools(self.formatter.supports_native_tools(&request))
+            .normalize_responses_tools_for_renderer(
+                self.formatter.supports_native_tools(&request),
+                self.prompt_tool_history,
+            )
             .map_err(|error| invalid_argument_error(error.to_string()))?;
+        self.prompt_tool_history.prepare_request(&mut request);
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();

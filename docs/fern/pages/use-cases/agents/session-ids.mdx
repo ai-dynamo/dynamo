@@ -39,6 +39,27 @@ Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-
   Set to `true` on a dedicated minimal request when the session ends. Lifecycle-aware consumers can release per-session state immediately instead of waiting for an idle timeout. This works with canonical or agent-native session identity and maps to `agent_context.session_final`.
 </ParamField>
 
+## Responses Session Hints
+
+For `/v1/responses`, Dynamo chooses the first nonempty session hint in this order:
+
+1. `conversation_params.conversation_id` in the request body.
+2. A supported session header, including `x-dynamo-session-id` or `x-session-id`
+   (see [Native Agent Headers](#native-agent-headers)). The canonical
+   `x-dynamo-session-id` takes precedence over agent-native headers.
+3. `client_metadata.thread_id` in the request body.
+4. `client_metadata.session_id` in the request body.
+
+The chosen value also supplies the TensorRT-LLM gRPC engine's conversation
+identity. Existing parent/subagent metadata, including
+`x-dynamo-parent-session-id`, is retained unless the parent equals the selected
+session. `prompt_cache_key`, `x-correlation-id`, and arbitrary header aliases do
+not establish session affinity.
+
+These hints do not authenticate a session or store/reconstruct conversation
+history. Enable [session affinity](session-affinity.md) separately to make
+placement sticky.
+
 ## Native Agent Headers
 
 Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve. See [Connect an Agent Harness](agent-harnesses.mdx) for packaged setup.

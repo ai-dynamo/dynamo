@@ -4958,14 +4958,16 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.reasoning_parser.force_reasoning is expected
 
     @pytest.mark.multimodal
+    @pytest.mark.parametrize("native_renderer", [False, True])
     def test_kimi_k3_normalizes_template_media_but_forwards_original_url(
         self,
         monkeypatch,
+        native_renderer,
     ):
         captured = {}
 
         class CapturingTokenizer:
-            chat_template = "template"
+            chat_template = None if native_renderer else "template"
 
             def apply_chat_template(self, messages, **kwargs):
                 captured["messages"] = messages
@@ -4998,6 +5000,11 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 }
             ],
         }
+        positional_history = copy.deepcopy(request["messages"])
+        positional_history[0]["content"][1]["image_url"][
+            "url"
+        ] = "https://example.com/replayed.png"
+        request["positional_tool_history"] = positional_history
 
         result = preprocess_chat_request(
             request,
@@ -5006,16 +5013,23 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             reasoning_parser_name=None,
         )
         dynamo_preproc = _build_dynamo_preproc(
-            result.request,
+            request,
             result.prompt_token_ids,
             request["model"],
             None,
+            positional_tool_history=result.positional_tool_history,
         )
 
+        expected_url = (
+            "https://example.com/replayed.png"
+            if native_renderer
+            else "https://example.com/k3.png"
+        )
         assert captured["messages"][0]["content"][1]["type"] == "image"
+        assert captured["messages"][0]["content"][1]["image_url"]["url"] == expected_url
         assert request["messages"][0]["content"][1]["type"] == "image_url"
         assert dynamo_preproc["multi_modal_data"] == {
-            "image_url": [{"Url": "https://example.com/k3.png"}]
+            "image_url": [{"Url": expected_url}]
         }
 
     def _preprocess_with_kimi_k3_template_capture(
@@ -5369,6 +5383,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         ("model", "tool_parser", "reasoning_parser", "is_kimi"),
         [
             ("moonshotai/Kimi-K3.1-Pro", None, None, True),
+            ("team/Kimi--K3", None, None, True),
             ("local-model", "kimi_k3", None, True),
             ("local-model", None, "kimi-k3", True),
             ("moonshotai/Kimi-K2.5", None, "kimi_k2", False),
@@ -5381,6 +5396,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": model,
             "messages": [{"role": "developer", "content": "Hello"}],
+            "positional_tool_history": [
+                {"role": "developer", "content": "Positional view"}
+            ],
             "reasoning_effort": "high",
         }
 
@@ -5393,6 +5411,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
 
         assert captured["messages"][0]["role"] == ("system" if is_kimi else "developer")
+        assert captured["messages"][0]["content"] == (
+            "Positional view" if is_kimi else "Hello"
+        )
         assert (
             captured["kwargs"].get("thinking_effort" if is_kimi else "reasoning_effort")
             == "high"
@@ -5405,6 +5426,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": "moonshotai/Kimi-K3",
             "messages": [{"role": "developer", "content": "Hello"}],
+            "positional_tool_history": [
+                {"role": "developer", "content": "Positional view"}
+            ],
             "tools": [
                 parity_tool(),
                 {"type": "function", "function": {"name": "get_time"}},

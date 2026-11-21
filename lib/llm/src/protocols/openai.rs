@@ -458,6 +458,10 @@ pub struct ParsingOptions {
 
     pub reasoning_parser: Option<String>,
 
+    /// Frontend-only Responses output policy of the selected deployment.
+    #[serde(skip)]
+    pub responses_emit_raw_reasoning: bool,
+
     /// A disabled thinking request must not regain a reasoning channel during raw batch recovery.
     #[serde(default)]
     pub reasoning_disabled: bool,
@@ -532,6 +536,7 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            responses_emit_raw_reasoning: false,
             reasoning_disabled: false,
             structured_response: false,
             default_thinking_mode: None,
@@ -545,6 +550,15 @@ impl ParsingOptions {
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
         }
+    }
+
+    pub(crate) fn responses_preserve_bare_tool_spelling(&self) -> bool {
+        use chat_completions::unified_parser::{KIMI_K3_UNIFIED_FAMILY, selected_family};
+
+        let tool_parser = self.tool_call_parser.as_deref();
+        selected_family(tool_parser, self.reasoning_parser.as_deref())
+            == Some(KIMI_K3_UNIFIED_FAMILY)
+            || matches!(tool_parser, Some("kimi_k3" | "kimi-k3"))
     }
 
     pub fn with_guided_tool_constraint(mut self, constraint: GuidedToolConstraint) -> Self {

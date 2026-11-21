@@ -3,6 +3,8 @@
 
 //! Native template metadata and custom/client-search protocol adaptation.
 
+use dynamo_protocols::types::responses::CustomToolParamFormat;
+
 use super::super::tools::custom_input_or_raw;
 use super::*;
 
@@ -18,9 +20,78 @@ pub struct ResponsesToolContext {
         HashMap<usize, MessagePhase>,
     )>,
     pub history_phases: HashMap<usize, MessagePhase>,
-    pub(super) history_tool_names: HashMap<String, Vec<String>>,
+    pub(super) history_tool_calls: HashMap<String, Vec<HistoricalToolCall>>,
     pub(super) tool_choice_name: Option<String>,
     pub(super) selected_tools: Option<HashSet<(Option<String>, String)>>,
+}
+
+const BARE_TOOL_CALL_ID_PREFIX: &str = "dynamo_bare_tool_v2_";
+const LEGACY_BARE_TOOL_CALL_ID_PREFIX: &str = "dynamo_kimi_bare_v2_";
+
+fn bare_tool_item_id(call_id: &str) -> Option<&str> {
+    let item_id = call_id
+        .strip_prefix(BARE_TOOL_CALL_ID_PREFIX)
+        .or_else(|| call_id.strip_prefix(LEGACY_BARE_TOOL_CALL_ID_PREFIX))?;
+    let uuid = item_id.strip_prefix("fc_")?.as_bytes();
+    // Only the compact lowercase UUIDv4 format emitted by Responses is reserved.
+    (uuid.len() == 32
+        && uuid[12] == b'4'
+        && matches!(uuid[16], b'8'..=b'9' | b'a'..=b'b')
+        && uuid
+            .iter()
+            .all(|&b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')))
+    .then_some(item_id)
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct HistoricalToolCall {
+    name: String,
+    bare_name: bool,
+}
+
+pub(super) fn history_tool_calls(
+    input: &InputParam,
+    names: &ToolNameMap,
+) -> HashMap<String, Vec<HistoricalToolCall>> {
+    let mut history: HashMap<String, Vec<HistoricalToolCall>> = HashMap::new();
+    let InputParam::Items(items) = input else {
+        return history;
+    };
+    for item in items {
+        let (call_id, item_id, name, namespace) = match item {
+            InputItem::Item(Item::FunctionCall(call)) => (
+                call.call_id.as_str(),
+                call.id.as_deref(),
+                call.name.as_str(),
+                call.namespace.as_deref(),
+            ),
+            InputItem::Item(Item::CustomToolCall(call)) => (
+                call.call_id.as_str(),
+                Some(call.id.as_str()),
+                call.name.as_str(),
+                call.namespace.as_deref(),
+            ),
+            InputItem::Item(Item::ToolSearchCall(call)) => {
+                let Some(call_id) = call.call_id.as_deref() else {
+                    continue;
+                };
+                (call_id, None, "tool_search", None)
+            }
+            _ => continue,
+        };
+        // Backend call IDs may repeat across turns. When supplied, the item
+        // ID must agree with the marker for this occurrence.
+        history
+            .entry(call_id.to_owned())
+            .or_default()
+            .push(HistoricalToolCall {
+                name: names.encode(namespace, name),
+                bare_name: namespace.is_some()
+                    && bare_tool_item_id(call_id)
+                        .is_some_and(|marked_id| item_id.is_none_or(|id| id == marked_id)),
+            });
+    }
+    history
 }
 
 fn search_call_id(id: Option<&str>) -> anyhow::Result<&str> {
@@ -126,36 +197,20 @@ pub(crate) fn effective_response_tools(
             }
         }
     }
-    validate_custom_formats(&tools)?;
-    Ok(tools)
-}
-
-fn validate_custom_formats(tools: &[RequestTool]) -> anyhow::Result<()> {
-    // Custom freeform text is supported; constrained grammars need a backend
-    // enforcement path and must not be silently advertised as honored.
-    for tool in tools {
-        let formats: Vec<_> = match &tool.inner {
-            Tool::Custom(custom) => vec![&custom.format],
-            Tool::Namespace(ns) => ns
-                .tools
-                .iter()
-                .filter_map(|member| match member {
-                    NamespaceToolParamTool::Custom(custom) => Some(&custom.format),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        for format in formats {
-            if serde_json::to_value(format)?["type"] != "text" {
-                return Err(ResponsesConversionError::UnsupportedContent(
-                    "Custom tool grammar formats are not supported".into(),
-                )
-                .into());
-            }
-        }
+    static ADVISORY_GRAMMAR_WARNING: std::sync::Once = std::sync::Once::new();
+    if !ADVISORY_GRAMMAR_WARNING.is_completed() && tools.iter().any(|tool| match &tool.inner {
+        Tool::Custom(custom) => matches!(custom.format, CustomToolParamFormat::Grammar(_)),
+        Tool::Namespace(namespace) => namespace.tools.iter().any(|member| matches!(
+            member,
+            NamespaceToolParamTool::Custom(custom) if matches!(custom.format, CustomToolParamFormat::Grammar(_))
+        )),
+        _ => false,
+    }) {
+        ADVISORY_GRAMMAR_WARNING.call_once(|| {
+            tracing::warn!("Responses custom-tool grammars are advisory; decoding does not enforce regex or Lark constraints");
+        });
     }
-    Ok(())
+    Ok(tools)
 }
 
 fn namespace_member_name(member: &NamespaceToolParamTool) -> &str {
@@ -338,6 +393,14 @@ impl NvCreateChatCompletionRequest {
     }
 
     pub(crate) fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
+        self.normalize_responses_tools_for_renderer(native, PromptToolHistory::AsProvided)
+    }
+
+    pub(crate) fn normalize_responses_tools_for_renderer(
+        &mut self,
+        native: bool,
+        history: PromptToolHistory,
+    ) -> anyhow::Result<()> {
         // Parser capability selects phase replay independently of tool rendering.
         if let Some(context) = &mut self.responses_tools {
             context.native = native;
@@ -376,12 +439,20 @@ impl NvCreateChatCompletionRequest {
             if let ChatCompletionRequestMessage::Assistant(message) = message {
                 for call in message.tool_calls.iter_mut().flatten() {
                     let occurrence = occurrences.entry(&call.id).or_default();
-                    let original = context
-                        .history_tool_names
+                    let historical = context
+                        .history_tool_calls
                         .get(&call.id)
-                        .and_then(|names| names.get(*occurrence))
+                        .and_then(|calls| calls.get(*occurrence));
+                    let original = historical
+                        .map(|call| &call.name)
                         .unwrap_or(&call.function.name);
-                    call.function.name = resolve(original);
+                    call.function.name = if history == PromptToolHistory::Positional
+                        && historical.is_some_and(|call| call.bare_name)
+                    {
+                        context.names.decode(original).1.to_string()
+                    } else {
+                        resolve(original)
+                    };
                     *occurrence += 1;
                 }
             }
@@ -403,6 +474,12 @@ impl NvCreateChatCompletionRequest {
         runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
     ) -> Result<serde_json::Value, serde_json::Error> {
         let mut value = serde_json::to_value(self)?;
+        if let Some(history) = self
+            .python_positional_tool_history(runtime_config)
+            .map_err(serde::ser::Error::custom)?
+        {
+            value["positional_tool_history"] = serde_json::to_value(history)?;
+        }
         if let Some(context) = &self.responses_tools {
             if let Some(template_tools) = self.native_template_tools() {
                 // This catalog is renderer-only: Python chooses it after resolving
@@ -598,6 +675,16 @@ impl ResponseParams {
             )?);
         }
         let (name, namespace, custom) = self.tool_identity(emitted);
+        let call_id = match namespace {
+            // Positional tool replay needs the exact spelling emitted by the model.
+            // Only synthesize IDs for deployments that opt into spelling preservation.
+            Some(_) if self.preserve_tool_spelling && emitted == name => {
+                format!("{BARE_TOOL_CALL_ID_PREFIX}{item_id}")
+            }
+            // Derive the replacement from the item so all SSE snapshots agree.
+            Some(_) if bare_tool_item_id(&call_id).is_some() => format!("call_{item_id}"),
+            _ => call_id,
+        };
         if custom {
             let input = if (arguments.is_empty() && status == OutputStatus::InProgress)
                 || (status == OutputStatus::Incomplete

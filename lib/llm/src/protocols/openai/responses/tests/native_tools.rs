@@ -338,6 +338,7 @@ fn python_adapter_preserves_native_catalog_and_engine_identities() {
     let python = chat
         .python_chat_processor_request_json(&Default::default())
         .unwrap();
+    assert!(python.get("positional_tool_history").is_none());
     let native = &python["responses_native_tools"];
     assert_eq!(native["template_tools"][0]["type"], "namespace");
     assert_eq!(native["template_tools"][0]["defer_loading"], true);
@@ -359,6 +360,28 @@ fn python_adapter_preserves_native_catalog_and_engine_identities() {
             .get("responses_native_tools")
             .is_none()
     );
+}
+
+#[test]
+fn python_adapter_merges_split_tool_results_for_kimi_k3_alias() {
+    let response: NvCreateResponse = serde_json::from_value(json!({
+        "model":"team/Kimi--K3",
+        "input":[
+            {"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
+            {"type":"function_call_output","call_id":"c1","output":"first"},
+            {"type":"function_call_output","call_id":"c1","output":"second"}
+        ]
+    }))
+    .unwrap();
+    let chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
+    let python = chat
+        .python_chat_processor_request_json(&Default::default())
+        .unwrap();
+    let history = python["positional_tool_history"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1]["tool_call_id"], "c1");
+    assert_eq!(history[1]["content"], "first\nsecond");
+    assert_eq!(python["messages"].as_array().unwrap().len(), 3);
 }
 
 #[test]

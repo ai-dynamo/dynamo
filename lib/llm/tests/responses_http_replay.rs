@@ -4,9 +4,12 @@
 //! Full-HTTP integration coverage for the OpenAI Responses compatibility surface.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+use dynamo_llm::local_model::runtime_config::RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY;
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
@@ -31,6 +34,93 @@ use http_harness::{
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
+
+#[tokio::test]
+#[serial]
+async fn selected_deployment_controls_late_plaintext_reasoning() {
+    temp_env::async_with_vars(ENV, async {
+        let mut script = load_agent_fixture("text.sse").await.unwrap();
+        let terminal = &mut script[2].data.as_mut().unwrap().inner.choices[0];
+        terminal.delta.reasoning_content = Some("late reasoning".into());
+
+        for emit_raw_reasoning in [false, true] {
+            let mut card = ModelDeploymentCard::with_name_only(MODEL);
+            card.runtime_config.runtime_data.insert(
+                RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY.into(),
+                json!(emit_raw_reasoning),
+            );
+            let engine = Arc::new(scripted_chat_engine::ScriptedChatEngine::new([Ok(
+                script.clone()
+            )]));
+            let svc = HarnessService::start_with_engine_and_card(engine, card).await;
+            let response = post_responses(
+                &svc,
+                &json!({"model": MODEL, "input": "ping", "stream": true}),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body = response.text().await.unwrap();
+            let events = parse_responses_sse(&body).await.unwrap();
+            let output = events.last().unwrap().data["response"]["output"]
+                .as_array()
+                .unwrap();
+            assert_eq!(output[0]["type"], "message");
+            if emit_raw_reasoning {
+                assert_eq!(output.len(), 2);
+                assert_eq!(output[1]["type"], "reasoning");
+                assert_eq!(output[1]["content"][0]["text"], "late reasoning");
+                assert!(output[1].get("encrypted_content").is_none());
+            } else {
+                assert_eq!(output.len(), 1);
+                assert!(!body.contains("late reasoning"));
+            }
+            svc.shutdown().await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn duplicate_fields_fail_before_responses_dispatch() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        let mut cases = Vec::new();
+        for (field, value) in [
+            ("model", json!("other-model")),
+            ("input", json!("other-input")),
+            ("tools", json!([])),
+            ("stream", json!(true)),
+        ] {
+            cases.push(format!(
+                r#"{{"model":"{MODEL}","input":"ping","tools":[],"stream":false,"{field}":{value}}}"#
+            ));
+        }
+        cases.push(format!(r#"{{"model":"{MODEL}","input":"ping","nvext":{{"metadata_upload":{{"kind":"generation_artifact","contents":[],"mode":"object_store","destination":{{"kind":"presigned_http_put","url":"https://example.com/upload","required_headers":{{"X-Token":"private-a","X-Token":"private-b"}},"expires_at":"2030-01-01T00:00:00Z","max_bytes":100,"object_id":"object"}}}}}}}}"#));
+        cases.push(format!(
+            r#"{{"model":"{MODEL}","input":"ping","metadata":{{"private-key":"private-a","private-key":"private-b"}}}}"#
+        ));
+        for body in cases {
+            let response = svc
+                .client
+                .post(format!("{}/v1/responses", svc.base_url))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let body: Value = response.json().await.unwrap();
+            let message = body["message"].as_str().unwrap();
+            assert!(message.contains("duplicate JSON object field at line "), "{message}");
+            assert!(!message.contains("X-Token") && !message.contains("private-"), "{message}");
+            assert!(!message.contains("other-model") && !message.contains("other-input"), "{message}");
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
 
 #[tokio::test]
 async fn responses_sse_requires_terminal_event_without_trailers() {
@@ -93,40 +183,61 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
     .await;
 }
 
-/// Unsupported choices return HTTP 400 without dispatch for unary and streaming
-/// requests even when the supplied function tool definitions are valid.
-/// Custom tools now share the function-template adapter while retaining their
-/// namespace and custom identity in the public Responses surface.
+/// Responses accepts custom grammar descriptors as advisory metadata, matching
+/// TRT-LLM's freeform input adapter for top-level and namespaced declarations.
 #[tokio::test]
 #[serial]
-async fn namespaced_custom_tools_are_accepted_and_echoed() {
+async fn custom_tool_formats_are_accepted_and_echoed() {
     temp_env::async_with_vars(ENV, async {
+        let formats = [
+            json!({"type":"text"}),
+            json!({"type":"grammar","syntax":"regex","definition":"[a-z]+"}),
+            json!({"type":"grammar","syntax":"lark","definition":"start: \"patch\""}),
+        ];
         let script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start([script.clone(), script]).await;
-        for stream in [false, true] {
-            let response = post_responses(
-                &svc,
-                &json!({
-                    "model": MODEL, "input":"ping", "stream":stream,
-                    "tools":[{"type":"namespace","name":"custom","description":"Custom tools",
-                        "tools":[{"type":"custom","name":"run","format":{"type":"text"}}]}]
-                }),
-            )
-            .await;
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            let body = response.text().await.unwrap();
-            if stream {
-                assert!(body.contains("response.completed"));
-            } else {
-                let body: Value = serde_json::from_str(&body).unwrap();
-                assert_eq!(body["tools"][0]["type"], "namespace");
-                assert_eq!(body["tools"][0]["tools"][0]["type"], "custom");
+        let count = formats.len() * 4;
+        let svc = HarnessService::start(std::iter::repeat_n(script, count)).await;
+        for format in formats {
+            for namespaced in [false, true] {
+                for stream in [false, true] {
+                    let custom = json!({"type":"custom","name":"run","format":format});
+                    let tool = if namespaced {
+                        json!({"type":"namespace","name":"custom","description":"Custom tools","tools":[custom]})
+                    } else {
+                        custom
+                    };
+                    let response = post_responses(&svc, &json!({
+                        "model":MODEL,"input":"ping","stream":stream,"tools":[tool]
+                    })).await;
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    assert_eq!(status, reqwest::StatusCode::OK, "{format}: {body}");
+                    let completed: Value = if stream {
+                        let events = parse_responses_sse(&body).await.unwrap();
+                        events.iter().find(|event| event.event == "response.completed")
+                            .unwrap().data["response"].clone()
+                    } else {
+                        serde_json::from_str(&body).unwrap()
+                    };
+                    let echoed = if namespaced {
+                        &completed["tools"][0]["tools"][0]
+                    } else {
+                        &completed["tools"][0]
+                    };
+                    assert_eq!(echoed["type"], "custom");
+                    assert_eq!(echoed["format"], format);
+                }
             }
         }
-        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), count);
+        for request in requests {
+            let tool = &request.inner.tools.as_ref().unwrap()[0];
+            assert_eq!(tool.function.parameters.as_ref().unwrap()["properties"]["input"]["type"], "string");
+            assert_ne!(tool.function.strict, Some(true));
+        }
         svc.shutdown().await;
-    })
-    .await;
+    }).await;
 }
 
 #[tokio::test]
@@ -1493,6 +1604,44 @@ async fn input_tokens_counts_input() {
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn input_tokens_uses_reasoning_replay_precedence() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        let encoded = format!("trtllm-reasoning-v1:{}", STANDARD.encode("x".repeat(3000)));
+        let summary = json!([{ "type": "summary_text", "text": "fallback" }]);
+        for (reasoning, expected) in [
+            (
+                json!({"type":"reasoning", "summary":[], "encrypted_content":encoded}),
+                1003,
+            ),
+            (
+                json!({"type":"reasoning", "summary":summary, "encrypted_content":encoded,
+                       "content":[{"type":"reasoning_text", "text":"plain"}]}),
+                4,
+            ),
+            (
+                json!({"type":"reasoning", "summary":summary, "encrypted_content":"foreign"}),
+                5,
+            ),
+        ] {
+            let response =
+                post_input_tokens(&svc, &json!({"model":MODEL, "input":[reasoning]})).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["input_tokens"],
+                expected
+            );
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 /// The endpoint must answer for models this frontend does not serve.
 ///
 #[tokio::test]
@@ -1631,6 +1780,21 @@ async fn input_tokens_accepts_tool_call_conversation_items() {
             body["input_tokens"].as_u64().unwrap() > 0,
             "tool-call items should contribute to the count, got {body}"
         );
+
+        let extended = json!({
+            "model": "dynamo/deepseek-ai/deepseek-v4-pro-sglang",
+            "instructions": "You are a careful filesystem assistant.",
+            "input": [
+                {"type": "additional_tools", "tools": [tool("list_directory")]},
+                {"role": "user", "content": "List /tmp"},
+                {"type": "function_call", "call_id": "call_1", "name": "list_directory",
+                    "arguments": r#"{"path":"/tmp"}"#},
+                {"type": "custom_tool_call_output", "call_id": "call_1", "output": r#"["a.txt"]"#}
+            ]
+        });
+        let counted = post_input_tokens(&svc, &extended).await;
+        assert_eq!(counted.status(), reqwest::StatusCode::OK);
+        assert_eq!(counted.json::<Value>().await.unwrap(), body);
         svc.shutdown().await;
     })
     .await;

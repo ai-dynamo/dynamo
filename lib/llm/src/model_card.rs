@@ -1552,6 +1552,13 @@ impl ModelDeploymentCard {
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
 
+                if let Some(enabled) = self.runtime_config.responses_raw_reasoning_override() {
+                    // Separate explicit disclosure policies from the legacy
+                    // parser-derived default while preserving old card checksums.
+                    bytes_to_hash.extend_from_slice(b"\0responses_emit_raw_reasoning\0");
+                    bytes_to_hash.push(u8::from(enabled));
+                }
+
                 // Keep workers with different cancellation semantics out of the same
                 // admitted cohort during rolling upgrades. Missing and false stay compatible.
                 if self.runtime_config.runtime_flag_enabled(
@@ -4140,6 +4147,26 @@ mod ownership_tests {
             .insert(capability.into(), true.into());
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn responses_reasoning_policy_isolates_worker_sets() {
+        use crate::local_model::runtime_config::RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY;
+
+        let card = |value| {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(RESPONSES_EMIT_RAW_REASONING_RUNTIME_KEY.into(), value);
+            card
+        };
+        let legacy = ModelDeploymentCard::with_name_only("model");
+        let disabled = card(false.into());
+        let enabled = card(true.into());
+        assert_ne!(legacy.mdcsum(), disabled.mdcsum());
+        assert_ne!(legacy.mdcsum(), enabled.mdcsum());
+        assert_ne!(disabled.mdcsum(), enabled.mdcsum());
+        assert_eq!(enabled.mdcsum(), card("true".into()).mdcsum());
     }
 
     #[test]
