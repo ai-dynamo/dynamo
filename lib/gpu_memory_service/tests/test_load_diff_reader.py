@@ -180,6 +180,48 @@ def test_tuple_elements_and_parameters_first_seen_under_another_name(monkeypatch
     assert model.child.weight.data_ptr() == source.data_ptr()
 
 
+@pytest.mark.parametrize("bulk_import", [True, False, None])
+def test_attach_imports_every_allocation_first_when_bulk_import_is_on(
+    monkeypatch, bulk_import
+):
+    calls = []
+
+    def spec(allocation_id):
+        def materialize(manager, device_index):
+            calls.append(("materialize", allocation_id))
+            return torch.arange(4.0)
+
+        return SimpleNamespace(
+            meta=SimpleNamespace(tensor_type="parameter"),
+            allocation_id=allocation_id,
+            materialize=materialize,
+        )
+
+    specs = {"a.weight": spec("x"), "b.weight": spec("x"), "c.weight": spec("y")}
+    monkeypatch.setattr(reader.GMSTensorSpec, "load_all", lambda manager: specs)
+    model = torch.nn.Module()
+    for name in "abc":
+        setattr(model, name, torch.nn.Module())
+        getattr(model, name).weight = torch.nn.Parameter(torch.empty(4, device="meta"))
+    published = {"aliases": {name: name for name in specs}, "storage_aliases": {}}
+    if bulk_import is None:  # a manager without bulk import
+        manager = SimpleNamespace()
+    else:
+        manager = SimpleNamespace(
+            bulk_import=bulk_import,
+            import_allocations=lambda ids: calls.append(("import", sorted(ids))),
+        )
+    reader._attach(manager, model, published, 0)
+    materialized = [call for call in calls if call[0] == "materialize"]
+    assert len(materialized) == 3
+    if bulk_import:
+        assert calls[0] == ("import", ["x", "x", "y"])
+        assert calls[1:] == materialized
+    else:
+        assert calls == materialized
+    assert not model.c.weight.is_meta
+
+
 def test_zero_element_meta_tensors_are_materialized_and_others_reported():
     model = _layer()
     model.register_buffer("rope", torch.empty(8, 0, device="meta"), persistent=False)

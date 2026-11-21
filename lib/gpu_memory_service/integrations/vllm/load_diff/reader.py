@@ -136,6 +136,12 @@ def _attach(manager, model: torch.nn.Module, published: dict, device_index: int)
     if set(specs) != set(aliases):
         extra = sorted(set(specs) ^ set(aliases))
         raise RuntimeError(f"Load-diff tensor schema mismatch: {extra[:10]}")
+    # As the default attach does: with bulk import on, import every referenced
+    # allocation in one call before any tensor is bound, and materialize below
+    # reuses the mappings. A manager without bulk import maps one allocation per
+    # tensor in materialize.
+    if getattr(manager, "bulk_import", False):
+        manager.import_allocations(spec.allocation_id for spec in specs.values())
     # A name the writer registered as a parameter makes its whole alias
     # group one parameter, whichever name comes first.
     parameters = {
