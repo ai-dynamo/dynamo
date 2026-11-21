@@ -748,7 +748,8 @@ impl Discovery for KVStoreDiscovery {
 
         // Watch only the query's keys where the store can scope the watch (etcd), so this
         // watcher neither snapshots nor receives changes from the rest of the bucket.
-        let (_, mut rx) = self
+        // Dropping the returned stream drops rx and stops the detached watch task.
+        let (_watch_task, mut rx) = self
             .store
             .clone()
             .watch(
