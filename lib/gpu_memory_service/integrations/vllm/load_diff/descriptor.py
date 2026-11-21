@@ -229,7 +229,10 @@ def get(manager) -> dict:
     """Fetch and verify the descriptor; raises if it is absent or invalid."""
     got = manager.metadata_get(KEY)
     if got is None:
-        raise RuntimeError("GMS has no load-diff descriptor")
+        raise RuntimeError(
+            "GMS has no load-diff descriptor: the writer did not run with "
+            "gms_reconstruction_mode=load_diff"
+        )
     try:
         header = json.loads(got[2])
     except ValueError as exc:
