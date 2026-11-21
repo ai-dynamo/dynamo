@@ -679,10 +679,13 @@ spec:
                 claimName: dynamo-pvc
 ```
 
-The profiling job also runs an `output-copier` sidecar that relays profiler status and
-writes results to the output ConfigMap. By default it uses `bitnami/kubectl:latest`.
-In air-gapped or private-registry clusters, override the sidecar image via
-`overrides.profilingJob`:
+The v1beta1 profiling job also runs an `output-copier` sidecar that relays profiler status and
+writes results to the output ConfigMap. For private registries, set the platform Helm value
+`dynamo-operator.dgdr.outputCopierImage` to your mirrored image. See
+[Output-copier image](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#output-copier-image)
+for the bundled digest-pinned image and a configuration example.
+
+A per-request image override via `overrides.profilingJob` takes precedence:
 
 ```yaml
 overrides:

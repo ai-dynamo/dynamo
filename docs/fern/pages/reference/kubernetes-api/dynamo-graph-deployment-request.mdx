@@ -472,6 +472,39 @@ service.
   </ParamField>
 </Indent>
 
+### Output-copier image
+
+The v1beta1 profiling Job's `output-copier` sidecar relays profiler status and writes results
+to the `dgdr-output-<name>` ConfigMap. This setting does not affect v1beta2 Run publisher images.
+
+An omitted or empty image setting uses the bundled digest-pinned kubectl image:
+
+```text
+docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d
+```
+
+To use a mirrored image, configure the operator-wide image through the platform chart:
+
+```yaml
+dynamo-operator:
+  dgdr:
+    outputCopierImage: <your-registry>/kubectl@sha256:<digest>
+```
+
+The equivalent operator configuration field is `dgdr.outputCopierImage`. A per-request
+`spec.overrides.profilingJob.template.spec.containers` entry named `output-copier` takes precedence.
+See [profiling artifacts](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#accessing-profiling-artifacts)
+for a per-request override example.
+
+Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash; a dash-only
+`/bin/sh` is not sufficient), `kubectl`, and the shell utilities used by the copier (`date`, `grep`,
+`awk`, `tr`, `sed`, `cat`, and `sleep`). Choose a kubectl version compatible with your Kubernetes
+API server.
+
+New image settings apply only to newly created profiling Jobs. Existing Jobs retain their image,
+and the DGDR spec is immutable once profiling starts. Create a new DGDR, or delete and recreate
+the existing DGDR, to use a changed image after profiling has started.
+
 ## Planner
 
 `spec.features.planner` is a `PlannerConfig` object, passed through to the Planner service without field-level validation; the Planner validates it at startup. Setting it (non-null) enables the planner in the generated DGD. The same object is documented standalone at [Planner Configuration](../components/planner-configuration.mdx); its fields are reproduced here. Nested list-and-object types are expanded under [Additional Types](#additional-types). All fields are optional.
