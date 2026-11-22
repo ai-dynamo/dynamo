@@ -34,6 +34,9 @@ class StageEngine(Protocol):
         """Return the tokenizer (may be async — callers should await)."""
         ...
 
+    async def abort(self, request_id: str) -> None:
+        ...
+
 
 class StageOutput(BaseModel):
     """Validated output dict from a stage worker.

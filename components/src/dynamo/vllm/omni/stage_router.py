@@ -111,7 +111,7 @@ class OmniStageRouter:
     async def generate(
         self,
         request: dict,
-        context,  # noqa: ARG002 — context unused; router generates its own request_id
+        context,
     ) -> AsyncGenerator[dict, None]:
         """Run the request through each stage and format the final output."""
         request_id = str(uuid.uuid4())
@@ -138,6 +138,8 @@ class OmniStageRouter:
 
         stage_outputs: List[StageOutput] = []
         for stage_idx, stage_cfg in enumerate(self.stage_configs):
+            if context.is_stopped():
+                return
             model_stage = getattr(
                 stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
             )
@@ -162,7 +164,7 @@ class OmniStageRouter:
                 list(stage_request.keys()),
             )
             # For now, it is just one chunk output from the stage. Keeping the loop style in mind if in future we decide to stream multiple chunks from the stage.
-            async for chunk in await client.round_robin(stage_request):
+            async for chunk in await client.round_robin(stage_request, context=context):
                 data = chunk.data()
                 if isinstance(data, (str, bytes)):
                     data = json.loads(data)

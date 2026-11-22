@@ -179,7 +179,15 @@ class OmniStageWorker:
         except VLLMValidationError as e:
             raise vllm_client_error_to_public_error(e) from e
         last_result = None
+        if context.is_stopped():
+            yield {"error": "Request cancelled", "finished": True}
+            return
 
+        async def abort_on_stop():
+            await context.async_killed_or_stopped()
+            await asyncio.shield(self.engine.abort(request_id))
+
+        abort_task = asyncio.create_task(abort_on_stop())
         try:
             async for chunk in self.engine.generate(
                 prompt, request_id=request_id, sampling_params_list=sp
@@ -194,6 +202,12 @@ class OmniStageWorker:
                 exc_info=True,
             )
             yield {"error": str(e), "finished": True}
+            return
+        finally:
+            abort_task.cancel()
+
+        if context.is_stopped():
+            yield {"error": "Request cancelled", "finished": True}
             return
 
         _ensure_cumulative_token_ids(last_result)

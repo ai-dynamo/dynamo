@@ -37,6 +37,9 @@ class _MockEngine:
     def get_tokenizer(self):
         return None
 
+    async def abort(self, request_id):
+        pass
+
 
 def test_stage_engine_protocol_satisfied():
     assert isinstance(_MockEngine(), StageEngine)
