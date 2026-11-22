@@ -641,7 +641,8 @@ mod tests {
         }
 
         for finish in [FinishReason::Length, FinishReason::ContentFilter] {
-            for separate_finish in [false, true] {
+            for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
+            {
                 let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
                 adapter.keep_parser_confirmed_calls(true);
                 let mut text = chunk(0, json!(null), json!(null));
@@ -652,7 +653,11 @@ mod tests {
                 );
                 let mut chunks = vec![Annotated::from_data(text)];
                 if separate_finish {
-                    chunks.push(Annotated::from_data(chunk(0, json!(null), json!(finish))));
+                    let mut terminal = chunk(0, json!(null), json!(finish));
+                    if reasoning_finish {
+                        terminal.inner.choices[0].delta.reasoning_content = Some("done".into());
+                    }
+                    chunks.push(Annotated::from_data(terminal));
                 } else {
                     chunks[0].data.as_mut().unwrap().inner.choices[0].finish_reason = Some(finish);
                 }
@@ -692,6 +697,15 @@ mod tests {
                     .filter_map(|choice| choice.finish_reason)
                     .collect::<Vec<_>>();
                 assert_eq!(terminal, [finish]);
+                if reasoning_finish {
+                    let reasoning: String = out
+                        .iter()
+                        .filter_map(|item| item.data.as_ref())
+                        .flat_map(|data| &data.inner.choices)
+                        .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                        .collect();
+                    assert_eq!(reasoning, "done");
+                }
             }
         }
     }

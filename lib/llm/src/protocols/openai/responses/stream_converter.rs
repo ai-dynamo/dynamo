@@ -2808,7 +2808,8 @@ mod tests {
             (FinishReason::ContentFilter, raw_cut_tail, true, 1),
             (FinishReason::Length, complete, false, 0),
         ] {
-            for separate_finish in [false, true] {
+            for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
+            {
                 let params = ResponseParams {
                     tools: Some(
                         serde_json::from_value(serde_json::json!([
@@ -2821,7 +2822,11 @@ mod tests {
                 let mut conv = ResponseStreamConverter::new("test-model".into(), params);
                 conv.keep_parser_confirmed_calls(keep);
                 let chunks = if separate_finish {
-                    vec![text_chunk(text), finish_chunk(finish)]
+                    let mut terminal = finish_chunk(finish);
+                    if reasoning_finish {
+                        terminal.inner.choices[0].delta.reasoning_content = Some("done".into());
+                    }
+                    vec![text_chunk(text), terminal]
                 } else {
                     vec![with_finish_reason(text_chunk(text), finish)]
                 };
@@ -2839,11 +2844,20 @@ mod tests {
                 );
                 futures::pin_mut!(parsed);
                 let mut events = Vec::new();
+                let mut reasoning = String::new();
                 while let Some(chunk) = parsed.next().await {
                     assert!(!chunk.is_error());
                     if let Some(data) = chunk.data {
+                        for choice in &data.inner.choices {
+                            if let Some(text) = &choice.delta.reasoning_content {
+                                reasoning.push_str(text);
+                            }
+                        }
                         events.extend(conv.process_chunk(&data));
                     }
+                }
+                if reasoning_finish {
+                    assert_eq!(reasoning, "done");
                 }
                 events.extend(conv.emit_end_events());
                 let values: Vec<_> = events.iter().map(event_json).collect();

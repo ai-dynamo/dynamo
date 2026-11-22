@@ -3053,7 +3053,8 @@ mod tests {
             ),
         ];
         for (finish, text, expected_finish, expected_calls) in cases {
-            for separate_finish in [false, true] {
+            for (separate_finish, reasoning_finish) in [(false, false), (true, false), (true, true)]
+            {
                 let raw = create_test_delta(
                     0,
                     text,
@@ -3064,7 +3065,13 @@ mod tests {
                 );
                 let mut chunks = vec![raw];
                 if separate_finish {
-                    chunks.push(create_test_delta(0, "", None, Some(finish), None, None));
+                    let mut terminal = create_test_delta(0, "", None, Some(finish), None, None);
+                    if reasoning_finish {
+                        let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content = None;
+                        choice.delta.reasoning_content = Some("done".into());
+                    }
+                    chunks.push(terminal);
                 }
                 let adapted = super::super::unified_parser::apply_stream(
                     stream::iter(chunks),
@@ -3103,6 +3110,9 @@ mod tests {
                     .collect();
                 assert_eq!(calls, expected_calls, "{finish:?} {text}");
                 assert!(choice.message.content.is_none(), "{finish:?} {text}");
+                if reasoning_finish {
+                    assert_eq!(choice.message.reasoning_content.as_deref(), Some("done"));
+                }
             }
         }
     }
