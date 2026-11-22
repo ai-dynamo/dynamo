@@ -354,23 +354,30 @@ cargo add \
   dynamo-kv-router
 ```
 
-```rust
-use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerWithDpRank;
+Put the test in a `#[cfg(test)]` module of the policy crate. The harness is available only to the crate's tests, so an import of it outside that module fails when the catalog, the frontend, or the EPP builds the crate:
 
-#[test]
-fn prefers_the_worker_with_fewer_requests() {
-    let policy = WorkerSelectionPolicy::new(
-        "test",
-        vec![Box::new(ActiveRequestsScorer)],
-        Box::new(LowestCostPicker),
-    );
-    let selected = SelectionCase::new(160, 16)
-        .worker(29, CaseWorker::new().active_requests(4))
-        .worker(41, CaseWorker::new().active_requests(1))
-        .select(&policy)
-        .unwrap();
-    assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
+```rust
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerWithDpRank;
+
+    use super::*;
+
+    #[test]
+    fn prefers_the_worker_with_fewer_requests() {
+        let policy = WorkerSelectionPolicy::new(
+            "test",
+            vec![Box::new(ActiveRequestsScorer)],
+            Box::new(LowestCostPicker),
+        );
+        let selected = SelectionCase::new(160, 16)
+            .worker(29, CaseWorker::new().active_requests(4))
+            .worker(41, CaseWorker::new().active_requests(1))
+            .select(&policy)
+            .unwrap();
+        assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
+    }
 }
 ```
 
