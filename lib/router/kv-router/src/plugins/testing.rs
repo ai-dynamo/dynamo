@@ -396,7 +396,9 @@ pub fn classify<C: RequestClassifier + ?Sized>(
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
+    // Only the harness names: every other name comes from the plugin API, as in a plugin's
+    // own tests, and not from this module's kernel and host imports.
+    use super::{CaseWorker, SelectionCase, classify, classify_request, registered_policy};
     use crate::plugins::v1alpha1::request_classifier::*;
     use crate::plugins::v1alpha1::worker_selection::*;
 
