@@ -123,16 +123,22 @@ def _post_chat(client: httpx.Client, url: str, body: dict[str, Any]) -> dict[str
                     content.append(delta["content"])
                 for tc in delta.get("tool_calls") or []:
                     slot = calls.setdefault(
-                        tc.get("index", 0), {"name": "", "arguments": ""}
+                        tc.get("index", 0), {"name": [], "arguments": []}
                     )
                     fn = tc.get("function") or {}
-                    slot["name"] += fn.get("name") or ""
-                    slot["arguments"] += fn.get("arguments") or ""
+                    slot["name"].append(fn.get("name") or "")
+                    slot["arguments"].append(fn.get("arguments") or "")
                 finish_reason = choice.get("finish_reason") or finish_reason
     return {
         "status": 200,
         "content": "".join(content) or None,
-        "tool_calls": [calls[i] for i in sorted(calls)],
+        "tool_calls": [
+            {
+                "name": "".join(calls[i]["name"]),
+                "arguments": "".join(calls[i]["arguments"]),
+            }
+            for i in sorted(calls)
+        ],
         "finish_reason": finish_reason,
         "token_ids": token_ids,
     }
@@ -173,6 +179,17 @@ _RAW_FINAL = re.compile(
 )
 
 
+def _json_equal(a: Any, b: Any) -> bool:
+    """JSON equality that, unlike ``==``, keeps ``true`` apart from ``1``."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_json_equal(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(map(_json_equal, a, b))
+    return a == b
+
+
 def raw_vs_parsed(raw_text: str, calls: list[dict[str, Any]]) -> str:
     """Compare argument JSON in the raw generation with the parsed tool calls.
 
@@ -197,7 +214,9 @@ def raw_vs_parsed(raw_text: str, calls: list[dict[str, Any]]) -> str:
         if raw_name != call["name"]:
             return f"mismatch: raw name {raw_name}, parsed {call['name']}"
         try:
-            equal = json.loads(raw_args) == json.loads(call["arguments"] or "")
+            equal = _json_equal(
+                json.loads(raw_args), json.loads(call["arguments"] or "")
+            )
         except json.JSONDecodeError:
             equal = raw_args.strip() == (call["arguments"] or "").strip()
         if not equal:
