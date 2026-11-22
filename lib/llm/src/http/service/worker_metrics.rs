@@ -342,6 +342,8 @@ mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_runtime::protocols::EndpointId;
     use parking_lot::Mutex;
+    use std::thread::sleep;
+    use std::time::Duration;
 
     struct Fixture {
         registry: Registry,
@@ -856,7 +858,7 @@ mod tests {
     fn test_observe_first_token_gauges_with_worker() {
         let tracker = RequestTracker::new();
         tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        sleep(Duration::from_millis(5));
         tracker.record_first_token();
         tracker.record_isl(256, Some(128));
 
@@ -882,7 +884,7 @@ mod tests {
         let tracker = RequestTracker::new();
         tracker.record_worker(99, Some(1), WORKER_TYPE_DECODE);
         tracker.record_first_token();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        sleep(Duration::from_millis(10));
         tracker.record_osl(5);
         tracker.record_finish();
 
@@ -896,5 +898,39 @@ mod tests {
             itl_val > 0.0,
             "ITL gauge should be positive after observe, got {itl_val}"
         );
+    }
+
+    #[test]
+    fn test_observe_gauges_with_unset_dp_rank() {
+        // An aggregated tracker records the worker for both phases; the rank stays unset.
+        let tracker = RequestTracker::new();
+        tracker.record_worker(261_007, None, WORKER_TYPE_DECODE);
+        sleep(Duration::from_millis(5));
+        tracker.record_first_token();
+        tracker.record_isl(64, None);
+        sleep(Duration::from_millis(10));
+        tracker.record_osl(5);
+        tracker.record_finish();
+
+        observe_first_token_gauges(&tracker);
+        observe_finish_gauges(&tracker);
+
+        // The scrape filter and the worker cleanup both match this label by value.
+        let labels = &["261007", "none", WORKER_TYPE_DECODE];
+        let ttft_val = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert!(
+            ttft_val > 0.0,
+            "TTFT gauge should be positive, got {ttft_val}"
+        );
+        let isl_val = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert_eq!(isl_val, 64, "ISL gauge should be 64, got {isl_val}");
+        let itl_val = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(labels)
+            .get();
+        assert!(itl_val > 0.0, "ITL gauge should be positive, got {itl_val}");
     }
 }
