@@ -797,11 +797,12 @@ impl<T> PolicyClassQueue<T> {
             let plan = std::mem::take(&mut self.recheck);
             // The gate woke the queue or its hold timer fired: every held lane is asked again,
             // after the shared group and the capacity lanes below. Taken first, so that a lane
-            // either of those files as held is not asked twice.
-            let held = if plan.all {
-                std::mem::take(&mut self.gate_held)
+            // either of those files as held is not asked twice. Drained, not taken, so the set
+            // keeps its table for the lanes that are held again.
+            let held: Vec<LaneId> = if plan.all {
+                self.gate_held.drain().collect()
             } else {
-                FxHashSet::default()
+                Vec::new()
             };
             self.recheck_shared(&plan, class_index, is_dispatchable);
             let Self {
