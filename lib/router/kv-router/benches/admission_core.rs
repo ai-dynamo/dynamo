@@ -149,7 +149,6 @@ impl Case {
         }
     }
 
-    /// The `sequence`-th request of the backlog.
     fn request(self, sequence: u64) -> ScheduleRequest {
         let mut request = request(format!("request-{sequence}"), self.classifier().is_some());
         match self {
@@ -307,8 +306,6 @@ impl Loaded {
         self.scheduler.admission_barrier().await.expect("barrier");
     }
 
-    /// One steady-state cycle: a request arrives and queues, a booked request frees its worker,
-    /// and the scheduler admits one waiting request in its place.
     async fn cycle(&mut self) {
         self.submit_next();
         // The arrival's task runs up to its hand-off to the actor.
