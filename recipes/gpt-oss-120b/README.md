@@ -30,7 +30,7 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 
 - Modality: Text (gpt-oss "harmony" format: reasoning + tool calls)
 - Reasoning (`gpt_oss` parser)
-- Tool / function calling (`harmony` tool-call parser) — `tool_calls` populates, `finish_reason: tool_calls`
+- Tool / function calling (`harmony` tool-call parser) — `tool_calls` populates, `finish_reason: tool_calls`. A `tool_choice: "auto"` response holds one tool call; see [Tool Call Parsing](../../docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx) for how to get several
 
 ## Prerequisites
 
