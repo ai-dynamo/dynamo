@@ -13,9 +13,11 @@ use std::{
 use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::experimental::dispatch_gate::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+};
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
-    DispatchRecheck, RequestClassifier,
+    ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::{
@@ -1923,7 +1925,7 @@ async fn decode_progress_collection_follows_picker_declaration() {
     use dynamo_kv_router::plugins::experimental::decode_progress::{
         DECODE_PROGRESS, DecodeProgressByRow,
     };
-    use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    use dynamo_kv_router::plugins::worker_selection::{
         WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionRequest,
     };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;

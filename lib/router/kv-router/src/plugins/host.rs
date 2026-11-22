@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! What a routing host names to resolve and run plugins, beyond the plugin API in
-//! [`super::v1alpha1`]: the resolved plugin set, the policy-file entries the registry resolves
-//! from, and the hosted picker.
+//! [`super::worker_selection`] and [`super::request_classifier`]: the resolved plugin set, the
+//! policy-file entries the registry resolves from, and the hosted picker.
 //!
 //! Plugin crates do not import this module. Kernel and stage types a host also needs (the
 //! scheduling request, worker configuration, candidate rows) come from each owning crate's
@@ -20,38 +20,62 @@
 //! a review item, not a compile-time check: both modules are public in every build.
 
 use dynamo_router_protocol::WorkerType;
+use dynamo_worker_selection::{WorkerInputs, WorkerSelectionPolicy};
 
 use crate::config::KvRouterConfig;
 use crate::plugins::hint_policy::HintPolicyRegistryError;
 use crate::plugins::request_classifier::{
     RequestClassifierFactory, RequestClassifierRegistryError,
 };
-use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
-use crate::plugins::{
-    RouterPluginRegistry, RouterPluginRegistryError, WorkerSelectionPolicyRegistryError,
+use crate::plugins::worker_selection::{
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError,
 };
+use crate::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
 
-// Resolution: the plugins a configuration selects, and the check that one role's fit together.
-pub use crate::plugins::{PluginConfigError, RouterPlugins, check_role};
+// The check that one role's plugins fit together reports this.
+pub use dynamo_scheduler::PluginConfigError;
 
-// The policy-file entries the registry resolves plugins from.
+// The policy-file entries the registry resolves plugins from, and the environment variables
+// that select a role's policy.
 pub use crate::plugins::hint_policy::HintPolicyEntry;
-pub use crate::plugins::request_classifier::RequestClassifierConfig;
-pub use crate::plugins::worker_selection::{
-    WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection,
-};
-pub use crate::plugins::{
+pub use crate::plugins::registry::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+};
+pub use crate::plugins::request_classifier::config::RequestClassifierConfig;
+pub use crate::plugins::worker_selection::config::{
+    WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection,
 };
 
 // Running a resolved worker-selection policy.
-pub use crate::plugins::worker_selection::{
+pub use dynamo_worker_selection::host::WorkerSelectionPolicyHostExt;
+pub use dynamo_worker_selection::{
     HostedSelectionRequest, HostedWorkerPicker, SelectionFailure, SelectionTraceSpec,
 };
-pub use dynamo_worker_selection::host::WorkerSelectionPolicyHostExt;
 
 // Running resolved hint policies.
 pub use crate::plugins::hint_policy::{HintPolicyFactory, RoleHintPolicies};
+
+// The plugins a configuration selects.
+pub use crate::plugins::registry::RouterPlugins;
+
+/// Check, for a routing host building a router, that one role's plugins fit together, and return
+/// the worker inputs whose resources the router starts for that role: the worker-selection
+/// policy's, plus those of the role's configured hint policies.
+///
+/// Rejects the same configurations as the router's own setup, with a message that names the fix.
+pub fn check_role(
+    role: WorkerType,
+    selection: &WorkerSelectionPolicy,
+    hint_policies: RoleHintPolicies,
+    config: &KvRouterConfig,
+) -> Result<WorkerInputs, PluginConfigError> {
+    dynamo_scheduler::check_role(
+        role,
+        selection,
+        hint_policies,
+        config.supports_kv_transfer_chain_retention(),
+    )
+}
 
 mod sealed {
     /// Keeps the host traits implementable only here, so a method can be added to one.

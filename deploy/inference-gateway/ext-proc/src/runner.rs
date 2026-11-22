@@ -566,8 +566,8 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError;
     use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyProviderError;
     use tokio::sync::Mutex;
 
     use super::*;

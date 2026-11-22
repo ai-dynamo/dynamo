@@ -10,7 +10,7 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::experimental::hints::{
     ExternalSequenceBlockHash, KvTransferCandidateSource,
 };
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::{default_policy, default_policy_with_rng, kvcr_policy};
 use dynamo_scheduler::host::WorkerSelector;
 use dynamo_scheduler::host::{
@@ -277,7 +277,7 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
 /// multiplier gives copies credit. The default policy never reads them.
 #[test]
 fn kvcr_reads_copy_offers_only_with_a_positive_multiplier() {
-    use dynamo_kv_router::plugins::v1alpha1::WorkerInputs;
+    use dynamo_kv_router::plugins::WorkerInputs;
 
     let reads_offers = |policy: WorkerSelectionPolicy| {
         WorkerSelector::<HintWorker>::required_worker_inputs(&policy)

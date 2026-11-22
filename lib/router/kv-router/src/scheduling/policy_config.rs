@@ -10,14 +10,15 @@ use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::plugins::request_classifier::RawRequestClassifierConfig;
-use crate::plugins::request_classifier::RequestClassifierConfig;
-use crate::plugins::worker_selection::{
-    RawWorkerSelectionConfig, WorkerCapacity, WorkerCapacityExt, WorkerSelectionConfig,
+use crate::plugins::request_classifier::config::{
+    RawRequestClassifierConfig, RequestClassifierConfig,
 };
+use crate::plugins::worker_selection::config::{RawWorkerSelectionConfig, WorkerSelectionConfig};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::WorkerCapacityExt;
 use dynamo_scheduler::WorkerConfigLike;
 use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::WorkerCapacity;
 
 #[derive(Debug, Error)]
 pub enum RouterPolicyConfigError {
@@ -432,11 +433,12 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
-    use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
+    use crate::plugins::worker_selection::config::WorkerSelectionPolicySelection;
     use dynamo_admission::UnknownPolicyClassError;
     use dynamo_scheduler::KvSchedulerError;
+    use dynamo_scheduler::WorkerLoadInputExt;
     use dynamo_slot_tracker::WorkerLoadProjection;
+    use dynamo_worker_selection::WorkerLoadInput;
 
     fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
         WorkerLoadInput::from_projection(WorkerLoadProjection {

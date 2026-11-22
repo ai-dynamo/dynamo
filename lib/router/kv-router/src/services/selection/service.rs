@@ -221,7 +221,7 @@ impl SelectionServiceBuilder {
             None => self
                 .plugin_registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
-                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
+                .ok_or(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         // Hint policies are a peer plugin role, resolved independently of worker selection.
         if self.host.hints.policies.is_none() {
@@ -822,8 +822,8 @@ mod tests {
             panic!("missing default accepted")
         };
         assert!(matches!(
-            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
-            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+            error.downcast_ref::<crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault)
         ));
     }
 

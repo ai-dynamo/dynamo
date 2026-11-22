@@ -19,12 +19,12 @@ use dynamo_kv_hashing::routing::{
 };
 use dynamo_kv_indexer::KvIndexerInterface;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::hint_policy::{
-    HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, HintPolicyFactory,
-    KvHintAction,
+use dynamo_kv_router::plugins::experimental::hints::{
+    Commitments, HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, KvHintAction,
 };
+use dynamo_kv_router::plugins::host::HintPolicyFactory;
 use dynamo_kv_router::plugins::worker_selection::{
-    Commitments, WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+    WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
     WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 use dynamo_kv_router::services::indexer::backend::Indexer;

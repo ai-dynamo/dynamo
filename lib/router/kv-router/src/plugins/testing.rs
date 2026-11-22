@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
-//! use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+//! use dynamo_kv_router::plugins::worker_selection::*;
 //!
 //! struct FewestRequests;
 //!
@@ -55,7 +55,7 @@
 //! classifier with no worker rows, and [`SelectionCase::classify`] runs it over the case's
 //! workers when it declares worker inputs. [`request_progress`] builds a progress reading.
 //!
-//! This module follows the stability of [`super::v1alpha1`].
+//! This module follows the stability of the plugin API ([`super`]).
 
 use std::collections::HashMap;
 
@@ -77,7 +77,8 @@ use dynamo_worker_selection::{
     WorkerSelectionPolicyError,
 };
 
-use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
+use crate::plugins::RouterPluginRegistry;
+use crate::plugins::worker_selection::WorkerSelectionPolicyRegistryError;
 
 /// The signals one worker reports in a [`SelectionCase`]. Every value starts at zero or
 /// unreported; set the ones the policy under test reads.
@@ -401,8 +402,8 @@ mod tests {
     // Only the harness names: every other name comes from the plugin API, as in a plugin's
     // own tests, and not from this module's kernel and host imports.
     use super::{CaseWorker, SelectionCase, classify, classify_request, registered_policy};
-    use crate::plugins::v1alpha1::request_classifier::*;
-    use crate::plugins::v1alpha1::worker_selection::*;
+    use crate::plugins::request_classifier::*;
+    use crate::plugins::worker_selection::*;
 
     /// Marks a request `batch` when every observed worker is at or past a request count.
     struct LoadAwareClassifier {

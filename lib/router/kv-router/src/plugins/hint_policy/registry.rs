@@ -11,7 +11,7 @@ use thiserror::Error;
 use super::{HintHost, HintPolicyConstructor, HintPolicyEntry, HintPolicyFactory};
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
-use crate::plugins::worker_selection::{
+use crate::plugins::worker_selection::config::{
     WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection,
 };
 

@@ -6,7 +6,7 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use dynamo_kv_hints::WorkerKvTransferKeys;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::host::SelectionTraceSpec;
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::default_policy;
 use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};

@@ -17,7 +17,7 @@ use dynamo_kv_router::plugins::experimental::hints::{
     HintPolicyProviderError, HintPolicyRegistryError, KvCopySource, KvHintAction,
     KvSourceLocationsPayload,
 };
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::*;
 
 use crate::KVCR_POLICY_TYPE;
 

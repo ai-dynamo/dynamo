@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! What an in-tree host names from the worker-selection stage beyond the plugin contract it
-//! reaches through `dynamo_kv_router::plugins::v1alpha1`: the configuration slices, the
+//! reaches through `dynamo_kv_router::plugins::worker_selection`: the configuration slices, the
 //! conditional-disaggregation decision inputs, the LoRA filter, the trace types it renders, and
 //! the host half of the plugin contract types: how the kernel builds the request view and the
 //! candidate rows a policy reads, and how it runs a policy. Those are extension traits and

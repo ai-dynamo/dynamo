@@ -47,19 +47,19 @@ An external policy owns its filters, scorers, and picker. Dynamo's default score
 
 ## Public Plugin API and Compatibility
 
-A plugin crate depends on `dynamo-kv-router` alone and imports the module for the kind of plugin it is:
+A plugin crate depends on `dynamo-kv-router` alone and imports the module for the kind of plugin it is. The path says how stable a name is: the plugin API or `plugins::experimental`.
 
 | Module | Public API | Compatibility |
 |---|---|---|
-| `plugins::v1alpha1::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, `WorkerSelectionRequest`, the picker's table, `WorkerSelectionPolicyContext`, `SelectionConfig`, factories, and everything in `plugins::v1alpha1` | Alpha: an item can change or move in a minor release. Each change is listed in the [deprecation notes](../../../../reference/general/releases/deprecations.mdx), and the previous path keeps resolving for one release where that is possible |
-| `plugins::v1alpha1::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in `plugins::v1alpha1` | Same |
-| `plugins::v1alpha1` | What both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
-| `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints` | None: an item can change or be removed in any release |
-| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from tests and benches | Same as `plugins::v1alpha1` |
+| `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, `WorkerSelectionRequest`, the picker's table, `WorkerSelectionPolicyContext`, `SelectionConfig`, factories, and everything in the root `plugins` module | The plugin API can change in a minor release. Each change is listed in that release's [deprecation notes](../../../../reference/general/releases/deprecations.mdx) |
+| `plugins::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in the root `plugins` module | Same |
+| `plugins` | Only what both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
+| `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints`. An API's names move into a kind's module when it is ready | None: an item can change or be removed in any release |
+| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from tests and benches | Same as the plugin API |
 
-A policy and a classifier read workers through the same rows, so a value added to an input group reaches both. The two contracts can be frozen as `v1` separately.
+A policy and a classifier read workers through the same rows, so a value added to an input group reaches both.
 
-`plugins::host` holds what a routing host names to resolve and run plugins, such as the resolved `RouterPlugins` bundle. Plugin crates do not import it. The per-contract modules `plugins::worker_selection` and `plugins::request_classifier` keep resolving; they re-export each stage with its host items, so new plugins import the `plugins::v1alpha1` modules.
+`plugins::host` holds what a routing host names to resolve and run plugins, such as the resolved `RouterPlugins` bundle. Plugin crates do not import it. The two kind modules hold no host-only name: a host imports those from `plugins::host` or from the owning crate's `host` module.
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
@@ -116,7 +116,7 @@ A filter answers a hard yes-or-no question about one worker that already passed 
 This filter keeps workers with at least the configured number of device-resident overlap blocks:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
@@ -153,7 +153,7 @@ A scorer expresses a preference without excluding a worker. It writes one finite
 This scorer ranks workers by active requests above the batch minimum:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
     WorkerSelectionRequest,
 };
@@ -200,7 +200,7 @@ A picker makes the final choice after filtering and scoring. It sees every remai
 This picker selects the lowest-cost row:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerPicker, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
@@ -232,11 +232,11 @@ The provider runs once at startup. Parse and validate all parameters there, then
 ```rust
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
     WorkerSelectionPolicyProviderError,
 };
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerFilter, WorkerScorer, WorkerSelectionPolicy,
 };
 
@@ -289,7 +289,7 @@ The context describes the partition, not a request. Filters, scorers, and picker
 Expose a registration function from the policy crate:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     RouterPluginRegistry, WorkerSelectionPolicyRegistryError,
 };
 
@@ -356,7 +356,7 @@ Add one focused test for each policy decision and one registration test for ever
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
-    use dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerWithDpRank;
+    use dynamo_kv_router::plugins::worker_selection::WorkerWithDpRank;
 
     use super::*;
 
@@ -519,7 +519,7 @@ A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, 
 This scorer charges each worker for the prompt blocks it can neither reuse nor copy. A worker without copy data still counts its own cache:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
     WorkerSelectionRequest,
 };
@@ -627,7 +627,7 @@ Register the catalog before the standard runner starts:
 
 ```rust
 use dynamo_ext_proc::run;
-use dynamo_kv_router::plugins::v1alpha1::RouterPluginRegistry;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -663,7 +663,7 @@ For `P` retained inputs containing `H` hashes each, the added hash payload is `8
 For example, a classifier can inspect the sequence before it queues the request:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 

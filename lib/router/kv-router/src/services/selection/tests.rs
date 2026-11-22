@@ -15,8 +15,9 @@ use tower::ServiceExt;
 
 use super::server::create_router;
 use super::*;
+use crate::plugins::RouterPluginRegistry;
 use crate::plugins::host::RouterPluginRegistryHostExt;
-use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyProviderError};
+use crate::plugins::worker_selection::WorkerSelectionPolicyProviderError;
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};

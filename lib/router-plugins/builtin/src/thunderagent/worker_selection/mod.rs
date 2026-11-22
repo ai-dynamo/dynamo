@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 use super::THUNDERAGENT_CLASSIFIER_TYPE;
 

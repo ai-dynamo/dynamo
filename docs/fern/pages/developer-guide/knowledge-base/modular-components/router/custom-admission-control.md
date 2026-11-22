@@ -74,7 +74,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 ```rust
 use std::time::Duration;
 
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
@@ -115,7 +115,7 @@ Add the provider below the classifier in `classifier/src/lib.rs`. Dynamo calls i
 ```rust
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+use dynamo_kv_router::plugins::request_classifier::{
     RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError,
 };
 
@@ -146,8 +146,8 @@ Each factory-created classifier owns its state. Separate frontend replicas have 
 Expose a registration function from `classifier/src/lib.rs`:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::RouterPluginRegistry;
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::RequestClassifierRegistryError;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError;
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -159,8 +159,8 @@ pub fn register(
 Call it from `catalog/src/lib.rs`:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::RouterPluginRegistry;
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::RequestClassifierRegistryError;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError;
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -232,10 +232,10 @@ Each entry returned by `workers()` is the same `WorkerInfo` that [worker-selecti
 A classifier reads workers through `WorkerCandidates`, the view a [worker-selection](custom-worker-selection.mdx) filter or scorer reads: one `WorkerCandidate` per eligible worker rank, with the same accessors. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
-use dynamo_kv_router::plugins::v1alpha1::WorkerInputs;
+use dynamo_kv_router::plugins::WorkerInputs;
 
 struct LoadAwareClass {
     max_active_requests: usize,
@@ -297,7 +297,7 @@ Use a class name from the [router policy configuration](configuration-and-tuning
 ### Hold Queued Requests With a Dispatch Gate
 
 > [!NOTE]
-> The dispatch gate is experimental. `DispatchGate`, `DispatchDecision`, `DispatchHead`, and `DispatchRecheck` are in `plugins::experimental::dispatch_gate` and may change or be removed in any release while ThunderAgent is their only in-tree user. Classifying requests without a gate uses only `plugins::v1alpha1`.
+> The dispatch gate is experimental. `DispatchGate`, `DispatchDecision`, `DispatchHead`, and `DispatchRecheck` are in `plugins::experimental::dispatch_gate` and may change or be removed in any release while ThunderAgent is their only in-tree user. Classifying requests without a gate uses only `plugins::request_classifier`.
 
 Implement `DispatchGate` and return it from `dispatch_gate`. In `classify`, give every request the gate may hold a lane key, so a hold blocks only that lane. Dynamo queues every request at once and asks the gate about each queue head before it dispatches:
 

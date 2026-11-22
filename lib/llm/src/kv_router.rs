@@ -18,16 +18,15 @@ use dynamo_kv_indexer::host::{
     SessionPrefixIndexer,
 };
 use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
-use dynamo_kv_router::plugins::check_role;
-use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
+use dynamo_kv_router::plugins::experimental::resident_blocks::RESIDENT_BLOCKS;
+use dynamo_kv_router::plugins::host::HintPolicyFactory;
 use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::host::check_role;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
-use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyContext,
-    WorkerSelectionPolicyFactory,
+    WorkerInfo, WorkerInputs, WorkerSelectionPolicyContext, WorkerSelectionPolicyFactory,
 };
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
 use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionRef};
@@ -45,8 +44,8 @@ use dynamo_scheduler::host::{
     RejectThresholdsProvider, RouterConfigOverride, RoutingConstraints, Selected,
     SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome, SelectionRun,
     SessionBinding, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerAvailabilityProvider, WorkerConfigLike, cache_hit_estimates_from_tiered_matches,
-    effective_prefill_tokens,
+    WorkerAvailabilityProvider, WorkerConfigLike, WorkerInfoExt,
+    cache_hit_estimates_from_tiered_matches, effective_prefill_tokens,
 };
 use dynamo_slot_tracker::host::{PrefillLoadHint, SchedulerBookingDescriptor};
 use dynamo_worker_selection::host::SelectionConfig;
@@ -127,7 +126,7 @@ impl SelectionPolicySource {
             Self::Registry => plugins::router_plugin_registry()
                 .resolve_for_worker_type(config, worker_type)?
                 .ok_or_else(|| {
-                    dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
+                    dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyRegistryError::MissingDefault
                         .into()
                 }),
         }

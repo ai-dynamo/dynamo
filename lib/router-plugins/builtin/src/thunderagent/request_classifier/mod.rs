@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
+use dynamo_kv_router::plugins::request_classifier::*;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -270,8 +270,8 @@ mod tests {
     use dynamo_kv_router::plugins::experimental::dispatch_gate::{
         DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     };
+    use dynamo_kv_router::plugins::request_classifier::*;
     use dynamo_kv_router::plugins::testing::{classify, classify_request};
-    use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 
     use super::*;
 

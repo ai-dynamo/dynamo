@@ -3,7 +3,7 @@
 mod support;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_router_policies::{default_policy, default_policy_with_rng, default_registry};
 use dynamo_scheduler::host::WorkerIdSet;
 use dynamo_scheduler::host::WorkerSelectionInput;
@@ -24,7 +24,7 @@ fn seeded(config: &KvRouterConfig, worker_label: &'static str, seed: u64) -> Wor
 
 #[test]
 fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
-    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     use serde_json::json;
 
     let (workers, mut request) = fixture(2, 160);
@@ -118,7 +118,7 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
 
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
-    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
     for (config, role) in [
         (
             KvRouterConfig {
@@ -176,7 +176,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
 
 #[test]
 fn runtime_cache_tier_weights_change_selection_without_device_credit() {
-    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+    use dynamo_kv_router::plugins::worker_selection::*;
 
     for role in [WorkerType::Prefill, WorkerType::Decode] {
         for name in [

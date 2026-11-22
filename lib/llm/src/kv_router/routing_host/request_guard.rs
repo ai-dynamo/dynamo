@@ -27,7 +27,7 @@ use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
 use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
-use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::DECODE_PROGRESS;
+use dynamo_kv_router::plugins::experimental::decode_progress::DECODE_PROGRESS;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,

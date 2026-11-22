@@ -29,8 +29,8 @@ use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead,
 };
 use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
+use dynamo_kv_router::plugins::request_classifier::*;
 use dynamo_kv_router::plugins::testing::classify_request;
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 
 const BLOCK_SIZE: u32 = 64;
 const ISL: usize = 1_000;

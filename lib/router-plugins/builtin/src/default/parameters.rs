@@ -3,7 +3,7 @@
 
 //! Startup parameters and provider registration for the default policy.
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use std::sync::Arc;
 
 use super::{Preset, policy_for_role};

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, RouterPlugins};
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::request_classifier::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 struct PassThrough;
 

@@ -31,7 +31,7 @@ use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
-use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::host::RouterPlugins;
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyContext;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};

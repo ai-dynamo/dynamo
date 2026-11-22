@@ -46,7 +46,7 @@ pub use crate::selector::DefaultWorkerSelector;
 /// The synchronous selection entry a host or a replay harness drives directly, and the
 /// reference selector tests compare against.
 pub use crate::selector::{
-    WorkerCapacityExt, WorkerSelectionInput, WorkerSelector, worker_input_rows,
+    WorkerCapacityExt, WorkerInfoExt, WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 pub use crate::shared_cache::SharedKvCache;
 pub use crate::tracking_hash::{TrackingHashAlgorithm, TrackingHashScope};

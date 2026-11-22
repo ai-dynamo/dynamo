@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! A worker-selection policy and a request classifier written against
-//! `dynamo_kv_router::plugins::v1alpha1` alone, with the experimental dispatch gate imported
-//! by name: no other path from this crate, no other router crate. This file is the surface
+//! `dynamo_kv_router::plugins::{worker_selection, request_classifier}` alone, with the
+//! experimental dispatch gate imported by name: no other path from this crate, no other router
+//! crate. This file is the surface
 //! new plugins target. The tests below play the routing host, so they also name
 //! `plugins::host` and the router configuration.
 
@@ -17,8 +18,8 @@ use dynamo_kv_router::plugins::host::{
     HostedSelectionRequest, HostedWorkerPicker, RouterPluginRegistryHostExt, RouterPlugins,
     SelectionFailure, WorkerSelectionPolicyHostExt,
 };
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::request_classifier::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 struct ContractPolicy;
 
@@ -119,7 +120,7 @@ fn contract_provider(
 }
 
 #[test]
-fn v1alpha1_plugins_resolve_through_the_registry() {
+fn plugins_resolve_through_the_registry() {
     let _: Box<dyn WorkerFilter> = Box::new(ContractPolicy);
     let _: Box<dyn WorkerScorer> = Box::new(ContractPolicy);
     let _: Box<dyn WorkerPicker> = Box::new(ContractPolicy);

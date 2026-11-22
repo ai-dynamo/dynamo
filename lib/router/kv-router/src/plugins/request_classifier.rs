@@ -1,27 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Request classifier plugin contract: classify a request into a policy class before it
-//! reaches the scheduler's queue.
+//! The request-classifier plugin API: everything a classifier names, in one import.
 //!
-//! The stage lives in `dynamo-admission`; this module re-exports it at the paths plugins and
-//! hosts already name and adds what only the composed router knows: the host's instance
-//! config and the registry.
+//! ```
+//! use dynamo_kv_router::plugins::request_classifier::*;
+//! ```
+//!
+//! Stability and scope are those of [`super`]. The stage lives in `dynamo-admission`; what
+//! only a routing host or the scheduler names from it is in [`super::host`] and in that
+//! crate's `host` module, not here. The dispatch gate a classifier can return is experimental
+//! and lives in `plugins::experimental::dispatch_gate`.
 
-mod config;
-mod registry;
+pub(crate) mod config;
+pub(crate) mod registry;
 
+// The trait, the request it classifies, and the lifecycle events it receives. The workers it
+// reads are the shared `WorkerCandidates`, below.
 pub use dynamo_admission::{
-    AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
-    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
-    RequestProgress, RequestProgressUpdater,
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier,
+    RequestClassifierContext, RequestProgress,
 };
 
-pub(crate) use config::RawRequestClassifierConfig;
-pub use config::RequestClassifierConfig;
-pub(crate) use registry::RequestClassifierRegistry;
+// Registration: the factory a provider returns, the parameters it is built from, and its
+// errors.
 pub use registry::{
     RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProvider,
     RequestClassifierProviderError, RequestClassifierRegistryError,
+};
+
+// What both kinds share, so that this module is the one import a plugin needs.
+pub use super::{
+    BusyThresholds, DpRank, RouterPluginRegistry, RouterPluginRegistryError, RoutingPartitionId,
+    RoutingPartitionRef, SessionContext, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
+    WorkerCapacity, WorkerCopyInput, WorkerId, WorkerInfo, WorkerInputs, WorkerLoadInput,
+    WorkerSelectionInputTrigger, WorkerType, WorkerWithDpRank,
 };

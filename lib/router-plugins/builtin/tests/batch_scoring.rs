@@ -4,7 +4,7 @@
 //! Exercise the batch scoring contract using only public plugin inputs.
 mod support;
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc, Mutex,

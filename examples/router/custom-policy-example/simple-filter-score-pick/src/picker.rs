@@ -3,7 +3,7 @@
 
 //! Request-aware picker for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 /// Uses device affinity for tool results and total cost for other requests.
 pub(crate) struct RequestAwarePicker;

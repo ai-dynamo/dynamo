@@ -8,13 +8,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::plugins::worker_selection::selection_config::{SelectionConfig, SharedCacheType};
-use crate::plugins::worker_selection::selection_config::{
-    default_decode_active_request_weight, default_disk_cache_hit_weight,
-    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
-    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+use crate::plugins::worker_selection::config::{
+    WorkerSelectionConfig, WorkerSelectionPolicySelection,
 };
-use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionPolicySelection};
 use crate::tracking_hash::{
     TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
 };
@@ -22,9 +18,15 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::BlockHashOptions;
 use dynamo_router_protocol::WorkerType;
 pub use dynamo_worker_selection::{ConditionalDisaggConfig, ConditionalDisaggPolicyKind};
+pub use dynamo_worker_selection::{SelectionConfig, SharedCacheType};
 use dynamo_worker_selection::{
     default_conditional_disagg_eff_isl_ratio_threshold,
     default_conditional_disagg_eff_isl_threshold,
+};
+use dynamo_worker_selection::{
+    default_decode_active_request_weight, default_disk_cache_hit_weight,
+    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
+    validate_finite_non_negative, validate_overlap_score_credit, validate_range,
 };
 
 pub use dynamo_scheduler::{RouterConfigOverride, RouterPrefillLoadModel};
@@ -915,10 +917,7 @@ impl KvRouterConfig {
     /// Return the custom worker-selection configuration from `router_policy_config`, if any.
     pub fn worker_selection_config(
         &self,
-    ) -> Result<
-        Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
-        super::policy_config::RouterPolicyConfigError,
-    > {
+    ) -> Result<Option<&WorkerSelectionConfig>, super::policy_config::RouterPolicyConfigError> {
         Ok(self
             .loaded_policy_config()?
             .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
@@ -928,7 +927,7 @@ impl KvRouterConfig {
     pub fn request_classifier_config(
         &self,
     ) -> Result<
-        Option<&crate::plugins::request_classifier::RequestClassifierConfig>,
+        Option<&crate::plugins::request_classifier::config::RequestClassifierConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self

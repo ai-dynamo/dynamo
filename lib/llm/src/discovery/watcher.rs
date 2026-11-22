@@ -3702,9 +3702,9 @@ request_classifier:
         assert!(resolved.worker_selection().is_some());
         let builtin = RouterPluginBuilder::new(resolved);
         let custom = RouterPluginBuilder::new(
-            dynamo_kv_router::plugins::RouterPlugins::default().with_worker_selection(Arc::new(
-                |_| unreachable!("role validation never constructs the policy"),
-            )),
+            dynamo_kv_router::plugins::host::RouterPlugins::default().with_worker_selection(
+                Arc::new(|_| unreachable!("role validation never constructs the policy")),
+            ),
         );
         let mut card = ModelDeploymentCard::with_name_only("model");
         assert!(validate_policy_worker_role(&card, &unresolved).is_ok());

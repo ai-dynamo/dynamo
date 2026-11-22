@@ -11,7 +11,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 use filter::MinimumDeviceOverlapFilter;
 use picker::{DecodePicker, PrefillPicker, UnsupportedWorkerTypePicker};
 use scorer::{DecodeLoadScorer, PrefillLoadScorer};

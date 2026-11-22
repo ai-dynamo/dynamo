@@ -988,7 +988,7 @@ pub fn run_input<'p>(
 }
 
 fn validate_router_plugin_input(
-    plugins: &dynamo_kv_router::plugins::RouterPlugins,
+    plugins: &dynamo_kv_router::plugins::host::RouterPlugins,
     input: &Input,
     is_kv_routing: bool,
 ) -> Result<(), &'static str> {
@@ -1013,7 +1013,7 @@ where
 #[cfg(test)]
 mod plugin_input_tests {
     use super::*;
-    use dynamo_kv_router::plugins::RouterPlugins;
+    use dynamo_kv_router::plugins::host::RouterPlugins;
 
     #[test]
     fn resolved_builtin_supports_stock_inputs_and_routing_modes() {

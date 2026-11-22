@@ -70,7 +70,7 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// `SelectionPolicySource::resolve`).
     pub policy_factory: WorkerSelectionPolicyFactory,
     /// The partition's hint policies, resolved from router configuration.
-    pub hint_policies: dynamo_kv_router::plugins::hint_policy::HintPolicyFactory,
+    pub hint_policies: dynamo_kv_router::plugins::host::HintPolicyFactory,
 }
 
 fn record_queue_rejection(

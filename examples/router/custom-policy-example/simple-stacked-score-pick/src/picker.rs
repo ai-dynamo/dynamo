@@ -3,7 +3,7 @@
 
 //! Lowest-cost picker for the `simple-stacked-score-pick` policy.
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+use dynamo_kv_router::plugins::worker_selection::*;
 
 pub(crate) struct LowestCostPicker;
 
