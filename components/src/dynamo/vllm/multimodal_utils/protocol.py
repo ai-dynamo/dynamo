@@ -40,16 +40,8 @@ class Tokens(BaseModel):
     tokens: list[int]
 
 
-class PrefillRequest(Request):
-    request_id: str
-
-
 class Response(BaseModel):
     text: str
-
-
-class PrefillResponse(BaseModel):
-    prefilled: bool
 
 
 # Hack to override the type of multi_modal_data in TokensPrompt
