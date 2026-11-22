@@ -331,7 +331,7 @@ note in [Quick Start](#quick-start).
 
 With `openai/gpt-oss-20b` on vLLM 0.33.0 (XGrammar 0.2.8), the
 [tool schema replay](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/tool_schema_replay)
-measured these results for its `strict: false` cases:
+measured these results for its suite A cases, where every tool is `strict: false`:
 
 - With schema mode `auto`, only cases with nested objects failed. Their
   `tool_choice="auto"` runs returned arguments that broke the schema in 19 of
