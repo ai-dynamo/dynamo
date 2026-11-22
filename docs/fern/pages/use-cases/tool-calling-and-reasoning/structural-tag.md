@@ -194,7 +194,7 @@ After selector validation, builder lookup tries the compatible Unified builder, 
 - `beam` through the pinned Unified library builder
 - `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`
 - `glm47` (V1 and V2 builders)
-- `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict. A gpt-oss request with `tool_choice: "required"` and `parallel_tool_calls` unset or `true` gets no structural tag; Dynamo guides it with a JSON array of calls instead
+- `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict. For a gpt-oss request with `tool_choice: "required"` and `parallel_tool_calls` unset or `true`, the structural tag does not use native Harmony tool calls; it guides the model to write all of its calls as one JSON array
 - `hermes`, `qwen25`
 - `inkling`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
