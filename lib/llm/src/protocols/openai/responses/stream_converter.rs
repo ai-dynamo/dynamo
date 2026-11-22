@@ -2799,10 +2799,13 @@ mod tests {
         }
         let complete = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}"#;
         let cut_tail = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]cd[ARGS]{"input":"cut"#;
+        let raw_cut_tail = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]cd[ARGS]dir_na"#;
         for (finish, text, keep, expected_count) in [
             (FinishReason::Length, complete, true, 1),
             (FinishReason::ContentFilter, complete, true, 1),
             (FinishReason::Length, cut_tail, true, 1),
+            (FinishReason::Length, raw_cut_tail, true, 1),
+            (FinishReason::ContentFilter, raw_cut_tail, true, 1),
             (FinishReason::Length, complete, false, 0),
         ] {
             for separate_finish in [false, true] {

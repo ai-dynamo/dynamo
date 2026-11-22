@@ -590,6 +590,18 @@ mod tests {
     /// the body is not JSON, so the stream must not drop it on a cut-off finish either.
     #[tokio::test]
     async fn chat_custom_stream_cut_off_keeps_only_mistral_confirmed_invalid_input() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::chat_custom_stream_cut_off_keeps_only_mistral_confirmed_invalid_input"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
         for (finish, keep, complete, expected) in
             ["length", "content_filter"].into_iter().flat_map(|finish| {
                 [
@@ -625,6 +637,61 @@ mod tests {
                     json!([{"index":0,"id":"c1","type":"custom","custom":{"name":"run_python","input":input}}])
                 ),
                 None => assert!(value["choices"][0]["delta"]["tool_calls"].is_null()),
+            }
+        }
+
+        for finish in [FinishReason::Length, FinishReason::ContentFilter] {
+            for separate_finish in [false, true] {
+                let mut adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
+                adapter.keep_parser_confirmed_calls(true);
+                let mut text = chunk(0, json!(null), json!(null));
+                text.inner.choices[0].delta.content = Some(
+                    dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        r#"[TOOL_CALLS]run_python[ARGS]{"workspace"}[TOOL_CALLS]run_python[ARGS]dir_na"#.into(),
+                    ),
+                );
+                let mut chunks = vec![Annotated::from_data(text)];
+                if separate_finish {
+                    chunks.push(Annotated::from_data(chunk(0, json!(null), json!(finish))));
+                } else {
+                    chunks[0].data.as_mut().unwrap().inner.choices[0].finish_reason = Some(finish);
+                }
+                let parsed = super::super::unified_parser::apply_stream(
+                    futures::stream::iter(chunks),
+                    Some(vec![dynamo_parsers::tool_calling::ToolDefinition {
+                        name: "run_python".into(),
+                        parameters: Some(super::super::custom_tool_parameters()),
+                        strict: None,
+                    }]),
+                    None,
+                    false,
+                    dynamo_parsers_v2::UnifiedParserStartingState::Response,
+                    super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+                );
+                let out: Vec<_> = adapter.stream(parsed).collect().await;
+                assert!(out.iter().all(|item| !item.is_error()));
+                let calls: Vec<_> = out
+                    .iter()
+                    .filter_map(|item| item.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .collect();
+                assert_eq!(
+                    calls.len(),
+                    1,
+                    "{finish:?} separate_finish={separate_finish}"
+                );
+                assert_eq!(
+                    calls[0].custom.as_ref().unwrap().input.as_deref(),
+                    Some(r#"{"workspace"}"#)
+                );
+                let terminal = out
+                    .iter()
+                    .filter_map(|item| item.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .filter_map(|choice| choice.finish_reason)
+                    .collect::<Vec<_>>();
+                assert_eq!(terminal, [finish]);
             }
         }
     }

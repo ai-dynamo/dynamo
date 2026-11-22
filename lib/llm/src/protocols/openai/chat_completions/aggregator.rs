@@ -3014,6 +3014,7 @@ mod tests {
         let both =
             r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#;
         let cut_off = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_na"#;
+        let raw_cut_off = r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]dir_na"#;
         let both_calls: &[(&str, &str)] = &[
             ("cd", r#"{"workspace"}"#),
             ("mkdir", r#"{"dir_name": "Projects"}"#),
@@ -3032,53 +3033,77 @@ mod tests {
                 FinishReason::Length,
                 &[("cd", r#"{"workspace"}"#)],
             ),
+            (
+                FinishReason::Length,
+                raw_cut_off,
+                FinishReason::Length,
+                &[("cd", r#"{"workspace"}"#)],
+            ),
+            (
+                FinishReason::ContentFilter,
+                raw_cut_off,
+                FinishReason::ContentFilter,
+                &[("cd", r#"{"workspace"}"#)],
+            ),
+            (
+                FinishReason::Stop,
+                raw_cut_off,
+                FinishReason::ToolCalls,
+                &[("cd", r#"{"workspace"}"#), ("mkdir", "dir_na")],
+            ),
         ];
         for (finish, text, expected_finish, expected_calls) in cases {
-            let raw = create_test_delta(
-                0,
-                text,
-                Some(dynamo_protocols::types::Role::Assistant),
-                Some(finish),
-                None,
-                None,
-            );
-            let adapted = super::super::unified_parser::apply_stream(
-                stream::iter(vec![raw]),
-                Some(vec![tool("cd", "folder"), tool("mkdir", "dir_name")]),
-                None,
-                false,
-                dynamo_parsers_v2::UnifiedParserStartingState::Response,
-                super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
-            );
+            for separate_finish in [false, true] {
+                let raw = create_test_delta(
+                    0,
+                    text,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    (!separate_finish).then_some(finish),
+                    None,
+                    None,
+                );
+                let mut chunks = vec![raw];
+                if separate_finish {
+                    chunks.push(create_test_delta(0, "", None, Some(finish), None, None));
+                }
+                let adapted = super::super::unified_parser::apply_stream(
+                    stream::iter(chunks),
+                    Some(vec![tool("cd", "folder"), tool("mkdir", "dir_name")]),
+                    None,
+                    false,
+                    dynamo_parsers_v2::UnifiedParserStartingState::Response,
+                    super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+                );
 
-            let response = DeltaAggregator::apply_with_tool_terminal_policy(
-                adapted,
-                ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
-                true,
-            )
-            .await
-            .expect("aggregation should succeed");
+                let response = DeltaAggregator::apply_with_tool_terminal_policy(
+                    adapted,
+                    ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
+                    true,
+                )
+                .await
+                .expect("aggregation should succeed");
 
-            let choice = &response.inner.choices[0];
-            assert_eq!(
-                choice.finish_reason,
-                Some(expected_finish),
-                "{finish:?} {text}"
-            );
-            let calls: Vec<_> = choice
-                .message
-                .tool_calls
-                .iter()
-                .flatten()
-                .map(|call| {
-                    (
-                        call.function.name.as_str(),
-                        call.function.arguments.as_str(),
-                    )
-                })
-                .collect();
-            assert_eq!(calls, expected_calls, "{finish:?} {text}");
-            assert!(choice.message.content.is_none(), "{finish:?} {text}");
+                let choice = &response.inner.choices[0];
+                assert_eq!(
+                    choice.finish_reason,
+                    Some(expected_finish),
+                    "{finish:?} {text}"
+                );
+                let calls: Vec<_> = choice
+                    .message
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .map(|call| {
+                        (
+                            call.function.name.as_str(),
+                            call.function.arguments.as_str(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(calls, expected_calls, "{finish:?} {text}");
+                assert!(choice.message.content.is_none(), "{finish:?} {text}");
+            }
         }
     }
 

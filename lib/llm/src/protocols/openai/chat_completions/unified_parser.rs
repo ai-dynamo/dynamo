@@ -4462,7 +4462,16 @@ where
                             && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. })
                             && terminal == Some(FinishReason::Stop)
                             && chat.model_eos.contains(&original.index);
-                        deltas.extend(state.finish_with_eos(confirmed_eos));
+                        let mut flushed = state.finish_with_eos(confirmed_eos);
+                        if family == MISTRAL_UNIFIED_FAMILY
+                            && matches!(&state.tool_output_mode, UnifiedToolOutputMode::Native)
+                            && matches!(terminal, Some(FinishReason::Length | FinishReason::ContentFilter))
+                        {
+                            // EOF can close a raw Mistral body without proving the model
+                            // finished it. Calls closed before the flush remain in `deltas`.
+                            flushed.retain(|event| !matches!(event, UnifiedParserEvent::ToolCall(_)));
+                        }
+                        deltas.extend(flushed);
                     }
                     records.entry(original.index).or_default().finished = true;
                 }
