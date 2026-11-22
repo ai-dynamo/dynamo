@@ -99,6 +99,7 @@ impl SelectionCore {
             .set_lifecycle(worker_id, WorkerLifecycle::Draining, Vec::new());
         self.publish_scheduler_config(&key);
         self.cleanup_indexer_registration(&previous).await;
+        self.cleanup_carrier_registration(&previous);
         let record = self
             .catalog
             .set_lifecycle(worker_id, WorkerLifecycle::Unschedulable, Vec::new())
@@ -194,6 +195,7 @@ impl SelectionCore {
                 .set_lifecycle(old.worker_id, WorkerLifecycle::Draining, Vec::new());
             self.publish_scheduler_config(&old.key());
             self.cleanup_indexer_registration(old).await;
+            self.cleanup_carrier_registration(old);
             None
         } else {
             previous
@@ -206,9 +208,26 @@ impl SelectionCore {
                 .await
         {
             self.cleanup_indexer_registration(&record).await;
+            self.cleanup_carrier_registration(&record);
             record
                 .not_schedulable_reasons
                 .push(format!("reconciliation failed: {error}"));
+        }
+        if record.not_schedulable_reasons.is_empty()
+            && let Some(block_size) = record.block_size
+            && let Some(entry) = self.entry(&record.key())
+            && let Err(error) = entry.carrier.upsert_worker(
+                record.worker_id,
+                record.dp_ranks(),
+                record.carrier.as_ref(),
+                block_size,
+            )
+        {
+            tracing::warn!(
+                worker_id = record.worker_id,
+                %error,
+                "invalid carrier routing configuration; worker remains schedulable"
+            );
         }
         record.lifecycle = if record.not_schedulable_reasons.is_empty() {
             WorkerLifecycle::Schedulable
@@ -235,6 +254,12 @@ impl SelectionCore {
             .block_size
             .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
         self.ensure_entry_for(record.key(), block_size, record.is_eagle.unwrap_or(false))
+    }
+
+    fn cleanup_carrier_registration(&self, record: &WorkerCatalogRecord) {
+        if let Some(entry) = self.entry(&record.key()) {
+            entry.carrier.remove_worker(record.worker_id);
+        }
     }
 
     /// Create the partition scheduler and indexer for `key` before any worker
@@ -381,6 +406,7 @@ impl SelectionCore {
                     replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
+                    carrier: self.carrier_router(),
                     affinity_replication: self.session_binding_sink(&key),
                 }))
             })?

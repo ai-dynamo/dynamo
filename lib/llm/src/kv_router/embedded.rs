@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
+use dynamo_kv_router::carrier_feed_client::{HttpCarrierFeedConnector, ZmqCarrierFeedConnector};
+use dynamo_kv_router::carrier_routing::{CARRIER_RUNTIME_DATA_KEY, CarrierWorkerConfig};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
@@ -32,6 +34,7 @@ use dynamo_kv_router::services::selection::{
     SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
@@ -259,45 +262,64 @@ impl EmbeddedSelection {
                 slot.lock().ok().and_then(|mut s| s.take())
             }));
 
+        let drt = args.endpoint.component().drt().clone();
+        let carrier_feed_connector: Arc<
+            dyn dynamo_kv_router::carrier_routing::CarrierFeedConnector,
+        > = match drt.default_event_transport_kind() {
+            dynamo_runtime::discovery::EventTransportKind::Zmq => {
+                Arc::new(ZmqCarrierFeedConnector::default())
+            }
+            dynamo_runtime::discovery::EventTransportKind::Nats => {
+                Arc::new(HttpCarrierFeedConnector::new(
+                    crate::kv_router::carrier_feed_nats::NatsFeedTransport::new(drt),
+                ))
+            }
+        };
+
         // The registry is only consulted when no factory is set; `policy_factory`
         // always is, so the builder never reads it.
-        let service = SelectionServiceBuilder::new(
+        let mut builder = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
             RouterPluginRegistry::default(),
         )
-        .worker_selection_policy_factory(args.policy_factory)
-        .host_manages_request_lifecycle()
-        .indexer_threads(1)
-        .host(SelectionHost {
-            load: HostLoad {
-                prefill_estimator: args.prefill_load_estimator,
-                overloaded_workers: Some(args.overloaded_worker_provider),
-                available_workers: Some(args.available_worker_provider),
-                reject_thresholds: args.reject_thresholds,
-            },
-            cache: HostCache {
-                shared: args.shared_cache,
-                index: KvIndexSource::Owned(args.ingress),
-            },
-            eligibility: HostEligibility {
-                lora_worker_filter: args.lora_worker_filter,
-            },
-            telemetry: HostTelemetry {
-                scheduler_load: Some(Arc::new(SenderLoadSink {
-                    sender: args.scheduler_load,
-                    worker_type: args.metric_worker_type,
-                })),
-            },
-            replication: HostReplication {
-                channels: replica_sync,
-                request_leases,
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-            },
-        })
-        .build()
-        .await
-        .context("failed to start embedded selection service")?;
+        .worker_selection_policy_factory(args.policy_factory);
+        if let Some(source) = super::embedder::carrier_lookup_source() {
+            builder = builder.carrier_lookup_source(source);
+        }
+        let service = builder
+            .carrier_feed_connector(carrier_feed_connector)
+            .host_manages_request_lifecycle()
+            .indexer_threads(1)
+            .host(SelectionHost {
+                load: HostLoad {
+                    prefill_estimator: args.prefill_load_estimator,
+                    overloaded_workers: Some(args.overloaded_worker_provider),
+                    available_workers: Some(args.available_worker_provider),
+                    reject_thresholds: args.reject_thresholds,
+                },
+                cache: HostCache {
+                    shared: args.shared_cache,
+                    index: KvIndexSource::Owned(args.ingress),
+                },
+                eligibility: HostEligibility {
+                    lora_worker_filter: args.lora_worker_filter,
+                },
+                telemetry: HostTelemetry {
+                    scheduler_load: Some(Arc::new(SenderLoadSink {
+                        sender: args.scheduler_load,
+                        worker_type: args.metric_worker_type,
+                    })),
+                },
+                replication: HostReplication {
+                    channels: replica_sync,
+                    request_leases,
+                    replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                },
+            })
+            .build()
+            .await
+            .context("failed to start embedded selection service")?;
         let service = Arc::new(service);
         let partition = service
             .core()
@@ -486,6 +508,14 @@ pub(crate) fn worker_request_from_runtime_config(
             }
         }
     }
+    let carrier = match config.get_engine_specific::<CarrierWorkerConfig>(CARRIER_RUNTIME_DATA_KEY)
+    {
+        Ok(carrier) => carrier,
+        Err(error) => {
+            tracing::warn!(%error, "ignoring malformed carrier runtime data");
+            None
+        }
+    };
     WorkerRequest {
         worker_id,
         model_name: key.model_name.clone(),
@@ -512,6 +542,7 @@ pub(crate) fn worker_request_from_runtime_config(
         router_hint_worker_type,
         router_hint_source_control_endpoints,
         kv_event_source_mode: config.kv_event_source_mode.clone(),
+        carrier,
         ..WorkerRequest::default()
     }
 }
@@ -623,6 +654,43 @@ mod tests {
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)
         );
+    }
+
+    #[test]
+    fn worker_request_reads_carrier_runtime_data() {
+        let mut config = ModelRuntimeConfig::default();
+        let carrier = CarrierWorkerConfig {
+            hub_url: "http://hub".to_string(),
+            manifest: "00".repeat(32),
+            block_size: 16,
+            instance_ids: HashMap::from([(0, "7".to_string())]),
+        };
+        config
+            .set_engine_specific(CARRIER_RUNTIME_DATA_KEY, &carrier)
+            .unwrap();
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(request.carrier, Some(carrier));
+    }
+
+    #[test]
+    fn worker_request_ignores_malformed_carrier_runtime_data() {
+        let mut config = ModelRuntimeConfig::default();
+        config.runtime_data.insert(
+            CARRIER_RUNTIME_DATA_KEY.to_string(),
+            serde_json::json!("bad"),
+        );
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(request.carrier, None);
+    }
+
+    #[test]
+    fn worker_request_keeps_carrier_absent_without_runtime_data() {
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request =
+            worker_request_from_runtime_config(7, &ModelRuntimeConfig::default(), &key, 16, false);
+        assert_eq!(request.carrier, None);
     }
 
     #[test]

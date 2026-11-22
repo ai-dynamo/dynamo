@@ -28,6 +28,8 @@ use super::types::{
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerType;
+use crate::carrier_lookup::CarrierLookupSource;
+use crate::carrier_routing::CarrierFeedConnector;
 use crate::plugins::RouterPluginRegistry;
 
 pub struct SelectionServiceBuilder {
@@ -45,6 +47,8 @@ pub struct SelectionServiceBuilder {
     session_affinity_mode: SessionAffinityMode,
     session_replication_writer_id: Option<u64>,
     host_manages_request_lifecycle: bool,
+    carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
+    carrier_lookup_source: Option<Arc<dyn CarrierLookupSource>>,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -88,6 +92,8 @@ impl SelectionServiceBuilder {
             session_affinity_mode: SessionAffinityMode::default(),
             session_replication_writer_id: None,
             host_manages_request_lifecycle: false,
+            carrier_feed_connector: None,
+            carrier_lookup_source: None,
         }
     }
 
@@ -111,6 +117,17 @@ impl SelectionServiceBuilder {
     /// What the embedding host supplies to every partition this service creates.
     pub fn host(mut self, host: SelectionHost) -> Self {
         self.host = host;
+        self
+    }
+
+    /// Use the supplied transport to connect carrier feeds from indexer hubs.
+    pub fn carrier_feed_connector(mut self, connector: Arc<dyn CarrierFeedConnector>) -> Self {
+        self.carrier_feed_connector = Some(connector);
+        self
+    }
+
+    pub fn carrier_lookup_source(mut self, source: Arc<dyn CarrierLookupSource>) -> Self {
+        self.carrier_lookup_source = Some(source);
         self
     }
 
@@ -227,6 +244,8 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
+            self.carrier_feed_connector,
+            self.carrier_lookup_source,
             self.session_affinity_ttl
                 .map(|ttl| SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode)),
         );

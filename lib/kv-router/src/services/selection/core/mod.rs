@@ -17,6 +17,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::carrier_lookup::CarrierLookupSource;
+use crate::carrier_routing::CarrierFeedConnector;
+use crate::carrier_routing::CarrierRouter;
 use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
@@ -135,6 +138,7 @@ struct SelectionEntry {
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
+    carrier: Arc<CarrierRouter>,
     affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
 }
 
@@ -297,6 +301,10 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
+    carrier_lookup_source: Option<Arc<dyn CarrierLookupSource>>,
+    #[cfg(test)]
+    carrier_connector_override: parking_lot::Mutex<Option<Arc<dyn CarrierFeedConnector>>>,
     /// Writer id and publisher for session bindings the host carries to its peers.
     session_binding_tx: Option<(u64, mpsc::Sender<AffinityBindingEvent>)>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
@@ -403,6 +411,8 @@ impl SelectionCore {
             tracking_hash,
             indexer_policy,
             None,
+            None,
+            None,
         ))
     }
 
@@ -423,6 +433,8 @@ impl SelectionCore {
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
         indexer_policy: IndexerPolicy,
+        carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
+        carrier_lookup_source: Option<Arc<dyn CarrierLookupSource>>,
         session_affinity: Option<SessionAffinityConfig>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
@@ -452,6 +464,10 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
             session_affinity,
+            carrier_feed_connector,
+            carrier_lookup_source,
+            #[cfg(test)]
+            carrier_connector_override: parking_lot::Mutex::new(None),
             session_binding_tx: None,
             #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
@@ -460,6 +476,47 @@ impl SelectionCore {
             #[cfg(test)]
             after_affinity_invalidation: None,
         }
+    }
+
+    fn carrier_router(&self) -> Arc<CarrierRouter> {
+        #[cfg(test)]
+        if let Some(connector) = self.carrier_connector_override.lock().clone() {
+            return Arc::new(CarrierRouter::new(
+                Some(connector),
+                self.carrier_lookup_source.clone(),
+            ));
+        }
+        let enabled = std::env::var("DYN_ROUTER_CARRIER_INDEX")
+            .ok()
+            .and_then(|value| dynamo_truthy::parse_bool_opt(&value))
+            != Some(false);
+        if !enabled {
+            return Arc::new(CarrierRouter::new(None, None));
+        }
+        if let Some(connector) = &self.carrier_feed_connector {
+            return Arc::new(CarrierRouter::new(
+                Some(Arc::clone(connector)),
+                self.carrier_lookup_source.clone(),
+            ));
+        }
+        #[cfg(feature = "standalone-indexer")]
+        {
+            Arc::new(CarrierRouter::new(
+                Some(Arc::new(
+                    crate::carrier_feed_client::ZmqCarrierFeedConnector::default(),
+                )),
+                self.carrier_lookup_source.clone(),
+            ))
+        }
+        #[cfg(not(feature = "standalone-indexer"))]
+        {
+            Arc::new(CarrierRouter::new(None, self.carrier_lookup_source.clone()))
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_carrier_connector(&self, connector: Arc<dyn CarrierFeedConnector>) {
+        *self.carrier_connector_override.lock() = Some(connector);
     }
 
     /// Export session bindings through a bounded channel for the host to carry.
