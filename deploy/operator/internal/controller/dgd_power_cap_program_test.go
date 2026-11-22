@@ -22,6 +22,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -294,4 +296,56 @@ func TestPowerCapUpgradeUsesNormalWorkerRollout(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestPowerCapEditDoesNotRecaptureCheckpoint(t *testing.T) {
+	t.Log("Capture an automatic checkpoint for a capped worker")
+	ctx := context.Background()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	const capKey = consts.KubeAnnotationGPUPowerLimit
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name:        "test-dgd",
+		Namespace:   "default",
+		UID:         types.UID("dgd-uid"),
+		Annotations: map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{capKey: "300"}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "worker:latest"}},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled: true,
+					Mode:    v1beta1.CheckpointModeAuto,
+				}},
+			}},
+		},
+	}
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = workerHash
+	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	job := jobs.Items[0].DeepCopy()
+
+	t.Log("A cap edit keeps the worker hash and does not start another capture")
+	dgd.Spec.Components[0].PodTemplate.Annotations[capKey] = "350"
+	require.Equal(t, workerHash, betaDGDWorkersSpecHash(t, dgd))
+	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	require.Equal(t, job.Name, jobs.Items[0].Name)
+	require.Equal(t, job.Spec, jobs.Items[0].Spec)
 }

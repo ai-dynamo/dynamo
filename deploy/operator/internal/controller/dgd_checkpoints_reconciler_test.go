@@ -705,9 +705,6 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *te
 		Name:      "test-dgd",
 		Namespace: "default",
 		UID:       types.UID("dgd-uid"),
-		Annotations: map[string]string{
-			commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
-		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -723,8 +720,6 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *te
 			}},
 		},
 	}
-	const capKey = commonconsts.KubeAnnotationGPUPowerLimit
-	dgd.Spec.Components[0].PodTemplate.Annotations = map[string]string{capKey: "300"}
 
 	t.Log("Reconcile while the worker generation has no durable identity")
 	result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
@@ -741,7 +736,9 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *te
 
 	t.Log("Record the active worker hash and reconcile capture again")
 	workerHash := betaDGDWorkersSpecHash(t, dgd)
-	dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2] = workerHash
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: workerHash,
+	}
 	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	require.NoError(t, err)
 
@@ -749,17 +746,6 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *te
 	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
 	require.Len(t, jobs.Items, 1)
 	assert.Equal(t, workerHash, jobs.Items[0].Labels[commonconsts.KubeLabelDynamoWorkerHash])
-
-	t.Log("A cap edit keeps the worker hash and does not start another capture")
-	job := jobs.Items[0].DeepCopy()
-	dgd.Spec.Components[0].PodTemplate.Annotations[capKey] = "350"
-	require.Equal(t, workerHash, betaDGDWorkersSpecHash(t, dgd))
-	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
-	require.NoError(t, err)
-	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
-	require.Len(t, jobs.Items, 1)
-	require.Equal(t, job.Name, jobs.Items[0].Name)
-	require.Equal(t, job.Spec, jobs.Items[0].Spec)
 }
 
 func TestDGDCheckpointsReconciler_CompatibilityVersionUpgradeRecaptures(t *testing.T) {
