@@ -564,6 +564,33 @@ fn full_recheck_asks_a_shared_lane_the_gate_now_holds_once() {
 }
 
 #[test]
+fn cancelling_a_gate_held_root_asks_its_successor() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "held");
+    enqueue_due(&mut queue, None, None, lane_of(1), "next");
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        if *payload == "held" {
+            LaneCheck::Blocked(BlockReason::Gate)
+        } else {
+            LaneCheck::Dispatch
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::Gate)
+    );
+
+    // The held root leaves: the lane is unblocked and its successor is asked at the next
+    // dispatch, with no recheck from the gate.
+    let (removed, root_removed) = queue.take_if_in_class(0, |payload| *payload == "held");
+    assert_eq!(removed.len(), 1);
+    assert!(root_removed);
+    assert_eq!(queue.class_lane_block_reason(0, lane_of(1)), None);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "next");
+}
+
+#[test]
 fn shared_group_stand_in_is_handed_on_when_it_is_cancelled() {
     // Three keyed lanes refused as SharedCapacity; the pinned lane keeps its own reason.
     let mut queue = PolicyQueue::new(&edf_profile());
