@@ -188,6 +188,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
         engine_owned_mm_identity: None,
+        idempotent_stores: None,
     }
 }
 
@@ -1603,6 +1604,13 @@ async fn shared_cache_hits_reach_worker_selection() {
     core.select(request).await.expect("select");
     assert_eq!(calls.lock().len(), 1);
     assert_eq!(observed.lock()[1].shared_beyond_device_blocks, vec![0]);
+
+    // Shared-cache keys carry no adapter, so a LoRA request skips the lookup.
+    let mut request = select_request();
+    request.prompt.lora_name = Some("adapter-a".to_string());
+    core.select(request).await.expect("select");
+    assert_eq!(calls.lock().len(), 1);
+    assert_eq!(observed.lock()[2].shared_beyond_device_blocks, vec![0]);
 }
 
 #[tokio::test]

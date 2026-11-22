@@ -388,6 +388,13 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
+    // In-process cards have no model type, so the preprocessor skips this check, yet
+    // `mistral` still selects `mistral_4`, which would drop every pre-v11 tool call.
+    crate::protocols::openai::chat_completions::unified_parser::check_family_tokens(
+        card.runtime_config.tool_call_parser.as_deref(),
+        card.runtime_config.reasoning_parser.as_deref(),
+        tokenizer.as_ref(),
+    )?;
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?;
@@ -519,6 +526,64 @@ impl PreprocessedRouting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnusedEngine;
+
+    #[dynamo_runtime::pipeline::async_trait]
+    impl
+        dynamo_runtime::pipeline::AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for UnusedEngine
+    {
+        async fn generate(
+            &self,
+            _: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, dynamo_runtime::pipeline::Error> {
+            unreachable!("building a pipeline sends no request")
+        }
+    }
+
+    // The `mistral` parser needs `[ARGS]` unless DYN_PARSER_VERSION=1 selects the v1
+    // parsers, which read the pre-v11 call format.
+    #[tokio::test]
+    async fn in_process_pipeline_rejects_pre_v11_mistral_tokenizer() {
+        const MODE: &str = "DYN_TEST_IN_PROCESS_MISTRAL_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            for mode in ["auto", "1"] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::in_process_pipeline_rejects_pre_v11_mistral_tokenizer"
+                    ),
+                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
+                ));
+            }
+            return;
+        };
+        for (fixture, has_args) in [("TinyLlama_v1.1", false), ("mock-mistral-tekken", true)] {
+            let mut card = ModelDeploymentCard::load_from_disk(
+                format!("tests/data/sample-models/{fixture}"),
+                None,
+            )
+            .unwrap();
+            card.runtime_config.tool_call_parser = Some("mistral".to_string());
+            card.runtime_config.reasoning_parser = Some("mistral".to_string());
+            let tokenizer = card.tokenizer().unwrap();
+            let result = build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(&card, Arc::new(UnusedEngine), tokenizer)
+            .await;
+            if has_args || mode == "1" {
+                result.unwrap();
+            } else {
+                let error = format!("{:#}", result.err().unwrap());
+                assert!(error.contains("DYN_PARSER_VERSION=1"), "{fixture}: {error}");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn invalid_runtime_lora_configuration_fails_before_waiting_for_workers() {

@@ -11,13 +11,47 @@ fn derives_only_a_proven_single_data_parallel_rank() {
 }
 
 #[tokio::test]
+async fn missing_sglang_terminal_precedes_missing_worker_placement() {
+    for has_nonterminal_frame in [false, true] {
+        let outputs = has_nonterminal_frame.then(|| {
+            Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(Box::new(json!({"sglang_response": {
+                    "output_ids": [],
+                    "meta_info": {"finish_reason": null}
+                }}))),
+                ..Default::default()
+            })
+        });
+        let stream =
+            ResponseStream::new(Box::pin(stream::iter(outputs)), Context::new(()).context());
+        let result = finish_branch(
+            started_branch(
+                prepared_noul_branch(0),
+                Arc::new(RequestTracker::new()),
+                stream,
+            ),
+            0,
+            1,
+            Context::new(()).context(),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("incomplete stream must not produce an answer")
+        };
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.public_message, "malformed scoring response");
+        assert_eq!(error.detail, "missing terminal SGLang scoring frame");
+    }
+}
+
+#[tokio::test]
 async fn backend_overload_preserves_retry_status_and_releases_admission() {
     for behavior in [EngineBehavior::RejectGenerate, EngineBehavior::RejectStream] {
         let (response, parent, semaphore) =
             dispatch_request(TestEngine::new(behavior), 2, "request").await;
         assert_eq!(
             response.status(),
-            super::super::super::error::overload_status_code()
+            dynamo_error::http::overload_status_code()
         );
         assert_eq!(response.headers()["retry-after"], "1");
         assert!(
