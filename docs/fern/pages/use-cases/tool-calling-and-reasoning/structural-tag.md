@@ -320,6 +320,22 @@ activation scope still attempts the tag, but cannot enforce the native tool
 envelope for that request. Set schema mode to `strict` to override the opt-out
 and let vLLM build the tag.
 
+Some clients send `strict: false` but still expect arguments that match the
+schema. Schema mode `auto` leaves those arguments unconstrained, so the model can
+write a value that the schema does not allow, such as a string where it asks for
+an object. For these clients, set `--dyn-structural-tag '{"schema":"strict"}'`.
+With `openai/gpt-oss-20b` on vLLM 0.33.0 (XGrammar 0.2.8), the
+[tool schema replay](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/tool_schema_replay)
+measured these results for its `strict: false` cases:
+
+- With schema mode `auto`, about 8% of runs had nested-argument violations.
+- With schema mode `strict`, every run returned schema-valid arguments.
+- Schema mode `strict` added no request rejections and caused no regressions in
+  the control cases.
+
+Schema mode `strict` applies to every request and every tool, so a tool schema
+that XGrammar cannot compile can then reject the request. See the warning above.
+
 ## `tool_choice="none"` and Token Banning
 
 On the Rust frontend preprocessing path, when `tool_choice="none"` and
