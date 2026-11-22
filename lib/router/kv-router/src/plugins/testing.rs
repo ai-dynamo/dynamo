@@ -6,7 +6,11 @@
 //! [`SelectionCase`] describes one selection as a policy sees it (a request and the workers it
 //! may pick) and runs a [`WorkerSelectionPolicy`] over it through the same path the router
 //! uses, so a plugin crate tests its filters, scorers, and picker without naming a router
-//! type outside the plugin API. Import it only from a test module.
+//! type outside the plugin API.
+//!
+//! Import it only from tests and benches. It builds requests, resolves registered types, and
+//! runs a selection, which in shipped code only a routing host does (see [`super::host`]).
+//! The module is public in every build, so that is a rule for plugin crates, not a check.
 //!
 //! ```
 //! use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};

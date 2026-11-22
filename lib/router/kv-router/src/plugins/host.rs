@@ -12,6 +12,12 @@
 //! Resolution is an extension trait here, [`RouterPluginRegistryHostExt`], not methods on
 //! [`RouterPluginRegistry`]: a plugin's `register` receives the registry to add providers to,
 //! and cannot replace the host's default policy or resolve other plugins through it.
+//!
+//! [`super::testing`] also reaches host operations: it resolves a registered type and builds
+//! the request and the progress reading a classifier is handed, so that a plugin's tests need
+//! not name this module. A plugin crate imports it only from its tests and benches. Like the
+//! rule for this module, that is a rule for plugin crates and a review item, not a
+//! compile-time check: both modules are public in every build.
 
 use dynamo_router_protocol::WorkerType;
 

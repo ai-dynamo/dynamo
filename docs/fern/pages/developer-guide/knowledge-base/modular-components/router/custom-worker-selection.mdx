@@ -55,7 +55,7 @@ A plugin crate depends on `dynamo-kv-router` alone and imports the module for th
 | `plugins::v1alpha1::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in `plugins::v1alpha1` | Same |
 | `plugins::v1alpha1` | What both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
 | `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints` | None: an item can change or be removed in any release |
-| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from a test module | Same as `plugins::v1alpha1` |
+| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from tests and benches | Same as `plugins::v1alpha1` |
 
 A policy and a classifier read workers through the same rows, so a value added to an input group reaches both. The two contracts can be frozen as `v1` separately.
 

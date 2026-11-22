@@ -61,7 +61,7 @@ signal view, identity type, and registry type that kind of plugin names
 |---|---|---|
 | `plugins::v1alpha1::{worker_selection, request_classifier}` | The plugin API, one module per kind of plugin; `plugins::v1alpha1` holds what both share, including the worker rows both read | Alpha: can change in a minor release; each change is listed in the release's deprecation notes |
 | `plugins::experimental` | The dispatch gate, hint policies, resident block counts, decode progress; one submodule each, imported by name | None: can change or be removed in any release |
-| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, `SelectionCase::classify`, `classify`, and `classify_request` for classifier tests, and `registered_policy` for registration tests; import it only from a test module | Same as `v1alpha1` |
+| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, `SelectionCase::classify`, `classify`, and `classify_request` for classifier tests, and `registered_policy` for registration tests; import it only from tests and benches | Same as `v1alpha1` |
 | `plugins::host` | What a routing host names to resolve and run plugins | Not for plugin crates |
 
 ## Features
