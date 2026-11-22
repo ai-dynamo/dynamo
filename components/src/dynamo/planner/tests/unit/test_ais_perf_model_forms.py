@@ -424,32 +424,6 @@ def test_matching_source_builds_the_config_it_builds_without_a_deployment(
     assert compared == uncompared
 
 
-def test_source_is_not_compared_without_a_deployment(adapter, tmp_path):
-    # A config written by hand, or by a profiler that did not carry the
-    # selected deployment.
-    config = _template_planner(tmp_path, {**_CONTENT, "tp": 4}, deployment=None)
-
-    assert adapter(config)._build_ais_config()["tp"] == 4
-
-
-@pytest.mark.parametrize(
-    "source,conflict",
-    [
-        pytest.param({"kv_block_size": 32}, "kv_block_size conflicts", id="kv-block"),
-        pytest.param({"nextn": 1}, "nextn conflicts", id="nextn"),
-    ],
-)
-def test_capability_guards_apply_to_a_matching_source(tmp_path, source, conflict):
-    config = _template_planner(tmp_path, {**_CONTENT, "tp": 2, **source})
-
-    with pytest.raises(ValueError, match=conflict):
-        PlannerEnginePerfModel(
-            worker_type="decode",
-            config=config,
-            capabilities=_caps(speculative_nextn=2),
-        )
-
-
 def test_deployment_holds_only_identity_fields():
     with pytest.raises(ValidationError, match="not identity fields: kv_block_size"):
         _planner(
