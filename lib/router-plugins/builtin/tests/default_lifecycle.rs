@@ -203,7 +203,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
         .unwrap();
     assert!(matches!(
         partition.scheduler().policy_control().get().await,
-        Err(dynamo_kv_router::plugins::v1alpha1::worker_selection::RuntimePolicyError::Unsupported)
+        Err(RuntimePolicyError::Unsupported)
     ));
     let error = core
         .select_and_reserve(reserve_request("request"))

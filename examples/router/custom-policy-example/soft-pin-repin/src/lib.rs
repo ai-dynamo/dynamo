@@ -24,7 +24,7 @@ impl SoftPinRepinPicker {
 
     fn least_loaded_row(
         candidates: &[ScoredWorkerCandidate],
-        loads: &[dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerLoadInput],
+        loads: &[WorkerLoadInput],
         excluded_target: Option<WorkerAffinityTarget>,
     ) -> Option<usize> {
         candidates

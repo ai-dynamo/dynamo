@@ -162,17 +162,16 @@ fn bench(c: &mut Criterion) {
 }
 
 struct LoadScorer(f64);
-impl dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerScorer for LoadScorer {
-    fn required_worker_inputs(&self) -> dynamo_kv_router::plugins::v1alpha1::WorkerInputs {
-        dynamo_kv_router::plugins::v1alpha1::WorkerInputs::LOAD
+impl WorkerScorer for LoadScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
     }
     fn score(
         &self,
-        _: &dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionContext<'_>,
-        candidates: dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerCandidates<'_>,
+        _: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
-    ) -> Result<(), dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionPolicyError>
-    {
+    ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
             *cost = candidate.load().unwrap().active_requests() as f64 * self.0;
         }
@@ -181,15 +180,12 @@ impl dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerScorer for Loa
 }
 
 struct MinimumPicker;
-impl dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerPicker for MinimumPicker {
+impl WorkerPicker for MinimumPicker {
     fn pick(
         &self,
-        _: &dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionContext<'_>,
-        input: dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerInputView<'_>,
-    ) -> Result<
-        usize,
-        dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionPolicyError,
-    > {
+        _: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(input
             .candidates()
             .iter()
@@ -211,19 +207,9 @@ fn stacked(c: &mut Criterion) {
         for count in [8, 64, 1024, 4096] {
             let (workers, request) = support::fixture(count, 2048);
             let scorers = (0..scorer_count)
-                .map(|index| {
-                    Box::new(LoadScorer((index + 1) as f64))
-                        as Box<
-                            dyn dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerScorer,
-                        >
-                })
+                .map(|index| Box::new(LoadScorer((index + 1) as f64)) as Box<dyn WorkerScorer>)
                 .collect();
-            let policy =
-                dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionPolicy::new(
-                    "prefill",
-                    scorers,
-                    Box::new(MinimumPicker),
-                );
+            let policy = WorkerSelectionPolicy::new("prefill", scorers, Box::new(MinimumPicker));
             let mut select = || {
                 black_box(
                     policy
@@ -259,11 +245,9 @@ fn shared_cache(c: &mut Criterion) {
                     if !tier_matches {
                         request.overlap.tier_overlap_blocks = Default::default();
                     }
-                    request.shared_cache_hits = Some(
-                        dynamo_kv_router::plugins::v1alpha1::worker_selection::SharedCacheHits::from_ranges(
-                            (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
-                        ),
-                    );
+                    request.shared_cache_hits = Some(SharedCacheHits::from_ranges(
+                        (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
+                    ));
                     let policy = default_policy(
                         SelectionConfig::from(&KvRouterConfig {
                             shared_cache_multiplier: Some(credit),

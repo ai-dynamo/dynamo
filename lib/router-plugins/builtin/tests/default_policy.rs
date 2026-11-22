@@ -215,11 +215,9 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 }
             }
             if name == "shared_cache_multiplier" {
-                request.shared_cache_hits = Some(
-                    dynamo_kv_router::plugins::v1alpha1::worker_selection::SharedCacheHits::from_ranges(
-                        std::iter::once(0..10).collect(),
-                    ),
-                );
+                request.shared_cache_hits = Some(SharedCacheHits::from_ranges(
+                    std::iter::once(0..10).collect(),
+                ));
             }
             // A nonzero multiplier also reads fetch inputs, which updates cannot add, so the
             // shared case starts with a credit too small to change the choice.
@@ -426,12 +424,8 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     ..Default::default()
                 };
                 if mode % 8 >= 4 {
-                    request.shared_cache_hits = Some(
-                        dynamo_kv_router::plugins::v1alpha1::worker_selection::SharedCacheHits::from_ranges(vec![
-                            1..3,
-                            5..12,
-                        ]),
-                    );
+                    request.shared_cache_hits =
+                        Some(SharedCacheHits::from_ranges(vec![1..3, 5..12]));
                 }
                 match mode % 4 {
                     1 => request.overlap.tier_overlap_blocks = Default::default(),
@@ -930,10 +924,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
             .insert(*worker, if worker.worker_id == 0 { 3 } else { 0 });
     }
     #[allow(clippy::single_range_in_vec_init)]
-    let hits =
-        dynamo_kv_router::plugins::v1alpha1::worker_selection::SharedCacheHits::from_ranges(vec![
-            0..4,
-        ]);
+    let hits = SharedCacheHits::from_ranges(vec![0..4]);
     request.shared_cache_hits = Some(hits);
 
     let mut registry = default_registry();
