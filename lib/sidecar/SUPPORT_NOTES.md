@@ -24,6 +24,8 @@ The standard gRPC generation path requires one completion per request (`n=1`). I
 
 Run one Dynamo sidecar per native SGLang encoder. Enable `--route-to-encoder` on the prefill or aggregated sidecar and set `SGLANG_EXTERNAL_ENCODER_HANDOFF=1` on each language server. Set `--encoder-advertise-endpoint` if the language server reaches E at a different address from its sidecar. The launcher uses DP=PP=1. Set `--tp-size N` for tensor parallelism or `--encoder-tp-size N` for a different encoder degree. Each role takes a separate GPU group by default. Use `--colocate` to put E and the language workers on the same GPUs.
 
+Discovery groups workers by their encoder handoff contract. SGLang owns the contract’s media types and layout versions. On a deployment that requires E, a Stage failure ends the request before language generation.
+
 Dynamo sends all media in a request to one encoder. Text requests bypass E. Chat accepts `image_url`, `video_url`, `audio_url` and inline `input_audio`. Native `/generate` accepts a URL string or flat list for each of `image_data`, `video_data` and `audio_data`. The original `input_ids` determine their order. SGLang advertises the staged media capabilities of the loaded model. Dynamo forwards the descriptor to P/PD and D with the original token IDs.
 
 | Model family | Image | Video | Separate audio input |
@@ -32,12 +34,14 @@ Dynamo sends all media in a request to one encoder. Text requests bypass E. Chat
 | GLM-5-Next (GLM-5.3-Flash), GLM-4V/MoE, MiniMax-M3 | Yes | Yes | — |
 | Qwen3-Omni-MoE | Yes | Yes | Yes |
 | Muse Spark | Yes | Yes | With a tokenizer that defines the soft-audio delimiters |
-| MiMo-V2 with the corresponding towers | Yes | Clips without an audio track | Yes |
-| Dots3-Note | Yes | Image items only | Yes |
+| MiMo-V2 with the corresponding towers | Layout implemented | Clips without an audio track | Layout implemented |
+| Dots3-Note | Layout implemented | Image items only | Layout implemented |
 | Kimi-VL, Kimi K2.5, K3, K3.1, Inkling2 | Yes | Image items only | — |
 | Qwen2-Audio, Qwen3-ASR | — | — | Yes |
 
 The native SGLang EPD launch list at `9fc0e2a6` includes 18 registered visual architectures. The staged image path covers all 18 and adds GLM-4V and GLM-4V-MoE. Of these 20, 14 accept direct video input. The pinned revision lists Qwen2.5-Omni in its launch check but has no registered vision implementation for it. [Native EPD launch list](https://github.com/sgl-project/sglang/blob/9fc0e2a6/python/sglang/srt/arg_groups/pd_disaggregation_hook.py#L366-L387) · [SGLang implementation](https://github.com/sgl-project/sglang/pull/51754)
+
+The MiMo-V2.5 and dots3-note-prev checkpoints failed to start standalone E during verification. MiMo accessed the absent decoder during weight loading, and Dots initialized the decoder MoE.
 
 Kimi K3/K3.1 process video as timestamped image chunks in unified serving. Dots3-Note interleaves frames, text and optional audio. Submit image items for Kimi and Dots3-Note vision. Dots3-Note also accepts separate audio items. Qwen-family handoffs use v1 for images and v2 for video. Other visual processors use v3, which carries the native model type, the embedding width and the row count of each item.
 
@@ -62,10 +66,10 @@ GPU validation covered the following checkpoints.
 |---|---|
 | Qwen2-Audio-7B-Instruct | Single-clip and ordered two-clip questions on Chat and `/generate` passed in E/PD over NIXL and split E/P/D over ZMQ (16/16 requests). Reversing the WAVs reversed the answer. Chat used the official processor template. |
 | Qwen3-ASR-0.6B | Dynamo transcribed two distinct WAVs on Chat and `/generate` with split E/P/D over NIXL and E/PD over ZMQ (8/8 requests). |
-| Qwen3-Omni-30B-A3B-Instruct | All 876 official audio and vision tensors ran on E. NIXL reproduced the native embeddings on four audio/image orderings. The reconstructed token IDs, spans and M-RoPE positions matched the checkpoint processor. Full language generation is unverified. |
+| Qwen3-Omni-30B-A3B-Instruct | The full thinker answered all eight targeted image/audio ordering questions on Chat and `/generate` in E/PD over each of NIXL and ZMQ. With a generic prompt, each transport scored 2/8. |
 | GLM-4.6V-Flash | E/PD with TP1 NIXL and TP4 ZMQ passed single-image, ordered two-image, video and mixed requests on Chat and `/generate`. Split E/P/D with TP4, ZMQ E→P and NIXL P→D passed mixed requests on both APIs. |
 | Kimi-VL-A3B-Instruct | TP1 E/PD with NIXL passed single-image and ordered two-image requests on both APIs using the tokenizer settings above. |
-| GLM-5.3-Flash | All 347 official vision tensors ran at E TP4. NIXL reproduced native encoder outputs byte-for-byte on seven image/video batches. Full language generation is unverified. |
+| GLM-5.3-Flash | With the full FP8 checkpoint, E/PD and E/P/D over NIXL each matched native SGLang on 16/16 Chat and `/generate` answers. All three deployments scored 4/8 with the pure-blue clip and 8/8 with the brighter clip. |
 | Qwen2.5-VL-3B-Instruct | An earlier PR revision passed 33 Chat and `/generate` requests across E/PD and E/P/D using both NIXL and ZMQ. |
 
 For requests with audio, E and the language worker must advertise the same audio model type. The v4 descriptor records native feature lengths, embedding rows, widths and identities. P/PD binds the rows to their placeholders, and split D reconstructs positions using the same metadata. Vision-only requests retain their v1–v3 formats.
@@ -75,6 +79,10 @@ The launcher defaults to NIXL/UCX. P or PD registers host memory for the encoder
 To serve video, deploy video-capable builds on every E and every participating language worker for the model in its Dynamo namespace. EncoderRouter binds one encoder worker set and selects replicas round-robin. A mixed rollout can leave the router without a unique encoder set or send a video to an image-only encoder, which rejects it.
 
 For encoders that advertise their media policy, the E sidecar fetches remote media under Dynamo's DNS and redirect checks and the native encoder's allowed domains, size limit, and timeout. The complete Stage request, including base64 expansion, must fit the 64 MiB gRPC limit. On older image-only encoders the native process fetches its own image URLs.
+
+Deploy a native encoder that reports its 16-byte instance ID in both GetEncoderInfo and Stage. A replacement encoder registers a new ID. The sidecar rejects a receipt from an unexpected instance and attempts to release it on the producing endpoint.
+
+The E sidecar gives each native Stage RPC a 180-second deadline after fetching the media. Set `DYN_SGLANG_ENCODER_STAGE_TIMEOUT_SECS` on the encoder sidecar to change that deadline.
 
 Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 

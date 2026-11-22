@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Optional multimodal encoder hop for token-serving pipelines.
+//! Multimodal encoder hop for token-serving pipelines.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -15,11 +15,12 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
     engine::AsyncEngine,
+    error::{DynamoError, ErrorType},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
         async_trait,
     },
-    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
+    protocols::{EndpointId, annotated::Annotated},
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
@@ -29,6 +30,11 @@ use crate::protocols::common::{
 };
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+/// Native HTTP adapters classify staging failures with the shared semantic HTTP policy.
+#[derive(Debug, thiserror::Error)]
+#[error("Required encoder stage failed")]
+pub(crate) struct RequiredEncoderStage;
 
 struct EncoderBinding {
     target_id: WorkerSetTargetId,
@@ -54,10 +60,10 @@ impl EncoderLifecycleState {
     }
 }
 
-/// Forward-only operator that optionally runs a multimodal Encode worker.
+/// Forward-only operator that routes media to a multimodal Encode worker.
 ///
-/// The router is present on every token pipeline but remains a passthrough
-/// until discovery supplies an Encode endpoint for the same model namespace.
+/// Consumers that require an encoder result propagate staging failures. Other
+/// token pipelines can encode inline while the external encoder is unavailable.
 /// Encode workers are selected round-robin independently of the downstream
 /// token router mode; they do not participate in KV-aware routing.
 pub struct EncoderRouter {
@@ -66,6 +72,7 @@ pub struct EncoderRouter {
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     cancel_token: CancellationToken,
     lifecycle: AtomicU8,
+    requires_encoder_result: bool,
     model_name: String,
     namespace: String,
 }
@@ -135,6 +142,7 @@ impl EncoderRouter {
             target_tx: None,
             cancel_token: CancellationToken::new(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            requires_encoder_result: false,
             model_name: String::new(),
             namespace: String::new(),
         })
@@ -142,20 +150,27 @@ impl EncoderRouter {
 
     /// Create a router whose endpoint is driven by committed discovery topology.
     pub fn new(model_name: String, namespace: String) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, None)
+        Self::new_inner(model_name, namespace, false, None)
     }
 
     pub(crate) fn new_with_task_guard(
         model_name: String,
         namespace: String,
+        requires_encoder_result: bool,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, Some(task_guard))
+        Self::new_inner(
+            model_name,
+            namespace,
+            requires_encoder_result,
+            Some(task_guard),
+        )
     }
 
     fn new_inner(
         model_name: String,
         namespace: String,
+        requires_encoder_result: bool,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
@@ -168,6 +183,7 @@ impl EncoderRouter {
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name,
             namespace,
+            requires_encoder_result,
         });
 
         let router_weak = Arc::downgrade(&router);
@@ -356,10 +372,10 @@ impl EncoderRouter {
     ) -> Result<(serde_json::Value, Option<TraceLink>)> {
         let mut terminal = None;
         while let Some(item) = response.next().await {
-            if let Some(error) = item.err() {
-                return Err(anyhow::anyhow!(error)).context("Encode worker returned an error");
-            }
-            let Some(output) = item.data else {
+            let Some(output) = item
+                .into_data()
+                .context("Encode worker returned an error")?
+            else {
                 continue;
             };
             if output.finish_reason.is_some() {
@@ -392,8 +408,8 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (mut request, context) = request.into_parts();
-        if self.lifecycle_state() != EncoderLifecycleState::Active || !Self::should_encode(&request)
-        {
+        let active = self.lifecycle_state() == EncoderLifecycleState::Active;
+        if (!active && !self.requires_encoder_result) || !Self::should_encode(&request) {
             return next.generate(context.map(|_| request)).await;
         }
         crate::routing_policy::check_stage(
@@ -401,16 +417,18 @@ impl
             crate::routing_policy::ExecutionStage::Encoder,
         )?;
 
-        let encode_context = Context::with_id_and_metadata(
-            request.clone(),
-            context.id().to_string(),
-            context.metadata().clone(),
-        );
         let encode_result = async {
-            let binding = self
-                .binding
-                .load_full()
-                .context("Encoder router is active but not initialized")?;
+            let binding = self.binding.load_full().filter(|_| active).ok_or_else(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::WorkerUnavailable)
+                    .message("No encoder is available for this model")
+                    .build()
+            })?;
+            let encode_context = Context::with_id_and_metadata(
+                request.clone(),
+                context.id().to_string(),
+                context.metadata().clone(),
+            );
             let response = binding.router.generate(encode_context).await?;
             Self::consume_encode_stream(response).await
         }
@@ -423,6 +441,9 @@ impl
                 // receiver owns transfer completion and buffer release.
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
+            }
+            Err(error) if self.requires_encoder_result => {
+                return Err(error.context(RequiredEncoderStage));
             }
             Err(error) => {
                 tracing::error!(
@@ -959,6 +980,32 @@ mod tests {
             .expect("downstream must receive the original request");
         assert!(request.encoder_result.is_none());
         assert!(request.multi_modal_data.is_some());
+    }
+
+    #[tokio::test]
+    async fn required_encoder_absence_is_unavailable_without_dispatching_media() {
+        let router = EncoderRouter::new_inner("model".into(), "namespace".into(), true, None);
+        let downstream = Arc::new(CaptureEngine::default());
+        let error = router
+            .generate(SingleIn::new(multimodal_request()), downstream.clone())
+            .await
+            .err()
+            .expect("required encoder is still pending");
+        assert!(error.is::<RequiredEncoderStage>());
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[ErrorType::WorkerUnavailable],
+            &[],
+        ));
+        assert!(downstream.request.lock().unwrap().is_none());
+
+        let mut text = multimodal_request();
+        text.multi_modal_data = None;
+        router
+            .generate(SingleIn::new(text), downstream.clone())
+            .await
+            .unwrap();
+        assert!(downstream.request.lock().unwrap().is_some());
     }
 
     #[tokio::test]

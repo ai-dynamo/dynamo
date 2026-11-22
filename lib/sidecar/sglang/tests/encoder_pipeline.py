@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import importlib
 import json
 import os
 import socket
@@ -38,6 +39,12 @@ import zmq.asyncio
 from sglang.encoder.v1 import encoder_pb2, encoder_pb2_grpc
 from sglang.srt.disaggregation.encoder.handoff import EncoderHandoff
 from sglang.srt.disaggregation.encoder.staged import StagedImageService
+
+try:
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+except ImportError:
+    web = TestServer = None
 
 
 def png(rgb):
@@ -79,6 +86,8 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
         self.sends = []
         self.releases = []
         self.fail = False
+        self.stage_failure = None
+        self.stage_calls = 0
         super().__init__(
             encode=self.encode,
             describe=lambda part: encoder_pb2.DescribeResponse(
@@ -97,6 +106,15 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
             ttl=30,
             stage_timeout=5,
         )
+
+    async def Stage(self, request, context):
+        self.stage_calls += 1
+        if self.stage_failure == grpc.StatusCode.DEADLINE_EXCEEDED:
+            # Let the sidecar enforce the deadline on a genuinely stalled RPC.
+            await asyncio.Future()
+        if self.stage_failure is not None:
+            await context.abort(self.stage_failure, "private injected Stage error")
+        return await super().Stage(request, context)
 
     async def encode(self, part, images, videos, audios):
         assert images == IMAGES[: len(images)]
@@ -154,6 +172,22 @@ class Encoder(StagedImageService, encoder_pb2_grpc.SglangEncoderServicer):
         self.releases.append(part)
 
 
+class EncoderEndpoint:
+    """Allow a backend swap at the same gRPC address between discovery polls."""
+
+    def __init__(self, encoder):
+        self.registered = self.serving = encoder
+
+    async def GetEncoderInfo(self, request, context):
+        return await self.registered.GetEncoderInfo(request, context)
+
+    def __getattr__(self, method):
+        async def dispatch(request, context):
+            return await getattr(self.serving, method)(request, context)
+
+        return dispatch
+
+
 async def run(args, tmp, stack):
     # Generate only the vendored language service: the patched SGLang package
     # supplies the encoder stubs and production lease/receipt code.
@@ -173,7 +207,9 @@ async def run(args, tmp, stack):
         check=True,
     )
     sglang.__path__.append(str(tmp / "sglang"))
-    from sglang.api.v1 import generate_pb2, service_pb2, service_pb2_grpc
+    generate_pb2 = importlib.import_module("sglang.api.v1.generate_pb2")
+    service_pb2 = importlib.import_module("sglang.api.v1.service_pb2")
+    service_pb2_grpc = importlib.import_module("sglang.api.v1.service_pb2_grpc")
 
     model = str(args.model.resolve())
     config = json.loads((args.model / "config.json").read_text())
@@ -194,6 +230,7 @@ async def run(args, tmp, stack):
             self.receives = []
             self.http_port = None
             self.http_requests = 0
+            self.grpc_requests = 0
 
         async def GetModelInfo(self, req, ctx):
             return service_pb2.GetModelInfoResponse(
@@ -260,6 +297,7 @@ async def run(args, tmp, stack):
             requests.append((self.role, room, transfer, ids))
 
         async def Generate(self, req, ctx):
+            self.grpc_requests += 1
             assert all(
                 not req.HasField(k) for k in ("image_data", "video_data", "audio_data")
             )
@@ -284,8 +322,8 @@ async def run(args, tmp, stack):
             yield item
 
         async def serve_http(self):
-            from aiohttp import web
-            from aiohttp.test_utils import TestServer
+            if web is None:
+                raise RuntimeError("--native-generate requires aiohttp")
 
             async def health(request):
                 return web.Response()
@@ -353,6 +391,7 @@ async def run(args, tmp, stack):
         "DYN_TCP_RPC_PORT": "0",
         "DYN_TCP_RESPONSE_STREAM_PORT": "0",
         "HF_HUB_OFFLINE": "1",
+        "DYN_HTTP_OVERLOAD_STATUS_CODE": "529",
     }
     # The frontend runs in its own interpreter/environment.
     env.pop("PYTHONPATH", None)
@@ -383,14 +422,20 @@ async def run(args, tmp, stack):
         return proc
 
     encoders = [Encoder(model, sockets) for _ in range(2)]
+    endpoints = [EncoderEndpoint(encoder) for encoder in encoders]
     encoder_workers = []
-    for i, encoder in enumerate(encoders):
+    for i, endpoint in enumerate(endpoints):
         port = await serve(
-            encoder_pb2_grpc.add_SglangEncoderServicer_to_server, encoder
+            encoder_pb2_grpc.add_SglangEncoderServicer_to_server, endpoint
         )
         encoder_workers.append(
             await start(
-                f"encode-{i}", args.sidecar, "--grpc-endpoint", f"127.0.0.1:{port}"
+                f"encode-{i}",
+                args.sidecar,
+                "--grpc-endpoint",
+                f"127.0.0.1:{port}",
+                "--encoder-stage-timeout-secs",
+                "2",
             )
         )
 
@@ -602,8 +647,44 @@ async def run(args, tmp, stack):
         assert sorted(e.encodes) == sorted(e.releases)
         assert sorted(e.encodes) == sorted(part for part, _ in e.sends)
         assert not e.parts
-    # Keep E registered but fail its native forward. The generic router may
-    # fall through. An external-required P/PD must refuse the unencoded images.
+    encoder = encoders[1]
+    failure_routes = [("/v1/chat/completions", payload(IMAGES))]
+    if args.native_generate:
+        failure_routes.append(("/generate", body))
+    for status, expected in (
+        (grpc.StatusCode.INVALID_ARGUMENT, 400),
+        (grpc.StatusCode.UNAVAILABLE, 503),
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, 529),
+        (grpc.StatusCode.DEADLINE_EXCEEDED, 504),
+    ):
+        encoder.stage_failure = status
+        for path, request in failure_routes:
+            stage_calls = encoder.stage_calls
+            language_calls = sum(s.grpc_requests + s.http_requests for s in languages)
+            started = time.monotonic()
+            try:
+                await exchange(path, request)
+            except urllib.error.HTTPError as exc:
+                message = exc.read()
+                assert exc.code == expected, (path, status, exc.code, message)
+                assert b"private injected Stage error" not in message, (path, message)
+            else:
+                raise AssertionError(f"{path} accepted Stage failure {status}")
+            if status == grpc.StatusCode.DEADLINE_EXCEEDED:
+                assert (
+                    time.monotonic() - started < 10
+                ), f"{path} exceeded the Stage deadline"
+            assert encoder.stage_calls == stage_calls + 1, path
+            assert (
+                sum(s.grpc_requests + s.http_requests for s in languages)
+                == language_calls
+            ), path
+    encoder.stage_failure = None
+    print(
+        "PASS required Stage preserved client, unavailable, overload and timeout status"
+    )
+
+    # Fail after the native forward starts to exercise cleanup of a staged lease.
     encoders[1].fail = True
     before = len(requests)
     try:
@@ -624,6 +705,20 @@ async def run(args, tmp, stack):
         [len(e.encodes) for e in encoders],
     )
     print("deliveries per receiver", [len(language.receives) for language in languages])
+
+    replacement = Encoder(model, sockets)
+    endpoints[1].serving = replacement
+    before_requests = len(requests)
+    try:
+        await exchange("/v1/chat/completions", payload(IMAGES))
+    except urllib.error.HTTPError:
+        pass
+    else:
+        raise AssertionError("Stage from a replacement encoder reached the consumer")
+    assert len(requests) == before_requests and not replacement.sends
+    assert len(replacement.encodes) == 1
+    assert replacement.releases == replacement.encodes and not replacement.parts
+    print("PASS rejected and released a replacement encoder's Stage for the same model")
 
 
 async def main():

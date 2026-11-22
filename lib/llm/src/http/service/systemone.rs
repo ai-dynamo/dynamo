@@ -747,9 +747,7 @@ fn bind_native(
         kv_cache_block_size,
         lora_name: None,
         tower_connector_lora_enabled: false,
-        sglang_staged_images: false,
-        sglang_staged_video: false,
-        sglang_staged_audio: false,
+        requires_encoder_result: false,
     })
     .map_err(|error| anyhow::anyhow!(error.message))
 }

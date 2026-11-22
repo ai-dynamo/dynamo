@@ -50,6 +50,8 @@ message GetEncoderInfoResponse {
   string staged_audio_model_type = 7;
   // Older encoders that do not set this field are image-capable.
   optional bool supports_staged_images = 8;
+  // Random 16-byte UUID for the lifetime of this staged encoder service.
+  bytes instance_id = 9;
 }
 
 message StagedMediaPolicy {
@@ -114,7 +116,11 @@ message StagedImageTransfer {
   repeated AudioLayout audios = 12;
 }
 
-message StageResponse { StagedImageTransfer transfer = 1; }
+message StageResponse {
+  StagedImageTransfer transfer = 1;
+  // The producing service's GetEncoderInfo.instance_id.
+  bytes instance_id = 2;
+}
 message DescribeRequest { StagedImageTransfer transfer = 1; }
 message DescribeResponse {
   repeated uint64 shape = 1; // [tokens, hidden dimensions] of the staged part

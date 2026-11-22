@@ -9,10 +9,7 @@ use std::time::Duration;
 use dynamo_backend_common::{
     DynamoError, EngineConfig, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
-use dynamo_llm::local_model::runtime_config::{
-    SGLANG_STAGED_AUDIO_V4, SGLANG_STAGED_IMAGES_V1, SGLANG_STAGED_NATIVE_V3,
-    SGLANG_STAGED_VIDEO_V2,
-};
+use dynamo_llm::local_model::runtime_config::ENCODER_HANDOFF_CONTRACT;
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
@@ -67,7 +64,7 @@ pub(crate) async fn discover(
 /// The same advertisement governs source admission and descriptor validation
 /// on E and on every language worker. Audio uses its own contract so a visual
 /// request can still use the older descriptors on an audio-capable worker.
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub(crate) struct StagedCapabilities {
     pub(crate) images: bool,
     pub(crate) video: bool,
@@ -77,31 +74,10 @@ pub(crate) struct StagedCapabilities {
 
 impl StagedCapabilities {
     pub(crate) fn advertise(&self, config: &mut EngineConfig) {
-        if self.images {
-            config
-                .runtime_data
-                .insert(SGLANG_STAGED_IMAGES_V1.into(), true.into());
-        }
-        if self.video {
-            config
-                .runtime_data
-                .insert(SGLANG_STAGED_VIDEO_V2.into(), true.into());
-        }
-        if !self.native_model_type.is_empty() {
-            config.runtime_data.insert(
-                SGLANG_STAGED_NATIVE_V3.into(),
-                self.native_model_type.clone().into(),
-            );
-        }
-        if !self.audio_model_type.is_empty() {
-            config.runtime_data.insert(
-                SGLANG_STAGED_AUDIO_V4.into(),
-                serde_json::json!({
-                    "model_type": self.audio_model_type,
-                    "supports_images": self.images,
-                }),
-            );
-        }
+        config.runtime_data.insert(
+            ENCODER_HANDOFF_CONTRACT.into(),
+            serde_json::json!({ "sglang": self }),
+        );
     }
 
     fn model_for(&self, [images, videos, audios]: [usize; 3]) -> Result<&str, DynamoError> {
@@ -334,9 +310,17 @@ pub(crate) fn validate_consumer(
                         })
                 }))
     {
-        // EncoderRouter also reaches here when no E is live or its RPC failed.
-        // Under the required topology this must never issue a second encode.
-        return Err(client::invalid_request(
+        // A caller that bypasses the encoder router still needs a staged result.
+        capabilities.model_for(media_counts(request)?)?;
+        for source in request
+            .multi_modal_data
+            .iter()
+            .flat_map(|m| m.values())
+            .flatten()
+        {
+            protocol::media_source(source)?;
+        }
+        return Err(client::cannot_connect(
             "multimodal request requires a successful Dynamo encoder_result",
         ));
     }
@@ -383,6 +367,7 @@ pub(crate) struct Encoder {
     capabilities: StagedCapabilities,
     peer: String,
     pool: OnceCell<GrpcChannelPool>,
+    stage_timeout: Duration,
     media: Option<Arc<StagedMedia>>,
 }
 
@@ -391,10 +376,16 @@ impl Encoder {
         info: pb::GetEncoderInfoResponse,
         endpoint: &GrpcEndpoint,
         advertised: Option<&str>,
+        stage_timeout: Duration,
     ) -> Result<Self, DynamoError> {
         if info.model_path.trim().is_empty() {
             return Err(client::protocol_error(
                 "GetEncoderInfo returned an empty model_path",
+            ));
+        }
+        if info.instance_id.len() != 16 {
+            return Err(client::protocol_error(
+                "GetEncoderInfo must identify the staged encoder with a 16-byte instance_id",
             ));
         }
         let media = info
@@ -414,6 +405,7 @@ impl Encoder {
             media,
             peer: advertised_peer(advertised.unwrap_or(endpoint.as_str()))?,
             pool: OnceCell::new(),
+            stage_timeout,
         })
     }
 
@@ -503,8 +495,10 @@ impl Encoder {
         let counts = [images, videos, audios];
         let mut rpc = self.rpc()?;
         let peer = self.peer.clone();
+        let instance_id = self.info.instance_id.clone();
         let native_model_type = self.capabilities.model_for(counts)?.to_owned();
         let media = self.media.clone();
+        let stage_timeout = self.stage_timeout;
         Ok(Box::pin(async_stream::try_stream! {
             let response = tokio::select! {
                 biased;
@@ -512,17 +506,24 @@ impl Encoder {
                 _ = ctx.stopped() => None,
                 res = async {
                     staged_media::prepare(&mut message, media.as_deref()).await?;
-                    rpc.stage(message).await.map_err(|e| client::status_to_dynamo("Stage", e))
+                    let mut request = tonic::Request::new(message);
+                    request.set_timeout(stage_timeout);
+                    client::rpc_with_deadline("Stage", Instant::now() + stage_timeout, rpc.stage(request)).await
                 } => Some(res),
             };
             let Some(response) = response else {
                 yield LLMEngineOutput::cancelled();
                 return;
             };
-            let transfer = response?
-                .into_inner().transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
+            let response = response?.into_inner();
+            let transfer = response.transfer.ok_or_else(|| client::protocol_error("Stage returned no transfer"))?;
             let handoff = Handoff { peer, transfer };
-            if let Err(error) = handoff.validate(&request_id, counts, &native_model_type) {
+            let validation = if response.instance_id == instance_id {
+                handoff.validate(&request_id, counts, &native_model_type)
+            } else {
+                Err(client::protocol_error("Stage came from a different encoder instance"))
+            };
+            if let Err(error) = validation {
                 let _ = timeout(Duration::from_secs(2), rpc.release(pb::ReleaseRequest {
                     transfer_id: handoff.transfer.transfer_id.clone(),
                 })).await;
@@ -549,6 +550,19 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_registration_requires_an_instance_id() {
+        let endpoint = GrpcEndpoint::parse("127.0.0.1:9100", "encoder").unwrap();
+        for size in [0, 15, 17] {
+            let info = pb::GetEncoderInfoResponse {
+                model_path: "vision".into(),
+                instance_id: vec![1; size],
+                ..Default::default()
+            };
+            assert!(Encoder::new(info, &endpoint, None, Duration::from_secs(1)).is_err());
+        }
+    }
 
     #[test]
     fn v1_handoff_json_is_unchanged_for_legacy_consumers() {

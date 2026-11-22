@@ -1065,9 +1065,30 @@ fn external_handoff_preserves_token_layout_and_hashes_without_raw_media() {
         ]
     });
 
-    assert!(
+    let missing =
         crate::encoder::validate_consumer(&req, "public", true, &visual_capabilities(false, ""))
-            .is_err()
+            .unwrap_err();
+    assert_eq!(
+        missing.class(),
+        dynamo_backend_common::ErrorType::Unavailable
+    );
+    let mut malformed = req.clone();
+    malformed
+        .multi_modal_data
+        .as_mut()
+        .unwrap()
+        .get_mut("image_url")
+        .unwrap()[0] = MultimodalData::Json(json!({"image": "custom"}));
+    let rejected = crate::encoder::validate_consumer(
+        &malformed,
+        "public",
+        true,
+        &visual_capabilities(false, ""),
+    )
+    .unwrap_err();
+    assert_eq!(
+        rejected.class(),
+        dynamo_backend_common::ErrorType::InvalidRequest
     );
     req.encoder_result = Some(staged.clone());
     assert!(
@@ -1119,13 +1140,38 @@ fn external_handoff_preserves_token_layout_and_hashes_without_raw_media() {
 }
 
 #[test]
+fn grouped_hashes_require_complete_order_only_for_mixed_media() {
+    let mut req = request();
+    assert_eq!(
+        ordered_media_hashes(&req, &json!({"video":["01", "02"]})).unwrap(),
+        ["01", "02"]
+    );
+    let grouped = json!({"video":["01"], "image":["02"]});
+    assert!(ordered_media_hashes(&req, &grouped).is_err());
+    req.multi_modal_order = serde_json::from_value(json!([
+        {"modality":"video_url", "index":0},
+        {"modality":"video_url", "index":0}
+    ]))
+    .unwrap();
+    assert!(ordered_media_hashes(&req, &grouped).is_err());
+}
+
+#[test]
 fn staged_mixed_media_gates_each_peer_and_preserves_native_layout() {
     let clip_url = "https://example.test/a.mp4";
     let second_url = "https://example.test/b.mp4";
     let image_url = "https://example.test/c.png";
     let mut req = request();
     req.token_ids = vec![151656, 5, 151655, 6, 151656].into();
-    req.extra_args = Some(json!({"mm_hashes": ["01", "02", "03"]}));
+    req.extra_args = Some(json!({"mm_hashes_by_modality": {
+        "image": ["02"], "video": ["01", "03"]
+    }}));
+    req.multi_modal_order = serde_json::from_value(json!([
+        {"modality":"video_url", "index":0},
+        {"modality":"image_url", "index":0},
+        {"modality":"video_url", "index":1}
+    ]))
+    .unwrap();
     req.multi_modal_data = Some(HashMap::from([
         ("image_url".into(), vec![url(image_url)]),
         ("video_url".into(), vec![url(clip_url), url(second_url)]),

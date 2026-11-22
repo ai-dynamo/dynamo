@@ -145,7 +145,11 @@ pub(crate) fn build_generate_request(
         media_data(request)?
     };
     let mm_hashes = if encoder_handoff.is_some() {
-        caller_hashes(request)?
+        caller_hashes(request)?.map(|items| pb::StringListOrList {
+            value: Some(pb::string_list_or_list::Value::One(pb::StringList {
+                items,
+            })),
+        })
     } else {
         None
     };
@@ -213,23 +217,71 @@ pub(crate) fn build_generate_request(
 
 /// Dynamo's frontend supplies these scalar cache-key overrides independently
 /// of the native encoder's 32-byte content identities.
-fn caller_hashes(
+pub(crate) fn caller_hashes(
     request: &PreprocessedRequest,
-) -> Result<Option<pb::StringListOrList>, DynamoError> {
-    let Some(value) = request
-        .extra_args
-        .as_ref()
-        .and_then(|args| args.get("mm_hashes"))
-    else {
+) -> Result<Option<Vec<String>>, DynamoError> {
+    let Some(extra) = request.extra_args.as_ref() else {
         return Ok(None);
     };
-    let items: Vec<String> = serde_json::from_value(value.clone())
-        .map_err(|_| client::invalid_request("extra_args.mm_hashes must be a list of strings"))?;
-    Ok(Some(pb::StringListOrList {
-        value: Some(pb::string_list_or_list::Value::One(pb::StringList {
-            items,
-        })),
-    }))
+    let items = if let Some(value) = extra.get("mm_hashes") {
+        serde_json::from_value(value.clone()).map_err(|_| {
+            client::invalid_request("extra_args.mm_hashes must be a list of strings")
+        })?
+    } else if let Some(value) = extra.get("mm_hashes_by_modality") {
+        ordered_media_hashes(request, value)?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(items))
+}
+
+/// Map the frontend's grouped cache identities into SGLang's one hash per
+/// source. Only a mixed-modality list needs explicit prompt ordering.
+fn ordered_media_hashes(
+    request: &PreprocessedRequest,
+    value: &Value,
+) -> Result<Vec<String>, DynamoError> {
+    let mut grouped: std::collections::HashMap<&str, Vec<Option<&str>>> =
+        serde::Deserialize::deserialize(value).map_err(|_| {
+            client::invalid_request("mm_hashes_by_modality must contain lists of strings")
+        })?;
+    let Some(order) = request.multi_modal_order.as_deref() else {
+        if grouped.len() > 1 {
+            return Err(client::invalid_request(
+                "mixed media hashes require multi_modal_order",
+            ));
+        }
+        return grouped
+            .into_values()
+            .flatten()
+            .map(|hash| {
+                hash.map(str::to_owned).ok_or_else(|| {
+                    client::invalid_request("mm_hashes_by_modality must contain lists of strings")
+                })
+            })
+            .collect();
+    };
+    if order.len() != grouped.values().map(Vec::len).sum::<usize>() {
+        return Err(client::invalid_request(
+            "multi_modal_order must cover every grouped media hash",
+        ));
+    }
+    order
+        .iter()
+        .map(|item| {
+            item.modality
+                .strip_suffix("_url")
+                .and_then(|modality| grouped.get_mut(modality))
+                .and_then(|hashes| hashes.get_mut(item.index))
+                .and_then(Option::take)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    client::invalid_request(
+                        "multi_modal_order references a missing or repeated media hash",
+                    )
+                })
+        })
+        .collect()
 }
 
 /// The request's image, video and audio items, one list per modality. SGLang
@@ -249,7 +301,7 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 
             }
         };
         for item in items {
-            data.push(media_source(item)?);
+            data.push(media_source(item)?.to_owned());
         }
     }
     let media = [image_data, video_data, audio_data];
@@ -277,7 +329,7 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 
 
 /// SGLang would read `file://` URLs and bare paths from its own disk, so only
 /// network and inline sources are forwarded.
-fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
+pub(crate) fn media_source(item: &MultimodalData) -> Result<&str, DynamoError> {
     let source = match item {
         MultimodalData::Json(_) => {
             return Err(client::invalid_request(
@@ -297,14 +349,14 @@ fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
             ));
         }
     };
-    validate_media_url(source).map(str::to_owned)
+    validate_media_url(source)
 }
 
 pub(crate) fn into_media_source(item: MultimodalData) -> Result<String, DynamoError> {
     match item {
         MultimodalData::RawUrl(source) => validate_media_url(source),
         MultimodalData::Url(url) => validate_media_url(String::from(url)),
-        other => media_source(&other),
+        other => media_source(&other).map(str::to_owned),
     }
 }
 

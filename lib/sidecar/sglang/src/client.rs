@@ -690,6 +690,16 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
             BackendError::InvalidArgument
         }
         tonic::Code::Unavailable => BackendError::CannotConnect,
+        // The staged encoder uses RESOURCE_EXHAUSTED when all lease slots are full.
+        tonic::Code::ResourceExhausted if rpc == "Stage" => BackendError::WorkerOverloaded,
+        // Tonic reports its own gRPC transport deadline as CANCELLED. A peer's
+        // cancellation has no local TimeoutExpired source and remains cancelled.
+        tonic::Code::Cancelled
+            if std::iter::successors(std::error::Error::source(&status), |e| (*e).source())
+                .any(|e| e.is::<tonic::TimeoutExpired>()) =>
+        {
+            BackendError::ConnectionTimeout
+        }
         tonic::Code::Cancelled => BackendError::Cancelled,
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
@@ -853,6 +863,7 @@ mod tests {
             (tonic::Code::NotFound, BackendError::InvalidArgument),
             (tonic::Code::OutOfRange, BackendError::InvalidArgument),
             (tonic::Code::Unavailable, BackendError::CannotConnect),
+            (tonic::Code::ResourceExhausted, BackendError::Unknown),
             (tonic::Code::Cancelled, BackendError::Cancelled),
             (
                 tonic::Code::DeadlineExceeded,
@@ -885,6 +896,18 @@ mod tests {
         assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::CannotConnect)
+        );
+
+        let stage_full = status_to_dynamo("Stage", tonic::Status::resource_exhausted("full"));
+        assert_eq!(
+            stage_full.error_type(),
+            ErrorType::Backend(BackendError::WorkerOverloaded)
+        );
+        let transport_timeout = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        assert_eq!(transport_timeout.code(), tonic::Code::Cancelled);
+        assert_eq!(
+            status_to_dynamo("Stage", transport_timeout).error_type(),
+            ErrorType::Backend(BackendError::ConnectionTimeout)
         );
 
         let error =

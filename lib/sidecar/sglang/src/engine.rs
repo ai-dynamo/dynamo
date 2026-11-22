@@ -188,8 +188,12 @@ impl SglangSidecarEngine {
                 )
             }
             NativeBackend::Encoder(info) => {
-                let encoder =
-                    Encoder::new(info, &endpoint, args.encoder_advertise_endpoint.as_deref())?;
+                let encoder = Encoder::new(
+                    info,
+                    &endpoint,
+                    args.encoder_advertise_endpoint.as_deref(),
+                    std::time::Duration::from_secs(args.encoder_stage_timeout_secs.into()),
+                )?;
                 let tokenizer = encoder.tokenizer().to_owned();
                 let served = encoder.served_name();
                 (
@@ -406,13 +410,13 @@ impl LLMEngine for SglangSidecarEngine {
         ))
         .await?;
         let infos: Vec<_> = started.iter().map(|(_, info)| info).collect();
-        let accepts_encoder_handoff = infos.iter().all(|info| info.accepts_encoder_handoff);
+        let node = NodeInfo::from_listeners(table, &infos, mode)?;
+        let accepts_encoder_handoff = node.engine.accepts_encoder_handoff;
         if self.route_to_encoder && !accepts_encoder_handoff {
             return Err(client::invalid_arg(
                 "native SGLang handoff capability changed during startup",
             ));
         }
-        let node = NodeInfo::from_listeners(table, &infos, mode)?;
 
         let mut config = build_engine_config(
             &node,
@@ -425,16 +429,17 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources = discover_kv_event_sources(&node, &mut config, deadline).await?;
         let native_http = self.native_http(&started, &endpoints, deadline).await?;
         let staged_capabilities = if accepts_encoder_handoff {
-            StagedCapabilities {
+            let capabilities = StagedCapabilities {
                 images: node.engine.supports_staged_images,
                 video: infos.iter().all(|info| info.supports_staged_video),
                 native_model_type: node.engine.native_model_type.clone(),
                 audio_model_type: node.engine.staged_audio_model_type.clone(),
-            }
+            };
+            capabilities.advertise(&mut config);
+            capabilities
         } else {
             StagedCapabilities::default()
         };
-        staged_capabilities.advertise(&mut config);
         if native_http.is_some() {
             config
                 .runtime_data
@@ -1194,6 +1199,7 @@ mod tests {
             model_path: "native-model".into(),
             tokenizer_path: "native-tokenizer".into(),
             served_model_name: "chat-model".into(),
+            instance_id: vec![1; 16],
             supports_staged_video: false,
             ..Default::default()
         };

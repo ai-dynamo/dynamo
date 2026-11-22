@@ -180,17 +180,11 @@ pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
 pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";
 
-/// The selected SGLang worker accepts already-staged images in native Generate.
-pub const SGLANG_STAGED_IMAGES_V1: &str = "sglang_staged_images_v1";
-
-/// The SGLang worker supports staged video and mixed image/video handoffs.
-pub const SGLANG_STAGED_VIDEO_V2: &str = "sglang_staged_video_v2";
-
-/// The native processor model type advertised for version 3 staged handoffs.
-pub const SGLANG_STAGED_NATIVE_V3: &str = "sglang_staged_native_v3";
-
-/// The audio processor and image support for the model's version 4 handoff.
-pub const SGLANG_STAGED_AUDIO_V4: &str = "sglang_staged_audio_v4";
+/// Opaque, backend-defined protocol identity for an external encoder and its
+/// language consumers. A language worker advertising this contract requires a
+/// successful encoder result for multimodal requests. Discovery keeps workers
+/// with different contracts out of the same serving cohort.
+pub const ENCODER_HANDOFF_CONTRACT: &str = "encoder_handoff_contract";
 
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
@@ -557,12 +551,8 @@ impl ModelRuntimeConfig {
         }
     }
 
-    pub(crate) fn sglang_staged_audio(&self) -> bool {
-        self.runtime_data
-            .get(SGLANG_STAGED_AUDIO_V4)
-            .and_then(|contract| contract.get("model_type"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|model_type| !model_type.is_empty())
+    pub(crate) fn requires_encoder_result(&self) -> bool {
+        self.runtime_data.contains_key(ENCODER_HANDOFF_CONTRACT)
     }
 
     /// Check whether a runtime capability is explicitly enabled.

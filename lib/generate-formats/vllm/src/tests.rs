@@ -12,9 +12,7 @@ fn routing_metadata(
         model: "test-model",
         kv_cache_block_size,
         tower_connector_lora_enabled,
-        sglang_staged_images: false,
-        sglang_staged_video: false,
-        sglang_staged_audio: false,
+        requires_encoder_result: false,
         lora_name,
     }
 }
