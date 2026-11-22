@@ -211,8 +211,15 @@ def add_argument(
     # that `type` rejects: argparse converts a string default with `type` only
     # when the flag is not given, so the flag still overrides the env value.
     # Like `deprecated`, this is skipped for another process's env (`ArgEnv`).
+    # Only `store` actions convert their default this way: `append` and
+    # `extend` copy the default and add to it, so a string default would break.
     choices = kwargs.get("choices")
-    if choices is not None and env is None and env_var in os.environ:
+    if (
+        choices is not None
+        and env is None
+        and env_var in os.environ
+        and kwargs.get("action", "store") == "store"
+    ):
         values = (
             default_with_env
             if isinstance(default_with_env, list)
@@ -232,6 +239,8 @@ def add_argument(
                     raise argparse.ArgumentTypeError(message)
                 return convert(value) if convert is not None else value
 
+            # argparse names the type in its "invalid <type> value" message.
+            reject_env_value.__name__ = getattr(convert, "__name__", "str")
             default_with_env = env_default
             arg_type = reject_env_value
     if env is not None:
