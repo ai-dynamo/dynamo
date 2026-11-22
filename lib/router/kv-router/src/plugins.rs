@@ -12,7 +12,7 @@
 //! - [`experimental`]: APIs with no compatibility guarantee, one submodule each, imported by
 //!   name.
 //! - [`testing`]: a harness that runs a policy over a described request and workers, for a
-//!   plugin crate's tests.
+//!   plugin crate's tests and benches.
 //! - [`host`]: what a routing host names to resolve and run plugins. Plugin crates do not
 //!   import it.
 //!
