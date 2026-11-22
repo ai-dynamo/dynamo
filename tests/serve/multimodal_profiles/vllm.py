@@ -442,7 +442,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 health_check_workers=True,
                 marks=[pytest.mark.pre_merge],
-                timeout_s=400,
+                # Startup (~130 s) plus three requests at their 180 s timeout.
+                timeout_s=720,
                 profiled_vram_gib=8.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
