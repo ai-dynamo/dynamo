@@ -378,7 +378,7 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
 
         **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-        **Notes:** Harmony channel format
+        **Notes:** Harmony channel format. Harmony ends the assistant turn at `<\|call\|>`, and Dynamo and vLLM both stop generation on that token. A response to `tool_choice: "auto"` therefore holds one tool call, even when `parallel_tool_calls` is `true`; send the tool result back to get the next call. To get several calls in one response, set `tool_choice: "required"` and leave `parallel_tool_calls` unset or `true`. Dynamo then guides the model to write all of its calls as one JSON array, and the model must call at least one tool.
       </Accordion>
     </AccordionGroup>
   </Accordion>
