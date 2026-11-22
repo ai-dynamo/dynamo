@@ -2801,7 +2801,6 @@ dependencies = [
  "dynamo-kv-hashing",
  "dynamo-kv-hints",
  "dynamo-kv-indexer",
- "dynamo-kv-router",
  "dynamo-router-protocol",
  "dynamo-scheduler",
  "dynamo-session-affinity",
