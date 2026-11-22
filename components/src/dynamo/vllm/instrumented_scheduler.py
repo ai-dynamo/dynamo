@@ -6415,16 +6415,17 @@ class InstrumentedScheduler(AsyncScheduler):
         return cap if isinstance(cap, int) and cap > 0 else None
 
     def _kvwarm_circular_table_manager(self, manager) -> bool:
-        """True for admission-capped groups whose block table is a fixed-length circular
-        buffer rather than a position-indexed table (GLM5-Next's k-pool tail: one block
-        per request, excluded from prefix caching). Sliding-window / chunked-local
-        groups are admission-capped too, but keep positional tables with null
-        placeholders for expired positions, so they take the positional path.
+        """True for groups whose block table is one circular-buffer block rather than a
+        position-indexed table (GLM5-Next's k-pool tail). vLLM keeps such a group out
+        of prefix caching (``prefix_cacheable``) and gives each request one block-table
+        entry, whatever its length (``max_num_blocks_per_req``). Sliding-window /
+        chunked-local groups keep positional tables with null placeholders for
+        expired positions, so they take the positional path.
         """
-        if self._kvwarm_admission_cap(manager) is None:
-            return False
         spec = getattr(manager, "kv_cache_spec", None)
-        return getattr(spec, "participates_in_prefix_caching", True) is False
+        if getattr(spec, "prefix_cacheable", True) is not False:
+            return False
+        return spec.max_num_blocks_per_req(self.vllm_config, self.max_model_len) == 1
 
     def _kvwarm_live_state_manager(self, manager) -> bool:
         """Recurrent-state groups served by live-state borrowing (hybrid live-state mode,
@@ -6452,7 +6453,7 @@ class InstrumentedScheduler(AsyncScheduler):
         (the exact arithmetic of ``_kvwarm_register_shadow`` /
         ``_kvwarm_shadow_pool_shortfall``): the write positions ctx .. ctx+headroom
         minus the shared full prefix blocks; random-state groups their state-table span;
-        admission-capped groups their whole (capped) table. The worst case
+        circular-buffer groups their one ring block. The worst case
         (``_kvwarm_shadow_tail_blocks``) charges two blocks per group for any context;
         on a hybrid with many small groups that alone pushes the large rungs over the
         pool.
@@ -6472,9 +6473,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
             )
             if self._kvwarm_circular_table_manager(manager):
-                need += (
-                    self._kvwarm_admission_cap(manager) or 0
-                )  # fixed ring, whatever the mode
+                need += 1  # the ring's one block, whatever the mode
                 continue
             if self._kvwarm_random_state_manager(
                 manager
@@ -7032,12 +7031,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 n_shared = ctx_len // bs
                 n_total = -(-(ctx_len + 1 + headroom) // bs)
                 chain_blocks = list(mgr.req_to_blocks[chain_id])
-                is_circular = self._kvwarm_circular_table_manager(mgr) and len(
-                    chain_blocks
-                ) <= (self._kvwarm_admission_cap(mgr) or 0)
+                is_circular = (
+                    self._kvwarm_circular_table_manager(mgr) and len(chain_blocks) <= 1
+                )
                 # A circular table (k-pool tail) is a fixed ring, never a positional
-                # state table: it keeps its own geometry even when live-state mode is on
-                # (the manager matches both predicates).
+                # state table: it keeps its own geometry even when live-state mode is on.
                 is_live_state = (
                     not is_circular
                     and self._kvwarm_live_state_manager(mgr)
@@ -7051,10 +7049,10 @@ class InstrumentedScheduler(AsyncScheduler):
                     # privately.
                     n_shared, n_total = recurrent_shadow_range(ctx_len, headroom, bs)
                 if is_circular:
-                    # Circular fixed-length table (k-pool tail): the chain holds ``cap``
-                    # blocks whatever its depth and the runner's table for the group has
-                    # ``cap`` columns, so the shadow shares nothing and forks the
-                    # chain's block(s) instead of walking positional indices.
+                    # Circular one-block table (k-pool tail): the chain holds one block
+                    # whatever its depth and the runner's table for the group has one
+                    # column, so the shadow shares nothing and forks the chain's block
+                    # instead of walking positional indices.
                     n_shared = 0
                     n_total = len(chain_blocks)
                     tail_src = list(chain_blocks)

@@ -33,6 +33,10 @@ from unittest.mock import MagicMock, call
 import pytest
 import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+
+# Imported as a module: the provenance tests below define a stand-in named
+# MLAAttentionSpec, which would shadow vLLM's.
+import vllm.v1.kv_cache_interface as kv_cache_interface
 import zmq
 from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.sampling_params import SamplingParams
@@ -7609,7 +7613,13 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     so the shadow at ctx=152 forks table index 9, never the last ``cap`` entries."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
     mgr.max_admission_blocks_per_request = 4
-    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=True)
+    mgr.kv_cache_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=33,
+    )
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
         stub, "shadow", "chain", 152, 3
     )
@@ -7619,16 +7629,37 @@ def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
     assert mgr.num_cached_block["shadow"] == 9
 
 
+def _kvwarm_ring_spec():
+    # GLM5-Next's k-pool tail: a ring of four [K, gate score] slots.
+    return kv_cache_interface.CircularBufferSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+
+
+def _kvwarm_ring_check_inputs(stub):
+    """The two arguments that the ring check passes to vLLM's
+    ``max_num_blocks_per_req``."""
+    stub.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+    )
+    stub.max_model_len = 4096
+    return stub
+
+
 def test_kvwarm_shadow_registration_forks_circular_tail_table():
-    """GLM5-Next's k-pool tail: one circularly reused block per request
-    (admission cap 1, excluded from prefix caching). The chain holds a single
+    """GLM5-Next's k-pool tail: one circularly reused block per request, excluded
+    from prefix caching and without an admission cap. The chain holds a single
     block whatever its depth; the shadow shares nothing and forks that block."""
     stub, mgr, pool, chain = _shadow_stub(cow=True)
+    _kvwarm_ring_check_inputs(stub)
     mgr.req_to_blocks["chain"] = chain[:1]
     mgr.block_size = 4
-    mgr.max_admission_blocks_per_request = 1
-    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
-    assert stub._bench_blocks_per_req(152, apply_admission_cap=True) == 1
+    mgr.kv_cache_spec = _kvwarm_ring_spec()
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
         stub, "shadow", "chain", 152, 3
     )
@@ -7676,21 +7707,21 @@ def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
 
 
 class KpoolTailManager(_FakeManager):
-    """Matches the circular-table predicate (admission cap, spec excluded from
-    prefix caching); its ``SimpleNamespace`` spec is not a Mamba spec, so the
-    live-state predicate does not match."""
+    """Carries a circular-buffer spec, which matches the circular-table predicate
+    and is not a Mamba spec, so the live-state predicate does not match."""
 
 
 def test_kvwarm_live_state_keeps_circular_kpool_geometry():
-    """With live-state on, the k-pool tail (one circular block, admission cap 1,
-    excluded from prefix caching) must keep its ring geometry: fork the single
-    block, never walk ``recurrent_shadow_range`` positions (65 entries at ctx 255)."""
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    """With live-state on, the k-pool tail (one circular block, excluded from
+    prefix caching) must keep its ring geometry: fork the single block, never
+    walk ``recurrent_shadow_range`` positions (65 entries at ctx 255)."""
+    stub = _kvwarm_ring_check_inputs(
+        InstrumentedScheduler.__new__(InstrumentedScheduler)
+    )
     chain = [_FakeBlock(0)]
     mgr = KpoolTailManager(chain, cow=True)
     mgr.block_size = 4
-    mgr.max_admission_blocks_per_request = 1
-    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
+    mgr.kv_cache_spec = _kvwarm_ring_spec()
     pool = _FakePool()
     stub.kv_cache_manager = SimpleNamespace(
         block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
@@ -7707,6 +7738,225 @@ def test_kvwarm_live_state_keeps_circular_kpool_geometry():
     assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 255, 3) == 1
     assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [255], 3) == 0
     assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 3) == 2
+
+
+def _kvwarm_attention_fields(**overrides):
+    return (
+        dict(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+        | overrides
+    )
+
+
+@pytest.mark.parametrize(
+    "build_spec,is_ring",
+    [
+        pytest.param(_kvwarm_ring_spec, True, id="circular_buffer"),
+        # One block-table entry at this model length, but kept in prefix caching.
+        pytest.param(
+            lambda: FullAttentionSpec(**_kvwarm_attention_fields(block_size=4096)),
+            False,
+            id="one_entry_prefix_cacheable",
+        ),
+        # Out of prefix caching, but a positional table of 256 entries.
+        pytest.param(
+            lambda: kv_cache_interface.SlidingWindowMLASpec(
+                **_kvwarm_attention_fields(), sliding_window=64, bounded_replay=True
+            ),
+            False,
+            id="bounded_replay_window",
+        ),
+        pytest.param(
+            lambda: kv_cache_interface.HiSparseResidentSpec(
+                block_size=16, page_size=64
+            ),
+            False,
+            id="hisparse_resident",
+        ),
+        # Out of prefix caching with a fixed table, but of two entries.
+        pytest.param(
+            lambda: kv_cache_interface.HiSparseHotSpec(
+                block_size=16, page_size=64, blocks_per_request=2
+            ),
+            False,
+            id="hisparse_hot",
+        ),
+        # A group with no block-table entry has no block to fork: a ring has one.
+        pytest.param(
+            lambda: kv_cache_interface.HiSparseHotSpec(
+                block_size=16, page_size=64, blocks_per_request=0
+            ),
+            False,
+            id="hisparse_hot_empty",
+        ),
+        # One entry, out of prefix caching: the shape of a ring, whatever the class.
+        pytest.param(
+            lambda: kv_cache_interface.HiSparseHotSpec(
+                block_size=16, page_size=64, blocks_per_request=1
+            ),
+            True,
+            id="hisparse_hot_one_block",
+        ),
+        pytest.param(
+            lambda: SlidingWindowSpec(**_kvwarm_attention_fields(), sliding_window=64),
+            False,
+            id="sliding_window",
+        ),
+        pytest.param(
+            lambda: kv_cache_interface.ChunkedLocalAttentionSpec(
+                **_kvwarm_attention_fields(), attention_chunk_size=64
+            ),
+            False,
+            id="chunked_local",
+        ),
+        pytest.param(
+            lambda: kv_cache_interface.MLAAttentionSpec(
+                block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+            ),
+            False,
+            id="mla",
+        ),
+        pytest.param(
+            lambda: kv_cache_interface.MambaSpec(
+                block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+            ),
+            False,
+            id="mamba",
+        ),
+        pytest.param(
+            lambda: kv_cache_interface.CrossAttentionSpec(**_kvwarm_attention_fields()),
+            False,
+            id="cross_attention",
+        ),
+        pytest.param(
+            lambda: kv_cache_interface.SinkFullAttentionSpec(
+                **_kvwarm_attention_fields(), sink_len=16
+            ),
+            False,
+            id="sink",
+        ),
+    ],
+)
+def test_kvwarm_circular_table_check_reads_vllm_spec_facts(build_spec, is_ring):
+    """Only a group that vLLM keeps out of prefix caching and gives one
+    block-table entry per request is a ring."""
+    stub = _kvwarm_ring_check_inputs(
+        InstrumentedScheduler.__new__(InstrumentedScheduler)
+    )
+    spec = build_spec()
+    # vLLM gives a manager the admission cap of its spec, for the specs that
+    # define one. A cap does not make a ring.
+    spec_cap = getattr(spec, "max_admission_blocks_per_request", None)
+    manager = SimpleNamespace(
+        kv_cache_spec=spec,
+        max_admission_blocks_per_request=(
+            spec_cap(max_in_flight_tokens=16, max_model_len=4096) if spec_cap else None
+        ),
+    )
+
+    assert stub._kvwarm_circular_table_manager(manager) is is_ring
+
+
+def _kvwarm_ring_layout_stub():
+    """vLLM's own cache manager for a hybrid layout with a ring (full attention,
+    a circular buffer and recurrent state, the groups of GLM-5.3-Flash), with
+    one parked chain of 160 tokens that vLLM allocated."""
+    stub = _kvwarm_ring_check_inputs(
+        InstrumentedScheduler.__new__(InstrumentedScheduler)
+    )
+    specs = [
+        FullAttentionSpec(**_kvwarm_attention_fields()),
+        _kvwarm_ring_spec(),
+        kv_cache_interface.MambaSpec(
+            block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+        ),
+    ]
+    stub.kv_cache_manager = kv_cache_manager.KVCacheManager(
+        KVCacheConfig(
+            num_blocks=64,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=[str(index)], kv_cache_spec=spec)
+                for index, spec in enumerate(specs)
+            ],
+        ),
+        max_model_len=stub.max_model_len,
+        scheduler_block_size=16,
+        hash_block_size=16,
+        max_in_flight_tokens=16,
+        enable_caching=True,
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    chain = Request(
+        request_id="chain",
+        prompt_token_ids=[1] * 160,
+        sampling_params=SamplingParams(max_tokens=8, ignore_eos=True),
+        pooling_params=None,
+    )
+    # As the benchmark paths do, leave the prefix-cache commit out: the chain
+    # has no block hashes here.
+    assert (
+        stub.kv_cache_manager.allocate_slots(chain, 160, delay_cache_blocks=True)
+        is not None
+    )
+    chain.num_computed_tokens = 160
+    stub.requests = {"chain": chain}
+    stub._kvwarm_chain_ids = ["chain"]
+    stub._kvwarm_chain_prompts = {"chain": [1] * 160}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub._kvwarm_borrowed_ids = set()
+    stub._bench_block_hasher = None
+    stub._bench_extra_steps_left = 3
+    stub.connector = None
+    stub.ec_connector = None
+    return stub
+
+
+def test_kvwarm_random_state_shadow_forks_the_ring_of_a_vllm_circular_buffer_group():
+    """Random-state mode on a hybrid layout with a ring. vLLM's manager holds
+    one ring block for the chain, whatever its depth, and has no admission cap.
+    The shadow at ctx=41 with three steady steps takes one attention block, the
+    ring's one block and one state block: it forks the chain's ring block and
+    never walks the 12 positions that a 4-token table would have."""
+    stub = _kvwarm_ring_layout_stub()
+    stub._bench_random_kda = True
+    stub._bench_hybrid_live_state = False
+    manager = stub.kv_cache_manager
+    attention, ring, state = manager.coordinator.single_type_managers
+    (chain_ring,) = ring.req_to_blocks["chain"]
+    assert ring.max_admission_blocks_per_request is None
+    free_before = manager.block_pool.get_num_free_blocks()
+
+    assert stub._kvwarm_shadow_tail_blocks_for(41, 3) == 3
+    assert stub._kvwarm_shadow_pool_shortfall([41], 3) == 0
+    output = stub._kvwarm_inject_borrowed([41])
+
+    (shadow,) = output.scheduled_new_reqs
+    attention_table, ring_table, state_table = shadow.block_ids
+    (shadow_ring,) = ring.req_to_blocks[shadow.req_id]
+    assert ring_table == [shadow_ring.block_id]
+    assert shadow_ring is not chain_ring
+    assert ring.req_to_blocks["chain"] == [chain_ring]
+    assert ring.num_cached_block[shadow.req_id] == 0
+    # The ring block and the attention tail are copies of the chain's blocks.
+    chain_attention = attention.req_to_blocks["chain"]
+    assert [
+        (copy.src_block_id, copy.dst_block_id) for copy in output.kv_cache_block_copies
+    ] == [
+        (chain_attention[2].block_id, attention_table[2]),
+        (chain_ring.block_id, shadow_ring.block_id),
+    ]
+    assert attention_table[:2] == [block.block_id for block in chain_attention[:2]]
+    # The recurrent state stays private and synthetic.
+    assert output.new_block_ids_to_zero == state_table[2:]
+    assert len(state_table) == 3
+    assert free_before - manager.block_pool.get_num_free_blocks() == 3
+
+    manager.free(stub.requests[shadow.req_id])
+    assert manager.block_pool.get_num_free_blocks() == free_before
+    assert ring.req_to_blocks["chain"] == [chain_ring]
 
 
 def test_kvwarm_plan_keeps_kimi_long_context_real_kv_coverage(monkeypatch):
