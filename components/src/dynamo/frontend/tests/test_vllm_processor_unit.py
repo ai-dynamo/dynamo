@@ -6817,3 +6817,73 @@ class TestBufferedToolPathReasoningSplit:
 
         assert content == '{"city":"Paris"}'
         assert "</think> spelling. Still reasoning." in reasoning
+
+    @pytest.mark.parametrize("single_token_chunks", [0, 5])
+    def test_multi_token_chunk_with_one_token_parser(
+        self, tokenizer, single_token_chunks
+    ):
+        """hunyuan_a13b's streaming split asserts one token per call.
+
+        A multi-token chunk must not reach it, also after single-token chunks
+        did; the whole output is then split with extract_reasoning(). The
+        parser matches its own hardcoded token ids, so each id below is paired
+        with the text it stands for.
+        """
+        from vllm.reasoning import ReasoningParserManager
+
+        pieces = [
+            (14023, "<"),
+            (771, "think"),
+            (397, ">\n"),
+            (1000, "Reasoning"),
+            (1001, " here."),
+            (198, "\n"),
+            (524, "</"),
+            (27963, "think"),
+            (397, ">\n"),
+            (27, "<"),
+            (9399, "answer"),
+            (397, ">\n"),
+            (2000, '{"city":'),
+            (2001, '"Paris"}'),
+            (198, "\n"),
+            (524, "</"),
+            (9399, "answer"),
+            (29, ">"),
+        ]
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="auto", model_fields=frozenset()
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=tokenizer.encode(
+                "<|im_start|>assistant\n", add_special_tokens=False
+            ),
+            tool_parser=_resolve_qwen3_tool_parser_class()(tokenizer),
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser(
+                "hunyuan_a13b"
+            ),
+            chat_template_kwargs={},
+            stream_response=False,
+        )
+        chunks = [[piece] for piece in pieces[:single_token_chunks]]
+        chunks.append(pieces[single_token_chunks:])
+        content, reasoning = "", ""
+        for n, chunk in enumerate(chunks):
+            choice = post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text="".join(text for _, text in chunk),
+                    token_ids=[token_id for token_id, _ in chunk],
+                    finish_reason="stop" if n == len(chunks) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            delta = (choice or {}).get("delta") or {}
+            content += delta.get("content") or ""
+            reasoning += delta.get("reasoning_content") or ""
+
+        assert content == '{"city":"Paris"}'
+        assert reasoning == "Reasoning here."

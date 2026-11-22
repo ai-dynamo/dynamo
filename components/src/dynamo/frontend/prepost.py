@@ -1299,6 +1299,8 @@ class StreamingPostProcessor:
         # Reasoning and answer text of the buffered non-streaming tool path.
         self._buffered_reasoning = ""
         self._buffered_content = ""
+        # Set when that path falls back to the text split of the whole output.
+        self._buffered_text_split = False
 
     @property
     def reasoning_token_total(self) -> int:
@@ -1670,8 +1672,22 @@ class StreamingPostProcessor:
         # streaming parser ends reasoning on the end token's id; the text-only
         # extract_reasoning() would also end it at the same marker spelled with
         # ordinary tokens, and return the rest of the reasoning as content.
+        # A parser that is not engine-based may read one token per streaming
+        # call (hunyuan_a13b asserts it). On a multi-token chunk (e.g. MTP),
+        # split the whole output with extract_reasoning() at the end instead.
+        if (
+            not self.reasoning_is_done
+            and self.reasoning_parser
+            and not self.reasoning_parser.engine_based_streaming
+            and len(delta_token_ids) > 1
+        ):
+            self._buffered_text_split = True
         split: DeltaMessage | None = DeltaMessage(content=delta_text)
-        if not self.reasoning_is_done and self.reasoning_parser:
+        if (
+            not self.reasoning_is_done
+            and self.reasoning_parser
+            and not self._buffered_text_split
+        ):
             split = self.reasoning_parser.extract_reasoning_streaming(
                 self.previous_text,
                 current_text,
@@ -1702,6 +1718,14 @@ class StreamingPostProcessor:
         self.previous_token_ids = current_token_ids
         if not output.finish_reason:
             return None
+
+        if self._buffered_text_split and self.reasoning_parser:
+            reasoning, content = self.reasoning_parser.extract_reasoning(
+                current_text,
+                request=self.request_for_sampling,
+            )
+            self._buffered_reasoning = reasoning or ""
+            self._buffered_content = content or ""
 
         saved_reasoning = self._buffered_reasoning or None
         if not self.request_for_sampling.include_reasoning:
