@@ -58,6 +58,7 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
+use llm_rs::http::service::worker_metrics::{observe_finish_gauges, observe_first_token_gauges};
 use llm_rs::kv_router::RoutingHost;
 type RsRoutingHost = RoutingHost;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
@@ -2278,7 +2279,7 @@ impl KvRouter {
                             .unwrap_or(false);
                         if has_tokens {
                             if let Some(ref tracker) = tracker {
-                                dynamo_llm::http::service::worker_metrics::observe_first_token_gauges(tracker);
+                                observe_first_token_gauges(tracker);
                             }
                             first_token_gauges_observed = true;
                         }
@@ -2310,7 +2311,7 @@ impl KvRouter {
                 }
 
                 if let Some(ref tracker) = tracker {
-                    dynamo_llm::http::service::worker_metrics::observe_finish_gauges(tracker);
+                    observe_finish_gauges(tracker);
                 }
             });
 

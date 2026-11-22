@@ -21,7 +21,7 @@ impl TrackerFinishGuard {
 
     fn observe(&mut self) {
         if let Some(tracker) = self.tracker.take() {
-            dynamo_llm::http::service::worker_metrics::observe_finish_gauges(&tracker);
+            observe_finish_gauges(&tracker);
         }
     }
 }
@@ -75,7 +75,7 @@ impl KvDemandStream {
                 .unwrap_or(false);
             if has_tokens {
                 if let Some(ref tracker) = self.tracker {
-                    dynamo_llm::http::service::worker_metrics::observe_first_token_gauges(tracker);
+                    observe_first_token_gauges(tracker);
                 }
                 self.first_token_gauges_observed = true;
             }
