@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 use super::server::create_router;
 use super::*;
+use crate::plugins::host::RouterPluginRegistryHostExt;
 use crate::plugins::worker_selection::SelectionConfig;
 use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyProviderError};
 use crate::tracking_hash::tracking_hash_context;
@@ -373,7 +374,7 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
     let rendezvous = Arc::clone(&factory_rendezvous);
     let app = native_policy_app(
         dynamo_router_protocol::WorkerType::Prefill,
-        move |config, worker_type, partition| {
+        move |_config, worker_type, partition| {
             calls.fetch_add(1, Ordering::Relaxed);
             partitions.lock().unwrap().push(partition.into_owned());
             worker_types.lock().unwrap().push(worker_type);
@@ -450,7 +451,7 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
     let app = native_policy_app(
         dynamo_router_protocol::WorkerType::Aggregated,
-        |config, worker_type, _partition| {
+        |_config, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 worker_type.as_str(),
                 vec![Box::new(NonFiniteScorer)],
@@ -484,7 +485,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
     let app = native_policy_app(
         dynamo_router_protocol::WorkerType::Aggregated,
-        |config, worker_type, _partition| {
+        |_config, worker_type, _partition| {
             WorkerSelectionPolicy::new(worker_type.as_str(), Vec::new(), Box::new(InvalidRowPicker))
         },
     )
@@ -514,7 +515,7 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
 async fn worker_selection_filter_returns_unavailable_without_booking() {
     let app = native_policy_app(
         dynamo_router_protocol::WorkerType::Aggregated,
-        |config, worker_type, _partition| {
+        |_config, worker_type, _partition| {
             WorkerSelectionPolicy::new_with_filters(
                 worker_type.as_str(),
                 vec![Box::new(RejectAllFilter)],
