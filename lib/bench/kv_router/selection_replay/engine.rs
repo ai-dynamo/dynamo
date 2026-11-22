@@ -1025,6 +1025,7 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
                 track_active_blocks: shared.host.track_active_blocks,
                 return_routing_hashes: false,
                 replay_id: None,
+                admitted_upstream: false,
             }),
     )
     .await;
