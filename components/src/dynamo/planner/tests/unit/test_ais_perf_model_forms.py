@@ -398,7 +398,6 @@ def test_source_that_disagrees_with_deployment_is_refused(
 def test_dataset_profile_that_disagrees_with_deployment_is_refused(
     adapter, monkeypatch
 ):
-    # The profile a dataset gives, without a dataset on disk.
     monkeypatch.setattr(
         ais_adapter, "prepare_execution_profile", lambda *_: {**_CONTENT, "tp": 4}
     )
