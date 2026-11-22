@@ -72,15 +72,13 @@ fn worker_selection_provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     let _: ThunderAgentSelectionParameters = parameters.deserialize()?;
-    Ok(Arc::new(
-        move |_config, worker_type: WorkerType, _partition| {
-            WorkerSelectionPolicy::new(
-                worker_type.as_str(),
-                vec![Box::new(ThunderAgentScorer)],
-                Box::new(ThunderAgentPicker),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            vec![Box::new(ThunderAgentScorer)],
+            Box::new(ThunderAgentPicker),
+        )
+    }))
 }
 
 pub(crate) fn register(

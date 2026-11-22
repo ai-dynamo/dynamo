@@ -49,10 +49,10 @@ fn prompt_tokens() -> Vec<u32> {
 /// `hints` makes worker 1 hold the whole prompt so every booking on another
 /// worker computes a fetch hint from it.
 fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
-    Arc::new(|config, role, _| {
+    Arc::new(|context| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
+            context.selection_config().clone(),
+            context.worker_type().default_selector_label(),
         )
     })
 }
@@ -164,9 +164,9 @@ fn core_with_copy_credit(
     workers: u64,
     copy_credit: f64,
 ) -> SelectionCore {
-    let policy: WorkerSelectionPolicyFactory = Arc::new(move |_config, role, _| {
+    let policy: WorkerSelectionPolicyFactory = Arc::new(move |context| {
         WorkerSelectionPolicy::new(
-            role.as_str(),
+            context.worker_type().as_str(),
             vec![Box::new(CopyCreditScorer { copy_credit })],
             Box::new(LowestCostPicker),
         )

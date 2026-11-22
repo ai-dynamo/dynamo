@@ -114,11 +114,11 @@ fn policy_with_rng(
 
 /// Factory installed by routing hosts, including hosts without a custom catalog.
 pub fn default_factory() -> WorkerSelectionPolicyFactory {
-    Arc::new(|config, role, _partition| {
+    Arc::new(|context| {
         policy_for_role(
-            config.clone(),
-            role,
-            PolicyParameters::from(config),
+            context.selection_config().clone(),
+            context.worker_type(),
+            PolicyParameters::from(context.selection_config()),
             Preset::Default,
         )
     })

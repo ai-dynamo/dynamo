@@ -108,9 +108,9 @@ impl RequestClassifier for ContractClassifier {
 fn contract_provider(
     _parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-    Ok(Arc::new(|_config, worker_type, _partition| {
+    Ok(Arc::new(|context| {
         WorkerSelectionPolicy::new_with_filters(
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             vec![Box::new(ContractPolicy)],
             vec![Box::new(ContractPolicy)],
             Box::new(ContractPolicy),
@@ -138,11 +138,11 @@ fn v1alpha1_plugins_resolve_through_the_registry() {
     };
     let plugins: RouterPlugins = registry.resolve_plugins(&config).unwrap();
     let factory = plugins.worker_selection().unwrap();
-    let _policy: WorkerSelectionPolicy = factory(
+    let _policy: WorkerSelectionPolicy = factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::from(&config),
         WorkerType::Aggregated,
         RoutingPartitionRef::new("model", "default"),
-    );
+    ));
     let _: RoutingPartitionId = RoutingPartitionId::new("model", "default");
     let _: Result<RouterPlugins, RouterPluginRegistryError> = Ok(RouterPlugins::default());
 }

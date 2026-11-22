@@ -63,11 +63,13 @@ fn provider<P: WorkerPicker + 'static>(
 + 'static {
     move |parameters| {
         let _: NoParameters = parameters.deserialize()?;
-        Ok(Arc::new(
-            move |_config: &SelectionConfig, worker_type, _partition| {
-                WorkerSelectionPolicy::new(worker_type.as_str(), Vec::new(), Box::new(picker()))
-            },
-        ))
+        Ok(Arc::new(move |context| {
+            WorkerSelectionPolicy::new(
+                context.worker_type().as_str(),
+                Vec::new(),
+                Box::new(picker()),
+            )
+        }))
     }
 }
 

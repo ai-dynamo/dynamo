@@ -476,16 +476,15 @@ worker_selection:
                     move |_parameters: &WorkerSelectionPolicyParameters| {
                         provider_calls.fetch_add(1, Ordering::Relaxed);
                         let factory_calls = Arc::clone(&factory_calls);
-                        let factory: WorkerSelectionPolicyFactory =
-                            Arc::new(move |_config, worker_type, _partition| {
-                                factory_calls.fetch_add(1, Ordering::Relaxed);
-                                assert_eq!(worker_type, WorkerType::Aggregated);
-                                WorkerSelectionPolicy::new(
-                                    worker_type.as_str(),
-                                    Vec::new(),
-                                    Box::new(FirstEligiblePicker),
-                                )
-                            });
+                        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                            factory_calls.fetch_add(1, Ordering::Relaxed);
+                            assert_eq!(context.worker_type(), WorkerType::Aggregated);
+                            WorkerSelectionPolicy::new(
+                                context.worker_type().as_str(),
+                                Vec::new(),
+                                Box::new(FirstEligiblePicker),
+                            )
+                        });
                         Ok(factory)
                     }
                 }),
@@ -763,14 +762,13 @@ worker_selection:
                     let picker = picker.clone();
                     move |_parameters: &WorkerSelectionPolicyParameters| {
                         let picker = picker.clone();
-                        let factory: WorkerSelectionPolicyFactory =
-                            Arc::new(move |_config, worker_type, _partition| {
-                                WorkerSelectionPolicy::new(
-                                    worker_type.as_str(),
-                                    Vec::new(),
-                                    Box::new(picker.clone()),
-                                )
-                            });
+                        let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                            WorkerSelectionPolicy::new(
+                                context.worker_type().as_str(),
+                                Vec::new(),
+                                Box::new(picker.clone()),
+                            )
+                        });
                         Ok(factory)
                     }
                 }),

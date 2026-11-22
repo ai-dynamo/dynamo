@@ -68,7 +68,9 @@ impl DefaultWorkerSelector {
     ) -> Self {
         let partition = RoutingPartitionRef::new("replay", "default");
         Self {
-            policy: Arc::new(Mutex::new(factory(&config, role, partition))),
+            policy: Arc::new(Mutex::new(factory(WorkerSelectionPolicyContext::new(
+                &config, role, partition,
+            )))),
             kv_router_config: config,
             worker_type,
             rng: None,

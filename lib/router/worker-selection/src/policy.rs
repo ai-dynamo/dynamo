@@ -7,12 +7,14 @@ use std::sync::Arc;
 use crossbeam_queue::ArrayQueue;
 use rustc_hash::FxHashSet;
 
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[cfg(any(test, feature = "testing", feature = "bench"))]
-use crate::{DefaultWorkerPicker, SelectionConfig};
+use crate::DefaultWorkerPicker;
 use crate::{
-    HostedWorkerPicker, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
+    HostedWorkerPicker, SelectionConfig, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
     WorkerSelectionPolicyError,
 };
 
@@ -130,6 +132,47 @@ struct ComposedPolicyState {
 /// Enough for the buffers in flight between callers and the actor to come back
 /// without allocating, while bounding what an idle policy keeps.
 const ROW_BUFFERS: usize = 64;
+
+/// What a policy factory receives when the router builds a policy for one routing partition.
+///
+/// It describes the partition, not a request: the value filters, scorers, and pickers read
+/// for each request is [`WorkerSelectionContext`].
+#[derive(Clone, Copy, Debug)]
+pub struct WorkerSelectionPolicyContext<'a> {
+    selection_config: &'a SelectionConfig,
+    worker_type: WorkerType,
+    partition: RoutingPartitionRef<'a>,
+}
+
+impl<'a> WorkerSelectionPolicyContext<'a> {
+    pub fn new(
+        selection_config: &'a SelectionConfig,
+        worker_type: WorkerType,
+        partition: RoutingPartitionRef<'a>,
+    ) -> Self {
+        Self {
+            selection_config,
+            worker_type,
+            partition,
+        }
+    }
+
+    /// The scoring and sampling settings of the model this partition serves. They can differ
+    /// per model, because a worker's model card can replace the frontend's settings.
+    pub fn selection_config(&self) -> &'a SelectionConfig {
+        self.selection_config
+    }
+
+    /// The role of the workers the policy selects among.
+    pub fn worker_type(&self) -> WorkerType {
+        self.worker_type
+    }
+
+    /// The partition the policy is built for.
+    pub fn partition(&self) -> RoutingPartitionRef<'a> {
+        self.partition
+    }
+}
 
 /// Native scorer/picker composition behind the kernel's `WorkerSelector`.
 ///

@@ -108,7 +108,11 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&SelectionConfig::from(&config), worker_type, partition);
+            factory(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                worker_type,
+                partition,
+            ));
         }
     }
 
@@ -140,7 +144,11 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&SelectionConfig::from(&config), worker_type, partition);
+            factory(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                worker_type,
+                partition,
+            ));
         }
     }
 
@@ -159,11 +167,11 @@ worker_selection:
         let factory = resolved
             .unwrap()
             .expect("a configured instance resolves to a factory");
-        factory(
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Prefill,
             RoutingPartitionRef::new("model", "default"),
-        );
+        ));
     }
 
     /// `kv_fetch` is on by default only under `kvcr`: a `kvcr` role runs it without listing it, a

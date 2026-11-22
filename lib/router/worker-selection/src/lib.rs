@@ -7,7 +7,8 @@
 //! [`WorkerSelectionPolicy`] pulls each rank's row at the columns its filters, scorers,
 //! and picker declared, and returns a [`RowPick`] or a [`SelectionFailure`]. Everything a
 //! plugin names lives here: the [`WorkerFilter`], [`WorkerScorer`], and [`WorkerPicker`]
-//! traits, the [`WorkerSelectionContext`] view of the request, the candidate rows and
+//! traits, the [`WorkerSelectionContext`] view of the request, the
+//! [`WorkerSelectionPolicyContext`] a policy factory receives, the candidate rows and
 //! their views, runtime parameter updates, the selection slice of the router config, the
 //! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
 //! summary a policy credits fetches with lives in `dynamo-kv-hints`; the kernel builds the
@@ -53,7 +54,7 @@ pub use inputs::{
 pub use lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 pub use policy::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
-    SelectionFailure, WorkerSelectionPolicy,
+    SelectionFailure, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
 };
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference_picker::{DefaultPick, DefaultWorkerPicker};

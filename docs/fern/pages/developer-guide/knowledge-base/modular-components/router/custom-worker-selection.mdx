@@ -41,7 +41,7 @@ To classify or reject requests before they enter the scheduling queue, or hold t
 | `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
 | `WorkerScorer` | Request context, all surviving workers, and an aligned output slice | One finite cost per worker | The rule ranks workers or adds a penalty |
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
-| Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
+| Policy factory | One `WorkerSelectionPolicyContext`: the selection settings, worker type, and routing partition the policy is built for | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
 An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
 
@@ -51,7 +51,7 @@ A plugin crate depends on `dynamo-kv-router` alone and imports the module for th
 
 | Module | Public API | Compatibility |
 |---|---|---|
-| `plugins::v1alpha1::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, the request context, the picker's table, `SelectionConfig`, factories, and everything in `plugins::v1alpha1` | Alpha: an item can change or move in a minor release. Each change is listed in the [deprecation notes](../../../../reference/general/releases/deprecations.mdx), and the previous path keeps resolving for one release where that is possible |
+| `plugins::v1alpha1::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, the request context, the picker's table, `WorkerSelectionPolicyContext`, `SelectionConfig`, factories, and everything in `plugins::v1alpha1` | Alpha: an item can change or move in a minor release. Each change is listed in the [deprecation notes](../../../../reference/general/releases/deprecations.mdx), and the previous path keeps resolving for one release where that is possible |
 | `plugins::v1alpha1::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in `plugins::v1alpha1` | Same |
 | `plugins::v1alpha1` | What both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
 | `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints` | None: an item can change or be removed in any release |
@@ -259,13 +259,13 @@ fn provider(
     }
     let minimum_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |_config, worker_type, _partition| {
+    Ok(Arc::new(move |context| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
         ];
         let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
         WorkerSelectionPolicy::new_with_filters(
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             filters,
             scorers,
             Box::new(LowestCostPicker),
@@ -274,7 +274,15 @@ fn provider(
 }
 ```
 
-Dynamo calls the returned factory once per routing partition. Branch on the typed `WorkerType::Aggregated`, `WorkerType::Prefill`, `WorkerType::Decode`, or `WorkerType::Encode` role when worker pools need different components. Use the partition identity for distinct model or routing-group state.
+Dynamo calls the returned factory once per routing partition and passes it one `WorkerSelectionPolicyContext`:
+
+| Accessor | Value |
+|---|---|
+| `worker_type()` | The typed role of the worker pool: `WorkerType::Aggregated`, `WorkerType::Prefill`, `WorkerType::Decode`, or `WorkerType::Encode`. Branch on it when worker pools need different components |
+| `partition()` | The model and routing group the policy is built for. Use it for distinct model or routing-group state |
+| `selection_config()` | The scoring and sampling settings of the model that partition serves. They can differ per model, because a worker's model card can replace the frontend's settings |
+
+The context describes the partition, not a request.
 
 ### Register the Policy
 

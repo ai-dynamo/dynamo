@@ -555,10 +555,10 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
-                    std::sync::Arc::new(|config, role, _| {
+                    std::sync::Arc::new(|context| {
                         dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                            config.clone(),
-                            role.default_selector_label(),
+                            context.selection_config().clone(),
+                            context.worker_type().default_selector_label(),
                         )
                     }),
                     SelectionHost {
@@ -801,10 +801,10 @@ mod tests {
     }
 
     fn test_registry() -> RouterPluginRegistry {
-        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|context| {
             dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                config.clone(),
-                role.default_selector_label(),
+                context.selection_config().clone(),
+                context.worker_type().default_selector_label(),
             )
         }))
     }

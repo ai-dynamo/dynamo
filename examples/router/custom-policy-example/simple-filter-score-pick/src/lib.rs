@@ -41,33 +41,30 @@ fn provider(
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(
-        move |_config: &SelectionConfig, worker_type, _partition| {
-            let policy = build_policy(worker_type.as_str(), min_device_overlap_blocks);
-            policy.with_runtime_config(
-                [(
-                    "min_device_overlap_blocks".into(),
-                    min_device_overlap_blocks.into(),
-                )]
-                .into_iter()
-                .collect(),
-                Arc::new(move |values| {
-                    let parameters: Parameters = serde_json::from_value(serde_json::Value::Object(
-                        values,
-                    ))
+    Ok(Arc::new(move |context| {
+        let worker_type = context.worker_type();
+        let policy = build_policy(worker_type.as_str(), min_device_overlap_blocks);
+        policy.with_runtime_config(
+            [(
+                "min_device_overlap_blocks".into(),
+                min_device_overlap_blocks.into(),
+            )]
+            .into_iter()
+            .collect(),
+            Arc::new(move |values| {
+                let parameters: Parameters =
+                    serde_json::from_value(serde_json::Value::Object(values)).map_err(|error| {
+                        RuntimePolicyError::InvalidParameters(error.to_string())
+                    })?;
+                validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)
                     .map_err(|error| RuntimePolicyError::InvalidParameters(error.to_string()))?;
-                    validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)
-                        .map_err(|error| {
-                            RuntimePolicyError::InvalidParameters(error.to_string())
-                        })?;
-                    Ok(build_policy(
-                        worker_type.as_str(),
-                        parameters.min_device_overlap_blocks,
-                    ))
-                }),
-            )
-        },
-    ))
+                Ok(build_policy(
+                    worker_type.as_str(),
+                    parameters.min_device_overlap_blocks,
+                ))
+            }),
+        )
+    }))
 }
 
 fn build_policy(

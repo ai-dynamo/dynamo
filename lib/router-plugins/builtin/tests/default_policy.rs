@@ -141,11 +141,12 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
         ),
         (KvRouterConfig::default(), WorkerType::Decode),
     ] {
-        let mut policy = dynamo_router_policies::default_factory()(
-            &SelectionConfig::from(&config),
-            role,
-            RoutingPartitionRef::new("model", "default"),
-        );
+        let mut policy =
+            dynamo_router_policies::default_factory()(WorkerSelectionPolicyContext::new(
+                &SelectionConfig::from(&config),
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            ));
         assert!(
             !<WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(&policy)
                 .contains(WorkerInputs::CACHE)
@@ -233,11 +234,12 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 }),
                 ..Default::default()
             };
-            let mut policy = dynamo_router_policies::default_factory()(
-                &SelectionConfig::from(&config),
-                role,
-                RoutingPartitionRef::new("model", "default"),
-            );
+            let mut policy =
+                dynamo_router_policies::default_factory()(WorkerSelectionPolicyContext::new(
+                    &SelectionConfig::from(&config),
+                    role,
+                    RoutingPartitionRef::new("model", "default"),
+                ));
             let select = |policy: &WorkerSelectionPolicy| {
                 policy
                     .select_worker(selection_input(&workers, &request, 16))
@@ -736,11 +738,11 @@ fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
                 .resolve_for_worker_type(&config, role)
                 .unwrap()
                 .unwrap();
-            let policy = factory(
+            let policy = factory(WorkerSelectionPolicyContext::new(
                 &SelectionConfig::from(&config),
                 role,
                 RoutingPartitionRef::new("model", "default"),
-            );
+            ));
             let inputs =
                 <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(
                     &policy,
@@ -891,11 +893,11 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
             ..Default::default()
         };
         let factory = registry.resolve(&config).unwrap().unwrap();
-        let policy = factory(
+        let policy = factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             RoutingPartitionRef::new("model", "default"),
-        );
+        ));
         assert_eq!(
             <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(&policy)
                 .contains(WorkerInputs::CACHE),
@@ -948,11 +950,11 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
         };
         config.apply_policy_config().unwrap();
         let factory = registry.resolve(&config).unwrap().unwrap();
-        let policy = factory(
+        let policy = factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             RoutingPartitionRef::new("model", "default"),
-        );
+        ));
         let select = |policy: WorkerSelectionPolicy| {
             policy
                 .select_worker(support::selection_input(&workers, &request, 16))
@@ -1041,11 +1043,12 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
                 WorkerType::Prefill,
                 WorkerType::Decode,
             ] {
-                let policy = dynamo_router_policies::default_factory()(
-                    &SelectionConfig::from(&config),
-                    role,
-                    RoutingPartitionRef::new("model", "default"),
-                );
+                let policy =
+                    dynamo_router_policies::default_factory()(WorkerSelectionPolicyContext::new(
+                        &SelectionConfig::from(&config),
+                        role,
+                        RoutingPartitionRef::new("model", "default"),
+                    ));
                 let expected = policy.runtime_config().unwrap();
                 let startup = startup_policy_parameters(&SelectionConfig::from(&config), role);
                 assert_eq!(

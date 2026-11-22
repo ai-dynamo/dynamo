@@ -81,11 +81,11 @@ worker_selection:
             WorkerType::Decode,
             WorkerType::Encode,
         ] {
-            factory(
+            factory(WorkerSelectionPolicyContext::new(
                 &SelectionConfig::from(&config),
                 role,
                 RoutingPartitionRef::new("model", "default"),
-            );
+            ));
         }
     }
 }

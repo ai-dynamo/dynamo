@@ -132,7 +132,7 @@ fn provider(
     }
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |_config, worker_type, _partition| {
+    Ok(Arc::new(move |context| {
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter {
                 min_device_overlap_blocks,
@@ -140,7 +140,7 @@ fn provider(
         ];
 
         WorkerSelectionPolicy::new_with_filters(
-            worker_type.as_str(),
+            context.worker_type().as_str(),
             filters,
             vec![Box::new(ActiveRequestsScorer)],
             Box::new(RequestAwarePicker),
@@ -149,7 +149,7 @@ fn provider(
 }
 ```
 
-`worker_type` is a typed `WorkerType`. `WorkerSelectionPolicy` accepts a static worker label for its routing logs, so `as_str()` converts only at the constructor boundary. Match on the enum before this conversion when each role needs different behavior.
+`context.worker_type()` is a typed `WorkerType`. `WorkerSelectionPolicy` accepts a static worker label for its routing logs, so `as_str()` converts only at the constructor boundary. Match on the enum before this conversion when each role needs different behavior.
 
 The provider and factory have different lifetimes:
 
@@ -158,7 +158,7 @@ The provider and factory have different lifetimes:
 3. Dynamo calls the factory once for each model and routing-group partition.
 4. Each factory call creates a new filter, scorer, and picker set for that partition.
 
-The factory also receives the typed `WorkerType` role. Hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use the partition value when models or routing groups need separate policy state.
+The factory receives one `WorkerSelectionPolicyContext`. `context.worker_type()` is the typed `WorkerType` role: hosts pass `Aggregated`, `Prefill`, or `Decode` when they construct that worker pool. Use `context.partition()` when models or routing groups need separate policy state. `context.selection_config()` holds the scoring and sampling settings of the model that partition serves.
 
 ## 4. Register the Policy Type
 

@@ -13,7 +13,8 @@
 // The three traits a policy is built from, and the policy they assemble into.
 pub use crate::plugins::worker_selection::{
     SelectionConfig, SharedCacheType, WorkerFilter, WorkerPicker, WorkerScorer,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
+    WorkerSelectionPolicy, WorkerSelectionPolicyContext, WorkerSelectionPolicyError,
+    WorkerSelectionPolicyFactory,
 };
 
 // Parameters a policy lets an operator change while it runs. The update and the snapshot are

@@ -83,8 +83,8 @@ fn provider(
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
 
-    Ok(Arc::new(move |_config, worker_type, _partition| {
-        create_policy(worker_type, min_device_overlap_blocks)
+    Ok(Arc::new(move |context| {
+        create_policy(context.worker_type(), min_device_overlap_blocks)
     }))
 }
 

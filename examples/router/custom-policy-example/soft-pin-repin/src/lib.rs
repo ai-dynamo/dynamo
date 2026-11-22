@@ -89,17 +89,15 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     let max_active_requests = parameters.max_active_requests;
 
-    Ok(Arc::new(
-        move |_config: &SelectionConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(SoftPinRepinPicker {
-                    max_active_requests,
-                }),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(SoftPinRepinPicker {
+                max_active_requests,
+            }),
+        )
+    }))
 }
 
 pub fn register(

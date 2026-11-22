@@ -21,18 +21,16 @@ fn provider(
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     let _: Parameters = parameters.deserialize()?;
 
-    Ok(Arc::new(
-        |_config: &SelectionConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                worker_type.as_str(),
-                vec![
-                    Box::new(ActiveRequestsScorer),
-                    Box::new(UncachedBlocksScorer),
-                ],
-                Box::new(LowestCostPicker),
-            )
-        },
-    ))
+    Ok(Arc::new(|context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            vec![
+                Box::new(ActiveRequestsScorer),
+                Box::new(UncachedBlocksScorer),
+            ],
+            Box::new(LowestCostPicker),
+        )
+    }))
 }
 
 /// Register the `simple-stacked-score-pick` policy type.

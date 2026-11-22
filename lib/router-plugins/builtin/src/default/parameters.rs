@@ -151,11 +151,14 @@ pub(crate) fn register(
             Arc::new(move |parameters| {
                 let parameters: Parameters = parameters.deserialize()?;
                 parameters.validate()?;
-                Ok(Arc::new(
-                    move |config: &SelectionConfig, role, _partition| {
-                        policy_for_role(config.clone(), role, parameters.resolve(config), preset)
-                    },
-                ))
+                Ok(Arc::new(move |context| {
+                    policy_for_role(
+                        context.selection_config().clone(),
+                        context.worker_type(),
+                        parameters.resolve(context.selection_config()),
+                        preset,
+                    )
+                }))
             }),
         )?;
     }

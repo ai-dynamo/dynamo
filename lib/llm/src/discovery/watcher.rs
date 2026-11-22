@@ -2623,11 +2623,13 @@ request_classifier:
                     let selectors = selectors.clone();
                     move |_| {
                         let selectors = selectors.clone();
-                        Ok(Arc::new(move |config, role, partition| {
-                            selectors.lock().push((role, partition.into_owned()));
+                        Ok(Arc::new(move |context| {
+                            selectors
+                                .lock()
+                                .push((context.worker_type(), context.partition().into_owned()));
                             dynamo_router_policies::default_policy(
-                                config.clone(),
-                                role.default_selector_label(),
+                                context.selection_config().clone(),
+                                context.worker_type().default_selector_label(),
                             )
                         }))
                     }
@@ -3701,7 +3703,7 @@ request_classifier:
         let builtin = RouterPluginBuilder::new(resolved);
         let custom = RouterPluginBuilder::new(
             dynamo_kv_router::plugins::RouterPlugins::default().with_worker_selection(Arc::new(
-                |_, _, _| unreachable!("role validation never constructs the policy"),
+                |_| unreachable!("role validation never constructs the policy"),
             )),
         );
         let mut card = ModelDeploymentCard::with_name_only("model");

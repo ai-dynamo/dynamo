@@ -983,16 +983,15 @@ fn capturing_policy_factory() -> (
 ) {
     let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let factory_observed = Arc::clone(&observed);
-    let factory: WorkerSelectionPolicyFactory =
-        Arc::new(move |_config, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(CapturingPicker {
-                    observed: Arc::clone(&factory_observed),
-                }),
-            )
-        });
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(CapturingPicker {
+                observed: Arc::clone(&factory_observed),
+            }),
+        )
+    });
     (factory, observed)
 }
 
@@ -1156,17 +1155,16 @@ fn resident_blocks_core(
 ) -> (SelectionCore, Arc<parking_lot::Mutex<Vec<Option<u64>>>>) {
     let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let factory_observed = Arc::clone(&observed);
-    let factory: WorkerSelectionPolicyFactory =
-        Arc::new(move |_config, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(ResidentBlocksRecorder {
-                    inputs,
-                    observed: Arc::clone(&factory_observed),
-                }),
-            )
-        });
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(ResidentBlocksRecorder {
+                inputs,
+                observed: Arc::clone(&factory_observed),
+            }),
+        )
+    });
     let core = core_with(
         test_config(true),
         SelectionHost::default(),
@@ -4743,9 +4741,9 @@ mod hint_policies {
     }
 
     fn overlap_policy() -> Option<WorkerSelectionPolicyFactory> {
-        Some(Arc::new(|_config, role, _| {
+        Some(Arc::new(|context| {
             WorkerSelectionPolicy::new(
-                role.as_str(),
+                context.worker_type().as_str(),
                 vec![Box::new(DeviceOverlapScorer)],
                 Box::new(LowestCostPicker),
             )
@@ -4967,9 +4965,9 @@ mod hint_policies {
     }
 
     fn copy_policy() -> Option<WorkerSelectionPolicyFactory> {
-        Some(Arc::new(|_config, role, _| {
+        Some(Arc::new(|context| {
             WorkerSelectionPolicy::new(
-                role.as_str(),
+                context.worker_type().as_str(),
                 vec![Box::new(CopyOfferScorer)],
                 Box::new(LowestCostPicker),
             )

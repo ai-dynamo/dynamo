@@ -73,7 +73,8 @@ use dynamo_scheduler::host::{
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{
-    SelectionConfig, WorkerInputRows, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    SelectionConfig, WorkerInputRows, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
+    WorkerSelectionPolicyError,
 };
 
 use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
@@ -352,11 +353,11 @@ pub fn registered_policy(
         parameters => serde_yaml::to_value(parameters).expect("JSON converts to YAML"),
     };
     let factory = registry.resolve_type_with(policy_type, parameters)?;
-    Ok(factory(
+    Ok(factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         worker_type,
         RoutingPartitionRef::new("model", "default"),
-    ))
+    )))
 }
 
 /// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
@@ -493,14 +494,13 @@ mod tests {
                 "prefer",
                 Arc::new(|parameters: &WorkerSelectionPolicyParameters| {
                     let parameters: Parameters = parameters.deserialize()?;
-                    let factory: WorkerSelectionPolicyFactory =
-                        Arc::new(move |_config, worker_type, _partition| {
-                            WorkerSelectionPolicy::new(
-                                worker_type.as_str(),
-                                Vec::new(),
-                                Box::new(Prefer(parameters.prefer)),
-                            )
-                        });
+                    let factory: WorkerSelectionPolicyFactory = Arc::new(move |context| {
+                        WorkerSelectionPolicy::new(
+                            context.worker_type().as_str(),
+                            Vec::new(),
+                            Box::new(Prefer(parameters.prefer)),
+                        )
+                    });
                     Ok(factory)
                 }),
             )

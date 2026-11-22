@@ -186,14 +186,14 @@ impl RouterPluginRegistry {
             required(decode)?,
             required(encode)?,
         );
-        Ok(Some(Arc::new(move |config, worker_type, partition| {
-            let selected = match worker_type {
+        Ok(Some(Arc::new(move |context| {
+            let selected = match context.worker_type() {
                 WorkerType::Aggregated => &aggregated,
                 WorkerType::Prefill => &prefill,
                 WorkerType::Decode => &decode,
                 WorkerType::Encode => &encode,
             };
-            selected(config, worker_type, partition)
+            selected(context)
         })))
     }
 
@@ -408,6 +408,7 @@ mod tests {
     use dynamo_worker_selection::WorkerSelectionPolicyError;
     use dynamo_worker_selection::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        WorkerSelectionPolicyContext,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -418,11 +419,7 @@ mod tests {
         threshold: usize,
     }
 
-    fn policy(
-        _config: &SelectionConfig,
-        _worker_type: WorkerType,
-        _partition: RoutingPartitionRef<'_>,
-    ) -> WorkerSelectionPolicy {
+    fn policy(_context: WorkerSelectionPolicyContext<'_>) -> WorkerSelectionPolicy {
         unreachable!("registry tests never invoke policy factories")
     }
 
@@ -458,12 +455,16 @@ mod tests {
             let parameters: Parameters = parameters.deserialize()?;
             provider_calls.fetch_add(1, Ordering::Relaxed);
             let factory_calls = factory_calls.clone();
-            Ok(Arc::new(move |_config, worker_type, _partition| {
+            Ok(Arc::new(move |context| {
                 factory_calls
                     .lock()
                     .unwrap()
-                    .push((parameters.threshold, worker_type.to_string()));
-                WorkerSelectionPolicy::new(worker_type.as_str(), Vec::new(), Box::new(NeverPicker))
+                    .push((parameters.threshold, context.worker_type().to_string()));
+                WorkerSelectionPolicy::new(
+                    context.worker_type().as_str(),
+                    Vec::new(),
+                    Box::new(NeverPicker),
+                )
             }))
         })
     }
@@ -539,21 +540,21 @@ worker_selection:
             .unwrap()
             .unwrap();
         let partition = RoutingPartitionRef::new("model", "default");
-        factory(
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Aggregated,
             partition,
-        );
-        factory(
+        ));
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Prefill,
             partition,
-        );
-        factory(
+        ));
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&config),
             WorkerType::Decode,
             partition,
-        );
+        ));
         // Two distinct inline specs: identical ones share a factory.
         assert_eq!(provider_calls.load(Ordering::Relaxed), 2);
         assert_eq!(
@@ -715,26 +716,26 @@ worker_selection:
         let router_config = KvRouterConfig::default();
         let partition = RoutingPartitionRef::new("model", "default");
 
-        factory(
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&router_config),
             WorkerType::Prefill,
             partition,
-        );
-        factory(
+        ));
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&router_config),
             WorkerType::Decode,
             partition,
-        );
-        factory(
+        ));
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&router_config),
             WorkerType::Aggregated,
             partition,
-        );
-        factory(
+        ));
+        factory(WorkerSelectionPolicyContext::new(
             &SelectionConfig::from(&router_config),
             WorkerType::Encode,
             partition,
-        );
+        ));
 
         assert_eq!(provider_calls.load(Ordering::Relaxed), 2);
         assert_eq!(

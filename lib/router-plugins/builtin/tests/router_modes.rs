@@ -16,11 +16,11 @@ const MODES: [&str; 3] = [RANDOM, ROUND_ROBIN, LEAST_LOADED];
 
 fn policy(policy_type: &str) -> WorkerSelectionPolicy {
     let factory = default_registry().resolve_type(policy_type).unwrap();
-    factory(
+    factory(WorkerSelectionPolicyContext::new(
         &SelectionConfig::default(),
         WorkerType::Decode,
         RoutingPartitionRef::new("model", "group"),
-    )
+    ))
 }
 
 #[test]

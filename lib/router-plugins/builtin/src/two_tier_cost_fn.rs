@@ -170,15 +170,13 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     parameters.validate()?;
 
-    Ok(Arc::new(
-        move |_config: &SelectionConfig, worker_type, _partition| {
-            WorkerSelectionPolicy::new(
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(TwoTierCostFnPicker { parameters }),
-            )
-        },
-    ))
+    Ok(Arc::new(move |context| {
+        WorkerSelectionPolicy::new(
+            context.worker_type().as_str(),
+            Vec::new(),
+            Box::new(TwoTierCostFnPicker { parameters }),
+        )
+    }))
 }
 
 pub fn register(
