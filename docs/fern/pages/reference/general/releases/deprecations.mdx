@@ -33,6 +33,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 | `WorkerSelectionPolicy::into_hosted_picker` | The same method on `dynamo_kv_router::plugins::host::WorkerSelectionPolicyHostExt` |
 | `RequestProgress::new` | None for a plugin: the Router creates the progress it hands a classifier. In a plugin's tests, `dynamo_kv_router::plugins::testing::request_progress` |
 | Public fields `ranges` and `total_hits` of `SharedCacheHits` | The accessors `ranges()` and `total_hits()` |
+| An exhaustive `match` on `RouterPluginRegistryError` | A wildcard arm: the enum is `#[non_exhaustive]`, because its `HintPolicy` variant carries an experimental type |
 | The leading configuration argument of `WorkerSelectionPolicy::new` and `WorkerSelectionPolicy::new_with_filters` (a `KvRouterConfig` in v1.7) | None. The argument was unused; delete it from each call |
 
 A worker-selection plugin is affected by the last row, and by the `SharedCacheHits` row if it reads those fields. A request classifier needs no change: `classify` still receives `WorkerCandidates<'_>`.
