@@ -280,9 +280,8 @@ def run_arm(args: argparse.Namespace) -> None:
                                         case, model, seed, stream, args.max_tokens
                                     ),
                                 )
-                        # ValueError covers a non-JSON body or SSE line, and
-                        # KeyError/IndexError a 200 body without `choices`, so
-                        # one bad response does not lose the arm's records.
+                        # ValueError: non-JSON body or SSE line; KeyError/IndexError:
+                        # 200 body without `choices`. Keeps the arm's records.
                         except (
                             httpx.HTTPError,
                             ValueError,
@@ -298,9 +297,8 @@ def run_arm(args: argparse.Namespace) -> None:
                                 token_ids, skip_special_tokens=False
                             )
                             if case.tool_choice == "none":
-                                # The frontend is meant to drop any call the
-                                # model writes here, so a raw call is no
-                                # parser change.
+                                # The frontend should drop any call written here,
+                                # so a raw call is not a parser change.
                                 result["raw_vs_parsed"] = "skipped: tool_choice none"
                             elif result.get("finish_reason") == "length":
                                 # Cut off by max_tokens, possibly inside the
