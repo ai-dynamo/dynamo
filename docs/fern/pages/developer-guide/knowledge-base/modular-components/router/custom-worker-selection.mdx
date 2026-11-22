@@ -344,9 +344,14 @@ cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 
 Add one focused test for each policy decision and one registration test for every type name. `plugins::testing::SelectionCase` describes a request and its workers and runs the policy through the router's own selection path, so a test names no router type outside the plugin API. Enable the harness from the policy crate's `[dev-dependencies]`:
 
-```toml
-[dev-dependencies]
-dynamo-kv-router = { workspace = true, features = ["plugin-testing"] }
+```bash
+# Add the test harness to the policy crate's dev-dependencies.
+cargo add \
+  --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
+  --dev \
+  --path "$DYNAMO_DIR/lib/router/kv-router" \
+  --features plugin-testing \
+  dynamo-kv-router
 ```
 
 ```rust

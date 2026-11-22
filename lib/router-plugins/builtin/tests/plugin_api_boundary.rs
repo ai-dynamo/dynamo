@@ -6,6 +6,11 @@
 //! `dynamo_kv_router::plugins::experimental`, and their only Dynamo dependencies are
 //! `dynamo-kv-router` and each other, under any dependency key. A plugin that needs something
 //! else needs it added to the plugin API first.
+//!
+//! The source scan reads one line at a time and does not expand a braced import, so an import
+//! must name the versioned module before any brace:
+//! `use dynamo_kv_router::plugins::v1alpha1::worker_selection::{A, B};` passes, and
+//! `use dynamo_kv_router::plugins::{v1alpha1::worker_selection::A};` is reported.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -66,22 +71,34 @@ fn dynamo_paths(line: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// The Dynamo packages a `[dependencies]` section names: the `package` of a renamed
-/// dependency, otherwise its key.
-fn dynamo_dependencies(dependencies: &str) -> Vec<&str> {
-    dependencies
-        .lines()
-        .filter_map(|line| {
-            let key = line.split(['=', '.']).next().unwrap_or_default().trim();
-            let package = line
-                .split_once("package")
-                .and_then(|(_, rest)| rest.trim_start().strip_prefix('='))
-                .and_then(|rest| rest.trim_start().strip_prefix('"'))
-                .and_then(|rest| rest.split('"').next());
-            let name = package.unwrap_or(key);
-            name.starts_with("dynamo-").then_some(name)
-        })
-        .collect()
+/// The value of `package = "..."` in a dependency's inline table or its own table.
+fn renamed_package(text: &str) -> Option<&str> {
+    text.split_once("package")
+        .and_then(|(_, rest)| rest.trim_start().strip_prefix('='))
+        .and_then(|rest| rest.trim_start().strip_prefix('"'))
+        .and_then(|rest| rest.split('"').next())
+}
+
+/// The Dynamo packages a manifest's dependencies name: the `package` of a renamed dependency,
+/// otherwise its key. Reads `[dependencies]`, a target's `[target.<cfg>.dependencies]`, and
+/// the table form `[dependencies.<key>]`.
+fn dynamo_dependencies(manifest: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    for section in manifest.split("\n[") {
+        let Some((header, body)) = section.split_once("]\n") else {
+            continue;
+        };
+        if header == "dependencies" || header.ends_with(".dependencies") {
+            names.extend(body.lines().map(|line| {
+                let key = line.split(['=', '.']).next().unwrap_or_default().trim();
+                renamed_package(line).unwrap_or(key)
+            }));
+        } else if let Some(key) = header.strip_prefix("dependencies.") {
+            names.push(renamed_package(body).unwrap_or(key));
+        }
+    }
+    names.retain(|name| name.starts_with("dynamo-"));
+    names
 }
 
 /// The section of `manifest` whose header is `[name]`.
@@ -105,15 +122,39 @@ fn package_name(manifest: &str) -> String {
 
 #[test]
 fn the_scan_sees_renamed_dependencies_aliases_and_braced_imports() {
-    let dependencies = r#"
+    let manifest = r#"
+[package]
+name = "example"
+
+[dependencies]
 dynamo-kv-router = { workspace = true }
 scheduler = { package = "dynamo-scheduler", workspace = true }
 dynamo-tokens.workspace = true
 serde = { workspace = true }
+
+[dependencies.kernel]
+package = "dynamo-admission"
+workspace = true
+
+[dependencies.dynamo-slot-tracker]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dynamo-memory = { workspace = true }
+
+[dev-dependencies]
+dynamo-scheduler = { workspace = true }
 "#;
     assert_eq!(
-        dynamo_dependencies(dependencies),
-        ["dynamo-kv-router", "dynamo-scheduler", "dynamo-tokens"]
+        dynamo_dependencies(manifest),
+        [
+            "dynamo-kv-router",
+            "dynamo-scheduler",
+            "dynamo-tokens",
+            "dynamo-admission",
+            "dynamo-slot-tracker",
+            "dynamo-memory",
+        ]
     );
 
     let paths = |line| dynamo_paths(line).collect::<Vec<_>>();
@@ -124,6 +165,19 @@ serde = { workspace = true }
     assert_eq!(
         paths("use dynamo_kv_router::{plugins::host::RouterPluginRegistryHostExt};"),
         ["dynamo_kv_router"]
+    );
+    assert_eq!(
+        paths("use dynamo_kv_router::{config::KvRouterConfig};"),
+        ["dynamo_kv_router"]
+    );
+    // A brace above the versioned module is reported, not expanded.
+    assert_eq!(
+        paths("use dynamo_kv_router::plugins::{v1alpha1::worker_selection::WorkerInputs};"),
+        ["dynamo_kv_router::plugins"]
+    );
+    assert_eq!(
+        paths("use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerInputs};"),
+        ["dynamo_kv_router::plugins::v1alpha1::worker_selection"]
     );
     assert_eq!(
         paths("use dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerInputs;"),
@@ -145,7 +199,7 @@ fn plugin_crates_name_only_the_plugin_api() {
     for (plugin_crate, manifest) in PLUGIN_CRATES.into_iter().zip(&manifests) {
         let crate_dir = root.join(plugin_crate);
 
-        for name in dynamo_dependencies(manifest_section(manifest, "dependencies")) {
+        for name in dynamo_dependencies(manifest) {
             if name != "dynamo-kv-router" && !plugin_packages.iter().any(|p| p == name) {
                 violations.push(format!("{plugin_crate}/Cargo.toml depends on {name}"));
             }
