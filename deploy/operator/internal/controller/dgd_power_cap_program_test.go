@@ -318,7 +318,7 @@ func TestPowerCapEditDoesNotRecaptureCheckpoint(t *testing.T) {
 				ComponentName: "worker",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{capKey: "300"}},
+					Annotations: map[string]string{capKey: "300"},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "worker:latest"}},
 					},
