@@ -116,7 +116,9 @@ A filter answers a hard yes-or-no question about one worker that already passed 
 This filter keeps workers with at least the configured number of device-resident overlap blocks:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext, WorkerSelectionPolicyError};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext, WorkerSelectionPolicyError,
+};
 
 struct MinimumDeviceOverlapFilter {
     minimum_blocks: f64,
@@ -151,7 +153,10 @@ A scorer expresses a preference without excluding a worker. It writes one finite
 This scorer ranks workers by active requests above the batch minimum:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
+};
 
 struct ActiveRequestsScorer;
 
@@ -195,7 +200,9 @@ A picker makes the final choice after filtering and scoring. It sees every remai
 This picker selects the lowest-cost row:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+};
 
 struct LowestCostPicker;
 
@@ -225,8 +232,13 @@ The provider runs once at startup. Parse and validate all parameters there, then
 ```rust
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError};
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
+    WorkerSelectionPolicyProviderError,
+};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    WorkerFilter, WorkerScorer, WorkerSelectionPolicy,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -269,7 +281,9 @@ Dynamo calls the returned factory once per routing partition. Branch on the type
 Expose a registration function from the policy crate:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    RouterPluginRegistry, WorkerSelectionPolicyRegistryError,
+};
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -494,7 +508,10 @@ A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, 
 This scorer charges each worker for the prompt blocks it can neither reuse nor copy. A worker without copy data still counts its own cache:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::worker_selection::{WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
+};
 
 struct UncoveredPromptScorer;
 

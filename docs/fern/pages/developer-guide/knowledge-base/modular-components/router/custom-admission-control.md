@@ -115,7 +115,9 @@ Add the provider below the classifier in `classifier/src/lib.rs`. Dynamo calls i
 ```rust
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::request_classifier::{RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError};
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
