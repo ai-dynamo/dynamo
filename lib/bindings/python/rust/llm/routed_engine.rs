@@ -166,13 +166,22 @@ impl RoutedEngine {
                             break;
                         };
 
-                        let py_response = Python::with_gil(|py| {
+                        // Per-chunk Python conversion runs on the blocking pool: a Tokio
+                        // worker waiting for the GIL stalls every task queued on it.
+                        let py_response = match crate::gil_offload::with_gil_offloaded(move |py| {
                             response.map_data(|data| {
                                 pythonize(py, &data)
                                     .map(|obj| obj.unbind())
                                     .map_err(|e| format!("pythonize failed: {e}"))
                             })
-                        });
+                        })
+                        .await
+                        {
+                            Ok(py_response) => py_response,
+                            Err(e) => {
+                                RsAnnotated::from_error(format!("failed to convert response: {e}"))
+                            }
+                        };
 
                         if tx.send(py_response).await.is_err() {
                             task_context.stop_generating();
