@@ -299,11 +299,10 @@ pub fn observe_first_token_gauges(tracker: &RequestTracker) {
         return;
     };
     let worker_id_str = worker_id.to_string();
-    let dp_rank_str = tracker
-        .prefill_dp_rank()
-        .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+    let dp_rank_str = tracker.prefill_dp_rank().map(|r| r.to_string());
+    let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
     let worker_type = tracker.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
-    let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+    let labels = &[worker_id_str.as_str(), dp_rank, worker_type];
 
     if let Some(ttft) = tracker.ttft_ms() {
         WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
@@ -324,11 +323,10 @@ pub fn observe_finish_gauges(tracker: &RequestTracker) {
         return;
     };
     let worker_id_str = worker_id.to_string();
-    let dp_rank_str = tracker
-        .decode_dp_rank()
-        .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+    let dp_rank_str = tracker.decode_dp_rank().map(|r| r.to_string());
+    let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
     let worker_type = tracker.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
-    let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+    let labels = &[worker_id_str.as_str(), dp_rank, worker_type];
 
     if let Some(avg_itl) = tracker.avg_itl_ms() {
         WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE

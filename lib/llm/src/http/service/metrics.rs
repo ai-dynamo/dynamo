@@ -2771,14 +2771,13 @@ impl ResponseMetricCollector {
             // Falls back to WORKER_TYPE_PREFILL if not available.
             if let Some(worker_id) = self.prefill_worker_id {
                 let worker_id_str = worker_id.to_string();
-                let dp_rank_str = self
-                    .prefill_dp_rank
-                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+                let dp_rank_str = self.prefill_dp_rank.map(|r| r.to_string());
+                let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_PREFILL);
-                let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+                let labels = &[worker_id_str.as_str(), dp_rank, worker_type];
                 WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
                     .with_label_values(labels)
                     .set(ttft);
@@ -2821,9 +2820,8 @@ impl ResponseMetricCollector {
                 && let Some(worker_id) = self.decode_worker_id
             {
                 let worker_id_str = worker_id.to_string();
-                let dp_rank_str = self
-                    .decode_dp_rank
-                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
+                let dp_rank_str = self.decode_dp_rank.map(|r| r.to_string());
+                let dp_rank = dp_rank_str.as_deref().unwrap_or(UNSET_DP_RANK_LABEL);
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()
@@ -2831,7 +2829,7 @@ impl ResponseMetricCollector {
                 self.decode_itl_gauge =
                     Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
                         worker_id_str.as_str(),
-                        dp_rank_str.as_str(),
+                        dp_rank,
                         worker_type,
                     ]));
             }
