@@ -11,6 +11,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContentPart as ToolPart, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContentPart as UserPart,
 };
+use dynamo_renderer::RenderedPrompt;
 
 use super::is_kimi_k3_prompt_hint;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -23,7 +24,10 @@ pub(crate) enum PromptToolHistory {
 }
 
 impl PromptToolHistory {
-    pub(crate) fn prepare_request(self, request: &mut NvCreateChatCompletionRequest) {
+    pub(crate) fn prepare_request(
+        self,
+        request: &mut NvCreateChatCompletionRequest,
+    ) -> ToolResultIndices {
         if self != Self::Positional
             || !request
                 .inner
@@ -31,7 +35,7 @@ impl PromptToolHistory {
                 .iter()
                 .any(|message| matches!(message, Message::Tool(_)))
         {
-            return;
+            return ToolResultIndices::default();
         }
         let mut phases = request
             .responses_tools
@@ -48,8 +52,9 @@ impl PromptToolHistory {
                 .map(|(index, _)| phases.remove(&index))
                 .collect::<Vec<_>>()
         });
-        request.inner.messages =
+        let (messages, indices) =
             positional_tool_history(std::mem::take(&mut request.inner.messages));
+        request.inner.messages = messages;
         if let (Some(phases), Some(assistant_phases)) = (phases, assistant_phases) {
             *phases = request
                 .inner
@@ -63,6 +68,79 @@ impl PromptToolHistory {
                 .filter_map(|(index, phase)| phase.map(|phase| (index, phase)))
                 .collect();
         }
+        indices
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ToolResultIndices {
+    result_count: usize,
+    corrections: HashMap<usize, usize>,
+}
+
+impl ToolResultIndices {
+    fn append(&mut self, matched: &mut Vec<(usize, Message)>, settled: &mut Vec<Message>) {
+        matched.sort_unstable_by_key(|(index, _)| *index);
+        for (ordinal, (index, message)) in matched.drain(..).enumerate() {
+            if ordinal != index {
+                self.corrections.insert(self.result_count, index + 1);
+            }
+            self.result_count += 1;
+            settled.push(message);
+        }
+    }
+
+    pub(crate) fn apply(&self, prompt: RenderedPrompt) -> anyhow::Result<RenderedPrompt> {
+        let Some(segments) = prompt.segments().filter(|_| !self.corrections.is_empty()) else {
+            return Ok(prompt);
+        };
+        // In the pinned XTML renderer, only the tag delimiters are special
+        // tokens. The index is the last attribute of a tool message header.
+        let mut previous_control = None;
+        let mut updated = segments.to_vec();
+        let mut result_count = 0;
+        for (end, control) in segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.allow_special)
+        {
+            let Some(start) = previous_control.replace(end) else {
+                continue;
+            };
+            if segments[start].text != "<|open|>" || control.text != "<|sep|>" {
+                continue;
+            }
+            let header = &segments[start + 1..end];
+            if !header
+                .iter()
+                .take(5)
+                .map(|segment| segment.text.as_str())
+                .eq(["message", " role", "=\"", "tool", "\""])
+            {
+                continue;
+            }
+            let ordinal = result_count;
+            result_count += 1;
+            let Some(index) = self.corrections.get(&ordinal) else {
+                continue;
+            };
+            let [.., key, equals, _, quote] = header else {
+                anyhow::bail!("positional tool result is missing its index");
+            };
+            anyhow::ensure!(
+                key.text == " index" && equals.text == "=\"" && quote.text == "\"",
+                "positional tool result is missing its index"
+            );
+            updated[end - 2].text = index.to_string();
+        }
+        anyhow::ensure!(
+            result_count == self.result_count,
+            "positional prompt rendered an unexpected number of tool results"
+        );
+        Ok(RenderedPrompt::segmented_with_pending(
+            updated,
+            prompt.pending_segments(),
+        ))
     }
 }
 
@@ -102,7 +180,7 @@ impl NvCreateChatCompletionRequest {
         } else {
             self.inner.messages.clone()
         };
-        Ok(Some(positional_tool_history(messages)))
+        Ok(Some(positional_tool_history(messages).0))
     }
 }
 
@@ -129,12 +207,12 @@ fn merge_split_tool_results(messages: Vec<Message>) -> Vec<Message> {
 }
 
 /// Positional renderers number results relative to the latest assistant batch.
-fn positional_tool_history(messages: Vec<Message>) -> Vec<Message> {
+fn positional_tool_history(messages: Vec<Message>) -> (Vec<Message>, ToolResultIndices) {
     if !messages
         .iter()
         .any(|message| matches!(message, Message::Tool(_)))
     {
-        return messages;
+        return (messages, ToolResultIndices::default());
     }
 
     let merged = merge_split_tool_results(messages);
@@ -142,6 +220,7 @@ fn positional_tool_history(messages: Vec<Message>) -> Vec<Message> {
     let mut notes = Vec::new();
     let mut calls = HashMap::new();
     let mut matched = Vec::new();
+    let mut indices = ToolResultIndices::default();
     for message in merged {
         if let Message::Tool(tool) = message {
             if let Some(&index) = calls.get(&tool.tool_call_id) {
@@ -169,8 +248,7 @@ fn positional_tool_history(messages: Vec<Message>) -> Vec<Message> {
                 }));
             }
         } else {
-            matched.sort_unstable_by_key(|(index, _)| *index);
-            settled.extend(matched.drain(..).map(|(_, message)| message));
+            indices.append(&mut matched, &mut settled);
             settled.append(&mut notes);
             calls.clear();
             if let Message::Assistant(assistant) = &message {
@@ -186,10 +264,9 @@ fn positional_tool_history(messages: Vec<Message>) -> Vec<Message> {
             settled.push(message);
         }
     }
-    matched.sort_unstable_by_key(|(index, _)| *index);
-    settled.extend(matched.into_iter().map(|(_, message)| message));
+    indices.append(&mut matched, &mut settled);
     settled.append(&mut notes);
-    settled
+    (settled, indices)
 }
 
 fn merge_tool_content(first: &mut ToolContent, next: ToolContent) {
@@ -251,7 +328,7 @@ mod tests {
         assert_eq!(value[2]["tool_call_id"], "b");
         assert_eq!(value[3]["role"], "user");
         assert_eq!(value[3]["content"][1]["text"], "orphan");
-        assert_eq!(positional_tool_history(normalized.clone()), normalized);
+        assert_eq!(positional_tool_history(normalized.clone()).0, normalized);
     }
 
     #[test]
@@ -264,10 +341,10 @@ mod tests {
             {"role":"tool","tool_call_id":"a","content":"late result"}
         ]))
         .unwrap();
-        let normalized = positional_tool_history(messages);
+        let (normalized, _) = positional_tool_history(messages);
         let value = serde_json::to_value(&normalized).unwrap();
         assert_eq!(value[2]["role"], "user");
         assert_eq!(value[2]["content"][1]["text"], "late result");
-        assert_eq!(positional_tool_history(normalized.clone()), normalized);
+        assert_eq!(positional_tool_history(normalized.clone()).0, normalized);
     }
 }

@@ -385,6 +385,34 @@ fn python_adapter_merges_split_tool_results_for_kimi_k3_alias() {
 }
 
 #[test]
+fn sparse_positional_tool_history_preserves_rendered_call_index() {
+    let response = request(
+        json!([]),
+        json!([
+            {"type":"message","role":"user","content":"Read both files"},
+            {"type":"function_call","call_id":"a","name":"read","arguments":"{\"path\":\"one.txt\"}"},
+            {"type":"function_call","call_id":"b","name":"read","arguments":"{\"path\":\"two.txt\"}"},
+            {"type":"function_call_output","call_id":"b","output":"second result"}
+        ]),
+    );
+    let mut chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
+    let indices = PromptToolHistory::Positional.prepare_request(&mut chat);
+
+    let renderer = dynamo_renderer::kimi_k3::KimiK3Formatter::new(false);
+    let prompt = renderer.render_prompt(&chat).unwrap();
+    let prompt = indices.apply(prompt).unwrap().into_text();
+    assert!(prompt.contains("<|open|>call tool=\"read\" index=\"1\"<|sep|>"));
+    assert!(prompt.contains("<|open|>call tool=\"read\" index=\"2\"<|sep|>"));
+    assert_eq!(prompt.matches("<|open|>message role=\"tool\"").count(), 1);
+    assert!(
+        prompt.contains(
+            "<|open|>message role=\"tool\" tool=\"read\" index=\"2\"<|sep|>second result"
+        ),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn responses_tool_kinds_are_validated_before_function_conversion() {
     let function = json!({"type":"function","name":"run","parameters":{"type":"object"}});
     let custom = json!({"type":"custom","name":"run"});

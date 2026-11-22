@@ -31,7 +31,7 @@ use crate::protocols::openai::{
 };
 
 mod tool_history;
-pub(crate) use tool_history::PromptToolHistory;
+pub(crate) use tool_history::{PromptToolHistory, ToolResultIndices};
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
 /// [`OAIChatLikeRequest`] so `dynamo_renderer` stays free of the media module;

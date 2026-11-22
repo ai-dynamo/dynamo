@@ -116,8 +116,8 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{
-    MediaRequestExt, PromptToolHistory, apply_continue_final_message, prompt_formatter_from_mdc,
-    prompt_formatter_with_history_from_mdc,
+    MediaRequestExt, PromptToolHistory, ToolResultIndices, apply_continue_final_message,
+    prompt_formatter_from_mdc, prompt_formatter_with_history_from_mdc,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
@@ -3689,6 +3689,7 @@ impl OpenAIPreprocessor {
                 tracker,
                 PreprocessRequestOptions::default(),
                 None,
+                None,
             )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
@@ -3709,6 +3710,7 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
         lora_name: Option<String>,
+        tool_result_indices: Option<&ToolResultIndices>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -3722,8 +3724,15 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let (formatted_prompt, prompt_injected_reasoning) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            off_runtime(|| self.apply_template_and_prefill(request))
-                .with_context(|| "Failed to apply prompt template")?
+            off_runtime(|| {
+                let (prompt, prefill) = self.apply_template_and_prefill(request)?;
+                let prompt = match (prompt, tool_result_indices) {
+                    (Some(prompt), Some(indices)) => Some(indices.apply(prompt)?),
+                    (prompt, _) => prompt,
+                };
+                Ok::<_, anyhow::Error>((prompt, prefill))
+            })
+            .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
@@ -8875,7 +8884,7 @@ impl
                 self.prompt_tool_history,
             )
             .map_err(|error| invalid_argument_error(error.to_string()))?;
-        self.prompt_tool_history.prepare_request(&mut request);
+        let tool_result_indices = self.prompt_tool_history.prepare_request(&mut request);
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -8950,6 +8959,7 @@ impl
                     .ok()
                     .flatten()
                     .map(|name| name.as_ref().clone()),
+                Some(&tool_result_indices),
             )
             .instrument(preprocessing.clone())
             .await?;
