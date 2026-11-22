@@ -29,6 +29,13 @@ declared `strict: false`:
 
 ## Run
 
+The runner needs `httpx` and `jsonschema`, and `transformers` unless you pass
+`--no-raw`:
+
+```bash
+uv pip install httpx jsonschema transformers
+```
+
 Start a frontend and one worker, then run each arm against it:
 
 ```bash
@@ -46,15 +53,20 @@ and the model's default temperature. Each run is classified as `pass`,
 `unexpected_tool_call`, `empty_text`, `rejected` (non-200 status or stream
 error), or `error`. A case passes in an arm only when every run passes.
 `--compare` reports which cases were recovered or regressed, and how many
-rejections are new.
+rejections are new. Dynamo's `/v1/responses` path ignores `seed`, so the
+`responses_bash` runs are not seeded there.
 
 The runner requests `nvext.extra_fields: ["completion_token_ids"]` and decodes
 the token IDs with special tokens kept. For GPT-OSS it extracts each Harmony
 call's arguments, or for `required` choice the final-channel JSON array, and
 compares them with the parsed `tool_calls`. A `mismatch` means the parser changed
-what the model wrote. Pass `--no-raw` to skip this step.
+what the model wrote. Runs with `tool_choice: "none"` record
+`skipped: tool_choice none`, because the frontend is meant to drop any call the
+model writes there. Runs that stop with `finish_reason: "length"` record
+`skipped: finish_reason length`, because the arguments may be cut off. Pass
+`--no-raw` to skip this step.
 
-Seeded output is not bit-identical across worker restarts. To measure that
+Seeded output may not be bit-identical across worker restarts. To measure that
 noise, run the baseline arm twice before you attribute a run-level difference
 to the treatment.
 

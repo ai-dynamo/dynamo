@@ -64,6 +64,7 @@ def _responses_body(
         "input": case.prompt,
         "tools": tools,
         "max_output_tokens": max_tokens,
+        # Dynamo's Responses path ignores `seed`; other servers may honor it.
         "seed": seed,
     }
     if case.tool_choice is not None:
@@ -279,7 +280,15 @@ def run_arm(args: argparse.Namespace) -> None:
                                         case, model, seed, stream, args.max_tokens
                                     ),
                                 )
-                        except httpx.HTTPError as exc:
+                        # ValueError covers a non-JSON body or SSE line, and
+                        # KeyError/IndexError a 200 body without `choices`, so
+                        # one bad response does not lose the arm's records.
+                        except (
+                            httpx.HTTPError,
+                            ValueError,
+                            KeyError,
+                            IndexError,
+                        ) as exc:
                             result = {"exception": f"{type(exc).__name__}: {exc}"}
                         latency = time.monotonic() - start
                         outcome, details = classify(case, result)
@@ -288,9 +297,21 @@ def run_arm(args: argparse.Namespace) -> None:
                             result["raw_text"] = tokenizer.decode(
                                 token_ids, skip_special_tokens=False
                             )
-                            result["raw_vs_parsed"] = raw_vs_parsed(
-                                result["raw_text"], result.get("tool_calls") or []
-                            )
+                            if case.tool_choice == "none":
+                                # The frontend is meant to drop any call the
+                                # model writes here, so a raw call is no
+                                # parser change.
+                                result["raw_vs_parsed"] = "skipped: tool_choice none"
+                            elif result.get("finish_reason") == "length":
+                                # Cut off by max_tokens, possibly inside the
+                                # arguments.
+                                result[
+                                    "raw_vs_parsed"
+                                ] = "skipped: finish_reason length"
+                            else:
+                                result["raw_vs_parsed"] = raw_vs_parsed(
+                                    result["raw_text"], result.get("tool_calls") or []
+                                )
                         records.append(
                             {
                                 "suite": suite,

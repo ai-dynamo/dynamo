@@ -178,7 +178,7 @@ it. The TensorRT-LLM sidecar defaults to `false`: the
 xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM
-0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
+0.30.0, auto choice with every tool explicitly
 non-strict also gets no structural tag from the registry; see
 [Schema Modes](#schema-modes). Use the global opt-out above to disable optional
 structural guidance.
@@ -314,21 +314,30 @@ argument-schema enforcement. This workaround is not guaranteed on older
 versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
 </Warning>
 
-In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
+In vLLM 0.30.0, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`
 activation scope still attempts the tag, but cannot enforce the native tool
 envelope for that request. Set schema mode to `strict` to override the opt-out
 and let vLLM build the tag.
 
 Some clients send `strict: false` but still expect arguments that match the
-schema. Schema mode `auto` leaves those arguments unconstrained, so the model can
-write a value that the schema does not allow, such as a string where it asks for
-an object. For these clients, set `--dyn-structural-tag '{"schema":"strict"}'`.
+schema. With `tool_choice="auto"`, schema mode `auto` leaves those arguments
+unconstrained, so the model can write a value that the schema does not allow,
+such as a string where it asks for an object. For these clients, set
+`--dyn-structural-tag '{"schema":"strict"}'` on the worker, or
+`DYN_STRUCTURAL_TAG='{"schema":"strict"}'`. On TensorRT-LLM this enforces
+nothing unless guided decoding and structural tags are enabled there; see the
+note in [Quick Start](#quick-start).
+
 With `openai/gpt-oss-20b` on vLLM 0.33.0 (XGrammar 0.2.8), the
 [tool schema replay](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/tool_schema_replay)
 measured these results for its `strict: false` cases:
 
-- With schema mode `auto`, about 8% of runs had nested-argument violations.
+- With schema mode `auto`, only cases with nested objects failed. Their
+  `tool_choice="auto"` runs returned arguments that broke the schema in 19 of
+  80 runs, for example a list of email strings where the schema asks for
+  attendee objects. The cases with a required nullable field or a scalar
+  argument did not fail.
 - With schema mode `strict`, every run returned schema-valid arguments.
 - Schema mode `strict` added no request rejections and caused no regressions in
   the control cases.
