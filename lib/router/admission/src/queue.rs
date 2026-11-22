@@ -535,6 +535,10 @@ struct PolicyClassQueue<T> {
     /// which runs on every worker free, never visits them. Empty without a gate, and every
     /// lookup checks that first: a router without a gate pays nothing for it.
     gate_held: FxHashSet<LaneId>,
+    /// Scratch for a full recheck: lanes the gate let go but that were refused for another
+    /// reason, filed once the other groups are asked. Kept between rechecks so a release into
+    /// a full fleet does not allocate.
+    gate_released: Vec<(LaneHead, BlockReason)>,
 }
 
 impl<T> PolicyClassQueue<T> {
@@ -799,12 +803,12 @@ impl<T> PolicyClassQueue<T> {
             // in place and before the other groups, so a lane they file as held is not asked
             // twice. A lane still held stays where it is. One refused for another reason is
             // filed after the other groups are asked, for the same reason.
-            let mut refiled = Vec::new();
             if plan.all && !self.gate_held.is_empty() {
                 let Self {
                     config,
                     ready_by_lane,
                     gate_held,
+                    gate_released,
                     candidate_lane_heads,
                     fallback_heads,
                     ..
@@ -820,7 +824,7 @@ impl<T> PolicyClassQueue<T> {
                             false
                         }
                         LaneCheck::Blocked(reason) => {
-                            refiled.push((head, reason));
+                            gate_released.push((head, reason));
                             false
                         }
                     }
@@ -872,9 +876,11 @@ impl<T> PolicyClassQueue<T> {
                     }
                 }
             });
-            for (head, reason) in refiled {
+            let mut released = std::mem::take(&mut self.gate_released);
+            for (head, reason) in released.drain(..) {
                 self.block_lane(head, reason);
             }
+            self.gate_released = released;
         }
 
         // Fallback work competes on every pass; healthy targets stay event-driven.
@@ -1175,6 +1181,7 @@ impl<T> PolicyQueue<T> {
                     due_entries: BTreeSet::new(),
                     expiring_roots: BTreeSet::new(),
                     gate_held: FxHashSet::default(),
+                    gate_released: Vec::new(),
                 })
                 .collect(),
             round_cursor: 0,
