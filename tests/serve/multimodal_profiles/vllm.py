@@ -453,6 +453,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.7,
                             prompt_filler_repeats=120,
+                            # First decode step (probe uses max_tokens=1): sm_120 CI
+                            # JIT-compiles sm_80-only FA2 kernels from PTX, ~60 s.
+                            timeout=180,
                         )
                     )
                 ],
