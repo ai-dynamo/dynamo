@@ -5,8 +5,9 @@
 Wire-format contract test for Forward Pass Metrics.
 
 Verifies that ForwardPassMetrics encoded by SGLang can be decoded by
-Dynamo's shared schema. Both use msgspec.Struct with positional array
-encoding, so field order and types must match exactly.
+Dynamo's shared schema. Both use msgspec.Struct with map encoding, so shared
+field names, order, and types must match exactly. Dynamo may add compatible
+optional fields after SGLang's fields.
 """
 
 import pytest
@@ -83,8 +84,8 @@ def test_sglang_fpm_decodes_with_dynamo_schema():
     assert dynamo_fpm.queued_requests.num_decode_requests == 1
 
 
-def test_sglang_fpm_field_order_matches_dynamo():
-    """Verify struct field names and order are identical."""
+def test_sglang_fpm_shared_fields_match_dynamo():
+    """Verify SGLang fields are an identical prefix of Dynamo's schema."""
     import msgspec
     from sglang.srt.observability.forward_pass_metrics import (
         ForwardPassMetrics as SglangFPM,
@@ -113,13 +114,15 @@ def test_sglang_fpm_field_order_matches_dynamo():
         sglang_names = [f.name for f in sglang_fields]
         dynamo_names = [f.name for f in dynamo_fields]
         assert (
-            sglang_names == dynamo_names
+            sglang_names == dynamo_names[: len(sglang_names)]
         ), f"{name} field names differ: sglang={sglang_names}, dynamo={dynamo_names}"
 
         # Compare type names (not identity) because sglang and dynamo define
         # structurally identical but distinct nested struct classes.
         sglang_type_names = [f.type.__name__ for f in sglang_fields]
-        dynamo_type_names = [f.type.__name__ for f in dynamo_fields]
+        dynamo_type_names = [
+            f.type.__name__ for f in dynamo_fields[: len(sglang_fields)]
+        ]
         assert (
             sglang_type_names == dynamo_type_names
         ), f"{name} field types differ: sglang={sglang_type_names}, dynamo={dynamo_type_names}"
