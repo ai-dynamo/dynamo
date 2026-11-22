@@ -1,0 +1,7 @@
+worker_selection:
+  aggregated:
+    type: dynamo-two-tier-cost-fn
+    parameters:
+      cache_threshold: 0.5
+      balance_abs_threshold: 7
+      balance_rel_threshold: 1.1

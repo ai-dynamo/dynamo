@@ -1,0 +1,200 @@
+{
+  "cases": [
+    {
+      "id": "case-0",
+      "block_size": 64,
+      "foreground_prompt_tokens": 16385,
+      "warm_overlap_blocks": 256,
+      "workers_kv_capacity": 2628,
+      "requests": [
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 17
+        }
+      ]
+    },
+    {
+      "id": "case-1",
+      "block_size": 64,
+      "foreground_prompt_tokens": 16385,
+      "warm_overlap_blocks": 256,
+      "workers_kv_capacity": 2628,
+      "requests": [
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 17
+        }
+      ]
+    },
+    {
+      "id": "case-2",
+      "block_size": 64,
+      "foreground_prompt_tokens": 16385,
+      "warm_overlap_blocks": 256,
+      "workers_kv_capacity": 2628,
+      "requests": [
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 17
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        }
+      ]
+    },
+    {
+      "id": "case-3",
+      "block_size": 64,
+      "foreground_prompt_tokens": 16385,
+      "warm_overlap_blocks": 256,
+      "workers_kv_capacity": 2628,
+      "requests": [
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 16
+        },
+        {
+          "prompt_tokens": 36,
+          "output_limit": 128,
+          "generated_tokens": 17
+        }
+      ]
+    }
+  ]
+}

@@ -129,6 +129,15 @@ impl BenchHost {
         busy: BusyThresholds,
         params: &WorkloadParams,
     ) -> Result<Self> {
+        Self::start_with_registry(router, busy, params, plugin_registry()?).await
+    }
+
+    pub async fn start_with_registry(
+        router: &KvRouterConfig,
+        busy: BusyThresholds,
+        params: &WorkloadParams,
+        benchmark_plugin_registry: RouterPluginRegistry,
+    ) -> Result<Self> {
         check_modeled(router)?;
         let workers = workers(params);
         let threads = router.router_event_threads as usize;
@@ -192,7 +201,7 @@ impl BenchHost {
         let service = SelectionServiceBuilder::new(
             router.clone(),
             WorkerType::Aggregated,
-            plugin_registry()?,
+            benchmark_plugin_registry,
         )
         .host_manages_request_lifecycle()
         .indexer_threads(1)

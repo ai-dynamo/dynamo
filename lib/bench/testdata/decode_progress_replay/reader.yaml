@@ -1,0 +1,3 @@
+worker_selection:
+  aggregated:
+    type: replay-progress-reader
