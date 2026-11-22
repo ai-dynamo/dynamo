@@ -796,14 +796,36 @@ impl<T> PolicyClassQueue<T> {
             // Re-peeking here also observes head changes from intervening `push_ready` calls.
             let plan = std::mem::take(&mut self.recheck);
             // The gate woke the queue or its hold timer fired: every held lane is asked again,
-            // after the shared group and the capacity lanes below. Taken first, so that a lane
-            // either of those files as held is not asked twice. Drained, not taken, so the set
-            // keeps its table for the lanes that are held again.
-            let held: Vec<LaneId> = if plan.all {
-                self.gate_held.drain().collect()
-            } else {
-                Vec::new()
-            };
+            // in place and before the other groups, so a lane they file as held is not asked
+            // twice. A lane still held stays where it is. One refused for another reason is
+            // filed after the other groups are asked, for the same reason.
+            let mut refiled = Vec::new();
+            if plan.all && !self.gate_held.is_empty() {
+                let Self {
+                    config,
+                    ready_by_lane,
+                    gate_held,
+                    candidate_lane_heads,
+                    fallback_heads,
+                    ..
+                } = self;
+                gate_held.retain(|&lane| {
+                    let root = lane_root(ready_by_lane, lane);
+                    let head = LaneHead::new(lane, root);
+                    match is_dispatchable(class_index, config, root.payload()).into() {
+                        LaneCheck::Blocked(BlockReason::Gate) => true,
+                        LaneCheck::Dispatch => {
+                            fallback_heads.remove(&head);
+                            candidate_lane_heads.insert(head);
+                            false
+                        }
+                        LaneCheck::Blocked(reason) => {
+                            refiled.push((head, reason));
+                            false
+                        }
+                    }
+                });
+            }
             self.recheck_shared(&plan, class_index, is_dispatchable);
             let Self {
                 config,
@@ -850,8 +872,8 @@ impl<T> PolicyClassQueue<T> {
                     }
                 }
             });
-            for lane in held {
-                self.reask(lane, class_index, is_dispatchable);
+            for (head, reason) in refiled {
+                self.block_lane(head, reason);
             }
         }
 

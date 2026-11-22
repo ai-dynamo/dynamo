@@ -564,6 +564,37 @@ fn full_recheck_asks_a_shared_lane_the_gate_now_holds_once() {
 }
 
 #[test]
+fn full_recheck_asks_a_lane_the_gate_lets_go_once() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "session");
+    let answer = std::cell::Cell::new(BlockReason::Gate);
+    let asks = std::cell::Cell::new(0usize);
+    let predicate = |_: usize, _: &PolicyClassConfig, _: &&'static str| {
+        asks.set(asks.get() + 1);
+        LaneCheck::Blocked(answer.get())
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::Gate)
+    );
+
+    // The gate lets the lane go but it has no room: the recheck that asked it as held files
+    // it on capacity without asking it again with the capacity lanes.
+    for now in [BlockReason::Capacity, BlockReason::SharedCapacity] {
+        answer.set(BlockReason::Gate);
+        queue.recheck_blocked_lanes(RecheckScope::All);
+        assert!(queue.pop_next(predicate).is_none());
+        answer.set(now);
+        asks.set(0);
+        queue.recheck_blocked_lanes(RecheckScope::All);
+        assert!(queue.pop_next(predicate).is_none());
+        assert_eq!(asks.get(), 1, "{now:?}");
+        assert_eq!(queue.class_lane_block_reason(0, lane_of(1)), Some(now));
+    }
+}
+
+#[test]
 fn cancelling_a_gate_held_root_asks_its_successor() {
     let mut queue = PolicyQueue::new(&edf_profile());
     enqueue_due(&mut queue, None, None, lane_of(1), "held");
