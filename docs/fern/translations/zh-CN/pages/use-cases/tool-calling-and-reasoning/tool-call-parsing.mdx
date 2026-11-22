@@ -49,7 +49,7 @@ python -m dynamo.<backend> --help
 | `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron-Ultra / -Super | Dynamo-only | `<TOOLCALL>` JSON |
 | `nemotron_nano` | Nemotron-Nano | Dynamo-only | `qwen3_coder` 的别名 |
 | `gemma4` | Google Gemma 4（thinking 模型） | vLLM: `gemma4` | 自定义非 JSON 文法，使用 `<\|"\|>` 字符串分隔符和 `<\|tool_call>...<tool_call\|>` 标记。别名：`gemma-4`。与 `--dyn-reasoning-parser gemma4` 和 `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja` 配对 |
-| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel 格式。Harmony 在 `<\|call\|>` 处结束 assistant 回合，Dynamo 和 vLLM 都会在该 token 处停止生成，因此 `tool_choice: "auto"` 的响应只包含一个工具调用，即使 `parallel_tool_calls` 为 `true`；将工具结果发回即可获得下一个调用。若要在一个响应中获得多个调用，请设置 `tool_choice: "required"`，并让 `parallel_tool_calls` 保持未设置或为 `true`：Dynamo 会引导模型把所有调用写成一个 JSON 数组，且模型必须至少调用一个工具 |
+| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel 格式。Harmony 在 `<\|call\|>` 处结束 assistant 回合，Dynamo 和 vLLM 都会在该 token 处停止生成，因此 `tool_choice: "auto"` 的响应最多只包含一个工具调用，即使 `parallel_tool_calls` 为 `true`；将工具结果发回即可获得下一个调用。若要允许在一个响应中返回多个调用，请设置 `tool_choice: "required"`，并让 `parallel_tool_calls` 保持未设置或为 `true`：Dynamo 会引导模型把所有调用写成一个 JSON 数组，模型必须至少调用一个工具，但仍可能只写出一个调用 |
 | `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25`（用于 Qwen 模型） | `<tool_call>` JSON |
 | `phi4` | Phi-4, Phi-4-mini, Phi-4-mini-reasoning | vLLM: `phi4_mini_json` | `functools[...]` JSON |
 | `pythonic` | Llama 4 (Scout / Maverick) | | Python 列表式工具语法 |
