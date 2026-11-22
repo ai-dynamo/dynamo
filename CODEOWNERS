@@ -71,6 +71,7 @@
 /lib/http-server/                                                                                       @ai-dynamo/dynamo-frontend-codeowners
 /examples/chat_templates/                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /lib/generate-format-catalog/                                                                           @ai-dynamo/dynamo-frontend-codeowners
+/benchmarks/tool_schema_replay/                                                                         @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
