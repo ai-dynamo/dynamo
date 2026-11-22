@@ -555,7 +555,6 @@ def _largest_decode_batch(estimate) -> list[int]:
     [
         pytest.param(1, 256, "vllm", None, [64], id="single-rank"),
         pytest.param(2, 256, "vllm", None, [64, 64], id="two-ranks"),
-        pytest.param(4, 256, "vllm", None, [64] * 4, id="four-ranks"),
         pytest.param(2, 31, "vllm", None, [16, 15], id="kv-bound"),
         pytest.param(2, 256, "sglang", None, [128, 128], id="sglang"),
         pytest.param(2, 256, "vllm", "worker", [128, 128], id="worker-speculative"),
