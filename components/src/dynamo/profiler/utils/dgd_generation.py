@@ -38,11 +38,13 @@ from dynamo.planner.config.parallelization import (
     picked_to_aic_model_config_kwargs,
 )
 from dynamo.planner.config.planner_config import (
+    AIS_IDENTITY_FIELDS,
     AISPerfModelSpec,
     AISPerfModelValue,
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
     ais_perf_model_role_config,
+    check_ais_identity,
 )
 from dynamo.profiler.utils.config import (
     DgdPlannerComponentConfig,
@@ -95,6 +97,7 @@ def assemble_final_config(
     aic_spec: Optional[AICInterpolationSpec] = None,
     ais_perf_model: Optional[AISPerfModelValue] = None,
     resolved_backend: Optional[str] = None,
+    ais_perf_model_deployment: Optional[dict[str, dict[str, Any]]] = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
@@ -109,7 +112,9 @@ def assemble_final_config(
        ``features.kvRouter.enabled`` is true.
     5. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``ais_perf_model`` is given, it is embedded so the planner can
-       initialize its direct AISimulate model with native identity. When
+       initialize its direct AISimulate model with native identity, and
+       ``ais_perf_model_deployment`` with it so the planner can compare what
+       a source gives with the selected deployment. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
     6. **Profile data** — attach interpolation-data ConfigMap when mocker
@@ -171,6 +176,7 @@ def assemble_final_config(
             best_decode_mapping=best_decode_config,
             aic_spec=aic_spec,
             ais_perf_model=ais_perf_model,
+            ais_perf_model_deployment=ais_perf_model_deployment,
         )
         config_maps.append(planner_cm)
 
@@ -680,6 +686,7 @@ def add_planner_to_config(
     best_decode_mapping=None,
     aic_spec: Optional[AICInterpolationSpec] = None,
     ais_perf_model: Optional[AISPerfModelValue] = None,
+    ais_perf_model_deployment: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict:
     """Add a Planner component and its planner-config ConfigMap to *config_dict*.
 
@@ -696,6 +703,9 @@ def add_planner_to_config(
             runs AIC in-process at bootstrap instead of reading NPZ files.
         ais_perf_model: Canonical AIS forward-pass perf model identity for
             real-time Planner engine queries.
+        ais_perf_model_deployment: Selected deployment identity of each
+            worker type whose ``ais_perf_model`` config takes identity
+            fields from a source; see :func:`build_ais_perf_model_deployment`.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
@@ -706,6 +716,7 @@ def add_planner_to_config(
         best_decode_mapping,
         aic_spec,
         ais_perf_model,
+        ais_perf_model_deployment,
     )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
@@ -882,6 +893,7 @@ def _build_planner_config(
     best_decode_mapping,
     aic_spec: Optional[AICInterpolationSpec] = None,
     ais_perf_model: Optional[AISPerfModelValue] = None,
+    ais_perf_model_deployment: Optional[dict[str, dict[str, Any]]] = None,
 ) -> PlannerConfig:
     """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
     if dgdr.features and dgdr.features.planner:
@@ -902,6 +914,8 @@ def _build_planner_config(
         planner_cfg.aic_interpolation = aic_spec
     if ais_perf_model is not None:
         planner_cfg.ais_perf_model = ais_perf_model
+    if ais_perf_model_deployment is not None:
+        planner_cfg.ais_perf_model_deployment = ais_perf_model_deployment
 
     # Propagate SLA targets from spec.sla so the post-deployment planner enforces
     # the same SLA used at sweep time. Without this, the planner silently uses
@@ -933,23 +947,6 @@ def _build_planner_config(
     return planner_cfg
 
 
-# The keys of a perf model config that say which deployment it describes.
-_IDENTITY_FIELDS = (
-    "model",
-    "system",
-    "backend",
-    "worker_type",
-    "tp",
-    "pp",
-    "attention_dp",
-    "moe_tp_size",
-    "moe_ep_size",
-    "cp_size",
-)
-# Of these, the ones that mean 1 where a config has no value for them.
-_ONE_WHEN_UNSET = ("pp", "moe_tp_size", "moe_ep_size", "cp_size")
-
-
 def _stated_configs(
     value: AISPerfModelValue, roles: Iterable[str]
 ) -> dict[str, dict[str, Any]]:
@@ -971,24 +968,14 @@ def _stated_configs(
     return stated
 
 
-def build_ais_perf_model_spec(
+def _sla_planner_picks(
     dgdr,
     best_prefill_pick: Optional[PickedParallelConfig],
     best_decode_pick: Optional[PickedParallelConfig],
-    resolved_backend: str,
-    system: str,
-) -> Optional[AISPerfModelValue]:
-    """Build native AIS identity for the Planner's AISimulate integration.
+) -> Optional[tuple[PlannerConfig, dict[str, Optional[PickedParallelConfig]]]]:
+    """Return the SLA Planner config and the pick of each worker type it scales.
 
-    This is intentionally independent from AIC interpolation. It does not
-    request a sweep; it only gives the Planner enough identity and parallelism
-    data to try native forward-pass estimation before falling back to
-    observed-FPM regression.
-
-    The result is a list with one perf model config per worker type of the
-    Planner mode. A value the user wrote is checked against the selected
-    deployment and returned as written. Fields a config takes from a source
-    are not compared; one warning names them.
+    ``None`` when the deployment runs no SLA Planner.
     """
     planner = (
         dgdr.features.planner  # type: ignore[union-attr]
@@ -1007,6 +994,34 @@ def build_ais_perf_model_spec(
         picks["prefill"] = best_prefill_pick
     if mode in ("decode", "agg", "disagg"):
         picks["aggregated" if mode == "agg" else "decode"] = best_decode_pick
+    return planner, picks
+
+
+def build_ais_perf_model_spec(
+    dgdr,
+    best_prefill_pick: Optional[PickedParallelConfig],
+    best_decode_pick: Optional[PickedParallelConfig],
+    resolved_backend: str,
+    system: str,
+) -> Optional[AISPerfModelValue]:
+    """Build native AIS identity for the Planner's AISimulate integration.
+
+    This is intentionally independent from AIC interpolation. It does not
+    request a sweep; it only gives the Planner enough identity and parallelism
+    data to try native forward-pass estimation before falling back to
+    observed-FPM regression.
+
+    The result is a list with one perf model config per worker type of the
+    Planner mode. A value the user wrote is checked against the selected
+    deployment and returned as written. Fields a config takes from a source
+    are not compared; one warning names them, and
+    :func:`build_ais_perf_model_deployment` gives the Planner what to compare
+    them with.
+    """
+    planner_picks = _sla_planner_picks(dgdr, best_prefill_pick, best_decode_pick)
+    if planner_picks is None:
+        return None
+    planner, picks = planner_picks
 
     written = planner.ais_perf_model
     if written is not None:
@@ -1030,25 +1045,16 @@ def build_ais_perf_model_spec(
                 backend=resolved_backend,
                 worker_type=role,
             )
-            for field in _IDENTITY_FIELDS:
-                if field not in stated[role]:
-                    not_compared.setdefault(role, []).append(field)
-                    continue
-                authored, chosen = stated[role][field], selected.get(field)
-                if field in _ONE_WHEN_UNSET:
-                    authored = 1 if authored is None else authored
-                    chosen = 1 if chosen is None else chosen
-                if authored != chosen:
-                    raise ValueError(
-                        f"{name.format(role)}{joiner}{field}={authored!r} "
-                        f"conflicts with selected deployment {field}={chosen!r}"
-                    )
+            check_ais_identity(f"{name.format(role)}{joiner}", stated[role], selected)
+            missing = [f for f in AIS_IDENTITY_FIELDS if f not in stated[role]]
+            if missing:
+                not_compared[role] = missing
         if not_compared:
             logger.warning(
                 "ais_perf_model: the profiler does not read the source a config "
                 "takes keys from, so it did not compare these fields with the "
-                "selected deployment: %s. The Planner takes them from the source "
-                "without a comparison.",
+                "selected deployment: %s. The Planner compares them when it "
+                "reads the source.",
                 "; ".join(
                     f"{role}: {join_names(fields)}"
                     for role, fields in not_compared.items()
@@ -1086,6 +1092,40 @@ def build_ais_perf_model_spec(
         )
         for role, pick in selected_picks.items()
     ]
+
+
+def build_ais_perf_model_deployment(
+    dgdr,
+    best_prefill_pick: Optional[PickedParallelConfig],
+    best_decode_pick: Optional[PickedParallelConfig],
+    resolved_backend: str,
+    system: str,
+) -> Optional[dict[str, dict[str, Any]]]:
+    """Return the selected deployment identity the Planner compares a source with.
+
+    It has one entry for each worker type whose written ``ais_perf_model``
+    config takes identity fields from a source, which the profiler does not
+    read; ``None`` when there is no such worker type. Call it after
+    :func:`build_ais_perf_model_spec` has checked the written value.
+    """
+    planner_picks = _sla_planner_picks(dgdr, best_prefill_pick, best_decode_pick)
+    if planner_picks is None or planner_picks[0].ais_perf_model is None:
+        return None
+    planner, picks = planner_picks
+    stated = _stated_configs(planner.ais_perf_model, picks)
+    deployment = {
+        role: _perf_model_config(
+            pick,
+            model=dgdr.model,
+            system=system,
+            backend=resolved_backend,
+            worker_type=role,
+        )
+        for role, pick in picks.items()
+        if pick is not None
+        and any(field not in stated[role] for field in AIS_IDENTITY_FIELDS)
+    }
+    return deployment or None
 
 
 def build_aic_interpolation_spec(

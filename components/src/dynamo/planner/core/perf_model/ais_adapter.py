@@ -34,6 +34,7 @@ from dynamo.planner.config.planner_config import (
     AISPerfModelSpec,
     PlannerConfig,
     ais_perf_model_role_config,
+    check_ais_identity,
 )
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
@@ -277,9 +278,15 @@ class PlannerEnginePerfModel:
                 # What a source named with `from` gives is checked here for
                 # the first time; a config without `from` was checked when
                 # the Planner config was loaded.
-                self._resolved_perf_model = ais_perf_model_role_config(
+                resolved = ais_perf_model_role_config(
                     self._worker_type, engine_perf_config(spec, self._worker_type)
                 )
+                # Checked before anything is kept, so that a wrong source is
+                # checked again on the next call.
+                self._check_source_identity(
+                    f"ais_perf_model entry for {self._worker_type}: ", resolved
+                )
+                self._resolved_perf_model = resolved
                 self._written_perf_model = deepcopy(spec)
             if self._resolved_perf_model is None:
                 raise RuntimeError("AIS perf model entry was not resolved")
@@ -297,6 +304,10 @@ class PlannerEnginePerfModel:
                     Path(directory.name) / "prepared",
                 )
                 normalized = ais_perf_model_role_config(self._worker_type, prepared)
+                self._check_source_identity(
+                    f"ais_perf_model.dataset_profiles.{self._worker_type}: ",
+                    normalized,
+                )
             except BaseException:
                 directory.cleanup()
                 raise
@@ -308,6 +319,20 @@ class PlannerEnginePerfModel:
         if self._profile_config is None:
             raise RuntimeError("AIS dataset profile was not prepared")
         return self._profile_config
+
+    def _check_source_identity(self, where: str, resolved: dict[str, Any]) -> None:
+        """Compare what a source gave with the deployment the profiler selected.
+
+        The profiler writes that identity only for worker types whose config
+        takes identity fields from a source; without it nothing is compared.
+        """
+        selected = (self._config.ais_perf_model_deployment or {}).get(self._worker_type)
+        if selected is None:
+            return
+        # A state snapshot saves "unknown" for a fact its producer did not
+        # know; AISimulate does not compare that value either.
+        stated = {key: value for key, value in resolved.items() if value != "unknown"}
+        check_ais_identity(where, stated, selected, origin=" from its source")
 
     def _build_ais_config(self) -> dict[str, Any]:
         spec = self._config.ais_perf_model

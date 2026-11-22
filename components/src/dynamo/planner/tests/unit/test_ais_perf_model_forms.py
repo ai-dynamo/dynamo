@@ -25,6 +25,7 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     ais_perf_model_old_form_names,
 )
+from dynamo.planner.core.perf_model import ais_adapter
 from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.tests.unit.test_ais_perf_adapter import (
     _caps,
@@ -49,9 +50,9 @@ _NEW_FORM = (
 )
 
 
-def _planner(ais_perf_model, mode="decode"):
+def _planner(ais_perf_model, mode="decode", **fields):
     return PlannerConfig(
-        mode=mode, optimization_target="sla", ais_perf_model=ais_perf_model
+        mode=mode, optimization_target="sla", ais_perf_model=ais_perf_model, **fields
     )
 
 
@@ -322,6 +323,139 @@ def test_template_is_checked_at_first_use_like_roles(adapter, tmp_path, wrong):
             model._configured_role()
         assert type(when_first_used.value) is ValueError
         assert str(when_first_used.value) == str(expected)
+
+
+# The decode deployment the profiler selected, as it writes it for the Planner.
+_DEPLOYMENT = {**_CONTENT, "worker_type": "decode", "tp": 2, "attention_dp": 1}
+
+
+def _template_planner(tmp_path, content, deployment=_DEPLOYMENT):
+    """Return a decode Planner config that takes its perf model from a template."""
+    template = tmp_path / "template.yaml"
+    template.write_text(yaml.safe_dump(content))
+    return _planner(
+        {"from": str(template)},
+        ais_perf_model_deployment=None
+        if deployment is None
+        else {"decode": deployment},
+    )
+
+
+@pytest.mark.parametrize(
+    "source,deployment,conflict",
+    [
+        pytest.param(
+            {"model": "other-model"},
+            {},
+            "model='other-model' from its source conflicts with selected "
+            "deployment model='test-model'",
+            id="model",
+        ),
+        pytest.param(
+            {"backend": "sglang"},
+            {},
+            "backend='sglang' from its source conflicts with selected "
+            "deployment backend='vllm'",
+            id="backend",
+        ),
+        pytest.param(
+            {"tp": 4},
+            {},
+            "tp=4 from its source conflicts with selected deployment tp=2",
+            id="tp",
+        ),
+        # The template writes no pp; it is compared as 1.
+        pytest.param(
+            {},
+            {"pp": 2},
+            "pp=1 from its source conflicts with selected deployment pp=2",
+            id="key-the-source-leaves-out",
+        ),
+    ],
+)
+def test_source_that_disagrees_with_deployment_is_refused(
+    adapter, tmp_path, source, deployment, conflict
+):
+    config = _template_planner(
+        tmp_path, {**_CONTENT, "tp": 2, **source}, {**_DEPLOYMENT, **deployment}
+    )
+    model = adapter(config, limits=False)
+
+    # A failure is not remembered: the second call reads the source again.
+    for _ in range(2):
+        with pytest.raises(ValueError) as when_first_used:
+            model._configured_role()
+        assert str(when_first_used.value) == (
+            f"ais_perf_model entry for decode: {conflict}"
+        )
+
+
+def test_dataset_profile_that_disagrees_with_deployment_is_refused(
+    adapter, monkeypatch
+):
+    # The profile a dataset gives, without a dataset on disk.
+    monkeypatch.setattr(
+        ais_adapter, "prepare_execution_profile", lambda *_: {**_CONTENT, "tp": 4}
+    )
+    config = _planner(
+        {"dataset_profiles": {"decode": _DATASET_PROFILE}},
+        ais_perf_model_deployment={"decode": _DEPLOYMENT},
+    )
+    model = adapter(config, limits=False)
+
+    with pytest.raises(ValueError) as when_first_used:
+        model._configured_role()
+    assert str(when_first_used.value) == (
+        "ais_perf_model.dataset_profiles.decode: tp=4 from its source conflicts "
+        "with selected deployment tp=2"
+    )
+
+
+def test_matching_source_builds_the_config_it_builds_without_a_deployment(
+    adapter, tmp_path
+):
+    content = {**_CONTENT, "tp": 2}
+
+    compared = adapter(_template_planner(tmp_path, content))._build_ais_config()
+    uncompared = adapter(
+        _template_planner(tmp_path, content, deployment=None)
+    )._build_ais_config()
+
+    assert compared == uncompared
+
+
+def test_source_is_not_compared_without_a_deployment(adapter, tmp_path):
+    # A config written by hand, or by a profiler that did not carry the
+    # selected deployment.
+    config = _template_planner(tmp_path, {**_CONTENT, "tp": 4}, deployment=None)
+
+    assert adapter(config)._build_ais_config()["tp"] == 4
+
+
+@pytest.mark.parametrize(
+    "source,conflict",
+    [
+        pytest.param({"kv_block_size": 32}, "kv_block_size conflicts", id="kv-block"),
+        pytest.param({"nextn": 1}, "nextn conflicts", id="nextn"),
+    ],
+)
+def test_capability_guards_apply_to_a_matching_source(tmp_path, source, conflict):
+    config = _template_planner(tmp_path, {**_CONTENT, "tp": 2, **source})
+
+    with pytest.raises(ValueError, match=conflict):
+        PlannerEnginePerfModel(
+            worker_type="decode",
+            config=config,
+            capabilities=_caps(speculative_nextn=2),
+        )
+
+
+def test_deployment_holds_only_identity_fields():
+    with pytest.raises(ValidationError, match="not identity fields: kv_block_size"):
+        _planner(
+            {"from": "/missing/template.yaml"},
+            ais_perf_model_deployment={"decode": {**_DEPLOYMENT, "kv_block_size": 16}},
+        )
 
 
 def test_mixed_forms_are_rejected():
