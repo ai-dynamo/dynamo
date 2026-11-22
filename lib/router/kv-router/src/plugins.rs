@@ -11,8 +11,8 @@
 //!   each change is listed in the release's deprecation notes.
 //! - [`experimental`]: APIs with no compatibility guarantee, one submodule each, imported by
 //!   name.
-//! - [`testing`]: a harness that runs a policy over a described request and workers, behind the
-//!   `plugin-testing` feature.
+//! - [`testing`]: a harness that runs a policy over a described request and workers, for a
+//!   plugin crate's tests.
 //! - [`host`]: what a routing host names to resolve and run plugins. Plugin crates do not
 //!   import it.
 //!
@@ -24,7 +24,6 @@ pub mod hint_policy;
 pub mod host;
 mod registry;
 pub mod request_classifier;
-#[cfg(any(test, feature = "plugin-testing"))]
 pub mod testing;
 pub mod v1alpha1;
 pub mod worker_selection;

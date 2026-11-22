@@ -55,7 +55,7 @@ A plugin crate depends on `dynamo-kv-router` alone and imports the module for th
 | `plugins::v1alpha1::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in `plugins::v1alpha1` | Same |
 | `plugins::v1alpha1` | What both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
 | `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints` | None: an item can change or be removed in any release |
-| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Enable the `plugin-testing` feature of `dynamo-kv-router` in `[dev-dependencies]` | Same as `plugins::v1alpha1` |
+| `plugins::testing` | `SelectionCase` and `CaseWorker`, which run a policy over a request and workers that a test describes. Import it only from a test module | Same as `plugins::v1alpha1` |
 
 A policy and a classifier read workers through the same rows, so a value added to an input group reaches both. The two contracts can be frozen as `v1` separately.
 
@@ -342,19 +342,7 @@ For prefill and decode, the selection order is the role-specific CLI or environm
 cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 ```
 
-Add one focused test for each policy decision and one registration test for every type name. `plugins::testing::SelectionCase` describes a request and its workers and runs the policy through the router's own selection path, so a test names no router type outside the plugin API. Enable the harness from the policy crate's `[dev-dependencies]`:
-
-```bash
-# Add the test harness to the policy crate's dev-dependencies.
-cargo add \
-  --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
-  --dev \
-  --path "$DYNAMO_DIR/lib/router/kv-router" \
-  --features plugin-testing \
-  dynamo-kv-router
-```
-
-Put the test in a `#[cfg(test)]` module of the policy crate. The harness is available only to the crate's tests, so an import of it outside that module fails when the catalog, the frontend, or the EPP builds the crate:
+Add one focused test for each policy decision and one registration test for every type name. `plugins::testing::SelectionCase` describes a request and its workers and runs the policy through the router's own selection path, so a test names no router type outside the plugin API. Put the test in a `#[cfg(test)]` module of the policy crate; the harness is for tests, and policy code does not import it:
 
 ```rust
 #[cfg(test)]

@@ -6,8 +6,7 @@
 //! [`SelectionCase`] describes one selection as a policy sees it (a request and the workers it
 //! may pick) and runs a [`WorkerSelectionPolicy`] over it through the same path the router
 //! uses, so a plugin crate tests its filters, scorers, and picker without naming a router
-//! type outside the plugin API. Enable the `plugin-testing` feature of `dynamo-kv-router` in
-//! the plugin crate's `[dev-dependencies]`.
+//! type outside the plugin API. Import it only from a test module.
 //!
 //! ```
 //! use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
@@ -390,8 +389,6 @@ pub fn classify<C: RequestClassifier + ?Sized>(
     WorkerInputRows::empty().read(|workers| classifier.classify(request, workers))
 }
 
-// Unit tests, not an integration test: this module compiles in the crate's own test build
-// without the `plugin-testing` feature, so these run under any `cargo test -p dynamo-kv-router`.
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

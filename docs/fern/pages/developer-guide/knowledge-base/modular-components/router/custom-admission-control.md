@@ -275,7 +275,7 @@ The rows and their accessors are the ones worker selection uses, so `CACHE`, `LO
 
 Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the request's `reject_thresholds()` with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
 
-To test a classifier, enable the `plugin-testing` feature of `dynamo-kv-router` in the classifier crate's `[dev-dependencies]`. `plugins::testing::classify_request` builds a request, `plugins::testing::classify` runs the classifier with no worker rows, and `SelectionCase::classify` runs it over workers a test describes with `CaseWorker`, built for the input groups the classifier declares.
+To test a classifier, use `dynamo_kv_router::plugins::testing` from the classifier crate's test module. `plugins::testing::classify_request` builds a request, `plugins::testing::classify` runs the classifier with no worker rows, and `SelectionCase::classify` runs it over workers a test describes with `CaseWorker`, built for the input groups the classifier declares.
 
 ### Admission Decisions
 
