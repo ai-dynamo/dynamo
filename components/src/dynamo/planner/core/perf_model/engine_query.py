@@ -377,9 +377,7 @@ class AISCoreEnginePerfModel:
 
         best: Optional[EngineCapacity] = None
         for batch_size in _capacity_batch_sizes(max_batch):
-            ttft_s = self._prefill_time_for_tokens(
-                _saturating_mul_u32(prefill_isl, batch_size)
-            )
+            ttft_s = self._prefill_time_for_batch(prefill_isl, batch_size)
             if ttft_s is None:
                 return None
             if ttft_s == 0:
@@ -501,11 +499,14 @@ class AISCoreEnginePerfModel:
             best = _select_capacity(best, capacity, request.optimization_target)
         return best
 
-    def _prefill_time_for_tokens(self, tokens: int) -> Optional[float]:
+    def _prefill_time_for_batch(self, isl: int, batch_size: int) -> Optional[float]:
+        ranks = self._attention_dp_size
+        busiest_rank_requests = _split_total(batch_size, ranks, 0)
+        busiest_rank_tokens = _saturating_mul_u32(isl, busiest_rank_requests)
         return self._prefill_chunk_time(
-            tokens,
+            busiest_rank_tokens,
             lambda chunk: self._estimate_forward_pass_seconds(
-                _synthetic_prefill_by_rank(chunk, self._attention_dp_size)
+                _synthetic_prefill_by_rank(isl, batch_size, ranks, chunk)
             ),
         )
 
@@ -571,11 +572,13 @@ class AISCoreEnginePerfModel:
         return total_s
 
     def _prefill_max_batch(self, isl: int) -> int:
-        if isl > self._limits.max_num_batched_tokens:
+        budget_per_rank = self._limits.max_num_batched_tokens
+        if isl > budget_per_rank:
             return 1
+        requests_per_rank = budget_per_rank // max(1, isl)
         return min(
             self._limits.max_num_seqs,
-            self._limits.max_num_batched_tokens // max(1, isl),
+            requests_per_rank * self._attention_dp_size,
         )
 
     def _decode_max_batch(self, context_length: int) -> int:
@@ -659,15 +662,20 @@ def _empty_fpm(dp_rank: int) -> ForwardPassMetrics:
     return ForwardPassMetrics(dp_rank=dp_rank)
 
 
-def _synthetic_prefill_by_rank(tokens: int, ranks: int) -> list[ForwardPassMetrics]:
+def _synthetic_prefill_by_rank(
+    isl: int, batch_size: int, ranks: int, chunk: int
+) -> list[ForwardPassMetrics]:
     metrics_by_rank: list[ForwardPassMetrics] = []
-    for dp_rank in range(max(1, ranks)):
-        rank_tokens = _split_total(tokens, ranks, dp_rank)
+    for dp_rank in range(ranks):
+        # A request stays on its assigned rank across all prefill chunks.
+        rank_requests = _split_total(batch_size, ranks, dp_rank)
+        rank_tokens = min(chunk, rank_requests * isl)
         metrics_by_rank.append(
             _replace_scheduled(
                 _empty_fpm(dp_rank),
                 ScheduledRequestMetrics(
-                    num_prefill_requests=int(rank_tokens > 0),
+                    # Preserve the existing single-rank query shape.
+                    num_prefill_requests=rank_requests if ranks > 1 else 1,
                     sum_prefill_tokens=rank_tokens,
                 ),
             )

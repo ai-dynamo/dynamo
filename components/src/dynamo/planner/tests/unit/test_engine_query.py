@@ -232,6 +232,65 @@ def test_aggregated_capacity_derives_ttft_itl_and_e2e():
     assert capacity.eligible
 
 
+def _prefill_query_shapes(
+    forward: _FakeForwardPassModel,
+) -> list[list[tuple[int, int]]]:
+    return [
+        [
+            (scheduled["num_prefill_requests"], scheduled["sum_prefill_tokens"])
+            for scheduled in (rank["scheduled_requests"] for rank in call)
+        ]
+        for call in forward.estimate_calls
+    ]
+
+
+@pytest.mark.parametrize(
+    ("isl", "max_num_seqs", "expected_batch"),
+    [
+        (32, 16, 4),
+        (24, 16, 4),
+        (32, 3, 3),
+    ],
+    ids=["exact-fit", "per-rank-remainder", "sequence-bound"],
+)
+def test_attention_dp_prefill_capacity_assigns_whole_requests(
+    isl: int, max_num_seqs: int, expected_batch: int
+) -> None:
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=64,
+        max_num_seqs=max_num_seqs,
+        attention_dp_size=2,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=isl, osl=0))
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(expected_batch / 0.01)
+    expected_requests = [(1, 0), (1, 1), (2, 1), (2, 2)]
+    assert _prefill_query_shapes(forward) == [
+        [(num_requests, num_requests * isl) for num_requests in request_counts]
+        for request_counts in expected_requests[:expected_batch]
+    ]
+
+
+def test_attention_dp_prefill_capacity_keeps_long_prompt_on_one_rank() -> None:
+    model, forward = _model(
+        worker_type="prefill",
+        estimate=lambda _: 10.0,
+        max_num_batched_tokens=64,
+        attention_dp_size=2,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=160, osl=0))
+
+    assert capacity is not None
+    # Two equal full chunks share one estimate, with a third round for the tail.
+    assert capacity.ttft_s == pytest.approx(0.03)
+    assert _prefill_query_shapes(forward) == [[(1, 64), (0, 0)], [(1, 32), (0, 0)]]
+
+
 def test_attention_dp_synthetic_work_is_split_across_ranks():
     model, forward_pass_model = _model(
         worker_type="decode",
