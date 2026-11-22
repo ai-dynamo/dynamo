@@ -82,10 +82,8 @@ impl RequestPayloadHandle {
         response: Option<Arc<NvCreateChatCompletionResponse>>,
         drop_reason: Option<String>,
     ) {
-        // The HTTP layer returns an error instead of a tool call outside
-        // `allowed_tools`, so the record must not keep that output either.
-        // An earlier drop reason (for example a backend error after a partial
-        // response) is what the client saw, so it is kept.
+        // Drop a tool call outside `allowed_tools`, as the HTTP layer does;
+        // keep any earlier drop reason, since that is what the client saw.
         let (response, drop_reason) = match (response, ToolAllowlist::from_request(&self.request)) {
             (Some(response), Some(allowlist)) => match allowlist.validate_response(&response) {
                 Ok(()) => (Some(response), drop_reason),

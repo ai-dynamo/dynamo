@@ -80,9 +80,8 @@ pub struct RequestTracePayload {
     pub payload_drop_reason: Option<String>,
 }
 
-// Runs in the sinks, off the request path. The normalized request keeps only
-// the selected tools and a plain `auto`/`required` choice, so put back what the
-// client sent.
+// Runs in the sinks, off the request path. Puts back the client's `tools`
+// catalog and `allowed_tools` choice that normalization replaced.
 fn serialize_client_request<S: Serializer>(
     request: &Option<Arc<NvCreateChatCompletionRequest>>,
     serializer: S,
