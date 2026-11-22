@@ -460,6 +460,40 @@ async def test_stage_worker_skips_engine_when_already_stopped():
 
 
 @pytest.mark.asyncio
+async def test_stage_worker_skips_upstream_registration_when_stopped_during_fetch():
+    """A stop while fetching stage inputs must return before code2wav's request
+    is registered with the output processor, which only generate cleans up."""
+    context = _Context()
+    engine = _StepEngine(steps=1000, on_step=lambda n: None)
+    worker = stage_worker.OmniStageWorker(
+        engine=engine,
+        stage_config=SimpleNamespace(stage_type="llm", engine_input_source=[]),
+        connectors={},
+        stage_id=1,
+    )
+    upstream = SimpleNamespace(engine_outputs=[SimpleNamespace(outputs=[object()])])
+
+    async def fetch(refs, request_id):
+        context.stop_generating()
+        return [upstream]
+
+    with (
+        patch.object(worker, "_fetch_stage_inputs", side_effect=fetch),
+        patch.object(worker, "_build_engine_core_request_from_upstream") as build,
+    ):
+        chunks = [
+            c
+            async for c in worker.generate(
+                {"request_id": "req-1", "stage_connector_refs": {"0": {}}}, context
+            )
+        ]
+
+    build.assert_not_called()
+    assert chunks == [{"error": "Request cancelled", "finished": True}]
+    assert engine.ran == 0
+
+
+@pytest.mark.asyncio
 async def test_completed_stage_stops_watching_for_disconnect():
     """A disconnect after the stage finished must not abort it (no leaked watcher)."""
     context = _Context()

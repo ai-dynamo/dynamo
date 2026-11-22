@@ -117,6 +117,9 @@ class OmniStageWorker:
             except RuntimeError as e:
                 yield {"error": str(e), "finished": True}
                 return
+            if context.is_stopped():
+                yield {"error": "Request cancelled", "finished": True}
+                return
 
             if len(stage_list) != len(
                 self._engine_input_source or stage_connector_refs
