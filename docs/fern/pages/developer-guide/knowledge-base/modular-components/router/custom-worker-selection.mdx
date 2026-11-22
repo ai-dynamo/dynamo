@@ -356,6 +356,7 @@ cargo add \
 
 ```rust
 use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerWithDpRank;
 
 #[test]
 fn prefers_the_worker_with_fewer_requests() {
