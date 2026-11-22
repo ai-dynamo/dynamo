@@ -2848,3 +2848,33 @@ async def test_custom_json_cannot_merge_with_processed_media():
         await processor.prepare_input(
             request, "request-1", None, DisaggregationMode.AGGREGATED
         )
+
+
+@pytest.mark.parametrize("value", [-1, "bad", [1], True])
+@pytest.mark.parametrize("location", ["top_level", "extra_args"])
+def test_get_mm_processor_kwargs_rejects_non_objects(value, location):
+    req = (
+        {"mm_processor_kwargs": value}
+        if location == "top_level"
+        else {"extra_args": {"mm_processor_kwargs": value}}
+    )
+    with pytest.raises(
+        mod.InvalidArgument, match="mm_processor_kwargs must be an object"
+    ):
+        mod.get_mm_processor_kwargs(req)
+
+
+@pytest.mark.parametrize(
+    ("req", "expected"),
+    [
+        ({}, None),
+        ({"mm_processor_kwargs": None}, None),
+        (
+            {"mm_processor_kwargs": {"use_audio_in_video": True}},
+            {"use_audio_in_video": True},
+        ),
+        ({"extra_args": {"mm_processor_kwargs": {}}}, {}),
+    ],
+)
+def test_get_mm_processor_kwargs_returns_objects(req, expected):
+    assert mod.get_mm_processor_kwargs(req) == expected
