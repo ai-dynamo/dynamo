@@ -2573,8 +2573,7 @@ impl<
         if drained.gate_recheck {
             scope = Some(RecheckScope::All);
         }
-        // Consume hints even when there is no pending work. Blocked lanes count as ready here
-        // and still need their recheck.
+        // Consume hints even when there is no pending work.
         if self.pending.pending_count() == 0 {
             return;
         }
