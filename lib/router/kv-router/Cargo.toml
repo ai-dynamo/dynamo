@@ -82,6 +82,11 @@ reqwest = { version = "0.12.24", default-features = false, features = ["json", "
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
+# Turns on `plugin-testing` for this crate's own tests, so `cargo test -p dynamo-kv-router`
+# runs the `plugins::testing` tests and doctest without another crate unifying the feature in.
+# Path only, with no version: cargo then drops the entry when it packages the crate, where a
+# versioned entry would make the crate depend on its own unpublished release.
+dynamo-kv-router = { path = ".", features = ["plugin-testing"] }
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }
 dynamo-slot-tracker = { workspace = true, features = ["testing"] }
 dynamo-session-affinity = { workspace = true, features = ["testing"] }
