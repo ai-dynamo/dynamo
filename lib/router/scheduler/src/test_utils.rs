@@ -4,9 +4,18 @@
 //! Shared test utilities. The indexer event builders live in
 //! `dynamo_kv_indexer::testing` and are re-exported here by name.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use dynamo_admission::PolicyProfile;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_slot_tracker::ActiveSequencesMultiWorker;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerConfigLike;
+use crate::selector::DefaultWorkerSelector;
 pub use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
@@ -153,30 +162,22 @@ pub fn local_test_core(
 
 /// The scheduler the kernel's tests and benchmarks drive: no sequence publisher,
 /// [`SimpleWorkerConfig`] workers, and the default selector.
-pub type TestScheduler = crate::LocalScheduler<
-    NoopSequencePublisher,
-    SimpleWorkerConfig,
-    crate::selector::DefaultWorkerSelector,
->;
+pub type TestScheduler =
+    crate::LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>;
 
 /// A [`TestScheduler`] over `workers` and `profile`: no load estimator, overlap refresh, or
 /// host providers, prefill tokens tracked, a 60 s recheck, and no config monitor. Keep the
 /// returned sender for as long as the scheduler runs; publish worker changes through it.
 pub fn local_test_scheduler(
-    workers: std::collections::HashMap<
-        dynamo_router_protocol::worker::WorkerId,
-        SimpleWorkerConfig,
-    >,
-    profile: dynamo_admission::PolicyProfile,
+    workers: HashMap<WorkerId, SimpleWorkerConfig>,
+    profile: PolicyProfile,
     block_size: u32,
-    cancel_token: tokio_util::sync::CancellationToken,
+    cancel_token: CancellationToken,
 ) -> (
-    std::sync::Arc<TestScheduler>,
-    tokio::sync::watch::Sender<
-        std::collections::HashMap<dynamo_router_protocol::worker::WorkerId, SimpleWorkerConfig>,
-    >,
+    Arc<TestScheduler>,
+    watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
 ) {
-    let slots = std::sync::Arc::new(dynamo_slot_tracker::ActiveSequencesMultiWorker::new(
+    let slots = Arc::new(ActiveSequencesMultiWorker::new(
         NoopSequencePublisher,
         block_size as usize,
         workers
@@ -192,19 +193,19 @@ pub fn local_test_scheduler(
         0,
         "test",
     ));
-    let (configs, config_rx) = tokio::sync::watch::channel(workers);
-    let scheduler = std::sync::Arc::new(crate::LocalScheduler::new(
+    let (configs, config_rx) = watch::channel(workers);
+    let scheduler = Arc::new(crate::LocalScheduler::new(
         slots,
         config_rx,
         profile,
         block_size,
-        crate::selector::DefaultWorkerSelector::new(None, "test"),
+        DefaultWorkerSelector::new(None, "test"),
         None,
-        None::<std::sync::Arc<crate::NoopOverlapScoresRefresh>>,
+        None::<Arc<crate::NoopOverlapScoresRefresh>>,
         None,
         None,
         None,
-        std::time::Duration::from_secs(60),
+        Duration::from_secs(60),
         true,
         cancel_token,
         "test",
