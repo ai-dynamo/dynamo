@@ -7669,14 +7669,12 @@ def test_kvwarm_shadow_registration_forks_circular_tail_table():
     assert mgr.num_cached_block["shadow"] == 0
 
 
-class _FakeMambaSpec:
-    """Spec whose class name carries "Mamba", the key of the recurrent-group checks."""
-
-
 class MambaManager(_FakeManager):
     def __init__(self, chain_blocks, cow=True):
         super().__init__(chain_blocks, cow=cow)
-        self.kv_cache_spec = _FakeMambaSpec()
+        self.kv_cache_spec = kv_cache_interface.MambaSpec(
+            block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+        )
 
 
 def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
@@ -7704,6 +7702,23 @@ def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
     # the per-context reserve and the pool-shortfall mirror agree on the span
     assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 32, 3) == 2
     assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [32], 3) == 0
+
+
+@dataclasses.dataclass(frozen=True)
+class _RenamedMambaSpec(kv_cache_interface.KVCacheSpec):
+    """A recurrent-state spec class that vLLM could ship under another name: not a
+    ``MambaSpec``, but "Mamba" in its class name."""
+
+
+def test_kvwarm_live_state_finds_a_recurrent_group_by_its_class_name():
+    """The live-state check also takes a spec by its class name, so that a vLLM
+    rename of the recurrent spec does not send the group to the positional path."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    manager = SimpleNamespace(kv_cache_spec=_RenamedMambaSpec(block_size=16))
+
+    assert stub._kvwarm_live_state_manager(manager) is True
 
 
 class KpoolTailManager(_FakeManager):
@@ -7940,7 +7955,6 @@ def test_kvwarm_random_state_shadow_forks_the_ring_of_a_vllm_circular_buffer_gro
     assert shadow_ring is not chain_ring
     assert ring.req_to_blocks["chain"] == [chain_ring]
     assert ring.num_cached_block[shadow.req_id] == 0
-    # The ring block and the attention tail are copies of the chain's blocks.
     chain_attention = attention.req_to_blocks["chain"]
     assert [
         (copy.src_block_id, copy.dst_block_id) for copy in output.kv_cache_block_copies
@@ -7976,7 +7990,13 @@ def test_kvwarm_plan_keeps_kimi_long_context_real_kv_coverage(monkeypatch):
             block_size=1536,
             mamba_cache_mode="align",
             num_speculative_blocks=0,
-            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+            kv_cache_spec=kv_cache_interface.MambaSpec(
+                block_size=1536,
+                shapes=(),
+                dtypes=(),
+                mamba_cache_mode="align",
+                num_prefill_checkpoint_blocks=1,
+            ),
         )
         for _ in range(3)
     ]
@@ -8012,7 +8032,9 @@ def test_kvwarm_reserve_uses_the_admission_context_at_a_block_boundary(monkeypat
     stub._bench_random_kda = False
     stub.kv_cache_manager.coordinator.single_type_managers[
         1
-    ].kv_cache_spec = _FakeMambaSpec()
+    ].kv_cache_spec = kv_cache_interface.MambaSpec(
+        block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+    )
     assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 32, 3) == 3
     assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 33, 4) == 2
     point = BenchmarkPoint(

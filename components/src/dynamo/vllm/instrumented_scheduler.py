@@ -6423,7 +6423,7 @@ class InstrumentedScheduler(AsyncScheduler):
         expired positions, so they take the positional path.
         """
         spec = getattr(manager, "kv_cache_spec", None)
-        if getattr(spec, "prefix_cacheable", True) is not False:
+        if spec is None or spec.prefix_cacheable is not False:
             return False
         return spec.max_num_blocks_per_req(self.vllm_config, self.max_model_len) == 1
 
