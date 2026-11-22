@@ -4,13 +4,17 @@
 //! The in-tree plugin crates stay on the plugin API: outside their test modules they name no
 //! Dynamo path other than `dynamo_kv_router::plugins::v1alpha1` and
 //! `dynamo_kv_router::plugins::experimental`, and their only Dynamo dependencies are
-//! `dynamo-kv-router` and each other, under any dependency key. A plugin that needs something
-//! else needs it added to the plugin API first.
+//! `dynamo-kv-router`, under that key, and each other, under any key. A plugin that needs
+//! something else needs it added to the plugin API first.
 //!
 //! The source scan reads one line at a time and does not expand a braced import, so an import
 //! must name the versioned module before any brace:
 //! `use dynamo_kv_router::plugins::v1alpha1::worker_selection::{A, B};` passes, and
 //! `use dynamo_kv_router::plugins::{v1alpha1::worker_selection::A};` is reported.
+//!
+//! The manifest check reads each plugin crate's own `Cargo.toml`. It does not follow
+//! `workspace = true` to the root manifest, so it does not see a dependency that
+//! `[workspace.dependencies]` renames.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,26 +83,47 @@ fn renamed_package(text: &str) -> Option<&str> {
         .and_then(|rest| rest.split('"').next())
 }
 
-/// The Dynamo packages a manifest's dependencies name: the `package` of a renamed dependency,
-/// otherwise its key. Reads `[dependencies]`, a target's `[target.<cfg>.dependencies]`, and
-/// the table form `[dependencies.<key>]`.
-fn dynamo_dependencies(manifest: &str) -> Vec<&str> {
-    let mut names = Vec::new();
+/// The Dynamo packages a manifest's dependencies name, each as `(key, package)`: the package
+/// is the `package` of a renamed dependency, otherwise its key. Reads `[dependencies]` and a
+/// target's `[target.<cfg>.dependencies]`, and the table form `[dependencies.<key>]` of each.
+fn dynamo_dependencies(manifest: &str) -> Vec<(&str, &str)> {
+    let is_dependencies = |table: &str| table == "dependencies" || table.ends_with(".dependencies");
+    let mut dependencies = Vec::new();
     for section in manifest.split("\n[") {
         let Some((header, body)) = section.split_once("]\n") else {
             continue;
         };
-        if header == "dependencies" || header.ends_with(".dependencies") {
-            names.extend(body.lines().map(|line| {
+        if is_dependencies(header) {
+            dependencies.extend(body.lines().map(|line| {
                 let key = line.split(['=', '.']).next().unwrap_or_default().trim();
-                renamed_package(line).unwrap_or(key)
+                (key, renamed_package(line).unwrap_or(key))
             }));
-        } else if let Some(key) = header.strip_prefix("dependencies.") {
-            names.push(renamed_package(body).unwrap_or(key));
+        } else if let Some((table, key)) = header.rsplit_once('.')
+            && is_dependencies(table)
+        {
+            dependencies.push((key, renamed_package(body).unwrap_or(key)));
         }
     }
-    names.retain(|name| name.starts_with("dynamo-"));
-    names
+    dependencies.retain(|(_, package)| package.starts_with("dynamo-"));
+    dependencies
+}
+
+/// What a plugin crate's manifest gets wrong: a Dynamo dependency that is neither
+/// `dynamo-kv-router` nor one of `plugin_packages`, or `dynamo-kv-router` under another key.
+/// The source scan finds a router path by the `dynamo_kv_router` name, so it would miss
+/// every path a renamed router dependency names.
+fn dependency_violations(manifest: &str, plugin_packages: &[String]) -> Vec<String> {
+    dynamo_dependencies(manifest)
+        .into_iter()
+        .filter_map(|(key, package)| {
+            if package != "dynamo-kv-router" {
+                let plugin = plugin_packages.iter().any(|p| p == package);
+                (!plugin).then(|| format!("depends on {package}"))
+            } else {
+                (key != package).then(|| format!("renames dynamo-kv-router to {key}"))
+            }
+        })
+        .collect()
 }
 
 /// The section of `manifest` whose header is `[name]`.
@@ -142,18 +167,41 @@ workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 dynamo-memory = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies.indexer]
+package = "dynamo-kv-indexer"
+workspace = true
+
 [dev-dependencies]
 dynamo-scheduler = { workspace = true }
 "#;
+    let plugin_packages = ["dynamo-example-plugin".to_owned()];
     assert_eq!(
-        dynamo_dependencies(manifest),
+        dependency_violations(manifest, &plugin_packages),
         [
-            "dynamo-kv-router",
-            "dynamo-scheduler",
-            "dynamo-tokens",
-            "dynamo-admission",
-            "dynamo-slot-tracker",
-            "dynamo-memory",
+            "depends on dynamo-scheduler",
+            "depends on dynamo-tokens",
+            "depends on dynamo-admission",
+            "depends on dynamo-slot-tracker",
+            "depends on dynamo-memory",
+            "depends on dynamo-kv-indexer",
+        ]
+    );
+
+    // A plugin crate passes under any key. The router crate passes only under its own.
+    let renamed = r#"
+[dependencies]
+example-plugin = { package = "dynamo-example-plugin", path = "../example" }
+router = { package = "dynamo-kv-router", workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies.linux-router]
+package = "dynamo-kv-router"
+workspace = true
+"#;
+    assert_eq!(
+        dependency_violations(renamed, &plugin_packages),
+        [
+            "renames dynamo-kv-router to router",
+            "renames dynamo-kv-router to linux-router",
         ]
     );
 
@@ -199,10 +247,8 @@ fn plugin_crates_name_only_the_plugin_api() {
     for (plugin_crate, manifest) in PLUGIN_CRATES.into_iter().zip(&manifests) {
         let crate_dir = root.join(plugin_crate);
 
-        for name in dynamo_dependencies(manifest) {
-            if name != "dynamo-kv-router" && !plugin_packages.iter().any(|p| p == name) {
-                violations.push(format!("{plugin_crate}/Cargo.toml depends on {name}"));
-            }
+        for violation in dependency_violations(manifest, &plugin_packages) {
+            violations.push(format!("{plugin_crate}/Cargo.toml {violation}"));
         }
 
         let mut sources = Vec::new();
