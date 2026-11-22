@@ -23,7 +23,7 @@ pub use reference::DefaultWorkerSelector;
 
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use dynamo_worker_selection::DefaultWorkerPicker;
-use dynamo_worker_selection::{WorkerInputs, WorkerLoadInput, WorkerSelectionContext};
+use dynamo_worker_selection::{WorkerInputs, WorkerLoadInput, WorkerSelectionRequest};
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use reference::{DefaultWorkerScorer, pick_default_worker};
 
@@ -31,7 +31,7 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
 use dynamo_worker_selection::host::{
-    WorkerSelectionContextHostExt, WorkerSelectionPolicyHostExt, worker_copy_input,
+    WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt, worker_copy_input,
 };
 use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
@@ -347,8 +347,8 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
 
     /// The policy's view of the request, pinned to what eligibility imposes. It borrows this
     /// source for the resident block counts the host lent, so it lives no longer than the source.
-    pub(super) fn context(&self) -> WorkerSelectionContext<'_> {
-        selection_context(self.request, self.block_size)
+    pub(super) fn selection_request(&self) -> WorkerSelectionRequest<'_> {
+        worker_selection_request(self.request, self.block_size)
             .with_pinned_worker(self.eligibility.pinned_worker())
             .with_decode_progress(self.decode_progress)
             .with_resident_blocks(
@@ -579,9 +579,12 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
     }
 }
 
-/// The fields of `request` a policy may read, as [`WorkerSelectionContext`] exposes them.
-fn selection_context(request: &SchedulingRequest, block_size: u32) -> WorkerSelectionContext<'_> {
-    WorkerSelectionContext::new(request.isl_tokens, block_size)
+/// The fields of `request` a policy may read, as [`WorkerSelectionRequest`] exposes them.
+fn worker_selection_request(
+    request: &SchedulingRequest,
+    block_size: u32,
+) -> WorkerSelectionRequest<'_> {
+    WorkerSelectionRequest::new(request.isl_tokens, block_size)
         .with_request_id(request.mode.request_id())
         .with_prefill_tracking(request.track_prefill_tokens)
         .with_pinned_worker(request.pinned_worker)
@@ -855,7 +858,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 /// the raw cache-reuse maximum for tracked requests.
 type Picked = Option<(WorkerWithDpRank, f64, Option<SelectionTrace>, Option<usize>)>;
 
-/// Drive `policy` from the host's inputs: build the context and the row source, select,
+/// Drive `policy` from the host's inputs: build the request view and the row source, select,
 /// and map the pick to the host's result. Eligibility outcomes and result construction stay
 /// here, shared with the reference selector.
 fn select_with_policy<C: WorkerConfigLike>(
@@ -869,7 +872,7 @@ fn select_with_policy<C: WorkerConfigLike>(
         return select_reference(policy.worker_label(), config, picker, input);
     }
     let source = SelectionRowSource::from_input(input)?;
-    let context = source.context();
+    let selection_request = source.selection_request();
     let prepared = prepared.and_then(|prepared| {
         let PreparedCandidates {
             rows,
@@ -893,7 +896,7 @@ fn select_with_policy<C: WorkerConfigLike>(
         }
         rows
     });
-    let picked: Picked = match policy.select_rows(&context, &source, prepared, trace) {
+    let picked: Picked = match policy.select_rows(&selection_request, &source, prepared, trace) {
         Ok(RowPick {
             worker,
             cost,
@@ -927,12 +930,12 @@ fn select_reference<C: WorkerConfigLike>(
     input: WorkerSelectionInput<'_, C>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     let source = SelectionRowSource::from_input(input)?;
-    let context = source.context();
+    let selection_request = source.selection_request();
     let scorer = DefaultWorkerScorer {
         kv_router_config,
         worker_type,
     };
-    let picked: Picked = pick_default_worker(&scorer, picker, &context, &source)
+    let picked: Picked = pick_default_worker(&scorer, picker, &selection_request, &source)
         .map(|(worker, cost)| (worker, cost, None, source.max_raw_cached_tokens()));
     finish_selection(&source, worker_type, picked)
 }

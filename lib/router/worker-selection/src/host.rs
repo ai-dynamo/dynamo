@@ -14,11 +14,11 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
 
-use crate::context::WorkerSelectionContext;
 use crate::inputs::{ResidentBlockSource, WorkerCopyInput, WorkerLoadInput};
 use crate::policy::{
     CandidatePreparer, CandidateRowSource, PreparedRows, RowPick, SelectionFailure,
 };
+use crate::request::WorkerSelectionRequest;
 
 pub use crate::conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicyKind,
@@ -47,12 +47,12 @@ mod sealed {
     pub trait Sealed {}
 }
 
-impl sealed::Sealed for WorkerSelectionContext<'_> {}
+impl sealed::Sealed for WorkerSelectionRequest<'_> {}
 impl sealed::Sealed for WorkerSelectionPolicy {}
 
 /// How the kernel builds the request view a policy reads. A plugin only reads a
-/// [`WorkerSelectionContext`]; its tests get one through `dynamo_kv_router::plugins::testing`.
-pub trait WorkerSelectionContextHostExt<'a>: sealed::Sealed + Sized {
+/// [`WorkerSelectionRequest`]; its tests get one through `dynamo_kv_router::plugins::testing`.
+pub trait WorkerSelectionRequestHostExt<'a>: sealed::Sealed + Sized {
     /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
     /// field at its default. A `block_size` of 0, as hosted selection without the KV path
     /// supplies, reads as zero request blocks.
@@ -115,7 +115,7 @@ pub trait WorkerSelectionPolicyHostExt: sealed::Sealed + Sized {
     /// carries the retained per-candidate costs.
     fn select_rows<S: CandidateRowSource>(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         source: &S,
         prepared: Option<PreparedRows>,
         trace: Option<SelectionTraceSpec>,

@@ -44,15 +44,15 @@ impl<const REQUEST_COST: bool> WorkerScorer for CopyCreditScorer<REQUEST_COST> {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        let prepared = self.0.prepare(context, candidates)?;
+        let prepared = self.0.prepare(request, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
             *cost =
                 self.0
-                    .score_worker(&prepared, context, candidate, copyable_blocks(candidate))?;
+                    .score_worker(&prepared, request, candidate, copyable_blocks(candidate))?;
         }
         Ok(())
     }

@@ -14,7 +14,7 @@ impl WorkerScorer for UncachedBlocksScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -22,7 +22,7 @@ impl WorkerScorer for UncachedBlocksScorer {
             let cache = candidate
                 .cache()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-            *cost = (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            *cost = (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
         }
         Ok(())
     }

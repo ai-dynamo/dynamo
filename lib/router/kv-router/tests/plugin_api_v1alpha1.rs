@@ -29,11 +29,11 @@ impl WorkerFilter for ContractPolicy {
 
     fn keep(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
-        let _: Option<&SessionContext> = context.session_context();
-        let _: Option<u32> = context.expected_output_tokens();
+        let _: Option<&SessionContext> = request.session_context();
+        let _: Option<u32> = request.expected_output_tokens();
         let _: WorkerWithDpRank = candidate.worker();
         let cache = candidate.cache().expect("requested cache inputs");
         Ok(cache.device_overlap_blocks() + cache.host_overlap_blocks() >= 0.0)
@@ -47,13 +47,13 @@ impl WorkerScorer for ContractPolicy {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
-            let _: u64 = context.request_blocks();
-            let _: u32 = context.block_size();
+            let _: u64 = request.request_blocks();
+            let _: u32 = request.block_size();
             let load = candidate.load().expect("requested load inputs");
             *cost = load.active_requests() as f64 + load.decode_cost_blocks();
         }
@@ -64,7 +64,7 @@ impl WorkerScorer for ContractPolicy {
 impl WorkerPicker for ContractPolicy {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input
@@ -157,7 +157,7 @@ impl WorkerPicker for ActiveRequestsPicker {
 
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         (0..input.len())

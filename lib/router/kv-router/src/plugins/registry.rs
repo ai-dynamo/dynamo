@@ -407,8 +407,8 @@ mod tests {
     use dynamo_router_protocol::identity::RoutingPartitionRef;
     use dynamo_worker_selection::WorkerSelectionPolicyError;
     use dynamo_worker_selection::{
-        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-        WorkerSelectionPolicyContext,
+        WorkerInputView, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
+        WorkerSelectionRequest,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -440,7 +440,7 @@ mod tests {
     impl WorkerPicker for NeverPicker {
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             unreachable!("registry tests only construct policies")

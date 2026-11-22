@@ -22,7 +22,7 @@ use crate::runtime::RuntimePolicyState;
 use crate::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCacheInputs,
     WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionRequest,
 };
 use crate::{RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 
@@ -136,7 +136,7 @@ const ROW_BUFFERS: usize = 64;
 /// What a policy factory receives when the router builds a policy for one routing partition.
 ///
 /// It describes the partition, not a request: the value filters, scorers, and pickers read
-/// for each request is [`WorkerSelectionContext`].
+/// for each request is [`WorkerSelectionRequest`].
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerSelectionPolicyContext<'a> {
     selection_config: &'a SelectionConfig,
@@ -438,7 +438,7 @@ impl crate::host::WorkerSelectionPolicyHostExt for WorkerSelectionPolicy {
 
     fn select_rows<S: CandidateRowSource>(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         source: &S,
         prepared: Option<PreparedRows>,
         trace: Option<SelectionTraceSpec>,
@@ -460,18 +460,18 @@ impl crate::host::WorkerSelectionPolicyHostExt for WorkerSelectionPolicy {
             WorkerSelectionPolicyState::Composed(state) => state,
         };
         let mut state = state.borrow_mut();
-        let cache_snapshot = context.cache_snapshot();
+        let cache_snapshot = request.cache_snapshot();
         let has_eligible_worker = match prepared {
             Some(prepared) => {
                 // Whether any row is left once the kernel dropped full workers' rows.
                 let has_eligible_worker = !prepared.rows.is_empty();
-                state.adopt_prepared(context, &cache_snapshot, source, prepared)?;
+                state.adopt_prepared(request, &cache_snapshot, source, prepared)?;
                 has_eligible_worker
             }
-            None => state.collect_rows(context, &cache_snapshot, source)?,
+            None => state.collect_rows(request, &cache_snapshot, source)?,
         };
         state.pick(
-            context,
+            request,
             &cache_snapshot,
             source,
             self.worker_label,
@@ -569,7 +569,7 @@ impl ComposedPolicyState {
     /// the source yielded any row, so an empty table is attributed to the filters or the source.
     fn collect_rows<S: CandidateRowSource>(
         &mut self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         cache_snapshot: &CacheSnapshot<'_>,
         source: &S,
     ) -> Result<bool, SelectionFailure> {
@@ -580,7 +580,7 @@ impl ComposedPolicyState {
                 state: self,
                 inputs,
             });
-            self.score_candidates(context, cache_snapshot, source)?;
+            self.score_candidates(request, cache_snapshot, source)?;
             return Ok(!self.candidates.is_empty());
         }
 
@@ -588,7 +588,7 @@ impl ComposedPolicyState {
         let scorer_picker_inputs = self.scorer_picker_inputs;
         let mut visitor = FilterRows {
             state: self,
-            context,
+            request,
             cache_snapshot,
             filter_inputs,
             scorer_picker_inputs,
@@ -605,7 +605,7 @@ impl ComposedPolicyState {
         if let Some(error) = error {
             return Err(error.into());
         }
-        self.score_candidates(context, cache_snapshot, source)?;
+        self.score_candidates(request, cache_snapshot, source)?;
         Ok(has_eligible_worker)
     }
 
@@ -613,7 +613,7 @@ impl ComposedPolicyState {
     /// to selection, and score them.
     fn adopt_prepared<S: CandidateRowSource>(
         &mut self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         cache_snapshot: &CacheSnapshot<'_>,
         source: &S,
         mut prepared: PreparedRows,
@@ -664,12 +664,12 @@ impl ComposedPolicyState {
             // Picker-only policies keep no scorer rows.
             unscored_candidates.clear();
         }
-        self.score_candidates(context, cache_snapshot, source)
+        self.score_candidates(request, cache_snapshot, source)
     }
 
     fn score_candidates<S: CandidateRowSource>(
         &mut self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         cache_snapshot: &CacheSnapshot<'_>,
         source: &S,
     ) -> Result<(), SelectionFailure> {
@@ -693,7 +693,7 @@ impl ComposedPolicyState {
         for (scorer_index, (inputs, scorer)) in scorers.iter().enumerate() {
             score_contributions.fill(f64::NAN);
             scorer.score(
-                context,
+                request,
                 WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot, &info),
                 score_contributions,
             )?;
@@ -716,7 +716,7 @@ impl ComposedPolicyState {
 
     fn pick<S: CandidateRowSource>(
         &mut self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         cache_snapshot: &CacheSnapshot<'_>,
         source: &S,
         worker_label: &'static str,
@@ -786,10 +786,10 @@ impl ComposedPolicyState {
         let picker_input = picker_input.with_decode_progress(
             picker_inputs
                 .contains(WorkerInputs::DECODE_PROGRESS)
-                .then_some(context.decode_progress)
+                .then_some(request.decode_progress)
                 .flatten(),
         );
-        let row = picker.pick(context, picker_input)?;
+        let row = picker.pick(request, picker_input)?;
         let Some(candidate) = candidates.get(row) else {
             return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                 row,
@@ -797,9 +797,9 @@ impl ComposedPolicyState {
             }
             .into());
         };
-        log_scored_candidates(context.request_id(), worker_label, candidates, row);
+        log_scored_candidates(request.request_id(), worker_label, candidates, row);
         let trace = trace.map(|spec| {
-            build_selection_trace(candidates, row, context.pinned_worker().is_some(), spec)
+            build_selection_trace(candidates, row, request.pinned_worker().is_some(), spec)
         });
         Ok(RowPick {
             worker: candidate.worker,
@@ -829,7 +829,7 @@ impl RankVisitor for PushRows<'_> {
 /// materializes scorer inputs.
 struct FilterRows<'s, 'c> {
     state: &'s mut ComposedPolicyState,
-    context: &'s WorkerSelectionContext<'c>,
+    request: &'s WorkerSelectionRequest<'c>,
     cache_snapshot: &'s CacheSnapshot<'c>,
     filter_inputs: WorkerInputs,
     scorer_picker_inputs: WorkerInputs,
@@ -846,7 +846,7 @@ impl RankVisitor for FilterRows<'_, '_> {
         let info = |_: usize| WorkerInfo::new(filter_candidate.worker, rank.capacity());
         for (inputs, filter) in &self.state.filters {
             match filter.keep(
-                self.context,
+                self.request,
                 WorkerCandidate::new(&filter_candidate, *inputs, self.cache_snapshot, &info),
             ) {
                 Ok(true) => {}
@@ -1110,7 +1110,7 @@ mod selection_trace_tests {
 #[cfg(test)]
 mod row_source_tests {
     use super::*;
-    use crate::host::{WorkerSelectionContextHostExt, WorkerSelectionPolicyHostExt};
+    use crate::host::{WorkerSelectionPolicyHostExt, WorkerSelectionRequestHostExt};
     use crate::{WorkerCacheData, WorkerCapacity};
     use rustc_hash::FxHashMap;
     use std::cell::Cell;
@@ -1216,13 +1216,13 @@ mod row_source_tests {
         }
     }
 
-    fn context() -> WorkerSelectionContext<'static> {
-        let context = WorkerSelectionContext::new(64, 16)
+    fn request() -> WorkerSelectionRequest<'static> {
+        let request = WorkerSelectionRequest::new(64, 16)
             .with_request_id(Some("stage"))
             .with_prefill_tracking(true)
             .with_tier_matches(true);
-        assert_eq!(context.request_blocks(), 4);
-        context
+        assert_eq!(request.request_blocks(), 4);
+        request
     }
 
     fn rank(worker_id: u64, raw_cached_tokens: u32, device_overlap_blocks: f64) -> Rank {
@@ -1239,7 +1239,7 @@ mod row_source_tests {
     impl WorkerFilter for RejectWorker {
         fn keep(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             // A filter that declared nothing sees no columns.
@@ -1258,7 +1258,7 @@ mod row_source_tests {
 
         fn score(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -1274,7 +1274,7 @@ mod row_source_tests {
     impl WorkerPicker for LowestCostPicker {
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             input
@@ -1298,13 +1298,13 @@ mod row_source_tests {
 
         let empty = Table::new(Vec::new());
         assert!(matches!(
-            policy.select_rows(&context(), &empty, None, None),
+            policy.select_rows(&request(), &empty, None, None),
             Err(SelectionFailure::NoCandidates)
         ));
 
         let rejected = Table::new(vec![rank(0, 96, 6.0)]);
         assert!(matches!(
-            policy.select_rows(&context(), &rejected, None, None),
+            policy.select_rows(&request(), &rejected, None, None),
             Err(SelectionFailure::AllFiltered)
         ));
         // The rejected rank was built once, at the filter's inputs, and never again.
@@ -1324,7 +1324,7 @@ mod row_source_tests {
 
         let pick = policy
             .select_rows(
-                &context(),
+                &request(),
                 &table,
                 None,
                 Some(SelectionTraceSpec { top_k: 0 }),
@@ -1353,7 +1353,7 @@ mod row_source_tests {
 
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 let loads = input.load().expect("declared load inputs");
@@ -1404,7 +1404,7 @@ mod row_source_tests {
         let rows_before = table.rows_built.get();
 
         let pick = policy
-            .select_rows(&context(), &table, Some(prepared), None)
+            .select_rows(&request(), &table, Some(prepared), None)
             .unwrap();
 
         assert_eq!(pick.worker, WorkerWithDpRank::from_worker_id(1));
@@ -1432,7 +1432,7 @@ mod row_source_tests {
 
             fn keep(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 _candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 Ok(true)
@@ -1445,7 +1445,7 @@ mod row_source_tests {
 
             fn score(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 _candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
@@ -1465,7 +1465,7 @@ mod row_source_tests {
 
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert!(input.decode_progress(input.len()).is_none());
@@ -1501,7 +1501,7 @@ mod row_source_tests {
                 calls.borrow_mut().push(worker);
                 None
             };
-            let context = WorkerSelectionContext::new(64, 16)
+            let request = WorkerSelectionRequest::new(64, 16)
                 .with_decode_progress(has_source.then_some(&provider));
             let policy = WorkerSelectionPolicy::new_with_filters(
                 "test",
@@ -1510,7 +1510,7 @@ mod row_source_tests {
                 Box::new(ProgressPicker { inputs, reads }),
             );
             assert_eq!(policy.required_worker_inputs(), inputs, "{case}");
-            let pick = policy.select_rows(&context, &table, None, None).unwrap();
+            let pick = policy.select_rows(&request, &table, None, None).unwrap();
             assert_eq!(pick.worker, expected_worker, "{case}");
             assert_eq!(
                 *calls.borrow(),
@@ -1527,7 +1527,7 @@ mod row_source_tests {
         impl WorkerPicker for OutOfRange {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 Ok(input.candidates().len())
@@ -1538,7 +1538,7 @@ mod row_source_tests {
         let table = Table::new(vec![rank(0, 0, 0.0)]);
 
         assert!(matches!(
-            policy.select_rows(&context(), &table, None, None),
+            policy.select_rows(&request(), &table, None, None),
             Err(SelectionFailure::Policy(
                 WorkerSelectionPolicyError::InvalidPickerRow {
                     row: 1,

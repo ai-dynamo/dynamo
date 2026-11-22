@@ -30,11 +30,11 @@ impl WorkerScorer for RelativeLoadScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        assert_eq!(context.isl_tokens(), 17);
+        assert_eq!(request.isl_tokens(), 17);
         assert!(candidates.iter().all(|c| c.cache().is_none()));
         let mut ids: Vec<_> = candidates.iter().map(|c| c.worker().worker_id).collect();
         ids.sort_unstable();
@@ -58,7 +58,7 @@ struct ExcludeWorkerOne;
 impl WorkerFilter for ExcludeWorkerOne {
     fn keep(
         &self,
-        _: &WorkerSelectionContext<'_>,
+        _: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != 1)
@@ -69,7 +69,7 @@ struct InspectCosts(Arc<Mutex<Vec<Call>>>);
 impl WorkerPicker for InspectCosts {
     fn pick(
         &self,
-        _: &WorkerSelectionContext<'_>,
+        _: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         assert!(input.load().is_none());
@@ -148,7 +148,7 @@ struct FailScoring(Arc<Mutex<usize>>);
 impl WorkerScorer for FailScoring {
     fn score(
         &self,
-        _: &WorkerSelectionContext<'_>,
+        _: &WorkerSelectionRequest<'_>,
         _: WorkerCandidates<'_>,
         _: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -160,7 +160,7 @@ struct NeverPick;
 impl WorkerPicker for NeverPick {
     fn pick(
         &self,
-        _: &WorkerSelectionContext<'_>,
+        _: &WorkerSelectionRequest<'_>,
         _: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         panic!("failed or empty selections must stop before picking")
@@ -200,7 +200,7 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
     impl WorkerScorer for Constant {
         fn score(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -238,7 +238,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         }
         fn score(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -258,7 +258,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         }
         fn pick(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             let cache = input.cache().unwrap();
@@ -306,7 +306,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     impl WorkerScorer for Fill {
         fn score(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -318,7 +318,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     impl WorkerScorer for OmitOnSecondCall {
         fn score(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -332,7 +332,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     impl WorkerPicker for First {
         fn pick(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             assert!(input.candidates().iter().all(|c| c.cost() == 8.0));

@@ -1945,7 +1945,7 @@ mod tests {
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
     use dynamo_kv_router::plugins::worker_selection::{
         WorkerCandidate, WorkerCapacity, WorkerFilter, WorkerInputView, WorkerPicker,
-        WorkerSelectionContext, WorkerSelectionPolicyError,
+        WorkerSelectionPolicyError, WorkerSelectionRequest,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -2149,7 +2149,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             let row = input
@@ -2172,7 +2172,7 @@ mod tests {
     impl WorkerFilter for RejectAll {
         fn keep(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             Ok(false)
@@ -2188,7 +2188,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             unreachable!("capability construction test does not select a worker")
@@ -2204,7 +2204,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             unreachable!("capability construction test does not select a worker")
@@ -3319,7 +3319,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             *self.picked_tag.lock() = Some(self.tag);

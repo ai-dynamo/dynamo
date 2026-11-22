@@ -12,7 +12,7 @@ use super::shared_cache::SharedCacheHits;
 ///
 /// Holds values, not the request: the kernel builds it once per selection from the
 /// request it owns, so a policy sees exactly the fields the accessors expose.
-pub struct WorkerSelectionContext<'a> {
+pub struct WorkerSelectionRequest<'a> {
     pub(crate) decode_progress: Option<&'a super::host::DecodeProgressSource<'a>>,
     pub(crate) request_id: Option<&'a str>,
     pub(crate) isl_tokens: usize,
@@ -32,7 +32,7 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) preview: bool,
 }
 
-impl<'a> WorkerSelectionContext<'a> {
+impl<'a> WorkerSelectionRequest<'a> {
     /// Request-wide cache facts shared by every candidate row.
     #[inline]
     pub(crate) fn cache_snapshot(&self) -> CacheSnapshot<'a> {
@@ -141,7 +141,7 @@ impl<'a> WorkerSelectionContext<'a> {
     }
 }
 
-impl<'a> crate::host::WorkerSelectionContextHostExt<'a> for WorkerSelectionContext<'a> {
+impl<'a> crate::host::WorkerSelectionRequestHostExt<'a> for WorkerSelectionRequest<'a> {
     #[inline]
     fn new(isl_tokens: usize, block_size: u32) -> Self {
         Self {

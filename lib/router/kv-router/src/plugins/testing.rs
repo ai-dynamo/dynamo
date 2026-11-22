@@ -25,7 +25,7 @@
 //!
 //!     fn pick(
 //!         &self,
-//!         _context: &WorkerSelectionContext<'_>,
+//!         _request: &WorkerSelectionRequest<'_>,
 //!         input: WorkerInputView<'_>,
 //!     ) -> Result<usize, WorkerSelectionPolicyError> {
 //!         let loads = input.load().expect("declared LOAD");
@@ -231,7 +231,7 @@ impl SelectionCase {
         }
     }
 
-    /// The request ID `WorkerSelectionContext::request_id` returns.
+    /// The request ID `WorkerSelectionRequest::request_id` returns.
     pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request.mode = ScheduleMode::QueryOnly {
             request_id: Some(request_id.into()),
@@ -239,27 +239,27 @@ impl SelectionCase {
         self
     }
 
-    /// The session `WorkerSelectionContext::session_context` returns.
+    /// The session `WorkerSelectionRequest::session_context` returns.
     pub fn session_context(mut self, session_context: SessionContext) -> Self {
         self.request.session_context = Some(session_context);
         self
     }
 
     /// The worker a session binding or a classifier asked for, as
-    /// `WorkerSelectionContext::affinity_target` returns it.
+    /// `WorkerSelectionRequest::affinity_target` returns it.
     pub fn affinity_target(mut self, target: impl Into<WorkerAffinityTarget>) -> Self {
         self.request.affinity_target = Some(target.into());
         self
     }
 
-    /// The worker the request is pinned to, as `WorkerSelectionContext::pinned_worker`
+    /// The worker the request is pinned to, as `WorkerSelectionRequest::pinned_worker`
     /// returns it. The router offers the policy only this worker.
     pub fn pinned_worker(mut self, worker: WorkerWithDpRank) -> Self {
         self.request.pinned_worker = Some(worker);
         self
     }
 
-    /// The output length `WorkerSelectionContext::expected_output_tokens` returns.
+    /// The output length `WorkerSelectionRequest::expected_output_tokens` returns.
     pub fn expected_output_tokens(mut self, tokens: u32) -> Self {
         self.request.expected_output_tokens = Some(tokens);
         self
@@ -477,7 +477,7 @@ mod tests {
         impl WorkerPicker for Prefer {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 input

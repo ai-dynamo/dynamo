@@ -37,8 +37,8 @@ use dynamo_scheduler::{MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput
 use dynamo_scheduler::{TrackingHashContext, TrackingHashScope};
 use dynamo_worker_selection::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
-    WorkerSelectionPolicyError,
+    WorkerSelectionPolicy, WorkerSelectionPolicyContext, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 use tempfile::NamedTempFile;
 
@@ -82,7 +82,7 @@ struct WorkerIdScorer;
 impl WorkerScorer for WorkerIdScorer {
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -98,7 +98,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
@@ -116,7 +116,7 @@ struct NonFiniteScorer;
 impl WorkerScorer for NonFiniteScorer {
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -132,7 +132,7 @@ struct InvalidRowPicker;
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(input.candidates().len())
@@ -144,7 +144,7 @@ struct RejectAllFilter;
 impl WorkerFilter for RejectAllFilter {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(false)
@@ -156,7 +156,7 @@ struct RejectWorker(WorkerId);
 impl WorkerFilter for RejectWorker {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != self.0)

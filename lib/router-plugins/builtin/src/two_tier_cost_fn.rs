@@ -145,7 +145,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let cache = input
@@ -158,7 +158,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
                     WorkerSelectionPolicyError::failed("active request counts unavailable")
                 })?);
             }
-            select_row(&self.parameters, cache, load, context.request_blocks())
+            select_row(&self.parameters, cache, load, request.request_blocks())
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
         })
     }

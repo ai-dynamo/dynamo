@@ -92,14 +92,14 @@ impl DefaultPicker {
 impl WorkerPicker for DefaultPicker {
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
         if candidates.is_empty() {
             return Err(WorkerSelectionPolicyError::failed("no eligible worker"));
         }
-        if context.pinned_worker().is_some() {
+        if request.pinned_worker().is_some() {
             return Ok(0);
         }
         if self.temperature == 0.0 && self.rng.is_none() {

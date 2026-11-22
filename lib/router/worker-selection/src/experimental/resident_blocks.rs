@@ -30,8 +30,8 @@
 //! ```
 //! use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
 //! use dynamo_worker_selection::{
-//!     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-//!     WorkerSelectionPolicyError,
+//!     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
+//!     WorkerSelectionRequest,
 //! };
 //!
 //! /// Charges one unit per block a placement could evict.
@@ -44,7 +44,7 @@
 //!
 //!     fn score(
 //!         &self,
-//!         _context: &WorkerSelectionContext<'_>,
+//!         _request: &WorkerSelectionRequest<'_>,
 //!         candidates: WorkerCandidates<'_>,
 //!         costs: &mut [f64],
 //!     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -87,8 +87,8 @@
 //!     CacheOwnerCapacity, RESIDENT_BLOCKS, ResidentBlocks,
 //! };
 //! use dynamo_worker_selection::{
-//!     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-//!     WorkerSelectionPolicyError,
+//!     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
+//!     WorkerSelectionRequest,
 //! };
 //!
 //! /// Charges up to one unit for a full KVCR instance.
@@ -101,7 +101,7 @@
 //!
 //!     fn score(
 //!         &self,
-//!         _context: &WorkerSelectionContext<'_>,
+//!         _request: &WorkerSelectionRequest<'_>,
 //!         candidates: WorkerCandidates<'_>,
 //!         costs: &mut [f64],
 //!     ) -> Result<(), WorkerSelectionPolicyError> {

@@ -22,7 +22,7 @@ use dynamo_worker_selection::experimental::resident_blocks::{
     CacheOwnerCapacity, RESIDENT_BLOCKS, ResidentBlocksByRow,
 };
 use dynamo_worker_selection::{
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -946,12 +946,12 @@ impl dynamo_worker_selection::WorkerPicker for CapturingPicker {
 
     fn pick(
         &self,
-        context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+        request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
         input: dynamo_worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
-            session_context: context.session_context().cloned(),
-            affinity_target: context.affinity_target(),
+            session_context: request.session_context().cloned(),
+            affinity_target: request.affinity_target(),
             shared_beyond_device_blocks: input
                 .cache()
                 .expect("CACHE inputs requested")
@@ -1142,7 +1142,7 @@ impl WorkerPicker for ResidentBlocksRecorder {
 
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         self.observed.lock().push(input.resident_blocks(0));
@@ -4691,7 +4691,7 @@ mod hint_policies {
     };
     use dynamo_worker_selection::{
         WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-        WorkerSelectionContext, WorkerSelectionPolicyError,
+        WorkerSelectionPolicyError, WorkerSelectionRequest,
     };
 
     /// Scores each worker by its negated device overlap, so cache reuse wins.
@@ -4704,7 +4704,7 @@ mod hint_policies {
 
         fn score(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -4723,7 +4723,7 @@ mod hint_policies {
     impl WorkerPicker for LowestCostPicker {
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             Ok(input
@@ -4950,7 +4950,7 @@ mod hint_policies {
 
         fn score(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {

@@ -15,10 +15,10 @@ impl WorkerPicker for RequestAwarePicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        if context
+        if request
             .session_context()
             .and_then(|session| session.input_trigger())
             == Some(WorkerSelectionInputTrigger::ToolResult)

@@ -152,7 +152,7 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let load = input
@@ -164,7 +164,7 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
                 "load input does not match candidates",
             ));
         }
-        let session_id = context
+        let session_id = request
             .session_context()
             .map(|session| session.session_id());
         self.0

@@ -23,7 +23,7 @@ impl WorkerPicker for PrefillPicker {
     /// Returns the prefill candidate row with the lowest cost.
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         lowest_cost_row(input)
@@ -37,7 +37,7 @@ impl WorkerPicker for DecodePicker {
     /// Returns the decode candidate row with the lowest cost.
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         lowest_cost_row(input)
@@ -58,7 +58,7 @@ impl UnsupportedWorkerTypePicker {
 impl WorkerPicker for UnsupportedWorkerTypePicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Err(WorkerSelectionPolicyError::failed(format!(

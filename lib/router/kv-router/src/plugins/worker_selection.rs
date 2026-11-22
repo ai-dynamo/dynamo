@@ -41,8 +41,8 @@ pub use dynamo_worker_selection::{
     SelectionTraceSpec, SharedCacheHits, SharedCacheType, WorkerCacheData, WorkerCacheInput,
     WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput,
     WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyContext, WorkerSelectionPolicyError,
+    WorkerPicker, WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyContext,
+    WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
 /// Factory that creates one worker-selection policy per routing partition.

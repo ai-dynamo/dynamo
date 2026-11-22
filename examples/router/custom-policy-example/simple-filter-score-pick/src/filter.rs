@@ -19,7 +19,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
     /// Keeps a candidate when its device overlap meets the minimum.
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate

@@ -25,7 +25,7 @@ use dynamo_kv_router::plugins::hint_policy::{
 };
 use dynamo_kv_router::plugins::worker_selection::{
     Commitments, WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::local_selection_core_with_host;
@@ -75,7 +75,7 @@ impl WorkerScorer for CopyCreditScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -91,9 +91,9 @@ impl WorkerScorer for CopyCreditScorer {
                 .kv_copy()
                 .and_then(|copy| copy.source_prefix_blocks())
                 .map_or(0.0, |blocks| (f64::from(blocks) - cached).max(0.0));
-            let uncached = (context.request_blocks() as f64 - cached).max(0.0);
+            let uncached = (request.request_blocks() as f64 - cached).max(0.0);
             *cost = uncached - self.copy_credit * copied
-                + load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.active_requests() as f64;
         }
         Ok(())
@@ -105,7 +105,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input

@@ -31,8 +31,8 @@ use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
 use dynamo_worker_selection::{
     SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError,
+    WorkerPicker, WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 use rustc_hash::FxHashMap;
 
@@ -68,7 +68,7 @@ struct KeepAllFilter;
 impl WorkerFilter for KeepAllFilter {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(true)
@@ -81,7 +81,7 @@ struct CapacityFilter;
 impl WorkerFilter for CapacityFilter {
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let info = candidate.info();
@@ -99,7 +99,7 @@ impl WorkerScorer for BenchScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -111,8 +111,8 @@ impl WorkerScorer for BenchScorer {
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
             let uncached_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = (uncached_blocks + load_blocks)
@@ -133,7 +133,7 @@ impl WorkerScorer for IgnoringPreferenceScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -145,8 +145,8 @@ impl WorkerScorer for IgnoringPreferenceScorer {
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
             let uncached_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = uncached_blocks + load_blocks;
@@ -165,7 +165,7 @@ impl WorkerScorer for ResidentBlocksScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -181,8 +181,8 @@ impl WorkerScorer for ResidentBlocksScorer {
                 WorkerSelectionPolicyError::failed("resident blocks input unavailable")
             })?;
             let uncached_blocks =
-                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                (request.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / request.block_size() as f64
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = uncached_blocks + load_blocks + resident_blocks as f64;
@@ -196,7 +196,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input

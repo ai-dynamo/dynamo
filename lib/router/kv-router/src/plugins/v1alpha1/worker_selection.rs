@@ -25,7 +25,7 @@ pub use crate::plugins::worker_selection::{
 };
 
 // The request a policy reads.
-pub use crate::plugins::worker_selection::{SharedCacheHits, WorkerSelectionContext};
+pub use crate::plugins::worker_selection::{SharedCacheHits, WorkerSelectionRequest};
 pub use dynamo_session_affinity::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, WorkerAffinityTarget,
 };

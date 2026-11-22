@@ -295,7 +295,7 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 - Prove that filter failures, all-filtered candidate sets, scorer failures, and invalid picker rows do not reserve a worker.
 - Benchmark stateful or input-heavy policies at the expected worker count.
 
-The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) lists the available context and worker signals.
+The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) lists the available request and worker signals.
 
 ## Try the Policies End to End With Mocker
 

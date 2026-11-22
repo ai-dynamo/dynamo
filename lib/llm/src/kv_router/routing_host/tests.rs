@@ -1924,7 +1924,7 @@ async fn decode_progress_collection_follows_picker_declaration() {
         DECODE_PROGRESS, DecodeProgressByRow,
     };
     use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
-        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionRequest,
     };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;
 
@@ -1942,7 +1942,7 @@ async fn decode_progress_collection_follows_picker_declaration() {
         }
         fn pick(
             &self,
-            _context: &WorkerSelectionContext<'_>,
+            _request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {

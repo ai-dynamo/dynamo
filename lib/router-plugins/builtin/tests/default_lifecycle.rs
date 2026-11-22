@@ -158,7 +158,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     impl WorkerScorer for FailOnce {
         fn score(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
@@ -173,7 +173,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     impl WorkerPicker for First {
         fn pick(
             &self,
-            _: &WorkerSelectionContext<'_>,
+            _: &WorkerSelectionRequest<'_>,
             _: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
             Ok(0)

@@ -272,7 +272,7 @@ mod tests {
     use super::*;
 
     /// Custom picker that records the expected output length observed in the
-    /// worker-selection context so tests can assert the value propagated from
+    /// worker-selection request so tests can assert the value propagated from
     /// the EPP request into the scheduling policy.
     #[derive(Clone)]
     struct ExpectedOutputRecorder(Arc<Mutex<Option<u32>>>);
@@ -287,10 +287,10 @@ mod tests {
     impl WorkerPicker for ExpectedOutputRecorder {
         fn pick(
             &self,
-            context: &WorkerSelectionContext<'_>,
+            request: &WorkerSelectionRequest<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.0.lock().unwrap() = context.expected_output_tokens();
+            *self.0.lock().unwrap() = request.expected_output_tokens();
             assert!(!input.candidates().is_empty());
             Ok(0)
         }
@@ -447,7 +447,7 @@ models:
         impl WorkerPicker for FirstEligiblePicker {
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert!(!input.candidates().is_empty());
@@ -740,9 +740,9 @@ worker_selection:
 
     /// Regression test for the scheduling-metadata propagation gap: a request
     /// that carries `expected_output_tokens` must forward the value all the way
-    /// into the worker-selection context, not silently drop it to `None`.
+    /// into the worker-selection request, not silently drop it to `None`.
     #[tokio::test]
-    async fn expected_output_tokens_reaches_worker_selection_context() {
+    async fn expected_output_tokens_reaches_worker_selection_request() {
         let (picker, recorded) = ExpectedOutputRecorder::new();
         let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
         std::fs::write(

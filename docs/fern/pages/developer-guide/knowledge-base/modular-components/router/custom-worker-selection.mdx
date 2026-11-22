@@ -38,8 +38,8 @@ To classify or reject requests before they enter the scheduling queue, or hold t
 
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
-| `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
-| `WorkerScorer` | Request context, all surviving workers, and an aligned output slice | One finite cost per worker | The rule ranks workers or adds a penalty |
+| `WorkerFilter` | The `WorkerSelectionRequest` and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
+| `WorkerScorer` | The `WorkerSelectionRequest`, all surviving workers, and an aligned output slice | One finite cost per worker | The rule ranks workers or adds a penalty |
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
 | Policy factory | One `WorkerSelectionPolicyContext`: the selection settings, worker type, and routing partition the policy is built for | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
@@ -51,7 +51,7 @@ A plugin crate depends on `dynamo-kv-router` alone and imports the module for th
 
 | Module | Public API | Compatibility |
 |---|---|---|
-| `plugins::v1alpha1::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, the request context, the picker's table, `WorkerSelectionPolicyContext`, `SelectionConfig`, factories, and everything in `plugins::v1alpha1` | Alpha: an item can change or move in a minor release. Each change is listed in the [deprecation notes](../../../../reference/general/releases/deprecations.mdx), and the previous path keeps resolving for one release where that is possible |
+| `plugins::v1alpha1::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, `WorkerSelectionRequest`, the picker's table, `WorkerSelectionPolicyContext`, `SelectionConfig`, factories, and everything in `plugins::v1alpha1` | Alpha: an item can change or move in a minor release. Each change is listed in the [deprecation notes](../../../../reference/general/releases/deprecations.mdx), and the previous path keeps resolving for one release where that is possible |
 | `plugins::v1alpha1::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, `RequestProgress`, its registration types, and everything in `plugins::v1alpha1` | Same |
 | `plugins::v1alpha1` | What both kinds share: `RouterPluginRegistry`, `WorkerInputs`, the rows both read (`WorkerCandidates`, `WorkerCandidate`, `WorkerLoadInput`, `WorkerCacheInput`), `WorkerInfo`, `SessionContext`, and the identity types. A crate that only registers plugins imports this | Same |
 | `plugins::experimental` | One submodule per API, imported by name: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy) in `resident_blocks`, [decode progress](#experimental-decode-progress) in `decode_progress`, the dispatch gate in `dispatch_gate`, and hint policies in `hints` | None: an item can change or be removed in any release |
@@ -117,7 +117,7 @@ This filter keeps workers with at least the configured number of device-resident
 
 ```rust
 use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
-    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
 struct MinimumDeviceOverlapFilter {
@@ -131,7 +131,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
 
     fn keep(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate
@@ -154,8 +154,8 @@ This scorer ranks workers by active requests above the batch minimum:
 
 ```rust
 use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 
 struct ActiveRequestsScorer;
@@ -167,7 +167,7 @@ impl WorkerScorer for ActiveRequestsScorer {
 
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -201,7 +201,7 @@ This picker selects the lowest-cost row:
 
 ```rust
 use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerInputView, WorkerPicker, WorkerSelectionPolicyError, WorkerSelectionRequest,
 };
 
 struct LowestCostPicker;
@@ -209,7 +209,7 @@ struct LowestCostPicker;
 impl WorkerPicker for LowestCostPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         input
@@ -282,7 +282,7 @@ Dynamo calls the returned factory once per routing partition and passes it one `
 | `partition()` | The model and routing group the policy is built for. Use it for distinct model or routing-group state |
 | `selection_config()` | The scoring and sampling settings of the model that partition serves. They can differ per model, because a worker's model card can replace the frontend's settings |
 
-The context describes the partition, not a request.
+The context describes the partition, not a request. Filters, scorers, and pickers read each request through `WorkerSelectionRequest`.
 
 ### Register the Policy
 
@@ -419,7 +419,9 @@ Worker identity and ordinary request metadata are always available. Dynamo calcu
 
 Routing cache resources start only if a component requests `CACHE` or a scorer requests `KV_COPY`. `serve_indexer`, `enable_session_prefix_index`, and the experimental `RESIDENT_BLOCKS` input require `CACHE`.
 
-### Request Context
+### Request
+
+Filters, scorers, and pickers receive each request as a `WorkerSelectionRequest`:
 
 | Accessor | Meaning |
 |---|---|
@@ -446,7 +448,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 | `agent_headers()` | Opaque coding-agent header names mapped to ordered lists of string values |
 
-`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across request and policy-context clones without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Connect an Agent Harness](../../../../use-cases/agents/session-ids.mdx#agent-headers) and [Trace an Agent Run](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
+`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across clones of the request and of the policy's view of it without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Connect an Agent Harness](../../../../use-cases/agents/session-ids.mdx#agent-headers) and [Trace an Agent Run](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
 
@@ -518,8 +520,8 @@ This scorer charges each worker for the prompt blocks it can neither reuse nor c
 
 ```rust
 use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionPolicyError,
+    WorkerSelectionRequest,
 };
 
 struct UncoveredPromptScorer;
@@ -531,7 +533,7 @@ impl WorkerScorer for UncoveredPromptScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -545,7 +547,7 @@ impl WorkerScorer for UncoveredPromptScorer {
                 .kv_copy()
                 .and_then(|copy| copy.source_prefix_blocks())
                 .map_or(0.0, f64::from);
-            *cost = (context.request_blocks() as f64 - cached.max(copyable)).max(0.0);
+            *cost = (request.request_blocks() as f64 - cached.max(copyable)).max(0.0);
         }
         Ok(())
     }
@@ -698,7 +700,7 @@ impl WorkerScorer for EvictionPressure {
 
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {

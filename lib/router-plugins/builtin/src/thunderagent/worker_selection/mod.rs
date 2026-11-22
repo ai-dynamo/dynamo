@@ -16,11 +16,11 @@ impl WorkerScorer for ThunderAgentScorer {
 
     fn score(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        let block_size = f64::from(context.block_size());
+        let block_size = f64::from(request.block_size());
         for (candidate, cost) in candidates.iter().zip(costs) {
             let load = candidate
                 .load()
@@ -36,11 +36,11 @@ struct ThunderAgentPicker;
 impl WorkerPicker for ThunderAgentPicker {
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
-        if let Some(target) = context.affinity_target()
+        if let Some(target) = request.affinity_target()
             && let Some(row) = candidates.iter().position(|candidate| {
                 candidate.worker().worker_id == target.worker_id
                     && target

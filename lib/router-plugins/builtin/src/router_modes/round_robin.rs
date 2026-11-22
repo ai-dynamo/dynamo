@@ -19,13 +19,13 @@ pub(super) struct RoundRobinPicker {
 impl WorkerPicker for RoundRobinPicker {
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         if input.is_empty() {
             return Err(no_candidates());
         }
-        let cursor = if context.is_preview() {
+        let cursor = if request.is_preview() {
             self.cursor.load(Ordering::Relaxed)
         } else {
             self.cursor.fetch_add(1, Ordering::Relaxed)

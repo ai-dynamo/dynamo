@@ -17,7 +17,7 @@ impl WorkerScorer for ActiveRequestsScorer {
     /// Find the batch minimum and write one relative load cost per worker.
     fn score(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {

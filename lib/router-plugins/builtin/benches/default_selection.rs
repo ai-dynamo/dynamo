@@ -168,7 +168,7 @@ impl WorkerScorer for LoadScorer {
     }
     fn score(
         &self,
-        _: &WorkerSelectionContext<'_>,
+        _: &WorkerSelectionRequest<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
@@ -183,7 +183,7 @@ struct MinimumPicker;
 impl WorkerPicker for MinimumPicker {
     fn pick(
         &self,
-        _: &WorkerSelectionContext<'_>,
+        _: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(input

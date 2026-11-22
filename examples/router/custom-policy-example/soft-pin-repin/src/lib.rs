@@ -46,7 +46,7 @@ impl WorkerPicker for SoftPinRepinPicker {
 
     fn pick(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
@@ -54,7 +54,7 @@ impl WorkerPicker for SoftPinRepinPicker {
             WorkerSelectionPolicyError::failed("active load input is unavailable")
         })?;
 
-        if let Some(target) = context.affinity_target()
+        if let Some(target) = request.affinity_target()
             && let Some(target_row) = candidates
                 .iter()
                 .zip(loads)

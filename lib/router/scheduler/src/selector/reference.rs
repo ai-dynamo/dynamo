@@ -9,7 +9,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use super::{
-    CandidateData, SelectionRowSource, WorkerInputs, WorkerSelectionContext, WorkerSelectionInput,
+    CandidateData, SelectionRowSource, WorkerInputs, WorkerSelectionInput, WorkerSelectionRequest,
     WorkerSelector, select_reference,
 };
 use crate::filter::RoutingEligibility;
@@ -204,7 +204,7 @@ fn default_row<C: WorkerConfigLike>(
 impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     fn worker_logit(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
         formula_name: &'static str,
@@ -218,7 +218,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         let device_overlap_blocks = cache.device_overlap_blocks;
         // Host and disk blocks already earn their own tier credit; the shared
         // cache extends the prefix from where the worker's ends.
-        let shared_beyond_local_blocks = context.shared_cache_hits().map_or(0, |hits| {
+        let shared_beyond_local_blocks = request.shared_cache_hits().map_or(0, |hits| {
             let local_blocks =
                 device_overlap_blocks + cache.host_overlap_blocks + cache.disk_overlap_blocks;
             hits.loadable_beyond(local_blocks.round().max(0.0) as u32)
@@ -230,16 +230,16 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
         let overlap_credit_decay =
-            if context.tracks_prefill_tokens() && weights.overlap_score_credit_decay > 0.0 {
+            if request.tracks_prefill_tokens() && weights.overlap_score_credit_decay > 0.0 {
                 let excess_active_prefill_blocks = load
                     .active_prefill_tokens()
                     .saturating_sub(default_context.min_active_prefill_tokens)
                     as f64
-                    / context.block_size() as f64;
+                    / request.block_size() as f64;
                 // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
                 // clamp so a worker at the load floor does not compute 0/0.
                 let normalized_prefill_load =
-                    excess_active_prefill_blocks / context.request_blocks().max(1) as f64;
+                    excess_active_prefill_blocks / request.request_blocks().max(1) as f64;
                 1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
             } else {
                 1.0
@@ -258,7 +258,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // conditional disagg leaves a positive overlap credit in place, prefer
         // cache-hot decode workers while still charging decode backlog.
         if self.worker_type == "decode"
-            && !context.tracks_prefill_tokens()
+            && !request.tracks_prefill_tokens()
             && weights.overlap_score_credit > 0.0
         {
             // Clamp at zero because downstream taint multipliers assume non-negative scores.
@@ -271,7 +271,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = context.request_id().unwrap_or("-"),
+                request_id = request.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -284,18 +284,18 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
 
         // Keep reference-only arithmetic out of public worker-input rows, including
         // benchmark builds: their layout must match the production plugin's inputs.
-        let raw_prefill_tokens = if context.tracks_prefill_tokens() {
+        let raw_prefill_tokens = if request.tracks_prefill_tokens() {
             if load.is_available() {
                 let cached_tokens = cache.estimated_cached_tokens;
-                let uncached_tokens = context.isl_tokens().saturating_sub(cached_tokens);
+                let uncached_tokens = request.isl_tokens().saturating_sub(cached_tokens);
                 (load.active_prefill_tokens() + uncached_tokens).saturating_add(cached_tokens)
             } else {
-                context.isl_tokens()
+                request.isl_tokens()
             }
         } else {
             0
         };
-        let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size() as f64;
+        let raw_prefill_blocks = raw_prefill_tokens as f64 / request.block_size() as f64;
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
@@ -308,7 +308,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
         // inside the macro so they cost nothing when DEBUG is disabled.
         if remote_blocks > 0 {
             tracing::debug!(
-                request_id = context.request_id().unwrap_or("-"),
+                request_id = request.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
@@ -325,7 +325,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
             );
         } else {
             tracing::debug!(
-                request_id = context.request_id().unwrap_or("-"),
+                request_id = request.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -345,11 +345,11 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
     #[inline]
     fn worker_cost(
         &self,
-        context: &WorkerSelectionContext<'_>,
+        request: &WorkerSelectionRequest<'_>,
         default_context: DefaultScoringContext,
         row: &CandidateData,
     ) -> f64 {
-        let base_score = self.worker_logit(context, default_context, row, "Formula");
+        let base_score = self.worker_logit(request, default_context, row, "Formula");
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
@@ -363,7 +363,7 @@ impl<C: Borrow<SelectionConfig>> DefaultWorkerScorer<C> {
 pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     scorer: &DefaultWorkerScorer<&SelectionConfig>,
     picker: &DefaultWorkerPicker,
-    context: &WorkerSelectionContext<'_>,
+    selection_request: &WorkerSelectionRequest<'_>,
     source: &SelectionRowSource<'_, C>,
 ) -> Option<(WorkerWithDpRank, f64)> {
     let workers = source.workers;
@@ -385,11 +385,11 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         );
         return Some((
             worker,
-            scorer.worker_logit(context, default_context, &row, "Pinned formula"),
+            scorer.worker_logit(selection_request, default_context, &row, "Pinned formula"),
         ));
     }
 
-    let temperature = context
+    let temperature = selection_request
         .router_temperature_override()
         .unwrap_or(scorer.kv_router_config.router_temperature);
     let get_score = |worker, config: &C| {
@@ -397,7 +397,7 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             .routing_constraints
             .preferred_taint_multiplier(config.taints());
         scorer.worker_cost(
-            context,
+            selection_request,
             default_context,
             &default_row(
                 source,
@@ -475,12 +475,12 @@ mod tests {
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
         let source = SelectionRowSource::new(request, &workers, request.eligibility(), block_size);
-        let context = source.context();
+        let selection_request = source.selection_request();
         let default_context =
             DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
-                &context,
+                &selection_request,
                 default_context,
                 &default_row(
                     &source,

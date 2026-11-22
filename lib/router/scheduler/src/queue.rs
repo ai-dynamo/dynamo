@@ -4450,7 +4450,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            _request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
             let (candidates, loads) = (input.candidates(), input.load().unwrap());
@@ -4475,7 +4475,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            _request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
             Ok(input
@@ -4497,7 +4497,7 @@ mod tests {
 
         fn pick(
             &self,
-            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            _request: &dynamo_worker_selection::WorkerSelectionRequest<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
             let candidates = input.candidates();
@@ -5638,7 +5638,7 @@ mod tests {
     async fn prepared_rows_read_decode_progress_at_actor_selection() {
         use dynamo_slot_tracker::host::DecodeProgressUpdate;
         use dynamo_worker_selection::{
-            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+            WorkerInputView, WorkerPicker, WorkerSelectionPolicy, WorkerSelectionRequest,
         };
 
         struct ProgressPicker;
@@ -5649,7 +5649,7 @@ mod tests {
 
             fn pick(
                 &self,
-                _context: &WorkerSelectionContext<'_>,
+                _request: &WorkerSelectionRequest<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, dynamo_worker_selection::host::WorkerSelectionPolicyError>
             {

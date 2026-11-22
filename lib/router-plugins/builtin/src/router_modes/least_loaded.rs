@@ -18,7 +18,7 @@ impl WorkerPicker for LeastLoadedPicker {
 
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         least_loaded(input.len(), active_requests(input), &mut ThreadRandom)

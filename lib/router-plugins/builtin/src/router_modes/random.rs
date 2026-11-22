@@ -14,7 +14,7 @@ pub(super) struct RandomPicker;
 impl WorkerPicker for RandomPicker {
     fn pick(
         &self,
-        _context: &WorkerSelectionContext<'_>,
+        _request: &WorkerSelectionRequest<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         random(input.len(), &mut ThreadRandom).ok_or_else(no_candidates)
