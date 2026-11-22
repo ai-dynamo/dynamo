@@ -8,11 +8,9 @@ use std::fmt;
 
 use dynamo_router_protocol::worker::WorkerId;
 
-use crate::host::WorkerSelectionContextHostExt;
-
 use crate::{
     ScoredWorkerCandidate, SelectionFailure, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerSelectionContext, WorkerSelectionPolicyError, host::WorkerSelectionContextHostExt,
 };
 
 /// Request metadata a routing host without the KV path supplies for one selection.
