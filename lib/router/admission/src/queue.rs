@@ -795,14 +795,15 @@ impl<T> PolicyClassQueue<T> {
             // Defer the scan until dispatch, when `is_dispatchable` is meaningful.
             // Re-peeking here also observes head changes from intervening `push_ready` calls.
             let plan = std::mem::take(&mut self.recheck);
-            self.recheck_shared(&plan, class_index, is_dispatchable);
             // The gate woke the queue or its hold timer fired: every held lane is asked again,
-            // after the capacity lanes below so that none is asked twice.
+            // after the shared group and the capacity lanes below. Taken first, so that a lane
+            // either of those files as held is not asked twice.
             let held = if plan.all {
                 std::mem::take(&mut self.gate_held)
             } else {
                 FxHashSet::default()
             };
+            self.recheck_shared(&plan, class_index, is_dispatchable);
             let Self {
                 config,
                 ready_by_lane,

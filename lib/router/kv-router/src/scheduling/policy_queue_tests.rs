@@ -531,6 +531,39 @@ fn capacity_recheck_skips_gate_held_lanes() {
 }
 
 #[test]
+fn full_recheck_asks_a_shared_lane_the_gate_now_holds_once() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "session");
+    let gate_holds = std::cell::Cell::new(false);
+    let asks = std::cell::Cell::new(0usize);
+    let predicate = |_: usize, _: &PolicyClassConfig, _: &&'static str| {
+        asks.set(asks.get() + 1);
+        if gate_holds.get() {
+            LaneCheck::Blocked(BlockReason::Gate)
+        } else {
+            LaneCheck::Blocked(BlockReason::SharedCapacity)
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::SharedCapacity)
+    );
+
+    // The gate's wake asks the shared group, which files the lane as held; the held lanes
+    // the same recheck asks are the ones held before it, so the lane is asked once.
+    gate_holds.set(true);
+    asks.set(0);
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asks.get(), 1);
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::Gate)
+    );
+}
+
+#[test]
 fn shared_group_stand_in_is_handed_on_when_it_is_cancelled() {
     // Three keyed lanes refused as SharedCapacity; the pinned lane keeps its own reason.
     let mut queue = PolicyQueue::new(&edf_profile());
