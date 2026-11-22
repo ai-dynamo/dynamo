@@ -660,7 +660,7 @@ mod tests {
                     futures::stream::iter(chunks),
                     Some(vec![dynamo_parsers::tool_calling::ToolDefinition {
                         name: "run_python".into(),
-                        parameters: Some(super::super::custom_tool_parameters()),
+                        parameters: Some(dynamo_protocols::types::custom_tool_parameters()),
                         strict: None,
                     }]),
                     None,
