@@ -243,7 +243,7 @@ class PlannerEnginePerfModel:
         max_kv_tokens = caps.max_kv_tokens or DEFAULT_MAX_KV_TOKENS
         return (max_num_batched_tokens, max_num_seqs, max_kv_tokens)
 
-    def _build_limits(self) -> Optional[Any]:
+    def _build_limits(self) -> Optional[EnginePerfLimits]:
         values = self._limit_values()
         if values is None:
             return None
@@ -252,7 +252,24 @@ class PlannerEnginePerfModel:
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_kv_tokens=max_kv_tokens,
+            decode_uses_batched_token_budget=self._decode_uses_batched_token_budget(),
         )
+
+    def _decode_uses_batched_token_budget(self) -> bool:
+        caps = self._capabilities
+        # Only an advertised vLLM budget bounds ordinary decode on this path.
+        if (
+            self._worker_type != "decode"
+            or self._config.backend != "vllm"
+            or caps is None
+            or caps.max_num_batched_tokens is None
+            or self._effective_speculative_nextn() > 0
+        ):
+            return False
+        role = (
+            self._configured_role() if self._config.ais_perf_model is not None else {}
+        )
+        return not (role.get("speculation") or role.get("nextn"))
 
     def _build_options(self) -> dict[str, int]:
         values = self._limit_values()
@@ -367,12 +384,12 @@ class PlannerEnginePerfModel:
         return config
 
     def _model_key(self) -> Optional[tuple[Any, ...]]:
-        values = self._limit_values()
-        if values is None:
+        limits = self._build_limits()
+        if limits is None:
             return None
         return (
             self._worker_type,
-            values,
+            limits,
             json.dumps(self._build_ais_config(), sort_keys=True, separators=(",", ":")),
         )
 

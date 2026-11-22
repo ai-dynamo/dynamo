@@ -43,6 +43,7 @@ class EnginePerfLimits:
     max_num_batched_tokens: int
     max_num_seqs: int
     max_kv_tokens: int
+    decode_uses_batched_token_budget: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -405,6 +406,12 @@ class AISCoreEnginePerfModel:
         accept_length = _normalized_accept_length(request.accept_length)
         context_length = _decode_context_length(request)
         max_batch = self._decode_max_batch(context_length)
+        if self._limits.decode_uses_batched_token_budget:
+            # Ordinary decode schedules one token per request on each rank.
+            max_batch = min(
+                max_batch,
+                self._limits.max_num_batched_tokens * self._attention_dp_size,
+            )
         if max_batch == 0:
             return None
 
