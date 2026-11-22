@@ -328,9 +328,14 @@ def test_template_is_checked_at_first_use_like_roles(adapter, tmp_path, wrong):
 # The decode deployment the profiler selected, as it writes it for the Planner.
 _DEPLOYMENT = {**_CONTENT, "worker_type": "decode", "tp": 2, "attention_dp": 1}
 
+# Default for _template_planner: carry a copy of _DEPLOYMENT. None carries none.
+_SELECTED = object()
 
-def _template_planner(tmp_path, content, deployment=_DEPLOYMENT):
+
+def _template_planner(tmp_path, content, deployment=_SELECTED):
     """Return a decode Planner config that takes its perf model from a template."""
+    if deployment is _SELECTED:
+        deployment = dict(_DEPLOYMENT)
     template = tmp_path / "template.yaml"
     template.write_text(yaml.safe_dump(content))
     return _planner(
