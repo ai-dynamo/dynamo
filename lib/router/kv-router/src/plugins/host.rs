@@ -15,9 +15,9 @@
 //!
 //! [`super::testing`] also reaches host operations: it resolves a registered type and builds
 //! the request and the progress reading a classifier is handed, so that a plugin's tests need
-//! not name this module. A plugin crate imports it only from its tests and benches. Like the
-//! rule for this module, that is a rule for plugin crates and a review item, not a
-//! compile-time check: both modules are public in every build.
+//! not name this module or a stage crate's `host` module. A plugin crate imports it only from
+//! its tests and benches. Like the rule for this module, that is a rule for plugin crates and
+//! a review item, not a compile-time check: both modules are public in every build.
 
 use dynamo_router_protocol::WorkerType;
 
