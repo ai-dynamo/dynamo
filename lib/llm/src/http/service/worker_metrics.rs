@@ -319,7 +319,7 @@ pub fn observe_first_token_gauges(tracker: &RequestTracker) {
 }
 
 /// Write avg ITL to per-worker last gauge using decode worker labels.
-/// Called at each output block boundary and from the Python binding path.
+/// Called from the Python binding path when the response stream ends.
 pub fn observe_finish_gauges(tracker: &RequestTracker) {
     let Some(worker_id) = tracker.decode_worker_id() else {
         return;
