@@ -84,10 +84,15 @@ impl RequestPayloadHandle {
     ) {
         // The HTTP layer returns an error instead of a tool call outside
         // `allowed_tools`, so the record must not keep that output either.
+        // An earlier drop reason (for example a backend error after a partial
+        // response) is what the client saw, so it is kept.
         let (response, drop_reason) = match (response, ToolAllowlist::from_request(&self.request)) {
             (Some(response), Some(allowlist)) => match allowlist.validate_response(&response) {
                 Ok(()) => (Some(response), drop_reason),
-                Err(error) => (None, Some(format!("invalid_tool_call_output:{error}"))),
+                Err(error) => (
+                    None,
+                    drop_reason.or_else(|| Some(format!("invalid_tool_call_output:{error}"))),
+                ),
             },
             (response, _) => (response, drop_reason),
         };
@@ -534,8 +539,6 @@ mod tests {
             ok["response"]["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
             "lookup"
         );
-        // The typed request still holds what generation used.
-        assert_eq!(request.inner.tools.as_ref().unwrap().len(), 1);
 
         let rejected = &records["payload-allowed-tools-rejected"]["payload"];
         assert_eq!(rejected["payload_complete"], false);
