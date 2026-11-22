@@ -605,7 +605,6 @@ class _Request:
     )
 
     def __init__(self, rid: str, context: Context) -> None:
-        # The native rid, and the Context its generate() received.
         self.rid = rid
         self.context = context
         self.chunks: list[Any] = []

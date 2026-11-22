@@ -1211,6 +1211,7 @@ async def test_abort_of_dropped_stream_is_safe_outside_the_event_loop(native):
         await engine.cleanup()
 
 
+@pytest.mark.timeout(5)
 async def test_overlapping_attempts_with_one_public_id_get_their_own_output(native):
     """A migrated retry keeps its public id and may run beside the attempt it
     replaces; each must get only its own engine output."""
@@ -1243,6 +1244,7 @@ async def test_overlapping_attempts_with_one_public_id_get_their_own_output(nati
         await engine.cleanup()
 
 
+@pytest.mark.timeout(5)
 async def test_aborting_a_failed_attempt_leaves_its_retry_running(native):
     native.respond = lambda request: []
     engine = make_engine()
@@ -1263,7 +1265,6 @@ async def test_aborting_a_failed_attempt_leaves_its_retry_running(native):
         await engine.abort(context("same-id", stopped=True))
         assert native.aborted == [first_rid]
         assert (await first)[-1]["finish_reason"] == "cancelled"
-        # Ending the first attempt removed only its own entries.
         assert list(engine._requests) == [second_rid]
         # A late abort for the ended attempt must not reach the live retry.
         await engine.abort(context("same-id", stopped=True))
