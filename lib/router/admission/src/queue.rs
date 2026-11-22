@@ -552,14 +552,6 @@ impl<T> PolicyClassQueue<T> {
             .chain(self.ready_by_lane.values().flat_map(|ready| ready.iter()))
     }
 
-    /// The root of the shared heap and of every lane, blocked or not.
-    fn roots(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
-        self.pending
-            .peek()
-            .into_iter()
-            .chain(self.ready_by_lane.values().filter_map(BinaryHeap::peek))
-    }
-
     fn lane(&self, lane: Option<LaneId>) -> Option<&BinaryHeap<PolicyQueueEntry<T>>> {
         match lane {
             None => Some(&self.pending),
@@ -1217,10 +1209,17 @@ impl<T> PolicyQueue<T> {
         &self,
         mut predicate: impl FnMut(usize, &PolicyClassConfig, &T) -> V,
     ) -> bool {
+        // Every root, the shared heap's and each lane's, blocked or not.
         self.classes.iter().enumerate().any(|(class_index, class)| {
-            class.roots().any(|root| {
-                predicate(class_index, &class.config, root.payload()).into() == LaneCheck::Dispatch
-            })
+            class
+                .pending
+                .peek()
+                .into_iter()
+                .chain(class.ready_by_lane.values().filter_map(BinaryHeap::peek))
+                .any(|root| {
+                    predicate(class_index, &class.config, root.payload()).into()
+                        == LaneCheck::Dispatch
+                })
         })
     }
 
