@@ -6,7 +6,7 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use dynamo_kv_hints::WorkerKvTransferKeys;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::host::SelectionTraceSpec;
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 use dynamo_router_policies::default_policy;
 use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -162,16 +162,17 @@ fn bench(c: &mut Criterion) {
 }
 
 struct LoadScorer(f64);
-impl dynamo_kv_router::plugins::v1alpha1::WorkerScorer for LoadScorer {
+impl dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerScorer for LoadScorer {
     fn required_worker_inputs(&self) -> dynamo_kv_router::plugins::v1alpha1::WorkerInputs {
         dynamo_kv_router::plugins::v1alpha1::WorkerInputs::LOAD
     }
     fn score(
         &self,
-        _: &dynamo_kv_router::plugins::v1alpha1::WorkerSelectionContext<'_>,
-        candidates: dynamo_kv_router::plugins::v1alpha1::WorkerCandidates<'_>,
+        _: &dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionContext<'_>,
+        candidates: dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerCandidates<'_>,
         costs: &mut [f64],
-    ) -> Result<(), dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicyError> {
+    ) -> Result<(), dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionPolicyError>
+    {
         for (candidate, cost) in candidates.iter().zip(costs) {
             *cost = candidate.load().unwrap().active_requests() as f64 * self.0;
         }
@@ -180,12 +181,15 @@ impl dynamo_kv_router::plugins::v1alpha1::WorkerScorer for LoadScorer {
 }
 
 struct MinimumPicker;
-impl dynamo_kv_router::plugins::v1alpha1::WorkerPicker for MinimumPicker {
+impl dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerPicker for MinimumPicker {
     fn pick(
         &self,
-        _: &dynamo_kv_router::plugins::v1alpha1::WorkerSelectionContext<'_>,
-        input: dynamo_kv_router::plugins::v1alpha1::WorkerInputView<'_>,
-    ) -> Result<usize, dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicyError> {
+        _: &dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionContext<'_>,
+        input: dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerInputView<'_>,
+    ) -> Result<
+        usize,
+        dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionPolicyError,
+    > {
         Ok(input
             .candidates()
             .iter()
@@ -209,14 +213,17 @@ fn stacked(c: &mut Criterion) {
             let scorers = (0..scorer_count)
                 .map(|index| {
                     Box::new(LoadScorer((index + 1) as f64))
-                        as Box<dyn dynamo_kv_router::plugins::v1alpha1::WorkerScorer>
+                        as Box<
+                            dyn dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerScorer,
+                        >
                 })
                 .collect();
-            let policy = dynamo_kv_router::plugins::v1alpha1::WorkerSelectionPolicy::new(
-                "prefill",
-                scorers,
-                Box::new(MinimumPicker),
-            );
+            let policy =
+                dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerSelectionPolicy::new(
+                    "prefill",
+                    scorers,
+                    Box::new(MinimumPicker),
+                );
             let mut select = || {
                 black_box(
                     policy
@@ -253,7 +260,7 @@ fn shared_cache(c: &mut Criterion) {
                         request.overlap.tier_overlap_blocks = Default::default();
                     }
                     request.shared_cache_hits = Some(
-                        dynamo_kv_router::plugins::v1alpha1::SharedCacheHits::from_ranges(
+                        dynamo_kv_router::plugins::v1alpha1::worker_selection::SharedCacheHits::from_ranges(
                             (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
                         ),
                     );

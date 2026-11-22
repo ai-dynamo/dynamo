@@ -6,15 +6,10 @@
 mod inputs;
 mod progress;
 pub mod runtime;
-mod view;
+use crate::placement::LaneKey;
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycle};
-#[cfg(test)]
-pub(crate) use view::NoWorkers;
-pub use view::{WorkerCacheView, WorkerLoadView, WorkerView};
-
-use crate::placement::LaneKey;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -27,6 +22,7 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
+use dynamo_worker_selection::WorkerCandidates;
 
 use crate::queue::QueueSnapshot;
 
@@ -118,7 +114,7 @@ impl ClassifyRequest {
 
     /// Router-wide busy thresholds, read when classification started. Selection skips a
     /// worker past them and rejects the request when none remains.
-    pub(crate) fn reject_thresholds(&self) -> BusyThresholds {
+    pub fn reject_thresholds(&self) -> BusyThresholds {
         self.reject_thresholds.unwrap_or_default()
     }
 
@@ -315,11 +311,11 @@ pub trait RequestClassifier: Send + 'static {
 
     /// `workers` covers every worker rank eligible for this request under its pin, allowed
     /// workers, availability, and routing constraints, in unspecified order, with the groups
-    /// [`Self::required_worker_inputs`] declares (`CACHE` and `LOAD`; other groups are
-    /// selection's and read as `None` here); it is empty when that is
-    /// [`WorkerInputs::NONE`]. Overloaded workers are included. Values come from the row
-    /// builder worker selection uses, so each group means the same thing here as in a filter
-    /// or scorer.
+    /// [`Self::required_worker_inputs`] declares; it is empty when that is
+    /// [`WorkerInputs::NONE`]. Overloaded workers are included. It is the same view of the same
+    /// rows that a worker-selection filter or scorer reads, so a value added to an input group
+    /// is readable here as well. A group that only a selection supplies (`KV_COPY`, resident
+    /// block counts) reads as `None`.
     ///
     /// The view is a snapshot taken for this call and is lent only for its duration: the host
     /// frees the rows when `classify` returns. Worker selection takes its own snapshot when it
@@ -330,7 +326,7 @@ pub trait RequestClassifier: Send + 'static {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         Ok(request)
     }

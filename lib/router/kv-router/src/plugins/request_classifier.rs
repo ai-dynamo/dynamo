@@ -15,7 +15,7 @@ pub use dynamo_admission::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
     ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
-    RequestProgress, RequestProgressUpdater, WorkerCacheView, WorkerLoadView, WorkerView,
+    RequestProgress, RequestProgressUpdater,
 };
 
 pub(crate) use config::RawRequestClassifierConfig;

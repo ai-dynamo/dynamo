@@ -15,8 +15,9 @@ use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
-    DispatchRecheck, RequestClassifier, WorkerView,
+    DispatchRecheck, RequestClassifier,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Client, Instance},
@@ -1922,7 +1923,7 @@ async fn decode_progress_collection_follows_picker_declaration() {
     use dynamo_kv_router::plugins::experimental::decode_progress::{
         DECODE_PROGRESS, DecodeProgressByRow,
     };
-    use dynamo_kv_router::plugins::v1alpha1::{
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::{
         WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;
@@ -2815,7 +2816,7 @@ impl RequestClassifier for RecordingClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(request)
@@ -2844,7 +2845,7 @@ impl RequestClassifier for BackendPriorityClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         request.set_backend_priority(self.0);
         Ok(request)
@@ -2904,7 +2905,7 @@ impl RequestClassifier for RejectingClassifier {
     fn classify(
         &mut self,
         _request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Err(Box::new(ClassifierRejected) as Box<ClassifierError>)
@@ -2978,7 +2979,7 @@ impl RequestClassifier for TypedRejectingClassifier {
     fn classify(
         &mut self,
         _request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Err(Box::new(
@@ -3221,7 +3222,7 @@ impl RequestClassifier for PausingClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // Held heads must wait in their own lanes, as ThunderAgent keys them.
         if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
@@ -3603,7 +3604,7 @@ impl RequestClassifier for TokenContractClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.classified
             .send((request.isl_tokens(), request.progress().clone()))

@@ -17,7 +17,8 @@ use dynamo_kv_router::plugins::host::{
     HostedSelectionRequest, HostedWorkerPicker, RouterPluginRegistryHostExt, RouterPlugins,
     SelectionFailure, WorkerSelectionPolicyHostExt,
 };
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
 struct ContractPolicy;
 
@@ -82,7 +83,7 @@ impl RequestClassifier for ContractClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let _: Option<&str> = request.request_id();
         let _: usize = request.isl_tokens();

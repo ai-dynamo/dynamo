@@ -8,7 +8,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 use picker::LowestCostPicker;
 use scorer::{ActiveRequestsScorer, UncachedBlocksScorer};
 

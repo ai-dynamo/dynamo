@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 use parking_lot::Mutex;
 
 /// Policy type selected under a `worker_selection` role.

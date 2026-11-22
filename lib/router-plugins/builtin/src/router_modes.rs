@@ -15,7 +15,7 @@ mod round_robin;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
 pub use least_loaded::LEAST_LOADED;
 pub use random::RANDOM;

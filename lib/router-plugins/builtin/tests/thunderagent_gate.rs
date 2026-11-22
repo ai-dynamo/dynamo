@@ -16,7 +16,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
-use dynamo_kv_router::plugins::v1alpha1::RequestClassifierContext;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::RequestClassifierContext;
 use dynamo_kv_router::plugins::v1alpha1::{WorkerCapacity, WorkerInfo};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::config::RouterQueuePolicy;

@@ -3543,8 +3543,6 @@ mod tests {
 
     use crate::OverlapSignals;
 
-    use crate::classifier_rows::ClassifierRows;
-
     use crate::kv_hints::KvTransferCandidates;
 
     use crate::protocols::WorkerSelectionResult;
@@ -3561,9 +3559,9 @@ mod tests {
 
     use crate::RefreshedOverlap;
 
-    use dynamo_admission::WorkerView;
     use dynamo_admission::{PolicyClassConfig, RouterQueuePolicy};
     use dynamo_slot_tracker::BusyThresholds;
+    use dynamo_worker_selection::WorkerCandidates;
     use std::num::NonZeroU32;
 
     use dynamo_slot_tracker::WorkerDpRange;
@@ -5112,7 +5110,7 @@ mod tests {
             fn classify(
                 &mut self,
                 request: ClassifyRequest,
-                _workers: &dyn WorkerView,
+                _workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 assert_eq!(request.sequence_hashes(), self.0.as_deref());
                 assert_eq!(request.pinned_worker(), Some(self.1));
@@ -5134,8 +5132,8 @@ mod tests {
             // The classification input owns its copy of the hashes and the pin.
             request.token_seq = Some(vec![99]);
             request.pinned_worker = None;
-            classifier
-                .classify(classified, &ClassifierRows(workers))
+            workers
+                .read(|workers| classifier.classify(classified, workers))
                 .unwrap();
             drop(request);
         }

@@ -63,7 +63,7 @@ mod tests {
     // `default_registry` and `with_defaults` are the host half of this crate: they set the host's
     // default policy, which only a host can do.
     use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
-    use dynamo_kv_router::plugins::v1alpha1::*;
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
     use super::*;
 

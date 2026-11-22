@@ -52,7 +52,10 @@ worker_selection:
         assert!(plugins.worker_selection().is_some());
         let factory = plugins.request_classifier().unwrap();
         let context =
-            dynamo_kv_router::plugins::v1alpha1::RequestClassifierContext::new(16, Vec::new);
+            dynamo_kv_router::plugins::v1alpha1::request_classifier::RequestClassifierContext::new(
+                16,
+                Vec::new,
+            );
         let _classifier = factory(context);
     }
 }

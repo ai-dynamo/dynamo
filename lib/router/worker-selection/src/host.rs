@@ -15,7 +15,7 @@ use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
 
 use crate::context::WorkerSelectionContext;
-use crate::inputs::{ResidentBlockSource, WorkerCopyInput, WorkerLoadInput};
+use crate::inputs::{ResidentBlockSource, WorkerCandidates, WorkerCopyInput, WorkerLoadInput};
 use crate::policy::{
     CandidatePreparer, CandidateRowSource, PreparedRows, RowPick, SelectionFailure,
 };
@@ -239,4 +239,11 @@ pub fn worker_copy_input(source_prefix_blocks: Option<u32>) -> WorkerCopyInput {
     WorkerCopyInput {
         source_prefix_blocks,
     }
+}
+
+/// A candidate view with no rows, for a request classifier that declared no worker inputs or
+/// a host that has no rows to lend it.
+#[inline]
+pub fn no_candidates() -> WorkerCandidates<'static> {
+    WorkerCandidates::empty()
 }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 use dynamo_kv_router::services::indexer::backend::test_util::flush;
 use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder, local_selection_core,
@@ -75,7 +75,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
         .unwrap();
     assert!(partition.scheduler().has_request("request"));
     // Replacing scorer/picker state must leave active reservations intact.
-    use dynamo_kv_router::plugins::v1alpha1::*;
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
     let control = partition.scheduler().policy_control();
     let initial = control.get().await.unwrap();
     control
@@ -98,7 +98,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 
 #[tokio::test]
 async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
-    use dynamo_kv_router::plugins::v1alpha1::*;
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
     let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
@@ -148,7 +148,7 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::plugins::v1alpha1::*;
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -203,7 +203,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
         .unwrap();
     assert!(matches!(
         partition.scheduler().policy_control().get().await,
-        Err(dynamo_kv_router::plugins::v1alpha1::RuntimePolicyError::Unsupported)
+        Err(dynamo_kv_router::plugins::v1alpha1::worker_selection::RuntimePolicyError::Unsupported)
     ));
     let error = core
         .select_and_reserve(reserve_request("request"))

@@ -30,7 +30,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
 /// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";

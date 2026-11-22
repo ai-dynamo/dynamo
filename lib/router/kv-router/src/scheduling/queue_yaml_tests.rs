@@ -12,7 +12,6 @@ use rustc_hash::FxHashMap;
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
-use dynamo_admission::host::ClassifyRequestHostExt;
 use dynamo_admission::{PolicyProfile, QueueSnapshot, RouterQueuePolicy};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};

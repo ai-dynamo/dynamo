@@ -51,15 +51,16 @@ reach the kernel and stage types through each owner's `host` module.
 ## Writing a Plugin
 
 A statically linked worker-selection policy or request classifier depends on this crate alone
-and imports `dynamo_kv_router::plugins::v1alpha1::*`, which lists every contract, signal view,
-identity type, and registry type a plugin names (`tests/plugin_api_v1alpha1.rs` is a policy and
-a classifier written against it).
+and imports the module for its kind: `dynamo_kv_router::plugins::v1alpha1::worker_selection::*`
+or `dynamo_kv_router::plugins::v1alpha1::request_classifier::*`. Each lists every contract,
+signal view, identity type, and registry type that kind of plugin names
+(`tests/plugin_api_v1alpha1.rs` is a policy and a classifier written against them).
 
 | Module | Holds | Compatibility |
 |---|---|---|
-| `plugins::v1alpha1` | The plugin API | Alpha: can change in a minor release; each change is listed in the release's deprecation notes |
+| `plugins::v1alpha1::{worker_selection, request_classifier}` | The plugin API, one module per kind of plugin; `plugins::v1alpha1` holds what both share, including the worker rows both read | Alpha: can change in a minor release; each change is listed in the release's deprecation notes |
 | `plugins::experimental` | The dispatch gate, hint policies, resident block counts, decode progress; one submodule each, imported by name | None: can change or be removed in any release |
-| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, and `classify_request` and `request_progress` for classifier tests; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
+| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, and `classify_request`, `no_workers`, and `request_progress` for classifier tests; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
 | `plugins::host` | What a routing host names to resolve and run plugins | Not for plugin crates |
 
 ## Features

@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::host::{RouterPluginRegistryHostExt, RouterPlugins};
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
 struct PassThrough;
 
@@ -13,7 +14,7 @@ impl RequestClassifier for PassThrough {
     fn classify(
         &mut self,
         request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         Ok(request)
     }

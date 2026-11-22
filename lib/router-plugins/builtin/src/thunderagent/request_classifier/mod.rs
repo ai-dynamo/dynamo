@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -186,7 +186,7 @@ impl RequestClassifier for ThunderAgentClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let Some(session) = request.session_context() else {
             return Ok(request);
@@ -270,31 +270,10 @@ mod tests {
     use dynamo_kv_router::plugins::experimental::dispatch_gate::{
         DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     };
-    use dynamo_kv_router::plugins::testing::classify_request;
-    use dynamo_kv_router::plugins::v1alpha1::*;
+    use dynamo_kv_router::plugins::testing::{classify_request, no_workers};
+    use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 
     use super::*;
-
-    /// A worker view with no rows: ThunderAgent's `classify` never reads the worker table.
-    struct NoWorkers;
-
-    impl WorkerView for NoWorkers {
-        fn len(&self) -> usize {
-            0
-        }
-
-        fn info(&self, _row: usize) -> Option<WorkerInfo> {
-            None
-        }
-
-        fn load(&self, _row: usize) -> Option<WorkerLoadView> {
-            None
-        }
-
-        fn cache(&self, _row: usize) -> Option<WorkerCacheView> {
-            None
-        }
-    }
 
     fn config() -> ThunderAgentConfig {
         ThunderAgentConfig {
@@ -383,18 +362,18 @@ mod tests {
 
         // A request without a session passes through untouched.
         let plain = classify_request(10, Some("plain"), None);
-        assert!(classifier.classify(plain, &NoWorkers).is_ok());
+        assert!(classifier.classify(plain, no_workers()).is_ok());
 
         let session_a = SessionContext::new("a".into(), None, None, None);
         let session_b = SessionContext::new("b".into(), None, None, None);
         assert!(
             classifier
-                .classify(session_request("a1", "a", 200), &NoWorkers)
+                .classify(session_request("a1", "a", 200), no_workers())
                 .is_ok()
         );
         assert!(
             classifier
-                .classify(session_request("b1", "b", 200), &NoWorkers)
+                .classify(session_request("b1", "b", 200), no_workers())
                 .is_ok()
         );
 
@@ -458,7 +437,7 @@ mod tests {
             None,
             Some(SessionContext::new("a".into(), None, None, None)),
         );
-        let error = classifier.classify(request, &NoWorkers).unwrap_err();
+        let error = classifier.classify(request, no_workers()).unwrap_err();
         assert!(error.to_string().contains("request ID"));
     }
 }

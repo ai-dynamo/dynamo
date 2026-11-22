@@ -36,7 +36,7 @@ plugin API:
 use dynamo_kv_router::plugins::experimental::decode_progress::{
     DECODE_PROGRESS, DecodeProgressByRow,
 };
-use dynamo_kv_router::plugins::v1alpha1::WorkerInputView;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerInputView;
 use std::time::Duration;
 
 // Return DECODE_PROGRESS from the picker's required_worker_inputs().

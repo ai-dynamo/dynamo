@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
 struct SoftPinRepinPicker {
     max_active_requests: usize,
@@ -24,7 +24,7 @@ impl SoftPinRepinPicker {
 
     fn least_loaded_row(
         candidates: &[ScoredWorkerCandidate],
-        loads: &[dynamo_kv_router::plugins::v1alpha1::WorkerLoadInput],
+        loads: &[dynamo_kv_router::plugins::v1alpha1::worker_selection::WorkerLoadInput],
         excluded_target: Option<WorkerAffinityTarget>,
     ) -> Option<usize> {
         candidates

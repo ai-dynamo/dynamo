@@ -181,6 +181,20 @@ impl<'a> WorkerCandidates<'a> {
         }
     }
 
+    /// A view with no rows: what a reader that declared no inputs receives, and what a host
+    /// with no rows to lend passes.
+    pub(crate) fn empty() -> WorkerCandidates<'static> {
+        const SNAPSHOT: CacheSnapshot<'static> = CacheSnapshot {
+            shared_hits: None,
+            has_tier_matches: false,
+            resident_blocks: None,
+        };
+        fn no_info(_row: usize) -> WorkerInfo {
+            unreachable!("a view with no rows has no worker to describe")
+        }
+        WorkerCandidates::new(&[], WorkerInputs::NONE, &SNAPSHOT, &no_info)
+    }
+
     #[inline]
     fn candidate(self, row: usize, data: &'a CandidateData) -> WorkerCandidate<'a> {
         WorkerCandidate {

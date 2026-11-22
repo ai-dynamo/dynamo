@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 use crate::classifier::{ClassificationOverrides, ClassifyRequest, RequestProgressUpdater};
 
-pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress, WorkerView};
+pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress};
 pub use crate::placement::LaneKey;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{
@@ -48,10 +48,6 @@ pub trait ClassifyRequestHostExt: Sized {
 
     /// The router-wide busy thresholds read when classification started.
     fn with_busy_thresholds(self, reject: BusyThresholds) -> Self;
-
-    /// Router-wide busy thresholds, read when classification started. Selection skips a
-    /// worker past them and rejects the request when none remains.
-    fn reject_thresholds(&self) -> BusyThresholds;
 
     /// The lane the classifier chose for the request within its class, when it chose one.
     fn lane_key(&self) -> Option<LaneKey>;
@@ -96,11 +92,6 @@ impl ClassifyRequestHostExt for ClassifyRequest {
     #[inline]
     fn with_busy_thresholds(self, reject: BusyThresholds) -> Self {
         ClassifyRequest::with_busy_thresholds(self, reject)
-    }
-
-    #[inline]
-    fn reject_thresholds(&self) -> BusyThresholds {
-        ClassifyRequest::reject_thresholds(self)
     }
 
     #[inline]

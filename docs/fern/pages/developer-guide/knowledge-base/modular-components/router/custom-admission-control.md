@@ -74,8 +74,8 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 ```rust
 use std::time::Duration;
 
-use dynamo_kv_router::plugins::v1alpha1::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
@@ -88,7 +88,7 @@ impl RequestClassifier for QueueBudget {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let deadline = request.ingress_at() + self.budget;
         if Instant::now() >= deadline {
@@ -115,9 +115,7 @@ Add the provider below the classifier in `classifier/src/lib.rs`. Dynamo calls i
 ```rust
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::v1alpha1::{
-    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError,
-};
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::{RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +145,7 @@ Expose a registration function from `classifier/src/lib.rs`:
 
 ```rust
 use dynamo_kv_router::plugins::v1alpha1::RouterPluginRegistry;
-use dynamo_kv_router::plugins::v1alpha1::RequestClassifierRegistryError;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::RequestClassifierRegistryError;
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -160,7 +158,7 @@ Call it from `catalog/src/lib.rs`:
 
 ```rust
 use dynamo_kv_router::plugins::v1alpha1::RouterPluginRegistry;
-use dynamo_kv_router::plugins::v1alpha1::RequestClassifierRegistryError;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::RequestClassifierRegistryError;
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -229,11 +227,11 @@ Each entry returned by `workers()` is the same `WorkerInfo` that [worker-selecti
 
 ### Worker Inputs
 
-A classifier can read the per-worker cache and load data that [worker-selection plugins](custom-worker-selection.mdx) receive. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
+A classifier reads workers through `WorkerCandidates`, the view a [worker-selection](custom-worker-selection.mdx) filter or scorer reads: one `WorkerCandidate` per eligible worker rank, with the same accessors. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
 
 ```rust
-use dynamo_kv_router::plugins::v1alpha1::{
-    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::{
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerCandidates,
 };
 use dynamo_kv_router::plugins::v1alpha1::WorkerInputs;
 
@@ -249,15 +247,16 @@ impl RequestClassifier for LoadAwareClass {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        workers: &dyn WorkerView,
+        workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // Count only observed loads, and require at least one.
-        let mut loads = (0..workers.len())
-            .filter_map(|row| workers.load(row))
-            .filter(|load| load.available)
+        let mut loads = workers
+            .iter()
+            .filter_map(|worker| worker.load())
+            .filter(|load| load.is_available())
             .peekable();
         let saturated = loads.peek().is_some()
-            && loads.all(|load| load.active_requests >= self.max_active_requests);
+            && loads.all(|load| load.active_requests() >= self.max_active_requests);
         if saturated {
             request.set_policy_class("batch");
         }
@@ -266,13 +265,13 @@ impl RequestClassifier for LoadAwareClass {
 }
 ```
 
-Dynamo builds these rows with the same code that worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` have the same meaning in both plugins. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
+The rows and their accessors are the ones worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` mean the same thing in both plugins, and a value added to a group is readable in both. See [Optional Worker Inputs](custom-worker-selection.mdx#optional-worker-inputs) for each accessor. A group that only a selection supplies, such as `KV_COPY`, reads as `None` in a classifier. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
 
 - Rows cover each worker rank that is eligible for the request, including overloaded workers. Row order is unspecified.
 - `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns. Do not treat a copy as current load when the request dispatches later.
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 
-Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the thresholds with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
+Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the request's `reject_thresholds()` with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
 
 ### Admission Decisions
 
@@ -308,7 +307,7 @@ impl RequestClassifier for SessionClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // One lane per session: a held turn waits behind its own session only.
         if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {

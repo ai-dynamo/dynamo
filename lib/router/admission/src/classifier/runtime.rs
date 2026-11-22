@@ -17,8 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
-
-use super::WorkerView;
+use dynamo_worker_selection::WorkerInputRows;
 
 /// Why classification did not produce a classified request. The kernel maps each variant
 /// to its own error; the stage never names the kernel's.
@@ -186,11 +185,11 @@ impl RequestClassifierRuntime {
     }
 
     /// `workers` holds the rows for the classifier's declared inputs. They are lent to
-    /// `classify` and freed when it returns, before the classification future is awaited.
+    /// `classify` as the view a worker-selection scorer reads.
     pub async fn classify_with(
         &self,
         mut request: ClassifyRequest,
-        workers: &dyn WorkerView,
+        workers: &WorkerInputRows,
     ) -> Result<ClassifyRequest, ClassificationError> {
         if self.shutdown.is_cancelled() {
             return Err(ClassificationError::Shutdown);
@@ -234,9 +233,11 @@ impl RequestClassifierRuntime {
             }
             // `classify` is synchronous and runs under the lock; a panic fails this request
             // and the same classifier instance keeps serving.
-            catch_unwind(AssertUnwindSafe(|| classifier.classify(request, workers)))
-                .map_err(|panic| ClassificationError::Panicked(panic_message(panic)))?
-                .map_err(|error| ClassificationError::Failed(Arc::from(error)))?
+            catch_unwind(AssertUnwindSafe(|| {
+                workers.read(|workers| classifier.classify(request, workers))
+            }))
+            .map_err(|panic| ClassificationError::Panicked(panic_message(panic)))?
+            .map_err(|error| ClassificationError::Failed(Arc::from(error)))?
         };
 
         if classified.classification_id != classification_id {
@@ -543,8 +544,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::classifier::{ClassifierError, NoWorkers, WorkerView};
+    use crate::classifier::ClassifierError;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_worker_selection::WorkerCandidates;
+    use dynamo_worker_selection::host::no_candidates;
 
     struct PassThrough;
 
@@ -558,7 +561,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 panic!("synchronous classifier panic");
@@ -578,7 +581,7 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
+            .classify_with(ClassifyRequest::new(1, 0), &WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -587,7 +590,7 @@ mod tests {
                 if message == "synchronous classifier panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0), &NoWorkers)
+            .classify_with(ClassifyRequest::new(2, 0), &WorkerInputRows::empty())
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -603,7 +606,7 @@ mod tests {
         fn classify(
             &mut self,
             _request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             Err(Box::new(TestClassifierError) as Box<ClassifierError>)
         }
@@ -615,7 +618,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(FailingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
+            .classify_with(ClassifyRequest::new(1, 0), &WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -631,7 +634,7 @@ mod tests {
         fn classify(
             &mut self,
             _request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             Ok(ClassifyRequest::new(2, 0))
         }
@@ -643,7 +646,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(ReplacingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), &NoWorkers)
+            .classify_with(ClassifyRequest::new(1, 0), &WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -676,7 +679,7 @@ mod tests {
             .with_request_id("request-1")
             .with_initial_policy_class("latency");
 
-        let result = PassThrough.classify(request, &NoWorkers).unwrap();
+        let result = PassThrough.classify(request, no_candidates()).unwrap();
 
         assert_eq!(result.request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));
@@ -715,7 +718,7 @@ mod tests {
         runtime
             .classify_with(
                 ClassifyRequest::new(1, 0).with_request_id("off-runtime-drop"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -732,7 +735,7 @@ mod tests {
         fn classify(
             &mut self,
             mut request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             request.set_scheduling_cost_tokens(7);
@@ -757,7 +760,7 @@ mod tests {
         runtime
             .classify_with(
                 ClassifyRequest::new(10, 10).with_request_id("request-1"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -782,7 +785,7 @@ mod tests {
         fn classify(
             &mut self,
             mut request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             request.set_backend_priority(-250);
             Ok(request)
@@ -794,10 +797,11 @@ mod tests {
         let runtime =
             RequestClassifierRuntime::new(Box::new(SetsBackendPriority), CancellationToken::new());
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
+        let workers = WorkerInputRows::empty();
         let classify = || {
             runtime.classify_with(
                 ClassifyRequest::new(10, 0).with_request_id("request-1"),
-                &NoWorkers,
+                &workers,
             )
         };
 
@@ -815,7 +819,7 @@ mod tests {
         let classified = runtime
             .classify_with(
                 ClassifyRequest::new(10, 0).with_request_id("request-1"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -836,7 +840,7 @@ mod tests {
         let first = runtime
             .classify_with(
                 ClassifyRequest::new(10, 10).with_request_id("request-1"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -848,7 +852,7 @@ mod tests {
         let retry = runtime
             .classify_with(
                 ClassifyRequest::new(20, 20).with_request_id("request-1"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -872,7 +876,7 @@ mod tests {
         let next = runtime
             .classify_with(
                 ClassifyRequest::new(3, 0).with_request_id("request-1"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -902,7 +906,7 @@ mod tests {
         let result = runtime
             .classify_with(
                 ClassifyRequest::new(4, 0).with_request_id("ghost"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await;
 
@@ -924,9 +928,10 @@ mod tests {
         );
         let lifecycle = runtime.begin_request("reused").unwrap();
         let guard = runtime.classifier.lock().await;
+        let workers = WorkerInputRows::empty();
         let mut stale = Box::pin(runtime.classify_with(
             ClassifyRequest::new(1, 0).with_request_id("reused"),
-            &NoWorkers,
+            &workers,
         ));
 
         // Poll once to guarantee the old call is waiting for the lock, then
@@ -946,7 +951,7 @@ mod tests {
         let replacement = runtime
             .classify_with(
                 ClassifyRequest::new(100, 0).with_request_id("reused"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -974,7 +979,7 @@ mod tests {
             ended_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("ended"),
-                    &NoWorkers,
+                    &WorkerInputRows::empty(),
                 )
                 .await
         });
@@ -1035,7 +1040,7 @@ mod tests {
         runtime
             .classify_with(
                 ClassifyRequest::new(40, 0).with_request_id("request-1"),
-                &NoWorkers,
+                &WorkerInputRows::empty(),
             )
             .await
             .unwrap();
@@ -1130,7 +1135,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             let _ = self
                 .observed
@@ -1188,7 +1193,7 @@ mod tests {
             classify_runtime
                 .classify_with(
                     ClassifyRequest::new(1, 0).with_request_id("reused"),
-                    &NoWorkers,
+                    &WorkerInputRows::empty(),
                 )
                 .await
         });

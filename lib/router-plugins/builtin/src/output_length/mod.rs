@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 use serde::Deserialize;
 
 use self::predictor::{Features, MAX_TOKENS, Predictor};
@@ -175,7 +175,7 @@ impl RequestClassifier for OutputLengthClassifier {
     fn classify(
         &mut self,
         mut request: ClassifyRequest,
-        _workers: &dyn WorkerView,
+        _workers: WorkerCandidates<'_>,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.predict(&mut request, Instant::now());
         Ok(request)

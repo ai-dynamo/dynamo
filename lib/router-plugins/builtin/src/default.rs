@@ -12,7 +12,7 @@ pub use parameters::KVCR_POLICY_TYPE;
 use parameters::PolicyParameters;
 pub(super) use parameters::register;
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
 

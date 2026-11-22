@@ -11,7 +11,7 @@
 //!
 //! ```
 //! use dynamo_kv_router::plugins::testing::{CaseWorker, SelectionCase};
-//! use dynamo_kv_router::plugins::v1alpha1::*;
+//! use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 //!
 //! struct FewestRequests;
 //!
@@ -45,8 +45,8 @@
 //! assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
 //! ```
 //!
-//! [`classify_request`] and [`request_progress`] build the inputs a request classifier's
-//! tests need.
+//! [`classify_request`], [`no_workers`], and [`request_progress`] build the inputs a request
+//! classifier's tests need.
 //!
 //! This module follows the stability of [`super::v1alpha1`].
 
@@ -62,7 +62,9 @@ use dynamo_scheduler::host::{
 };
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
-use dynamo_worker_selection::{WorkerSelectionPolicy, WorkerSelectionPolicyError};
+use dynamo_worker_selection::{
+    WorkerCandidates, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+};
 
 /// The signals one worker reports in a [`SelectionCase`]. Every value starts at zero or
 /// unreported; set the ones the policy under test reads.
@@ -323,4 +325,10 @@ pub fn classify_request(
 /// for a request the router has not updated.
 pub fn request_progress(context_tokens: usize) -> RequestProgress {
     dynamo_admission::host::request_progress(context_tokens).0
+}
+
+/// A worker view with no rows to pass to `RequestClassifier::classify`, as the router passes
+/// a classifier that declared no worker inputs.
+pub fn no_workers() -> WorkerCandidates<'static> {
+    dynamo_worker_selection::host::no_candidates()
 }

@@ -11,7 +11,6 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::classifier_rows::ClassifierRows;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
@@ -477,7 +476,7 @@ where
         // one entry per worker; the actor projects load again before selection.
         request.worker_loads = FxHashMap::default();
         classifier
-            .classify_with(classification, &ClassifierRows(workers))
+            .classify_with(classification, &workers)
             .await
             .map(Some)
             .map_err(KvSchedulerError::from)
@@ -871,11 +870,12 @@ mod tests {
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::types::{ScheduleMode, TierOverlapBlocks};
     use dynamo_admission::{
-        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, WorkerView,
+        ClassifierError, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     };
     use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
     use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_worker_selection::WorkerCandidates;
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1358,7 +1358,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             Ok(key_by_session(request))
         }
@@ -1370,7 +1370,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            _workers: &dyn WorkerView,
+            _workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             Ok(key_by_session(request))
         }
@@ -1640,7 +1640,7 @@ mod tests {
         fn classify(
             &mut self,
             request: ClassifyRequest,
-            workers: &dyn WorkerView,
+            workers: WorkerCandidates<'_>,
         ) -> Result<ClassifyRequest, Box<ClassifierError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert!(workers.is_empty());
@@ -1734,7 +1734,7 @@ mod tests {
             fn classify(
                 &mut self,
                 mut request: ClassifyRequest,
-                _workers: &dyn WorkerView,
+                _workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 assert_eq!(request.ingress_at(), self.0);
                 request.set_due_at(self.0 + Duration::from_secs(1));
@@ -1783,7 +1783,7 @@ mod tests {
             fn classify(
                 &mut self,
                 request: ClassifyRequest,
-                workers: &dyn WorkerView,
+                workers: WorkerCandidates<'_>,
             ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 // The queue's capacity check, run on the classifier's own rows.
                 let thresholds = BusyThresholds {
@@ -1791,19 +1791,20 @@ mod tests {
                     ..Default::default()
                 };
                 *self.0.lock() = Some(
-                    (0..workers.len())
-                        .map(|row| {
-                            let info = workers.info(row).expect("row in range");
-                            let load = workers.load(row).expect("LOAD was declared");
+                    workers
+                        .iter()
+                        .map(|worker| {
+                            let info = worker.info();
+                            let load = worker.load().expect("LOAD was declared");
                             (
                                 info.worker(),
-                                workers
-                                    .cache(row)
+                                worker
+                                    .cache()
                                     .expect("CACHE was declared")
-                                    .device_overlap_blocks,
-                                load.available,
-                                load.active_requests,
-                                thresholds.has_room(&load, info.capacity()),
+                                    .device_overlap_blocks(),
+                                load.is_available(),
+                                load.active_requests(),
+                                thresholds.has_room(load, info.capacity()),
                             )
                         })
                         .collect(),

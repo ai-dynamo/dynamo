@@ -3,7 +3,7 @@
 
 //! Load scorers for prefill and decode routing partitions.
 
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
 
 /// Scores prefill workers by active work and uncached request blocks.
 pub(crate) struct PrefillLoadScorer;

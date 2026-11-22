@@ -29,34 +29,13 @@ use dynamo_kv_router::plugins::experimental::dispatch_gate::{
     DispatchDecision, DispatchGate, DispatchHead,
 };
 use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
-use dynamo_kv_router::plugins::testing::classify_request;
-use dynamo_kv_router::plugins::v1alpha1::*;
+use dynamo_kv_router::plugins::testing::{classify_request, no_workers};
+use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 
 const BLOCK_SIZE: u32 = 64;
 const ISL: usize = 1_000;
 const HELD: usize = 1_000;
 const RETENTION: Duration = Duration::from_secs(3_600);
-
-/// A worker view with no rows: ThunderAgent's `classify` never reads the worker table.
-struct NoWorkers;
-
-impl WorkerView for NoWorkers {
-    fn len(&self) -> usize {
-        0
-    }
-
-    fn info(&self, _row: usize) -> Option<WorkerInfo> {
-        None
-    }
-
-    fn load(&self, _row: usize) -> Option<WorkerLoadView> {
-        None
-    }
-
-    fn cache(&self, _row: usize) -> Option<WorkerCacheView> {
-        None
-    }
-}
 
 fn worker(index: u64) -> WorkerWithDpRank {
     WorkerWithDpRank::new(index, 0)
@@ -141,7 +120,7 @@ request_classifier:
 fn classify(classifier: &mut dyn RequestClassifier, request_id: &str, session: &SessionContext) {
     let request = classify_request(ISL, Some(request_id), Some(session.clone()));
     classifier
-        .classify(request, &NoWorkers)
+        .classify(request, no_workers())
         .expect("classification succeeds");
 }
 
