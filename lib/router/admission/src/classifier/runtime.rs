@@ -545,9 +545,9 @@ mod tests {
 
     use super::*;
     use crate::classifier::ClassifierError;
+    use crate::host::ClassifyRequestHostExt;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_worker_selection::WorkerCandidates;
-    use dynamo_worker_selection::host::no_candidates;
 
     struct PassThrough;
 
@@ -679,7 +679,9 @@ mod tests {
             .with_request_id("request-1")
             .with_initial_policy_class("latency");
 
-        let result = PassThrough.classify(request, no_candidates()).unwrap();
+        let result = WorkerInputRows::empty()
+            .read(|workers| PassThrough.classify(request, workers))
+            .unwrap();
 
         assert_eq!(result.request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));

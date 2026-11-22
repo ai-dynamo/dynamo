@@ -44,7 +44,8 @@ pub trait WorkerLoadInputExt: Sized {
     /// The `LOAD` row for `worker`: its projection in `loads` when the host observed one,
     /// otherwise `unobserved()` flagged unavailable. Worker selection, the policy-class
     /// queue, and offline replay all build rows here or in [`Self::from_observed`], so they
-    /// read the same row for the same worker by construction.
+    /// read the same row for the same worker. Each goes through
+    /// `dynamo_worker_selection::host::worker_load_input`, the one constructor of the row.
     fn for_worker(
         loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         worker: WorkerWithDpRank,

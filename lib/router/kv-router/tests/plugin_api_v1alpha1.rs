@@ -188,3 +188,152 @@ fn active_requests_pickers_select_through_the_hosted_api() {
     let _: Result<WorkerId, SelectionFailure> =
         picker.select(&[], None, &HostedSelectionRequest::new(0));
 }
+
+/// The test harness a plugin crate uses, exercised the way a plugin's own tests would.
+#[cfg(feature = "plugin-testing")]
+mod harness {
+    use std::sync::Arc;
+
+    use dynamo_kv_router::plugins::testing::{
+        CaseWorker, SelectionCase, classify, classify_request, registered_policy,
+    };
+    use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
+    use dynamo_kv_router::plugins::v1alpha1::worker_selection::*;
+
+    /// Marks a request `batch` when every observed worker is at or past a request count.
+    struct LoadAwareClassifier {
+        max_active_requests: usize,
+        rows_seen: usize,
+    }
+
+    impl RequestClassifier for LoadAwareClassifier {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::LOAD
+        }
+
+        fn classify(
+            &mut self,
+            mut request: ClassifyRequest,
+            workers: WorkerCandidates<'_>,
+        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            self.rows_seen = workers.len();
+            let mut loads = workers
+                .iter()
+                .filter_map(|worker| worker.load())
+                .filter(|load| load.is_available())
+                .peekable();
+            if loads.peek().is_some()
+                && loads.all(|load| load.active_requests() >= self.max_active_requests)
+            {
+                request.set_policy_class("batch");
+            }
+            Ok(request)
+        }
+    }
+
+    #[test]
+    fn a_classifier_reads_the_case_workers_through_the_selection_rows() {
+        let mut classifier = LoadAwareClassifier {
+            max_active_requests: 4,
+            rows_seen: 0,
+        };
+        let busy = SelectionCase::new(160, 16)
+            .worker(29, CaseWorker::new().active_requests(4))
+            .worker(41, CaseWorker::new().active_requests(9));
+        let classified = busy
+            .classify(&mut classifier, classify_request(160, Some("r1"), None))
+            .unwrap();
+        assert_eq!(classifier.rows_seen, 2);
+        assert_eq!(classified.policy_class(), Some("batch"));
+
+        let idle = SelectionCase::new(160, 16)
+            .worker(29, CaseWorker::new().active_requests(4))
+            .worker(41, CaseWorker::new().active_requests(1));
+        let classified = idle
+            .classify(&mut classifier, classify_request(160, Some("r2"), None))
+            .unwrap();
+        assert_eq!(classified.policy_class(), None);
+
+        // Without a case the classifier is lent no rows.
+        let classified = classify(&mut classifier, classify_request(160, None, None)).unwrap();
+        assert_eq!(classifier.rows_seen, 0);
+        assert_eq!(classified.policy_class(), None);
+    }
+
+    #[test]
+    fn a_registered_policy_is_built_from_its_parameters() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Parameters {
+            #[serde(default)]
+            prefer: u64,
+        }
+
+        struct Prefer(u64);
+        impl WorkerPicker for Prefer {
+            fn pick(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                input
+                    .candidates()
+                    .iter()
+                    .position(|candidate| candidate.worker().worker_id == self.0)
+                    .ok_or_else(|| WorkerSelectionPolicyError::failed("preferred worker absent"))
+            }
+        }
+
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection(
+                "prefer",
+                Arc::new(|parameters: &WorkerSelectionPolicyParameters| {
+                    let parameters: Parameters = parameters.deserialize()?;
+                    let factory: WorkerSelectionPolicyFactory =
+                        Arc::new(move |_config, worker_type, _partition| {
+                            WorkerSelectionPolicy::new(
+                                worker_type.as_str(),
+                                Vec::new(),
+                                Box::new(Prefer(parameters.prefer)),
+                            )
+                        });
+                    Ok(factory)
+                }),
+            )
+            .unwrap();
+
+        let policy = registered_policy(
+            &registry,
+            "prefer",
+            serde_json::json!({ "prefer": 41 }),
+            WorkerType::Aggregated,
+        )
+        .unwrap();
+        let selected = SelectionCase::new(16, 16)
+            .worker(29, CaseWorker::new())
+            .worker(41, CaseWorker::new())
+            .select(&policy)
+            .unwrap();
+        assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
+
+        assert!(matches!(
+            registered_policy(
+                &registry,
+                "prefer",
+                serde_json::json!({ "unknown": 1 }),
+                WorkerType::Aggregated,
+            ),
+            Err(WorkerSelectionPolicyRegistryError::Provider { .. })
+        ));
+        assert!(matches!(
+            registered_policy(
+                &registry,
+                "absent",
+                serde_json::Value::Null,
+                WorkerType::Aggregated,
+            ),
+            Err(WorkerSelectionPolicyRegistryError::UnknownType { .. })
+        ));
+    }
+}

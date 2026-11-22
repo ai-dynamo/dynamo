@@ -56,60 +56,11 @@ pub struct ClassificationOverrides {
 impl ClassifyRequest {
     #[cfg(test)]
     pub fn new(input_tokens: usize, initial_cached_tokens: usize) -> Self {
-        Self::with_timing(input_tokens, initial_cached_tokens, Instant::now())
-    }
-
-    pub(crate) fn with_timing(
-        input_tokens: usize,
-        initial_cached_tokens: usize,
-        ingress_at: Instant,
-    ) -> Self {
-        Self {
-            classification_id: 0,
-            request_id: None,
-            policy_class: None,
-            overrides: ClassificationOverrides::default(),
-            ingress_at,
+        <Self as crate::host::ClassifyRequestHostExt>::with_timing(
             input_tokens,
             initial_cached_tokens,
-            sequence_hashes: None,
-            progress: RequestProgress::new(input_tokens).0,
-            session_context: None,
-            pinned_worker: None,
-            reject_thresholds: None,
-        }
-    }
-
-    pub(crate) fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
-        self.request_id = Some(request_id.into());
-        self
-    }
-
-    pub(crate) fn with_initial_policy_class(mut self, policy_class: impl Into<String>) -> Self {
-        self.policy_class = Some(policy_class.into());
-        self
-    }
-
-    pub(crate) fn with_session_context(mut self, session_context: SessionContext) -> Self {
-        self.session_context = Some(session_context);
-        self
-    }
-
-    pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
-        self.pinned_worker = pinned_worker;
-        self
-    }
-
-    /// Copy tracking hashes into storage owned by this classification attempt.
-    pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
-        self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
-        self
-    }
-
-    /// The router-wide busy thresholds read when classification started.
-    pub(crate) fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
-        self.reject_thresholds = Some(reject);
-        self
+            Instant::now(),
+        )
     }
 
     /// Router-wide busy thresholds, read when classification started. Selection skips a
@@ -227,21 +178,66 @@ impl ClassifyRequest {
         self.overrides.lane_key = Some(LaneKey::new(key));
     }
 
-    /// The lane key set by [`Self::set_lane_key`], if any.
-    pub(crate) fn lane_key(&self) -> Option<LaneKey> {
-        self.overrides.lane_key
-    }
-
     /// Exact worker/rank required by the caller. A classifier's soft selection
     /// target cannot override this pin.
     pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
         self.pinned_worker
     }
+}
 
-    /// Only the explicit overrides feed the queue: cache eligibility is
-    /// recomputed from the current workers at enqueue, because worker state
-    /// may have changed while the classification was pending.
-    pub(crate) fn into_queue_inputs(self) -> ClassificationOverrides {
+impl crate::host::ClassifyRequestHostExt for ClassifyRequest {
+    fn with_timing(input_tokens: usize, initial_cached_tokens: usize, ingress_at: Instant) -> Self {
+        Self {
+            classification_id: 0,
+            request_id: None,
+            policy_class: None,
+            overrides: ClassificationOverrides::default(),
+            ingress_at,
+            input_tokens,
+            initial_cached_tokens,
+            sequence_hashes: None,
+            progress: RequestProgress::new(input_tokens).0,
+            session_context: None,
+            pinned_worker: None,
+            reject_thresholds: None,
+        }
+    }
+
+    fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    fn with_initial_policy_class(mut self, policy_class: impl Into<String>) -> Self {
+        self.policy_class = Some(policy_class.into());
+        self
+    }
+
+    fn with_session_context(mut self, session_context: SessionContext) -> Self {
+        self.session_context = Some(session_context);
+        self
+    }
+
+    fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+        self.pinned_worker = pinned_worker;
+        self
+    }
+
+    fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
+        self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
+        self
+    }
+
+    fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
+        self.reject_thresholds = Some(reject);
+        self
+    }
+
+    fn lane_key(&self) -> Option<LaneKey> {
+        self.overrides.lane_key
+    }
+
+    fn into_queue_inputs(self) -> ClassificationOverrides {
         self.overrides
     }
 }

@@ -8,6 +8,8 @@ use std::fmt;
 
 use dynamo_router_protocol::worker::WorkerId;
 
+use crate::host::WorkerSelectionContextHostExt;
+
 use crate::{
     ScoredWorkerCandidate, SelectionFailure, WorkerInputView, WorkerInputs, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicyError,
@@ -137,6 +139,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::host::WorkerSelectionPolicyHostExt;
     use crate::{
         RuntimePolicyError, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerScorer,
         WorkerSelectionPolicy,

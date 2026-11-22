@@ -678,8 +678,9 @@ fn worker_input_row(
     }
 }
 
-/// Build owned input rows for every worker rank that `eligibility` admits.
-pub(crate) fn worker_input_rows<C: WorkerConfigLike>(
+/// Build owned input rows for every worker rank that `eligibility` admits: the rows a request
+/// classifier reads, with the input groups it declared.
+pub fn worker_input_rows<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,

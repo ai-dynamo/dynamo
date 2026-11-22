@@ -103,33 +103,6 @@ pub enum WorkerSelectionPolicyRegistryError {
 }
 
 impl RouterPluginRegistry {
-    /// Supply the host default while preserving registered custom plugin types.
-    pub(crate) fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
-        self.default_factory = Some(factory);
-        self
-    }
-
-    /// Resolve every configured plugin once before constructing any routers.
-    pub(crate) fn resolve_plugins(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
-        self.hint_policies.check_hosts(|host| match host {
-            HintHost::AnyWorkerSelection => true,
-            HintHost::WorkerSelection(policy_type) => {
-                policy_type == "default" || self.providers.contains_key(policy_type)
-            }
-        })?;
-        Ok(super::RouterPlugins {
-            worker_selection: self.resolve(config)?,
-            custom_worker_selection: config
-                .selected_worker_selection_policy_instance()
-                .map_err(WorkerSelectionPolicyRegistryError::from)?
-                .is_some(),
-            request_classifier: self.resolve_request_classifier(config)?,
-        })
-    }
-
     /// Register a worker-selection provider through the common plugin catalog.
     pub fn register_worker_selection(
         &mut self,
@@ -159,14 +132,6 @@ impl RouterPluginRegistry {
         self.request_classifiers.register(name, provider)
     }
 
-    /// Resolve the configured request classifier once at frontend startup.
-    pub(crate) fn resolve_request_classifier(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
-        self.request_classifiers.resolve(config)
-    }
-
     /// Register a hint-policy type, a peer of worker-selection and request-classifier plugins,
     /// with its hosts: the worker-selection plugins it runs under by default.
     ///
@@ -186,59 +151,6 @@ impl RouterPluginRegistry {
         hosts: impl IntoIterator<Item = HintHost>,
     ) -> Result<(), HintPolicyRegistryError> {
         self.hint_policies.register(name, provider, hosts)
-    }
-
-    /// Resolve each role's hints once at startup, from its `worker_selection` entry. A role whose
-    /// entry lists no `hints` runs the hints registered as on by default for its policy type.
-    pub(crate) fn resolve_hint_policies(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
-        self.hint_policies.resolve(config)
-    }
-
-    /// Whether this image has no linked router plugin types.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.providers.is_empty()
-            && self.request_classifiers.is_empty()
-            && self.hint_policies.is_empty()
-    }
-
-    /// Resolve the configured policy instances once at process startup.
-    ///
-    /// Aggregated, prefill, decode, and encode pools can select separate instances. The returned
-    /// factory dispatches by the typed role that the host supplies for each worker pool.
-    pub(crate) fn resolve(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let selected = config.selected_worker_selection_policy_instances()?;
-        let policy_config = config.worker_selection_config().map_err(|source| {
-            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
-        })?;
-        self.resolve_selections(policy_config, selected)
-    }
-
-    /// Resolve only the policy selected for one worker role.
-    ///
-    /// Single-pool hosts use this method to avoid loading policy types for worker pools that they
-    /// do not construct.
-    pub(crate) fn resolve_for_worker_type(
-        &self,
-        config: &KvRouterConfig,
-        worker_type: WorkerType,
-    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let selected = config.selected_worker_selection_policy_instances()?;
-        let selected = match worker_type {
-            WorkerType::Aggregated => selected.aggregated,
-            WorkerType::Prefill => selected.prefill,
-            WorkerType::Decode => selected.decode,
-            WorkerType::Encode => selected.encode,
-        };
-        let policy_config = config.worker_selection_config().map_err(|source| {
-            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
-        })?;
-        self.resolve_selected(policy_config, selected.as_ref())
     }
 
     fn resolve_selections(
@@ -372,11 +284,12 @@ impl RouterPluginRegistry {
         }
     }
 
-    /// Build the factory for one registered policy type with default parameters, as a routing
-    /// mode names it (for example `round-robin`) without a policy file.
-    pub(crate) fn resolve_type(
+    /// Build the factory for one registered policy type from `parameters`, the mapping a policy
+    /// file would give it.
+    pub(crate) fn resolve_type_with(
         &self,
         policy_type: &str,
+        parameters: serde_yaml::Value,
     ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
         let provider = self.providers.get(policy_type).ok_or_else(|| {
             WorkerSelectionPolicyRegistryError::UnknownType {
@@ -384,12 +297,11 @@ impl RouterPluginRegistry {
                 available: self.available_policy_types(),
             }
         })?;
-        provider(&WorkerSelectionPolicyParameters::new(
-            serde_yaml::Value::Mapping(Default::default()),
-        ))
-        .map_err(|source| WorkerSelectionPolicyRegistryError::Provider {
-            policy_type: policy_type.to_owned(),
-            source,
+        provider(&WorkerSelectionPolicyParameters::new(parameters)).map_err(|source| {
+            WorkerSelectionPolicyRegistryError::Provider {
+                policy_type: policy_type.to_owned(),
+                source,
+            }
         })
     }
 
@@ -404,9 +316,93 @@ impl RouterPluginRegistry {
     }
 }
 
+impl crate::plugins::host::RouterPluginRegistryHostExt for RouterPluginRegistry {
+    fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
+        self.default_factory = Some(factory);
+        self
+    }
+
+    fn resolve_plugins(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
+        self.hint_policies.check_hosts(|host| match host {
+            HintHost::AnyWorkerSelection => true,
+            HintHost::WorkerSelection(policy_type) => {
+                policy_type == "default" || self.providers.contains_key(policy_type)
+            }
+        })?;
+        Ok(super::RouterPlugins {
+            worker_selection: self.resolve(config)?,
+            custom_worker_selection: config
+                .selected_worker_selection_policy_instance()
+                .map_err(WorkerSelectionPolicyRegistryError::from)?
+                .is_some(),
+            request_classifier: self.resolve_request_classifier(config)?,
+        })
+    }
+
+    fn resolve_request_classifier(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
+        self.request_classifiers.resolve(config)
+    }
+
+    fn resolve_hint_policies(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
+        self.hint_policies.resolve(config)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+            && self.request_classifiers.is_empty()
+            && self.hint_policies.is_empty()
+    }
+
+    fn resolve(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
+        let selected = config.selected_worker_selection_policy_instances()?;
+        let policy_config = config.worker_selection_config().map_err(|source| {
+            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
+        })?;
+        self.resolve_selections(policy_config, selected)
+    }
+
+    fn resolve_for_worker_type(
+        &self,
+        config: &KvRouterConfig,
+        worker_type: WorkerType,
+    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
+        let selected = config.selected_worker_selection_policy_instances()?;
+        let selected = match worker_type {
+            WorkerType::Aggregated => selected.aggregated,
+            WorkerType::Prefill => selected.prefill,
+            WorkerType::Decode => selected.decode,
+            WorkerType::Encode => selected.encode,
+        };
+        let policy_config = config.worker_selection_config().map_err(|source| {
+            crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
+        })?;
+        self.resolve_selected(policy_config, selected.as_ref())
+    }
+
+    fn resolve_type(
+        &self,
+        policy_type: &str,
+    ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
+        self.resolve_type_with(policy_type, serde_yaml::Value::Mapping(Default::default()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::host::RouterPluginRegistryHostExt;
     use crate::plugins::worker_selection::SelectionConfig;
     use dynamo_router_protocol::identity::RoutingPartitionRef;
     use dynamo_worker_selection::WorkerSelectionPolicyError;

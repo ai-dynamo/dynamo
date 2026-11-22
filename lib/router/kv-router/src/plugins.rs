@@ -104,7 +104,9 @@ impl RouterPlugins {
     }
 }
 
+/// Non-exhaustive: the `HintPolicy` variant carries an experimental type and can change.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RouterPluginRegistryError {
     #[error(transparent)]
     WorkerSelection(#[from] WorkerSelectionPolicyRegistryError),

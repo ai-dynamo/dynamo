@@ -17,10 +17,6 @@ pub use crate::plugins::request_classifier::{
     RequestClassifierContext, RequestClassifierFactory, RequestProgress,
 };
 
-// The router-wide busy thresholds `ClassifyRequest::reject_thresholds` returns; `has_room`
-// on them is the fullness check the router runs on a rank's load.
-pub use dynamo_slot_tracker::BusyThresholds;
-
 // Registration: the parameters a provider is built from, and its errors.
 pub use crate::plugins::request_classifier::{
     RequestClassifierParameters, RequestClassifierProvider, RequestClassifierProviderError,
@@ -29,7 +25,7 @@ pub use crate::plugins::request_classifier::{
 
 // What both contracts share, so that this module is the one import a plugin needs.
 pub use super::{
-    DpRank, RouterPluginRegistry, RouterPluginRegistryError, RoutingPartitionId,
+    BusyThresholds, DpRank, RouterPluginRegistry, RouterPluginRegistryError, RoutingPartitionId,
     RoutingPartitionRef, SessionContext, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
     WorkerCapacity, WorkerCopyInput, WorkerId, WorkerInfo, WorkerInputs, WorkerLoadInput,
     WorkerSelectionInputTrigger, WorkerType, WorkerWithDpRank,

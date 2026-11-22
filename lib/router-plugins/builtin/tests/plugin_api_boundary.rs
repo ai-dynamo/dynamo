@@ -84,8 +84,13 @@ fn plugin_crates_name_only_the_plugin_api() {
         rust_sources(&crate_dir.join("src"), &mut sources);
         for source in sources {
             let text = fs::read_to_string(&source).unwrap();
-            // Unit tests sit in a trailing `#[cfg(test)]` module and may name other crates.
-            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+            // Unit tests sit in a trailing `#[cfg(test)] mod` and may name other crates. A
+            // `#[cfg(test)]` on a single item does not end the scan.
+            let tests_at = text
+                .match_indices("#[cfg(test)]")
+                .find(|(at, marker)| text[at + marker.len()..].trim_start().starts_with("mod "))
+                .map_or(text.len(), |(at, _)| at);
+            let code = &text[..tests_at];
             for (number, line) in code.lines().enumerate() {
                 let line = line.split("//").next().unwrap_or_default();
                 for path in dynamo_paths(line) {

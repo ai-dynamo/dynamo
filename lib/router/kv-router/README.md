@@ -10,7 +10,8 @@ name.
 - `services::selection::{SelectionService, SelectionServiceBuilder}`: the composed router an
   embedding host or the standalone service runs
 - `plugins`: the plugin registry and the worker-selection and request-classifier contracts;
-  `plugins::v1alpha1` is the single import a plugin needs
+  `plugins::v1alpha1::worker_selection` or `plugins::v1alpha1::request_classifier` is the
+  single import a plugin needs
 - `config::KvRouterConfig` with its CLI, environment, and policy-file parsers, converted once
   into the kernel's validated configuration; `scheduling::policy_config` is the YAML policy file
 - `tracking_hash`: the tracking-hash key file read and the context built from the flat config
@@ -60,7 +61,7 @@ signal view, identity type, and registry type that kind of plugin names
 |---|---|---|
 | `plugins::v1alpha1::{worker_selection, request_classifier}` | The plugin API, one module per kind of plugin; `plugins::v1alpha1` holds what both share, including the worker rows both read | Alpha: can change in a minor release; each change is listed in the release's deprecation notes |
 | `plugins::experimental` | The dispatch gate, hint policies, resident block counts, decode progress; one submodule each, imported by name | None: can change or be removed in any release |
-| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, and `classify_request`, `no_workers`, and `request_progress` for classifier tests; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
+| `plugins::testing` | `SelectionCase`, which runs a policy over a described request and workers, `SelectionCase::classify`, `classify`, and `classify_request` for classifier tests, and `registered_policy` for registration tests; enable the `plugin-testing` feature from `[dev-dependencies]` | Same as `v1alpha1` |
 | `plugins::host` | What a routing host names to resolve and run plugins | Not for plugin crates |
 
 ## Features
@@ -89,6 +90,8 @@ Other features:
 - `metrics`: Prometheus metrics for router internals
 - `bench`: internal benchmarking helpers
 - `testing`: test-only hooks consumed by dependent crates' tests; never enable in release
+- `plugin-testing`: `plugins::testing`, the harness a plugin crate's tests run a policy or a
+  classifier through; enable it from `[dev-dependencies]`
 
 ## Testing the Services
 
@@ -109,17 +112,17 @@ cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
 kernel, or a vocabulary crate. The 1.7 paths keep resolving through 1.9 as deprecated named
 re-exports in `src/compat.rs` (plain structs warn with the new path) and are removed in 1.10;
 see the deprecations page. In-tree hosts import the owner's `host` module; plugins import
-`plugins::v1alpha1`.
+`plugins::v1alpha1::worker_selection` or `plugins::v1alpha1::request_classifier`.
 
 | Pre-split path | Owner |
 |---|---|
-| root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::v1alpha1`, or `config::` |
+| root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, the `plugins::v1alpha1` modules, or `config::` |
 | `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler` |
 | `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad` (this crate cannot see `lib/llm`, which publishes and reads the message) |
 | `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer`) |
 | `indexer::*`, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` (`host`, `cuckoo`, `api`) |
 | `sequences`, `multi_worker_sequence`, `sequence` | `dynamo_slot_tracker` (`host`) |
-| `scheduling::{queue, selector, overlap, overlap_refresh, prefill_load, protocols, router_config, shared_cache, tracking_hash, classifier_rows}` and its kernel re-exports | `dynamo_scheduler` (`host`) |
+| `scheduling::{queue, selector, overlap, overlap_refresh, prefill_load, protocols, router_config, shared_cache, tracking_hash}` and its kernel re-exports | `dynamo_scheduler` (`host`) |
 | `scheduling::{policy_queue, request_classifier, admission_config, queue_admission}` | `dynamo_admission` (`host`) |
 | `scheduling::lora_filter`, `conditional_disagg` | `dynamo_worker_selection` (`host`) |
 | `kv_hints` | `dynamo_kv_hints`, `dynamo_kv_indexer`, `dynamo_scheduler` |

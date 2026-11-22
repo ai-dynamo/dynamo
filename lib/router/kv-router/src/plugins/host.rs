@@ -47,9 +47,16 @@ pub use dynamo_worker_selection::host::WorkerSelectionPolicyHostExt;
 // Running resolved hint policies.
 pub use crate::plugins::hint_policy::{HintPolicyFactory, RoleHintPolicies};
 
+mod sealed {
+    /// Keeps the host traits implementable only here, so a method can be added to one.
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for RouterPluginRegistry {}
+
 /// What a routing host does with a [`RouterPluginRegistry`]: supply its default policy and
 /// resolve the plugins a configuration selects.
-pub trait RouterPluginRegistryHostExt: Sized {
+pub trait RouterPluginRegistryHostExt: sealed::Sealed + Sized {
     /// Supply the host default while preserving registered custom plugin types.
     fn with_default_factory(self, factory: WorkerSelectionPolicyFactory) -> Self;
 
@@ -100,57 +107,4 @@ pub trait RouterPluginRegistryHostExt: Sized {
         &self,
         config: &KvRouterConfig,
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError>;
-}
-
-impl RouterPluginRegistryHostExt for RouterPluginRegistry {
-    fn with_default_factory(self, factory: WorkerSelectionPolicyFactory) -> Self {
-        RouterPluginRegistry::with_default_factory(self, factory)
-    }
-
-    fn is_empty(&self) -> bool {
-        RouterPluginRegistry::is_empty(self)
-    }
-
-    fn resolve_plugins(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<RouterPlugins, RouterPluginRegistryError> {
-        RouterPluginRegistry::resolve_plugins(self, config)
-    }
-
-    fn resolve(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        RouterPluginRegistry::resolve(self, config)
-    }
-
-    fn resolve_for_worker_type(
-        &self,
-        config: &KvRouterConfig,
-        worker_type: WorkerType,
-    ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        RouterPluginRegistry::resolve_for_worker_type(self, config, worker_type)
-    }
-
-    fn resolve_type(
-        &self,
-        policy_type: &str,
-    ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
-        RouterPluginRegistry::resolve_type(self, policy_type)
-    }
-
-    fn resolve_request_classifier(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
-        RouterPluginRegistry::resolve_request_classifier(self, config)
-    }
-
-    fn resolve_hint_policies(
-        &self,
-        config: &KvRouterConfig,
-    ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
-        RouterPluginRegistry::resolve_hint_policies(self, config)
-    }
 }

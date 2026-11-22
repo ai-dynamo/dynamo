@@ -16,7 +16,9 @@ pub use crate::plugins::worker_selection::{
     WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
 };
 
-// Parameters a policy lets an operator change while it runs.
+// Parameters a policy lets an operator change while it runs. The update and the snapshot are
+// here, although a host applies them, so that a policy's tests can exercise its builder
+// through `WorkerSelectionPolicy::update_runtime_config`.
 pub use crate::plugins::worker_selection::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
@@ -40,7 +42,7 @@ pub use crate::plugins::{
 
 // What both contracts share, so that this module is the one import a plugin needs.
 pub use super::{
-    DpRank, RouterPluginRegistry, RouterPluginRegistryError, RoutingPartitionId,
+    BusyThresholds, DpRank, RouterPluginRegistry, RouterPluginRegistryError, RoutingPartitionId,
     RoutingPartitionRef, SessionContext, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
     WorkerCapacity, WorkerCopyInput, WorkerId, WorkerInfo, WorkerInputs, WorkerLoadInput,
     WorkerSelectionInputTrigger, WorkerType, WorkerWithDpRank,

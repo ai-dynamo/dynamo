@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # lib/router
 
-The Dynamo router as a set of small crates. Every arrow into a stage starts at the scheduler kernel: stages never message each other, the kernel carries one stage's output to the next as that stage's own input type, and `dynamo-kv-router` composes the result behind features.
+The Dynamo router as a set of small crates. Every arrow into a stage starts at the scheduler kernel: stages never message each other, the kernel carries one stage's output to the next as that stage's own input type, and `dynamo-kv-router` composes the result behind features. The one stage-to-stage type is the worker rows: a request classifier in `dynamo-admission` reads worker selection's `WorkerCandidates`, so both plugin kinds read the same worker inputs.
 
 ## The thirteen crates
 

@@ -270,7 +270,7 @@ mod tests {
     use dynamo_kv_router::plugins::experimental::dispatch_gate::{
         DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
     };
-    use dynamo_kv_router::plugins::testing::{classify_request, no_workers};
+    use dynamo_kv_router::plugins::testing::{classify, classify_request};
     use dynamo_kv_router::plugins::v1alpha1::request_classifier::*;
 
     use super::*;
@@ -362,20 +362,12 @@ mod tests {
 
         // A request without a session passes through untouched.
         let plain = classify_request(10, Some("plain"), None);
-        assert!(classifier.classify(plain, no_workers()).is_ok());
+        assert!(classify(&mut classifier, plain).is_ok());
 
         let session_a = SessionContext::new("a".into(), None, None, None);
         let session_b = SessionContext::new("b".into(), None, None, None);
-        assert!(
-            classifier
-                .classify(session_request("a1", "a", 200), no_workers())
-                .is_ok()
-        );
-        assert!(
-            classifier
-                .classify(session_request("b1", "b", 200), no_workers())
-                .is_ok()
-        );
+        assert!(classify(&mut classifier, session_request("a1", "a", 200)).is_ok());
+        assert!(classify(&mut classifier, session_request("b1", "b", 200)).is_ok());
 
         // a fits; b must wait for room, with a forced-dispatch time.
         assert_eq!(
@@ -437,7 +429,7 @@ mod tests {
             None,
             Some(SessionContext::new("a".into(), None, None, None)),
         );
-        let error = classifier.classify(request, no_workers()).unwrap_err();
+        let error = classify(&mut classifier, request).unwrap_err();
         assert!(error.to_string().contains("request ID"));
     }
 }

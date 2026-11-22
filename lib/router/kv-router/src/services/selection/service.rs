@@ -24,6 +24,7 @@ use dynamo_session_affinity::AffinityBindingEvent;
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
 use crate::plugins::RouterPluginRegistry;
+use crate::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_router_protocol::WorkerType;
 #[cfg(feature = "ingest-zmq")]
 use dynamo_scheduler::host::HostCache;

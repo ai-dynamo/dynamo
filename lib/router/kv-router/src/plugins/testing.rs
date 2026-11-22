@@ -45,26 +45,35 @@
 //! assert_eq!(selected, WorkerWithDpRank::from_worker_id(41));
 //! ```
 //!
-//! [`classify_request`], [`no_workers`], and [`request_progress`] build the inputs a request
-//! classifier's tests need.
+//! [`registered_policy`] builds a policy from a registered type name and parameters, for a
+//! registration test.
+//!
+//! For a request classifier, [`classify_request`] builds the request, [`classify`] runs the
+//! classifier with no worker rows, and [`SelectionCase::classify`] runs it over the case's
+//! workers when it declares worker inputs. [`request_progress`] builds a progress reading.
 //!
 //! This module follows the stability of [`super::v1alpha1`].
 
 use std::collections::HashMap;
 
 use dynamo_admission::host::ClassifyRequestHostExt;
-use dynamo_admission::{ClassifyRequest, RequestProgress};
+use dynamo_admission::{ClassifierError, ClassifyRequest, RequestClassifier, RequestProgress};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::columns::WorkerInputs;
+use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{
     AccountingAttribution, KvSchedulerError, OverlapSignals, RoutingConstraints, ScheduleMode,
-    SchedulingRequest, WorkerConfigLike, WorkerSelectionInput, WorkerSelector,
+    SchedulingRequest, WorkerConfigLike, WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{
-    WorkerCandidates, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    SelectionConfig, WorkerInputRows, WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
+
+use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
 
 /// The signals one worker reports in a [`SelectionCase`]. Every value starts at zero or
 /// unreported; set the ones the policy under test reads.
@@ -284,6 +293,27 @@ impl SelectionCase {
         );
     }
 
+    /// Run `classifier` on `request` with this case's workers as its worker view, built for
+    /// the input groups the classifier declares. The view holds every worker in the case.
+    pub fn classify<C: RequestClassifier + ?Sized>(
+        &self,
+        classifier: &mut C,
+        request: ClassifyRequest,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        let inputs = classifier.required_worker_inputs();
+        let rows = if inputs == WorkerInputs::NONE {
+            WorkerInputRows::empty()
+        } else {
+            worker_input_rows(
+                &self.workers,
+                &self.request,
+                self.request.eligibility(),
+                inputs,
+            )
+        };
+        rows.read(|workers| classifier.classify(request, workers))
+    }
+
     /// Run `policy` over this case and return the worker it picked.
     pub fn select(
         &self,
@@ -302,6 +332,28 @@ impl SelectionCase {
                 other => SelectionCaseError::NoWorker(other.to_string()),
             })
     }
+}
+
+/// Build the policy that `registry` registers under `policy_type`, for workers of
+/// `worker_type`, from `parameters`: the mapping a policy file would give that type. Use it to
+/// test that a plugin registers under its name and that its provider accepts or rejects
+/// parameters, without resolving a policy file.
+pub fn registered_policy(
+    registry: &RouterPluginRegistry,
+    policy_type: &str,
+    parameters: serde_json::Value,
+    worker_type: WorkerType,
+) -> Result<WorkerSelectionPolicy, WorkerSelectionPolicyRegistryError> {
+    let parameters = match parameters {
+        serde_json::Value::Null => serde_yaml::Value::Mapping(Default::default()),
+        parameters => serde_yaml::to_value(parameters).expect("JSON converts to YAML"),
+    };
+    let factory = registry.resolve_type_with(policy_type, parameters)?;
+    Ok(factory(
+        &SelectionConfig::default(),
+        worker_type,
+        RoutingPartitionRef::new("model", "default"),
+    ))
 }
 
 /// A request to hand to `RequestClassifier::classify`: `isl_tokens` prompt tokens with no
@@ -324,11 +376,16 @@ pub fn classify_request(
 /// A progress reading fixed at `context_tokens`, as `ClassifyRequest::progress` returns one
 /// for a request the router has not updated.
 pub fn request_progress(context_tokens: usize) -> RequestProgress {
-    dynamo_admission::host::request_progress(context_tokens).0
+    classify_request(context_tokens, None, None)
+        .progress()
+        .clone()
 }
 
-/// A worker view with no rows to pass to `RequestClassifier::classify`, as the router passes
-/// a classifier that declared no worker inputs.
-pub fn no_workers() -> WorkerCandidates<'static> {
-    dynamo_worker_selection::host::no_candidates()
+/// Run `classifier` on `request` with no worker rows, as the router does for a classifier that
+/// declares no worker inputs.
+pub fn classify<C: RequestClassifier + ?Sized>(
+    classifier: &mut C,
+    request: ClassifyRequest,
+) -> Result<ClassifyRequest, Box<ClassifierError>> {
+    WorkerInputRows::empty().read(|workers| classifier.classify(request, workers))
 }

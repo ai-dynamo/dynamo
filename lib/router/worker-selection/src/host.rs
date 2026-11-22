@@ -15,7 +15,7 @@ use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
 
 use crate::context::WorkerSelectionContext;
-use crate::inputs::{ResidentBlockSource, WorkerCandidates, WorkerCopyInput, WorkerLoadInput};
+use crate::inputs::{ResidentBlockSource, WorkerCopyInput, WorkerLoadInput};
 use crate::policy::{
     CandidatePreparer, CandidateRowSource, PreparedRows, RowPick, SelectionFailure,
 };
@@ -42,9 +42,17 @@ pub type DecodeProgressSource<'a> = dyn Fn(
     ) -> Option<dynamo_slot_tracker::host::DecodeProgress>
     + 'a;
 
+mod sealed {
+    /// Keeps the host traits implementable only here, so a method can be added to one.
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for WorkerSelectionContext<'_> {}
+impl sealed::Sealed for WorkerSelectionPolicy {}
+
 /// How the kernel builds the request view a policy reads. A plugin only reads a
 /// [`WorkerSelectionContext`]; its tests get one through `dynamo_kv_router::plugins::testing`.
-pub trait WorkerSelectionContextHostExt<'a>: Sized {
+pub trait WorkerSelectionContextHostExt<'a>: sealed::Sealed + Sized {
     /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
     /// field at its default. A `block_size` of 0, as hosted selection without the KV path
     /// supplies, reads as zero request blocks.
@@ -86,81 +94,9 @@ pub trait WorkerSelectionContextHostExt<'a>: Sized {
     fn with_decode_progress(self, progress: Option<&'a DecodeProgressSource<'a>>) -> Self;
 }
 
-impl<'a> WorkerSelectionContextHostExt<'a> for WorkerSelectionContext<'a> {
-    #[inline]
-    fn new(isl_tokens: usize, block_size: u32) -> Self {
-        WorkerSelectionContext::new(isl_tokens, block_size)
-    }
-
-    #[inline]
-    fn with_preview(self, preview: bool) -> Self {
-        WorkerSelectionContext::with_preview(self, preview)
-    }
-
-    #[inline]
-    fn with_request_id(self, request_id: Option<&'a str>) -> Self {
-        WorkerSelectionContext::with_request_id(self, request_id)
-    }
-
-    #[inline]
-    fn with_prefill_tracking(self, track_prefill_tokens: bool) -> Self {
-        WorkerSelectionContext::with_prefill_tracking(self, track_prefill_tokens)
-    }
-
-    #[inline]
-    fn with_pinned_worker(self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
-        WorkerSelectionContext::with_pinned_worker(self, pinned_worker)
-    }
-
-    #[inline]
-    fn with_router_temperature_override(self, temperature: Option<f64>) -> Self {
-        WorkerSelectionContext::with_router_temperature_override(self, temperature)
-    }
-
-    #[inline]
-    fn with_session_context(self, session_context: Option<&'a SessionContext>) -> Self {
-        WorkerSelectionContext::with_session_context(self, session_context)
-    }
-
-    #[inline]
-    fn with_affinity_target(self, affinity_target: Option<WorkerAffinityTarget>) -> Self {
-        WorkerSelectionContext::with_affinity_target(self, affinity_target)
-    }
-
-    #[inline]
-    fn with_expected_output_tokens(self, expected_output_tokens: Option<u32>) -> Self {
-        WorkerSelectionContext::with_expected_output_tokens(self, expected_output_tokens)
-    }
-
-    #[inline]
-    fn with_priority(self, priority_jump: f64, strict_priority: u32) -> Self {
-        WorkerSelectionContext::with_priority(self, priority_jump, strict_priority)
-    }
-
-    #[inline]
-    fn with_shared_cache_hits(self, shared_cache_hits: Option<&'a SharedCacheHits>) -> Self {
-        WorkerSelectionContext::with_shared_cache_hits(self, shared_cache_hits)
-    }
-
-    #[inline]
-    fn with_tier_matches(self, has_tier_matches: bool) -> Self {
-        WorkerSelectionContext::with_tier_matches(self, has_tier_matches)
-    }
-
-    #[inline]
-    fn with_resident_blocks(self, resident_blocks: Option<&'a dyn ResidentBlockSource>) -> Self {
-        WorkerSelectionContext::with_resident_blocks(self, resident_blocks)
-    }
-
-    #[inline]
-    fn with_decode_progress(self, progress: Option<&'a DecodeProgressSource<'a>>) -> Self {
-        WorkerSelectionContext::with_decode_progress(self, progress)
-    }
-}
-
 /// How the kernel runs a [`WorkerSelectionPolicy`] a plugin built: selection over candidate
 /// rows, row preparation, and the hosted picker.
-pub trait WorkerSelectionPolicyHostExt: Sized {
+pub trait WorkerSelectionPolicyHostExt: sealed::Sealed + Sized {
     /// A preparer for this policy's rows, when its rows depend only on the request and
     /// worker configuration until load inputs are filled. Filters are policy callbacks, so a
     /// policy with filters builds its rows at selection.
@@ -190,34 +126,6 @@ pub trait WorkerSelectionPolicyHostExt: Sized {
     fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self>;
 }
 
-impl WorkerSelectionPolicyHostExt for WorkerSelectionPolicy {
-    #[inline]
-    fn candidate_preparer(&self) -> Option<CandidatePreparer> {
-        WorkerSelectionPolicy::candidate_preparer(self)
-    }
-
-    #[inline]
-    fn accepts_prepared(&self, prepared: &PreparedRows) -> bool {
-        WorkerSelectionPolicy::accepts_prepared(self, prepared)
-    }
-
-    #[inline]
-    fn select_rows<S: CandidateRowSource>(
-        &self,
-        context: &WorkerSelectionContext<'_>,
-        source: &S,
-        prepared: Option<PreparedRows>,
-        trace: Option<SelectionTraceSpec>,
-    ) -> Result<RowPick, SelectionFailure> {
-        WorkerSelectionPolicy::select_rows(self, context, source, prepared, trace)
-    }
-
-    #[inline]
-    fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
-        WorkerSelectionPolicy::into_hosted_picker(self)
-    }
-}
-
 /// The `LOAD` row for one rank from its load projection. `observed` is false for a rank
 /// the host has no projection for, which a policy reads through
 /// [`WorkerLoadInput::is_available`].
@@ -239,11 +147,4 @@ pub fn worker_copy_input(source_prefix_blocks: Option<u32>) -> WorkerCopyInput {
     WorkerCopyInput {
         source_prefix_blocks,
     }
-}
-
-/// A candidate view with no rows, for a request classifier that declared no worker inputs or
-/// a host that has no rows to lend it.
-#[inline]
-pub fn no_candidates() -> WorkerCandidates<'static> {
-    WorkerCandidates::empty()
 }

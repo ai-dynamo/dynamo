@@ -328,10 +328,50 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    /// A preparer for this policy's rows, when its rows depend only on the request and
-    /// worker configuration until load inputs are filled. Filters are policy callbacks, so a
-    /// policy with filters builds its rows at selection.
-    pub(crate) fn candidate_preparer(&self) -> Option<CandidatePreparer> {
+    fn can_run_hosted(&self) -> bool {
+        if self.runtime.is_some() {
+            return false;
+        }
+        match &self.state {
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => false,
+            WorkerSelectionPolicyState::Composed(state) => {
+                let state = state.borrow();
+                state.filters.is_empty()
+                    && state.scorers.is_empty()
+                    && WorkerInputs::ACTIVE_REQUESTS.contains(state.picker_declared_inputs)
+            }
+        }
+    }
+
+    /// Construct the native reference implementation for parity tests and benchmarks.
+    ///
+    /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
+    /// [`dynamo_router_protocol::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
+    /// The kernel selects for it directly; `select_rows` reports a policy failure.
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    pub fn reference(kv_router_config: SelectionConfig, worker_label: &'static str) -> Self {
+        let picker = DefaultWorkerPicker::new();
+        Self {
+            worker_label,
+            exclusive_affinity: false,
+            runtime: None,
+            state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
+        }
+    }
+
+    /// The reference implementation's config and picker, for the kernel to select with.
+    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    pub fn reference_parts(&self) -> Option<(&SelectionConfig, &DefaultWorkerPicker)> {
+        match &self.state {
+            WorkerSelectionPolicyState::Reference(config, picker) => Some((config, picker)),
+            WorkerSelectionPolicyState::Composed(_) => None,
+        }
+    }
+}
+
+impl crate::host::WorkerSelectionPolicyHostExt for WorkerSelectionPolicy {
+    fn candidate_preparer(&self) -> Option<CandidatePreparer> {
         match &self.state {
             #[cfg(any(test, feature = "testing", feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => None,
@@ -345,9 +385,7 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    /// Whether `prepared` rows are usable by this policy: built by one that would build the
-    /// same rows, with the same inputs and without filters, which run as policy callbacks.
-    pub(crate) fn accepts_prepared(&self, prepared: &PreparedRows) -> bool {
+    fn accepts_prepared(&self, prepared: &PreparedRows) -> bool {
         match &self.state {
             #[cfg(any(test, feature = "testing", feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => false,
@@ -355,14 +393,7 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    /// Filter, score, and pick over the rows `source` yields.
-    ///
-    /// `prepared` rows, which must satisfy [`Self::accepts_prepared`], stand in for the
-    /// source's rows. Their load column is filled from `source` here, on the actor, so it
-    /// reflects bookings since preparation; after [`PreparedRows::keep_filled_loads`]
-    /// only the ranks it named are read from `source`. When `trace` is set, the pick
-    /// carries the retained per-candidate costs.
-    pub(crate) fn select_rows<S: CandidateRowSource>(
+    fn select_rows<S: CandidateRowSource>(
         &self,
         context: &WorkerSelectionContext<'_>,
         source: &S,
@@ -406,23 +437,7 @@ impl WorkerSelectionPolicy {
         )
     }
 
-    /// Take out this policy's picker for hosted selection, when the policy can run there:
-    /// it has no filters, no scorers and no runtime config, and its picker declares at
-    /// most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back unchanged.
-    ///
-    /// Passing this check doesn't make a policy run hosted: for now the hosts call it only
-    /// for the `--router-mode` types (random, round-robin, least-loaded), in
-    /// the routing host and as `PushRouter`'s instance selectors. A picker-only type named
-    /// in a policy file still runs on the KV path.
-    ///
-    /// The picker then serves every request for its role, so each factory call must build
-    /// a fresh one. Pins and session affinity are applied by the host before selection, so
-    /// [`Self::with_exclusive_affinity`] has no effect there.
-    #[expect(
-        clippy::result_large_err,
-        reason = "called once per role at startup, and the caller reuses the returned policy"
-    )]
-    pub(crate) fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
+    fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
         if !self.can_run_hosted() {
             return Err(self);
         }
@@ -443,47 +458,6 @@ impl WorkerSelectionPolicy {
             ..
         } = state.into_inner();
         Ok(HostedWorkerPicker::new(picker, picker_inputs))
-    }
-
-    fn can_run_hosted(&self) -> bool {
-        if self.runtime.is_some() {
-            return false;
-        }
-        match &self.state {
-            #[cfg(any(test, feature = "testing", feature = "bench"))]
-            WorkerSelectionPolicyState::Reference(..) => false,
-            WorkerSelectionPolicyState::Composed(state) => {
-                let state = state.borrow();
-                state.filters.is_empty()
-                    && state.scorers.is_empty()
-                    && WorkerInputs::ACTIVE_REQUESTS.contains(state.picker_declared_inputs)
-            }
-        }
-    }
-
-    /// Construct the native reference implementation for parity tests and benchmarks.
-    ///
-    /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
-    /// [`dynamo_router_protocol::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
-    /// The kernel selects for it directly; [`Self::select_rows`] reports a policy failure.
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
-    pub fn reference(kv_router_config: SelectionConfig, worker_label: &'static str) -> Self {
-        let picker = DefaultWorkerPicker::new();
-        Self {
-            worker_label,
-            exclusive_affinity: false,
-            runtime: None,
-            state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
-        }
-    }
-
-    /// The reference implementation's config and picker, for the kernel to select with.
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
-    pub fn reference_parts(&self) -> Option<(&SelectionConfig, &DefaultWorkerPicker)> {
-        match &self.state {
-            WorkerSelectionPolicyState::Reference(config, picker) => Some((config, picker)),
-            WorkerSelectionPolicyState::Composed(_) => None,
-        }
     }
 }
 
@@ -1093,6 +1067,7 @@ mod selection_trace_tests {
 #[cfg(test)]
 mod row_source_tests {
     use super::*;
+    use crate::host::{WorkerSelectionContextHostExt, WorkerSelectionPolicyHostExt};
     use crate::{WorkerCacheData, WorkerCapacity};
     use rustc_hash::FxHashMap;
     use std::cell::Cell;

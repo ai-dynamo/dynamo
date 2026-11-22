@@ -9,6 +9,7 @@ use super::*;
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
 use crate::plugins::RouterPluginRegistry;
+use crate::plugins::host::RouterPluginRegistryHostExt;
 use crate::plugins::worker_selection::WorkerInputs;
 use crate::scheduling::RouterPolicyConfig;
 use dynamo_router_protocol::identity::RoutingPartitionId;

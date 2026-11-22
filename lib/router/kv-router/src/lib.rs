@@ -7,9 +7,9 @@
 //! - [`services::selection`]: `SelectionService` and `SelectionServiceBuilder`, the composed
 //!   router an embedding host or the standalone service runs.
 //! - [`plugins`]: the plugin registry (`RouterPluginRegistry`, `RouterPlugins`) and the
-//!   worker-selection and request-classifier contracts; [`plugins::v1alpha1`] is the single
-//!   import a statically linked plugin needs, and [`plugins::experimental`] holds the APIs
-//!   with no compatibility guarantee.
+//!   worker-selection and request-classifier contracts; a statically linked plugin needs one
+//!   import, `plugins::v1alpha1::worker_selection` or `plugins::v1alpha1::request_classifier`,
+//!   and [`plugins::experimental`] holds the APIs with no compatibility guarantee.
 //! - [`config`]: the flat `KvRouterConfig` with its CLI, environment, and policy-file parsers,
 //!   converted once into the kernel's validated configuration; [`scheduling::policy_config`]
 //!   is the YAML policy file and its resolver.

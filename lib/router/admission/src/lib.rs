@@ -14,10 +14,10 @@
 //! set of worker inputs. The YAML policy file, the plugin registry, and the gate that judges
 //! "all eligible workers full" over the slot projection stay in `lib/router/kv-router`.
 //!
-//! Kernel-facing: the `ClassifyRequest` constructors, `ClassificationOverrides`, the
-//! `PolicyQueue` scheduling methods (`extract_next`, `settle`, `take_expired`), and
-//! `RequestClassifierRuntime` are public for the kernel in another crate; hosts and plugins do
-//! not call them. `QueueMetadata` is also what offline replay enqueues with.
+//! Kernel-facing: `host::ClassifyRequestHostExt` (building a `ClassifyRequest` and reading
+//! back what the classifier set), `ClassificationOverrides`, the `PolicyQueue` scheduling
+//! methods (`extract_next`, `settle`, `take_expired`), and `RequestClassifierRuntime` are
+//! public for the kernel in another crate; hosts and plugins do not call them. `QueueMetadata` is also what offline replay enqueues with.
 
 mod classifier;
 pub mod host;

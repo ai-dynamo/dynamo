@@ -33,145 +33,6 @@ pub struct WorkerSelectionContext<'a> {
 }
 
 impl<'a> WorkerSelectionContext<'a> {
-    /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
-    /// field at its default: no request id, no pin, no session, no affinity target, no
-    /// expected output length, zero priority, no shared-cache hits, no tier matches, no
-    /// resident block counts, not a preview, and prefill-load tracking off. The kernel sets
-    /// what the request carries with the `with_*` methods, which it reaches through
-    /// [`crate::host::WorkerSelectionContextHostExt`]. A `block_size` of 0, as hosted
-    /// selection without the KV path supplies, reads as zero request blocks.
-    #[inline]
-    pub(crate) fn new(isl_tokens: usize, block_size: u32) -> Self {
-        Self {
-            decode_progress: None,
-            request_id: None,
-            isl_tokens,
-            request_blocks: match block_size {
-                0 => 0,
-                block_size => isl_tokens.div_ceil(block_size as usize) as u64,
-            },
-            block_size,
-            track_prefill_tokens: false,
-            pinned_worker: None,
-            router_temperature_override: None,
-            session_context: None,
-            affinity_target: None,
-            expected_output_tokens: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            shared_cache_hits: None,
-            has_tier_matches: false,
-            resident_blocks: None,
-            preview: false,
-        }
-    }
-
-    /// Whether this selection only previews a worker, as a peek does; see
-    /// [`Self::is_preview`].
-    #[inline]
-    pub(crate) fn with_preview(mut self, preview: bool) -> Self {
-        self.preview = preview;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_request_id(mut self, request_id: Option<&'a str>) -> Self {
-        self.request_id = request_id;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_prefill_tracking(mut self, track_prefill_tokens: bool) -> Self {
-        self.track_prefill_tokens = track_prefill_tokens;
-        self
-    }
-
-    /// The exact worker and rank the host imposes: an explicit pin or an eligible
-    /// exclusive-affinity target.
-    #[inline]
-    pub(crate) fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
-        self.pinned_worker = pinned_worker;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
-        self.router_temperature_override = temperature;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_session_context(
-        mut self,
-        session_context: Option<&'a SessionContext>,
-    ) -> Self {
-        self.session_context = session_context;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_affinity_target(
-        mut self,
-        affinity_target: Option<WorkerAffinityTarget>,
-    ) -> Self {
-        self.affinity_target = affinity_target;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_expected_output_tokens(
-        mut self,
-        expected_output_tokens: Option<u32>,
-    ) -> Self {
-        self.expected_output_tokens = expected_output_tokens;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
-        self.priority_jump = priority_jump;
-        self.strict_priority = strict_priority;
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_shared_cache_hits(
-        mut self,
-        shared_cache_hits: Option<&'a SharedCacheHits>,
-    ) -> Self {
-        self.shared_cache_hits = shared_cache_hits;
-        self
-    }
-
-    /// Whether any rank reported per-tier overlap, so cache columns read device overlap
-    /// from the tier blocks rather than the effective estimate.
-    #[inline]
-    pub(crate) fn with_tier_matches(mut self, has_tier_matches: bool) -> Self {
-        self.has_tier_matches = has_tier_matches;
-        self
-    }
-
-    /// Per-rank resident block counts the host lends to this selection, read only by
-    /// components that declared `WorkerInputs::RESIDENT_BLOCKS`.
-    #[inline]
-    pub(crate) fn with_resident_blocks(
-        mut self,
-        resident_blocks: Option<&'a dyn ResidentBlockSource>,
-    ) -> Self {
-        self.resident_blocks = resident_blocks;
-        self
-    }
-
-    /// Lend a live worker lookup to pickers declaring the experimental decode-progress input.
-    /// The lookup is called only when the picker reads a candidate's progress.
-    pub(crate) fn with_decode_progress(
-        mut self,
-        progress: Option<&'a super::host::DecodeProgressSource<'a>>,
-    ) -> Self {
-        self.decode_progress = progress;
-        self
-    }
-
     /// Request-wide cache facts shared by every candidate row.
     #[inline]
     pub(crate) fn cache_snapshot(&self) -> CacheSnapshot<'a> {
@@ -277,5 +138,118 @@ impl<'a> WorkerSelectionContext<'a> {
     #[inline]
     pub fn is_preview(&self) -> bool {
         self.preview
+    }
+}
+
+impl<'a> crate::host::WorkerSelectionContextHostExt<'a> for WorkerSelectionContext<'a> {
+    #[inline]
+    fn new(isl_tokens: usize, block_size: u32) -> Self {
+        Self {
+            decode_progress: None,
+            request_id: None,
+            isl_tokens,
+            request_blocks: match block_size {
+                0 => 0,
+                block_size => isl_tokens.div_ceil(block_size as usize) as u64,
+            },
+            block_size,
+            track_prefill_tokens: false,
+            pinned_worker: None,
+            router_temperature_override: None,
+            session_context: None,
+            affinity_target: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            shared_cache_hits: None,
+            has_tier_matches: false,
+            resident_blocks: None,
+            preview: false,
+        }
+    }
+
+    #[inline]
+    fn with_preview(mut self, preview: bool) -> Self {
+        self.preview = preview;
+        self
+    }
+
+    #[inline]
+    fn with_request_id(mut self, request_id: Option<&'a str>) -> Self {
+        self.request_id = request_id;
+        self
+    }
+
+    #[inline]
+    fn with_prefill_tracking(mut self, track_prefill_tokens: bool) -> Self {
+        self.track_prefill_tokens = track_prefill_tokens;
+        self
+    }
+
+    #[inline]
+    fn with_pinned_worker(mut self, pinned_worker: Option<WorkerWithDpRank>) -> Self {
+        self.pinned_worker = pinned_worker;
+        self
+    }
+
+    #[inline]
+    fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
+        self.router_temperature_override = temperature;
+        self
+    }
+
+    #[inline]
+    fn with_session_context(mut self, session_context: Option<&'a SessionContext>) -> Self {
+        self.session_context = session_context;
+        self
+    }
+
+    #[inline]
+    fn with_affinity_target(mut self, affinity_target: Option<WorkerAffinityTarget>) -> Self {
+        self.affinity_target = affinity_target;
+        self
+    }
+
+    #[inline]
+    fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
+        self.expected_output_tokens = expected_output_tokens;
+        self
+    }
+
+    #[inline]
+    fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
+        self.priority_jump = priority_jump;
+        self.strict_priority = strict_priority;
+        self
+    }
+
+    #[inline]
+    fn with_shared_cache_hits(mut self, shared_cache_hits: Option<&'a SharedCacheHits>) -> Self {
+        self.shared_cache_hits = shared_cache_hits;
+        self
+    }
+
+    #[inline]
+    fn with_tier_matches(mut self, has_tier_matches: bool) -> Self {
+        self.has_tier_matches = has_tier_matches;
+        self
+    }
+
+    #[inline]
+    fn with_resident_blocks(
+        mut self,
+        resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    ) -> Self {
+        self.resident_blocks = resident_blocks;
+        self
+    }
+
+    #[inline]
+    fn with_decode_progress(
+        mut self,
+        progress: Option<&'a super::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
+        self
     }
 }
