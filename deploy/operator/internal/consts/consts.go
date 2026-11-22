@@ -244,7 +244,6 @@ const (
 	// Kai-scheduler related constants
 	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
-	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
 
 	// Volcano scheduler related constants
@@ -279,6 +278,7 @@ const (
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeploymentRun            = "DynamoGraphDeploymentRun"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
 
 	// Resource state constants - used in status reporting and metrics

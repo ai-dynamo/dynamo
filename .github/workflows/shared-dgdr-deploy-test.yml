@@ -41,6 +41,71 @@ on:
         required: false
 
 jobs:
+  dgdr-v1beta2-smoke:
+    name: CPU / v1beta2 smoke
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Save host kubeconfig for teardown
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          kubectl config view --raw --flatten > "${RUNNER_TEMP}/dgdr-smoke-host.kubeconfig"
+
+      # Keep this installation separate from the v1beta1 and backend deploy lanes.
+      - name: Install DGDR v1beta2 through Helm in a dedicated vCluster
+        id: setup
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: dgdr-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-dgdr-v2-dt
+          reset_existing: 'true'
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ inputs.operator_tag }}
+          dgdr_v1beta2_enabled: 'true'
+          planner_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ inputs.planner_image_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Connect to smoke-test vCluster
+        id: connect-vcluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+
+      - name: Run Request to Candidate smoke test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: ${{ inputs.dd_env }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          test_name: dgdr-v1beta2-smoke
+          test_file: tests/deploy/test_dgdr_v1beta2.py
+          cleanup_deployment: 'false'
+
+      - name: Teardown smoke-test vCluster
+        if: always() && steps.setup.outputs.vcluster_name != ''
+        uses: $/.github/actions/teardown-dynamo-operator
+        env:
+          KUBECONFIG: ${{ runner.temp }}/dgdr-smoke-host.kubeconfig
+        with:
+          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+
   ensure-vcluster:
     name: Ensure vCluster
     runs-on: prod-deploy-tester-v1

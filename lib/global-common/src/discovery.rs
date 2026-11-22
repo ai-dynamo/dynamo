@@ -40,6 +40,82 @@ fn checked_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D
     Ok(model)
 }
 
+/// `POST /routers` body. The identity names one process incarnation, and the
+/// endpoint must reach that replica's Relay receiver directly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RouterRegistrationFields")]
+pub struct RouterRegistration {
+    pub replica: String,
+    pub url: Url,
+}
+
+#[derive(Debug, Error)]
+#[error("invalid router registration: {0}")]
+pub struct RouterRegistrationError(pub &'static str);
+
+impl RouterRegistration {
+    pub fn validate(&self) -> Result<(), RouterRegistrationError> {
+        if self.replica.is_empty()
+            || self.replica.len() > 256
+            || self
+                .replica
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(RouterRegistrationError(
+                "replica must be 1–256 bytes without whitespace or controls",
+            ));
+        }
+        let url = &self.url;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+            || url.port() == Some(0)
+        {
+            return Err(RouterRegistrationError(
+                "url must be an HTTP(S) authority without credentials, path, query or fragment",
+            ));
+        }
+        let ip = match url.host() {
+            Some(url::Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+            Some(url::Host::Ipv6(ip)) => Some(IpAddr::V6(ip).to_canonical()),
+            Some(url::Host::Domain(domain)) if domain.contains('*') => {
+                return Err(RouterRegistrationError("url must not advertise a wildcard"));
+            }
+            _ => None,
+        };
+        if ip.is_some_and(|ip| ip.is_unspecified() || ip.is_multicast()) {
+            return Err(RouterRegistrationError(
+                "url must advertise a unicast address",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct RouterRegistrationFields {
+    replica: String,
+    url: Url,
+}
+
+impl TryFrom<RouterRegistrationFields> for RouterRegistration {
+    type Error = RouterRegistrationError;
+
+    fn try_from(fields: RouterRegistrationFields) -> Result<Self, Self::Error> {
+        let registration = Self {
+            replica: fields.replica,
+            url: fields.url,
+        };
+        registration.validate()?;
+        Ok(registration)
+    }
+}
+
 /// The workers of one hardware SKU.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Capacity {
@@ -156,6 +232,14 @@ pub fn address_identity(address: IpAddr) -> String {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutersResponse {
     pub routers: Vec<RouterReplica>,
+    /// Partial snapshots preserve previously known replicas at the client.
+    /// Older services always returned complete lists and omitted this field.
+    #[serde(default = "complete_by_default")]
+    pub complete: bool,
+}
+
+fn complete_by_default() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -200,11 +284,43 @@ mod tests {
             "complete": true
         }));
         round_trip::<RoutersResponse>(json!({
-            "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]
+            "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}],
+            "complete": true
         }));
         let mapped: IpAddr = "::ffff:10.43.66.175".parse().unwrap();
         assert_eq!(address_identity(mapped), "ip:10.43.66.175");
         assert_eq!(address_identity("fd00::2".parse().unwrap()), "ip:fd00::2");
+    }
+
+    #[test]
+    fn router_registration_rejects_unusable_identity_and_endpoint() {
+        let valid = json!({"replica": "east/pod-uid", "url": "http://[fd00::2]:50051/"});
+        round_trip::<RouterRegistration>(valid.clone());
+        for replica in ["", "two words", "tab\tname", &"x".repeat(257)] {
+            let mut body = valid.clone();
+            body["replica"] = json!(replica);
+            assert!(serde_json::from_value::<RouterRegistration>(body).is_err());
+        }
+        for url in [
+            "ftp://host/",
+            "http://0.0.0.0:50051/",
+            "http://[::]:50051/",
+            "http://224.0.0.1/",
+            "http://host:0/",
+            "http://user:pass@host/",
+            "http://host/path",
+            "http://host/?query",
+            "http://host/#fragment",
+        ] {
+            let mut body = valid.clone();
+            body["url"] = json!(url);
+            assert!(
+                serde_json::from_value::<RouterRegistration>(body).is_err(),
+                "{url}"
+            );
+        }
+        let old: RoutersResponse = serde_json::from_value(json!({"routers": []})).unwrap();
+        assert!(old.complete);
     }
 
     #[test]

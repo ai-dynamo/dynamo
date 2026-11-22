@@ -13,6 +13,24 @@ SPDX-License-Identifier: Apache-2.0
 - Use durable status, conditions, or transaction markers when the reconciler must distinguish work that is pending from work that was previously observed and later deleted.
 - Use an uncached read only when a concrete correctness requirement cannot be represented with durable state and watches, and document that exception.
 
+# Pure resource rendering
+
+- Put shared resource renderers in a subpackage for their lowering under
+  `internal/controller/`, in files named `*_render.go`.
+- A `Render` function is pure: it takes explicit, resolved inputs and returns
+  concrete Kubernetes objects without mutating its inputs. It must not accept
+  a Kubernetes client, perform reads or writes, or consult process state.
+- Resolve cluster-dependent inputs in the controller before calling `Render`.
+  Admission and reconciliation must use the same render functions for resource
+  construction, generated metadata, and resource-existence decisions. Do not
+  maintain a separate admission model of a lowering.
+- Keep lowering-specific decisions with their lowering. Do not collect them in
+  generic `dynamo`, `names`, or utility packages, or add forwarding wrappers.
+- Use import names that describe the lowering, such as `disaggregatedset` or
+  `grove`; avoid aliases tied to one role, such as `dsrender`.
+- Extract only the rendering needed by the change. Moving a complete lowering's
+  reconciliation and lifecycle into its subpackage is a separate refactor.
+
 # Tests
 
 - Use one `t.Log` heading before each block that implements a test step so the test output tells the scenario's story.

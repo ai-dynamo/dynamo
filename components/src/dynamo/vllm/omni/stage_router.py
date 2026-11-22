@@ -113,6 +113,7 @@ class OmniStageRouter:
         request: dict,
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
+        """Run the request through each stage and format the final output."""
         request_id = str(uuid.uuid4())
         parsed_request, request_type = parse_request_type(
             request, self.config.output_modalities
@@ -199,6 +200,8 @@ class OmniStageRouter:
             fmt_ctx["fps"] = nvext["fps"]
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
+        if nvext.get("num_inference_steps") is not None:
+            fmt_ctx["num_inference_steps"] = nvext["num_inference_steps"]
         # If the request type is AUDIO_GENERATION,
         # we need to normalize the data_source and response_format to
         # align with other modalities.

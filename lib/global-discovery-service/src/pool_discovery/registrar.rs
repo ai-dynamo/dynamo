@@ -19,3 +19,12 @@ use super::DiscoveryError;
 pub trait PoolRegistrar: Send + Sync {
     async fn register(&self, registration: PoolRegistration) -> Result<Lease, DiscoveryError>;
 }
+
+/// Trusted-network router self-registration. Each call renews the lease.
+#[async_trait]
+pub trait RouterRegistrar: Send + Sync {
+    async fn register_router(
+        &self,
+        registration: dynamo_global_common::RouterRegistration,
+    ) -> Result<Lease, DiscoveryError>;
+}

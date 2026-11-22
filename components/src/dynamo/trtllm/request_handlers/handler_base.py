@@ -23,6 +23,7 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import numpy as np
@@ -32,6 +33,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import WaitingQueuePolicy
 
 try:
     from tensorrt_llm.llmapi.llm import PreprocessedInputs
@@ -62,6 +64,7 @@ from dynamo.trtllm.conversation_affinity import (
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.engine_monitor import exit_worker_on_fatal_error
+from dynamo.trtllm.errors import guided_decoding_error_to_invalid_argument
 from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -69,6 +72,7 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
+    TRTLLM_HAS_ORIG_ELAPSED_S,
     DisaggregatedParams,
     DisaggregatedParamsCodec,
     get_compatible_global_disagg_request_id,
@@ -76,7 +80,9 @@ from dynamo.trtllm.utils.disagg_utils import (
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
     normalize_top_k_for_trtllm,
+    orig_elapsed_s,
     request_cache_salt,
+    request_trtllm_priority,
 )
 
 if TYPE_CHECKING:
@@ -87,6 +93,7 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+_decode_token_cap_warned = False
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
@@ -335,6 +342,9 @@ class HandlerBase(BaseGenerativeHandler):
         self._conversation_affinity_dp_rank_source: str = (
             config.conversation_affinity_dp_rank_source
         )
+        # Whether the engine's waiting queue orders by request priority
+        # (scheduler_config.waiting_queue_policy); resolved lazily like the gate above.
+        self._engine_orders_by_priority: Optional[bool] = None
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -849,6 +859,11 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params,
                 epd_metadata,
             ) = self._decode_disaggregated_params_from_prefill(prefill_result)
+            # TRT-LLM's generation admission orders this request by its arrival at
+            # the frontend rather than at this worker.
+            elapsed_s = orig_elapsed_s(request)
+            if elapsed_s is not None and TRTLLM_HAS_ORIG_ELAPSED_S:
+                disaggregated_params.orig_elapsed_s = elapsed_s
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
 
@@ -1047,6 +1062,8 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
+        global _decode_token_cap_warned
+
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
         # With DYN_TOKEN_IDS_AS_BYTES the ingress hands token ids over as a packed
@@ -1218,6 +1235,14 @@ class HandlerBase(BaseGenerativeHandler):
                 no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
 
+        # TensorRT-LLM 1.4.0rc2 imports the prefill token without checking max_tokens.
+        # Cap decode output and drain the rest so KV frees normally; drop once fixed.
+        is_generation_only = (
+            disaggregated_params is not None
+            and disaggregated_params.request_type == "generation_only"
+        )
+        output_token_cap = sampling_params.max_tokens if is_generation_only else None
+
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
         streaming = (
@@ -1263,6 +1288,13 @@ class HandlerBase(BaseGenerativeHandler):
                     "release newer than 1.3.0rc20)."
                 )
         conv_affinity = self._conversation_affinity
+        if self._engine_orders_by_priority is None:
+            # Engine args without a scheduler config run the default FCFS queue.
+            scheduler_config = getattr(self.engine.llm.args, "scheduler_config", None)
+            self._engine_orders_by_priority = (
+                getattr(scheduler_config, "waiting_queue_policy", None)
+                == WaitingQueuePolicy.PRIORITY
+            )
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
@@ -1299,8 +1331,9 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
-        # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
-        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        priority = request_trtllm_priority(
+            request, DEFAULT_REQUEST_PRIORITY, self._engine_orders_by_priority
+        )
         cache_salt = request_cache_salt(request)
         if cache_salt is None and request.get(HEALTH_CHECK_KEY):
             # Keep the canary out of the unsalted namespace that TRT-LLM's
@@ -1333,6 +1366,10 @@ class HandlerBase(BaseGenerativeHandler):
             generate_async = self.engine.llm.generate_async
             try:
                 generation_result = generate_async(**generate_kwargs)
+            except RequestError as e:
+                # The engine owns request validation, including its token budget.
+                # Surface pre-submission rejections as 400 without copying its rules.
+                raise InvalidArgument(str(e)) from e
             except (ValueError, TypeError, NotImplementedError) as e:
                 # TRT-LLM performs request validation and preprocessing synchronously in
                 # `generate_async()`, before executor submission. A TypeError can also mean
@@ -1414,13 +1451,39 @@ class HandlerBase(BaseGenerativeHandler):
                     for output in res.outputs:
                         output_idx = getattr(output, "index", 0) or 0
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
-                        next_total_toks = len(output.token_ids)
+                        token_ids = output.token_ids
+                        finish_reason = output.finish_reason
+                        stop_reason = output.stop_reason
+                        logprobs_output = output
+                        if (
+                            output_token_cap is not None
+                            and len(token_ids) > output_token_cap
+                        ):
+                            if not _decode_token_cap_warned:
+                                _decode_token_cap_warned = True
+                                logger.warning(
+                                    "Clamping TensorRT-LLM decode output for request %s: "
+                                    "%s tokens exceed max_tokens=%s; "
+                                    "check whether the engine still needs this workaround",
+                                    context.id(),
+                                    len(token_ids),
+                                    output_token_cap,
+                                )
+                            token_ids = token_ids[:output_token_cap]
+                            logprobs_output = SimpleNamespace(
+                                token_ids=token_ids, logprobs=output.logprobs
+                            )
+                            # Keep the terminal chunk aligned with engine completion.
+                            if finish_reason:
+                                finish_reason = "length"
+                                stop_reason = None
+                        next_total_toks = len(token_ids)
 
                         # The engine returns all tokens generated so far for
                         # this choice. Calculate only the new tokens generated
                         # in this iteration to create the delta.
                         out = {
-                            "token_ids": output.token_ids[tokens_so_far:],
+                            "token_ids": token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
                         if (
@@ -1435,7 +1498,7 @@ class HandlerBase(BaseGenerativeHandler):
                         # aligned with the cumulative token list, so use the
                         # same per-choice cursor as token_ids.
                         log_probs, top_logprobs = self._extract_logprobs(
-                            output, tokens_so_far
+                            logprobs_output, tokens_so_far
                         )
                         if log_probs:
                             out["log_probs"] = log_probs
@@ -1447,10 +1510,10 @@ class HandlerBase(BaseGenerativeHandler):
                                 output
                             )
 
-                        if output.finish_reason:
-                            out["finish_reason"] = output.finish_reason
-                        if output.stop_reason:
-                            out["stop_reason"] = output.stop_reason
+                        if finish_reason:
+                            out["finish_reason"] = finish_reason
+                        if stop_reason:
+                            out["stop_reason"] = stop_reason
                         if self.disaggregation_mode == DisaggregationMode.PREFILL:
                             # Return the disaggregated params only when
                             # operating in prefill mode.
@@ -1479,7 +1542,10 @@ class HandlerBase(BaseGenerativeHandler):
 
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
-                                len(o.token_ids) for o in res.outputs
+                                len(o.token_ids)
+                                if output_token_cap is None
+                                else min(len(o.token_ids), output_token_cap)
+                                for o in res.outputs
                             )
 
                             if prefill_prompt_tokens_details:
@@ -1487,10 +1553,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 # attempt already reported cache reuse.
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                is_generation_only = (
-                                    getattr(disaggregated_params, "request_type", None)
-                                    == "generation_only"
-                                )
                                 prompt_tokens_details = _prompt_tokens_details(
                                     res, num_input_tokens, is_generation_only
                                 )
@@ -1599,14 +1661,18 @@ class HandlerBase(BaseGenerativeHandler):
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             error_msg = str(e)
-            logging.warning(f"Request {request_id} error: {error_msg}")
+            logging.warning("Request %s error: %s", request_id, error_msg)
+            if not output_tokens_per_choice:
+                client_error = guided_decoding_error_to_invalid_argument(error_msg)
+                if client_error is not None:
+                    raise client_error from e
             yield {
                 "finish_reason": {"error": error_msg},
                 "token_ids": [],
             }
 
-        # 3. EngineShutdown - let it propagate to the Rust bridge
-        except EngineShutdown:
+        # 3. Typed errors - let the Rust bridge preserve their error codes
+        except (EngineShutdown, InvalidArgument):
             raise
 
         # 4. ALL OTHER ERRORS - graceful shutdown

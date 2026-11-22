@@ -6,11 +6,13 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_global_common::PoolId;
 use url::Url;
 
 use crate::Pool;
+use crate::affinity::ANONYMOUS_TENANT;
 use crate::load::InFlightTracker;
 
 /// What a selector may know about a request. Routing inputs such as the
@@ -21,6 +23,11 @@ pub struct RoutingRequest<'a> {
     pub model: &'a str,
     /// The session the request belongs to, from `X-Dynamo-Session-ID`.
     pub session: Option<&'a str>,
+    /// An opaque identifier for the caller's credential (see
+    /// [`affinity::tenant_id`](crate::affinity::tenant_id)), so that two
+    /// tenants reusing one session ID are kept apart. Never the credential
+    /// itself, and never an admission decision.
+    pub tenant: &'a str,
 }
 
 impl<'a> RoutingRequest<'a> {
@@ -28,11 +35,18 @@ impl<'a> RoutingRequest<'a> {
         Self {
             model,
             session: None,
+            tenant: ANONYMOUS_TENANT,
         }
     }
 
     pub fn with_session(mut self, session: Option<&'a str>) -> Self {
         self.session = session;
+        self
+    }
+
+    /// `tenant` is an opaque identifier, not the caller's credential.
+    pub fn with_tenant(mut self, tenant: &'a str) -> Self {
+        self.tenant = tenant;
         self
     }
 }
@@ -46,10 +60,17 @@ pub struct PoolTarget<'a> {
 }
 
 /// Chooses a pool, and a frontend in it, for each request.
+///
+/// This trait is internal to the Global Router and its frontend: it is public
+/// so that selectors can live in sibling crates, not as a stable extension
+/// point, and it changes without a major version. `select` is `async` because
+/// a selector may consult shared storage; the policies that do not, such as
+/// round robin and least in flight, return without awaiting.
+#[async_trait]
 pub trait PoolSelector: Send + Sync {
     /// `candidates` are the pools serving the request's model. `None` means
     /// none of them can take the request.
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
@@ -74,8 +95,9 @@ impl RoundRobinSelector {
     }
 }
 
+#[async_trait]
 impl PoolSelector for RoundRobinSelector {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
@@ -112,8 +134,9 @@ impl LeastInFlightSelector {
     }
 }
 
+#[async_trait]
 impl PoolSelector for LeastInFlightSelector {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         _request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
@@ -182,6 +205,7 @@ pub(crate) mod tests {
     use dynamo_global_common::PoolKey;
 
     use super::*;
+    use futures::FutureExt;
 
     pub(crate) fn pool(dgd: &str, model: &str, frontends: &[&str]) -> Pool {
         regional_pool("us-east-2", dgd, model, frontends)
@@ -196,6 +220,8 @@ pub(crate) mod tests {
     fn picks(selector: &RoundRobinSelector, model: &str, candidates: &[&Pool]) -> String {
         let target = selector
             .select(&RoutingRequest::new(model), candidates)
+            .now_or_never()
+            .unwrap()
             .unwrap();
         target.frontend.host_str().unwrap().to_owned()
     }
@@ -249,11 +275,18 @@ pub(crate) mod tests {
         let request = RoutingRequest::new("qwen");
 
         for _ in 0..3 {
-            let target = selector.select(&request, &[&empty, &live]).unwrap();
+            let target = selector
+                .select(&request, &[&empty, &live])
+                .now_or_never()
+                .unwrap()
+                .unwrap();
             assert_eq!(target.pool.id, live.id);
         }
-        assert_eq!(selector.select(&request, &[&empty]), None);
-        assert_eq!(selector.select(&request, &[]), None);
+        assert_eq!(
+            selector.select(&request, &[&empty]).now_or_never().unwrap(),
+            None
+        );
+        assert_eq!(selector.select(&request, &[]).now_or_never().unwrap(), None);
     }
 
     #[test]
@@ -267,7 +300,11 @@ pub(crate) mod tests {
         let _busy = [in_flight.start(&blue.id), in_flight.start(&blue.id)];
         let _one = in_flight.start(&green.id);
         for _ in 0..10 {
-            let target = selector.select(&request, &[&blue, &green]).unwrap();
+            let target = selector
+                .select(&request, &[&blue, &green])
+                .now_or_never()
+                .unwrap()
+                .unwrap();
             assert_eq!(target.pool.id, green.id);
         }
     }
@@ -284,6 +321,8 @@ pub(crate) mod tests {
             .map(|_| {
                 selector
                     .select(&request, &[&empty, &blue, &green])
+                    .now_or_never()
+                    .unwrap()
                     .unwrap()
                     .pool
                     .id
@@ -292,6 +331,9 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let (blue, green) = (blue.id.clone(), green.id.clone());
         assert_eq!(chosen, [blue.clone(), green.clone(), blue, green]);
-        assert_eq!(selector.select(&request, &[&empty]), None);
+        assert_eq!(
+            selector.select(&request, &[&empty]).now_or_never().unwrap(),
+            None
+        );
     }
 }

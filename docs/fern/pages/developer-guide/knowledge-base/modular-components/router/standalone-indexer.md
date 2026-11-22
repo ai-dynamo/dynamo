@@ -127,6 +127,8 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 | `--port` | `8090` | HTTP server listen port |
 | `--threads` | `4` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
 | `--workers` | (none) | Initial workers as `instance_id[:dp_rank]=zmq_address,...` pairs (dp_rank defaults to 0) |
+| `--engine-owned-mm-identity` | `false` | Enable [multimodal event filtering](#multimodal-event-sources) for every initial `--workers` entry. Later HTTP registrations use their own field. |
+| `--idempotent-stores` | `false` | Do not count [repeated block stores](#repeated-block-stores) for every initial `--workers` entry. Set it for SGLang sources. Later HTTP registrations use their own field. |
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--routing-group` | `default` | Routing group for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
@@ -239,12 +241,51 @@ curl -X POST http://localhost:8090/register \
 | `routing_group` | no | `"default"` | Worker routing group |
 | `dp_rank` | no | `0` | Data parallel rank |
 | `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
+| `engine_owned_mm_identity` | no | `false` | Boolean: enable [multimodal event filtering](#multimodal-event-sources) for this source. |
+| `idempotent_stores` | no | `false` | Boolean: do not count [repeated block stores](#repeated-block-stores) for this source. Set it to `true` for SGLang sources. |
 | `additional_salt` | no | — | Per-tenant salt (Mooncake RFC #1403 `additionalsalt`, alias accepted). Currently parsed for forward compatibility — engines apply their own salting today. |
 
 For transition compatibility, indexer HTTP inputs also accept a string `tenant_id`, and the
 CLI accepts the hidden `--tenant-id` flag. These values are ignored. `routing_group` always
 controls worker eligibility; when it is omitted, the endpoint's normal default or all-groups
 behavior applies. Responses never include `tenant_id`.
+
+#### Repeated Block Stores
+
+An engine can report a store for the same block more than once. vLLM sends a remove for each store, so the indexer counts the stores and keeps the block until its last copy is removed. SGLang sends one remove per block however many times it stored the block, so a counted block would stay in the index after its only remove. Set `idempotent_stores` to `true` in the registration of each SGLang source. Leave it `false` for vLLM.
+
+```bash
+curl -X POST http://localhost:8090/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instance_id": 4,
+    "endpoint": "tcp://127.0.0.1:5560",
+    "model_name": "Qwen/Qwen3-0.6B",
+    "block_size": 16,
+    "idempotent_stores": true
+  }'
+```
+
+For initial `--workers`, the indexer's `--idempotent-stores` flag applies to every listed source. Changing an existing registration requires unregistering it first, as described in [Worker Restarts](#worker-restarts).
+
+#### Multimodal Event Sources
+
+For direct sources using [wide-token SGLang builds](../backends/sglang/multimodal.md#wide-token-sglang-builds), set `engine_owned_mm_identity` to `true` in each source's registration. The indexer then excludes media blocks and their descendants from predicted cache hits. Leave it `false` for legacy sources whose media tokens already match Dynamo's routing tokens. Like other SGLang sources, these also set [`idempotent_stores`](#repeated-block-stores).
+
+```bash
+curl -X POST http://localhost:8090/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instance_id": 3,
+    "endpoint": "tcp://127.0.0.1:5559",
+    "model_name": "Qwen/Qwen3-VL-2B-Instruct",
+    "block_size": 16,
+    "engine_owned_mm_identity": true,
+    "idempotent_stores": true
+  }'
+```
+
+The flag depends on the SGLang build, not the model. For initial `--workers`, the indexer's `--engine-owned-mm-identity` flag applies to every listed source. Use separate HTTP registrations for sources with different event formats. Changing an existing registration requires unregistering it first, as described in [Worker Restarts](#worker-restarts).
 
 ### `POST /unregister` — Deregister an instance
 

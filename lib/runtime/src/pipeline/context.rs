@@ -2,18 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::ops::{Deref, DerefMut};
+use std::pin::pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
 use crate::engine::{AsyncEngineController, EngineContextGuard};
 use async_trait::async_trait;
+use tokio::sync::Notify;
 
 use super::registry::Registry;
 
 pub struct Context<T: Data> {
     current: T,
-    controller: Arc<Controller>, //todo: hold this as an arc
+    controller: Arc<Controller>,
     registry: Registry,
     stages: Vec<String>,
     metadata: BTreeMap<String, String>,
@@ -354,21 +359,18 @@ impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
 
 // TODO - refactor here - this came from the dynamo.llm-async-engine crate
 
-use tokio::sync::watch::{Receiver, Sender, channel};
-
-#[derive(Debug, Eq, PartialEq)]
-enum State {
-    Live,
-    Stopped,
-    Killed,
-}
+// Controller states. A controller only moves forward through them.
+const LIVE: u8 = 0;
+const STOPPED: u8 = 1;
+const KILLED: u8 = 2;
 
 /// A context implementation with cancellation propagation.
 #[derive(Debug)]
 pub struct Controller {
     id: String,
-    tx: Sender<State>,
-    rx: Receiver<State>,
+    state: AtomicU8,
+    /// Notified after every change of `state`.
+    state_changed: Notify,
     child_context: Mutex<Vec<Arc<dyn AsyncEngineContext>>>,
     retained: Mutex<Vec<RetainedGuard>>,
 }
@@ -385,11 +387,10 @@ impl std::fmt::Debug for RetainedGuard {
 
 impl Controller {
     pub fn new(id: String) -> Self {
-        let (tx, rx) = channel(State::Live);
         Self {
             id,
-            tx,
-            rx,
+            state: AtomicU8::new(LIVE),
+            state_changed: Notify::new(),
             child_context: Mutex::new(Vec::new()),
             retained: Mutex::new(Vec::new()),
         }
@@ -397,6 +398,48 @@ impl Controller {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Moves the state forward to `to` and wakes the waiters. Never moves it back, so a stop
+    /// leaves a kill in place.
+    fn advance_to(&self, to: u8) {
+        if self.state.fetch_max(to, Ordering::SeqCst) < to {
+            self.state_changed.notify_waiters();
+        }
+    }
+
+    /// Waits until the state is `target` or later.
+    ///
+    /// Stream loops poll this on every chunk, almost always while the context is live, and a
+    /// pending `Notified` locks the waiter list on each poll. A live state means no change has
+    /// been notified yet, so the waker an earlier poll registered is still queued and a stop
+    /// or kill will wake it: such a poll reads `state` and returns.
+    async fn reached(&self, target: u8) {
+        let mut notified = pin!(self.state_changed.notified());
+        let mut registered: Option<Waker> = None;
+        poll_fn(|cx| {
+            loop {
+                let state = self.state.load(Ordering::SeqCst);
+                if state >= target {
+                    return Poll::Ready(());
+                }
+                if state == LIVE
+                    && registered
+                        .as_ref()
+                        .is_some_and(|waker| waker.will_wake(cx.waker()))
+                {
+                    return Poll::Pending;
+                }
+                if notified.as_mut().poll(cx).is_pending() {
+                    registered = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+                // The state changed without reaching `target`. Wait for the next change on a
+                // new `Notified`, created before `state` is read again.
+                notified.set(self.state_changed.notified());
+            }
+        })
+        .await
     }
 }
 
@@ -415,29 +458,19 @@ impl AsyncEngineContext for Controller {
     }
 
     fn is_stopped(&self) -> bool {
-        *self.rx.borrow() != State::Live
+        self.state.load(Ordering::SeqCst) != LIVE
     }
 
     fn is_killed(&self) -> bool {
-        *self.rx.borrow() == State::Killed
+        self.state.load(Ordering::SeqCst) == KILLED
     }
 
     async fn stopped(&self) {
-        let mut rx = self.rx.clone();
-        loop {
-            if *rx.borrow_and_update() != State::Live || rx.changed().await.is_err() {
-                return;
-            }
-        }
+        self.reached(STOPPED).await
     }
 
     async fn killed(&self) {
-        let mut rx = self.rx.clone();
-        loop {
-            if *rx.borrow_and_update() == State::Killed || rx.changed().await.is_err() {
-                return;
-            }
-        }
+        self.reached(KILLED).await
     }
 
     fn stop_generating(&self) {
@@ -453,7 +486,7 @@ impl AsyncEngineContext for Controller {
             child.stop_generating();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        self.advance_to(STOPPED);
     }
 
     fn stop(&self) {
@@ -469,7 +502,7 @@ impl AsyncEngineContext for Controller {
             child.stop();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        self.advance_to(STOPPED);
     }
 
     fn kill(&self) {
@@ -485,7 +518,7 @@ impl AsyncEngineContext for Controller {
             child.kill();
         }
 
-        let _ = self.tx.send(State::Killed);
+        self.advance_to(KILLED);
     }
 
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
@@ -536,6 +569,78 @@ mod tests {
                 message: format!("Processed length: {}", processed.length),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn parent_stop_does_not_downgrade_killed_child() {
+        let parent = Controller::default();
+        let child = Arc::new(Controller::default());
+        parent.link_child(child.clone());
+
+        child.kill();
+        parent.stop();
+
+        assert!(child.is_killed());
+        tokio::time::timeout(std::time::Duration::from_secs(1), child.killed())
+            .await
+            .expect("killed child no longer reported its terminal state");
+
+        child.stop_generating();
+        assert!(child.is_killed());
+    }
+
+    /// A waker that records whether it was woken.
+    #[derive(Default)]
+    struct WakeFlag(std::sync::atomic::AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl WakeFlag {
+        fn take(&self) -> bool {
+            self.0.swap(false, Ordering::SeqCst)
+        }
+    }
+
+    // Both tests re-poll the wait with one waker, as a stream loop does on every chunk.
+
+    #[test]
+    fn stop_wakes_a_waiter_repolled_while_live() {
+        let controller = Controller::default();
+        let flag = Arc::new(WakeFlag::default());
+        let waker = Waker::from(flag.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut wait = controller.stopped();
+        for _ in 0..3 {
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        }
+
+        controller.stop();
+        assert!(flag.take(), "stop did not wake the waiter");
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn kill_wakes_a_waiter_that_was_woken_by_a_stop() {
+        let controller = Controller::default();
+        let flag = Arc::new(WakeFlag::default());
+        let waker = Waker::from(flag.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut wait = controller.killed();
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+
+        controller.stop();
+        assert!(flag.take(), "stop did not wake the waiter");
+        for _ in 0..3 {
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        }
+
+        controller.kill();
+        assert!(flag.take(), "kill did not wake the waiter");
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]

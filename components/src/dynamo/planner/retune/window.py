@@ -187,7 +187,7 @@ def read_trace_window(
     as_of_ms: float,
     out_path: str | os.PathLike[str],
     *,
-    buckets: ObservationBuckets | None = None,
+    buckets: ObservationBuckets | Sequence[ObservationBuckets] | None = None,
 ) -> WindowFile:
     """Write the requests that arrived in ``[start_ms, end_ms)`` to ``out_path``.
 
@@ -195,8 +195,16 @@ def read_trace_window(
     bare-row ``dynamo.request.trace.v1`` file sorted by (arrival, completion,
     request_id) with ``request_received_ms`` set to the normalized arrival, so
     AISimulate replays it as is. ``buckets``, when given, receives every kept
-    row.
+    row; a sequence of bucket sets receives it in each.
     """
+
+    targets: tuple[ObservationBuckets, ...] = (
+        ()
+        if buckets is None
+        else (buckets,)
+        if isinstance(buckets, ObservationBuckets)
+        else tuple(buckets)
+    )
 
     counts = _new_counts()
     selected: dict[str, _RequestRow] = {}
@@ -221,8 +229,8 @@ def read_trace_window(
     with _open_output(out_path) as sink:
         for row in rows:
             _count_kept(row, counts)
-            if buckets is not None:
-                buckets.add(row.arrival_ms, row.input_length, row.output_tokens)
+            for target in targets:
+                target.add(row.arrival_ms, row.input_length, row.output_tokens)
             sink.write(_dumps(_window_record(row)))
             sink.write("\n")
     return WindowFile(

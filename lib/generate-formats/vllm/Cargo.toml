@@ -12,7 +12,8 @@ repository.workspace = true
 description = "vLLM client format for Dynamo /generate"
 
 [dependencies]
-dynamo-kv-router = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
 tracing = { workspace = true }
 dynamo-llm = { workspace = true }
 anyhow = { workspace = true }

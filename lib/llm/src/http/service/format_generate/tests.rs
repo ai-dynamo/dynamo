@@ -75,7 +75,7 @@ async fn streaming_events_preserve_native_json() {
         "unknown_field": {"value": true}
     });
     let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
-        engine_data: Some(native.clone()),
+        engine_data: Some(Box::new(native.clone())),
         ..Default::default()
     })]);
     let exchange: Box<dyn GenerateExchange> = Box::new(Passthrough);

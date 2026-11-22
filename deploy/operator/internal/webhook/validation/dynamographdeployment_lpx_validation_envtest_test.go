@@ -225,14 +225,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantCELErr: "spec.services[worker]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
-			name: "LPX admits nine hybrid replicas with lowered conductor volumes",
+			name: "LPX admits nine hybrid replicas with an authored conductor device mount",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Replicas = new(int32(9))
 				component.Roles[1].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					// LPX lowering supplies these volume definitions after admission.
+					// The shared renderer supplies the authored device volume after admission.
 					Containers: []corev1.Container{{Name: "main", Image: "gpu-runtime", VolumeMounts: []corev1.VolumeMount{
-						{Name: "config", MountPath: "/config"},
 						{Name: "infiniband", MountPath: "/dev/infiniband"},
 					}}},
 				}}
@@ -581,7 +580,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "LPX rejects an agent runtime sidecar as the shared speculative target",
+			name: "LPX admits an agent runtime sidecar as the speculative target",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, nil)
 				target := &dgd.Spec.Components[1]
@@ -590,7 +589,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
 				}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: a shared draft and target pair requires the target's conductor role; the agent "runtime" sidecar serves only a single model`},
 		},
 		{
 			name: "LPX admits a conductor runtime sidecar",

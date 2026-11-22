@@ -263,9 +263,13 @@ async fn a_full_rank_refuses_for_itself_and_the_same_router_reaches_its_sibling_
         .expect("the endpoint is discovered")
         .unwrap()[0]
         .id();
-    let router = Router::from_client(client.clone(), RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let router = Router::from_client_with_options(
+        client.clone(),
+        RouterMode::RoundRobin,
+        dynamo_llm::kv_router::plugins::push_router_options(),
+    )
+    .await
+    .unwrap();
 
     // Rank 4 fills its engine request and its queue place, while rank 5 is
     // idle and the worker has room for it.

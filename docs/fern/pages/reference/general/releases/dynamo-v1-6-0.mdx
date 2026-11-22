@@ -468,81 +468,81 @@ For how to contribute code, docs, and recipes, see the [Contribution Guide](../.
 
 Between v1.5.1 and v1.6.0 the project merged 654 PRs from 148 contributors, 58 of them from outside NVIDIA. Thank you to the external community contributors in this release (organization identified through the commit-author email domain or the public GitHub profile):
 
-- **DaoCloud:** [@bzsuni](https://github.com/bzsuni), [@carlory](https://github.com/carlory), [@cyclinder](https://github.com/cyclinder), [@flpanbin](https://github.com/flpanbin), [@git-jxj](https://github.com/git-jxj), [@panpan0000](https://github.com/panpan0000), [@weizhoublue](https://github.com/weizhoublue), [@yankay](https://github.com/yankay).
-- **Intel:** [@Jianhong-Zhang](https://github.com/Jianhong-Zhang), [@sandeep-maddipatla](https://github.com/sandeep-maddipatla), [@tthakkal](https://github.com/tthakkal), [@VincyZhang](https://github.com/VincyZhang), [@zxue2](https://github.com/zxue2).
-- **CoreWeave:** [@alexeldeib](https://github.com/alexeldeib), [@c2w-sea](https://github.com/c2w-sea), [@houshengbo](https://github.com/houshengbo), [@surajssd](https://github.com/surajssd).
-- **Aliyun:** [@xianlubird](https://github.com/xianlubird).
-- **Altera Labs:** [@aylonsk](https://github.com/aylonsk).
-- **Apple:** [@dundysm](https://github.com/dundysm).
-- **Baseten:** [@jacksonrnewhouse](https://github.com/jacksonrnewhouse), [@michaelfeil](https://github.com/michaelfeil), [@Stelath](https://github.com/Stelath).
-- **Datadog:** [@walkoss](https://github.com/walkoss).
-- **Docker:** [@ericcurtin](https://github.com/ericcurtin).
-- **Fireworks AI:** [@zhaohuizh](https://github.com/zhaohuizh).
-- **Gcore:** [@Kaonael](https://github.com/Kaonael).
-- **HKUST:** [@ZenAlexa](https://github.com/ZenAlexa).
-- **IIT Kharagpur:** [@shwetha-krishnamurthy](https://github.com/shwetha-krishnamurthy).
-- **Inferact:** [@ywang96](https://github.com/ywang96).
-- **LinkedIn:** [@chanh](https://github.com/chanh).
-- **Microsoft:** [@Jont828](https://github.com/Jont828).
-- **New York University:** [@JasperChan929](https://github.com/JasperChan929).
-- **PaddlePaddle:** [@ShaneGZhu](https://github.com/ShaneGZhu).
-- **Prime Intellect:** [@qimcis](https://github.com/qimcis).
-- **Rimo:** [@Atharva-Kanherkar](https://github.com/Atharva-Kanherkar).
-- **San Jose State University:** [@ayaangazali](https://github.com/ayaangazali).
-- **SK Telecom:** [@changhyeonnam](https://github.com/changhyeonnam), [@SeungminHeo](https://github.com/SeungminHeo).
-- **T-Systems:** [@RealNicolasBourbaki](https://github.com/RealNicolasBourbaki).
-- **UC San Diego:** [@nihalmaddala](https://github.com/nihalmaddala).
-- **UCAS:** [@gitover22](https://github.com/gitover22).
-- **UIUC:** [@livingshade](https://github.com/livingshade).
-- **xAI:** [@sherlockwu](https://github.com/sherlockwu).
-- **Independent:** [@AmeenP](https://github.com/AmeenP), [@awesome-pro](https://github.com/awesome-pro), [@bojiang-li](https://github.com/bojiang-li), [@Champollion9012](https://github.com/Champollion9012), [@charan-rathore](https://github.com/charan-rathore), [@cmdy](https://github.com/cmdy), [@Efeselimsurekli](https://github.com/Efeselimsurekli), [@elizabetht](https://github.com/elizabetht), [@host452b](https://github.com/host452b), [@jorgeantonio21](https://github.com/jorgeantonio21), [@junuxyz](https://github.com/junuxyz), [@neilkg](https://github.com/neilkg), [@Prudctual](https://github.com/Prudctual), [@Sumit884-byte](https://github.com/Sumit884-byte).
+- **DaoCloud:** @bzsuni, @carlory, @cyclinder, @flpanbin, @git-jxj, @panpan0000, @weizhoublue, @yankay.
+- **Intel:** @Jianhong-Zhang, @sandeep-maddipatla, @tthakkal, @VincyZhang, @zxue2.
+- **CoreWeave:** @alexeldeib, @c2w-sea, @houshengbo, @surajssd.
+- **Aliyun:** @xianlubird.
+- **Altera Labs:** @aylonsk.
+- **Apple:** @dundysm.
+- **Baseten:** @jacksonrnewhouse, @michaelfeil, @Stelath.
+- **Datadog:** @walkoss.
+- **Docker:** @ericcurtin.
+- **Fireworks AI:** @zhaohuizh.
+- **Gcore:** @Kaonael.
+- **HKUST:** @ZenAlexa.
+- **IIT Kharagpur:** @shwetha-krishnamurthy.
+- **Inferact:** @ywang96.
+- **LinkedIn:** @chanh.
+- **Microsoft:** @Jont828.
+- **New York University:** @JasperChan929.
+- **PaddlePaddle:** @ShaneGZhu.
+- **Prime Intellect:** @qimcis.
+- **Rimo:** @Atharva-Kanherkar.
+- **San Jose State University:** @ayaangazali.
+- **SK Telecom:** @changhyeonnam, @SeungminHeo.
+- **T-Systems:** @RealNicolasBourbaki.
+- **UC San Diego:** @nihalmaddala.
+- **UCAS:** @gitover22.
+- **UIUC:** @livingshade.
+- **xAI:** @sherlockwu.
+- **Independent:** @AmeenP, @awesome-pro, @bojiang-li, @Champollion9012, @charan-rathore, @cmdy, @Efeselimsurekli, @elizabetht, @host452b, @jorgeantonio21, @junuxyz, @neilkg, @Prudctual, @Sumit884-byte.
 
 **New Contributors:** welcome to the 45 first-time contributors in this release:
 
-- [@Victor49152](https://github.com/Victor49152) matched the Qwen vision utilities to the DeepStack vision embedding size ([#11244](https://github.com/ai-dynamo/dynamo/pull/11244)).
-- [@Stelath](https://github.com/Stelath) preserved raw reasoning output in the Responses API ([#11604](https://github.com/ai-dynamo/dynamo/pull/11604)).
-- [@RealNicolasBourbaki](https://github.com/RealNicolasBourbaki) propagated the worker ID into snapshot-restored vLLM engine cores ([#12545](https://github.com/ai-dynamo/dynamo/pull/12545)).
-- [@gitover22](https://github.com/gitover22) published KV cache gauges from vLLM prefill workers ([#12559](https://github.com/ai-dynamo/dynamo/pull/12559)).
-- [@aswinvisva](https://github.com/aswinvisva) forwarded `mm_processor_kwargs` to the TensorRT-LLM engine and enabled NVDEC decoding of `data:` URI videos ([#13856](https://github.com/ai-dynamo/dynamo/pull/13856), [#15219](https://github.com/ai-dynamo/dynamo/pull/15219)).
-- [@ShaneGZhu](https://github.com/ShaneGZhu) made the ThunderAgent cost model aware of data-parallel ranks ([#14000](https://github.com/ai-dynamo/dynamo/pull/14000)).
-- [@aylonsk](https://github.com/aylonsk) bounded the KV router state-agent discovery wait at worker startup and four more Planner and router fixes ([#14003](https://github.com/ai-dynamo/dynamo/pull/14003)).
-- [@Champollion9012](https://github.com/Champollion9012) recorded the router prefill start only for phases that run prefill ([#14019](https://github.com/ai-dynamo/dynamo/pull/14019)).
-- [@sbak5](https://github.com/sbak5) added per-request lifecycle instrumentation to the runtime ([#14101](https://github.com/ai-dynamo/dynamo/pull/14101)).
-- [@ZenAlexa](https://github.com/ZenAlexa) rejected oversized TCP request frames before send ([#14110](https://github.com/ai-dynamo/dynamo/pull/14110)).
-- [@Vinya567](https://github.com/Vinya567) added FP16 and BF16 tensor protocol variants and Triton `/v1/classify` support ([#14150](https://github.com/ai-dynamo/dynamo/pull/14150), [#15396](https://github.com/ai-dynamo/dynamo/pull/15396)).
-- [@cyclinder](https://github.com/cyclinder) preserved forced SGLang tool guidance in the frontend ([#14179](https://github.com/ai-dynamo/dynamo/pull/14179)).
-- [@trevor-m](https://github.com/trevor-m) fixed SGLang compatibility for `get_model_config` and `use_mla_backend` ([#14234](https://github.com/ai-dynamo/dynamo/pull/14234)).
-- [@SeungminHeo](https://github.com/SeungminHeo) added A.X-K2 H200 vLLM recipes with a disaggregated benchmark ([#14318](https://github.com/ai-dynamo/dynamo/pull/14318)).
-- [@Efeselimsurekli](https://github.com/Efeselimsurekli) documented that the operator `compilationCache` is version-specific ([#14381](https://github.com/ai-dynamo/dynamo/pull/14381)).
-- [@git-jxj](https://github.com/git-jxj) rejected unsupported tools in the Responses API before dispatch ([#14440](https://github.com/ai-dynamo/dynamo/pull/14440)).
-- [@diffractiongoo](https://github.com/diffractiongoo) shared the process runtime with model fetching ([#14534](https://github.com/ai-dynamo/dynamo/pull/14534)).
-- [@nvjullin](https://github.com/nvjullin) forwarded `session_id` and `parent_session_id` to the SGLang engine ([#14611](https://github.com/ai-dynamo/dynamo/pull/14611)).
-- [@tianhaox](https://github.com/tianhaox) fixed the decode warm-up for hybrid KDA and Mamba models, validated on GLM-5.3-Flash ([#14614](https://github.com/ai-dynamo/dynamo/pull/14614)).
-- [@jacksonrnewhouse](https://github.com/jacksonrnewhouse) drained SSE streams after graceful generation stops ([#14645](https://github.com/ai-dynamo/dynamo/pull/14645)).
-- [@zhaohuizh](https://github.com/zhaohuizh) shared prompt tokens across request clones ([#14701](https://github.com/ai-dynamo/dynamo/pull/14701)).
-- [@Arsene12358](https://github.com/Arsene12358) settled vLLM KV warm-up stages through a per-step round on every attention data-parallel rank ([#14728](https://github.com/ai-dynamo/dynamo/pull/14728)).
-- [@Prudctual](https://github.com/Prudctual) carried typed pre-stream errors on the QUIC response plane and passed `response_format` into vLLM-Omni video inputs ([#14789](https://github.com/ai-dynamo/dynamo/pull/14789), [#14844](https://github.com/ai-dynamo/dynamo/pull/14844)).
-- [@Sumit884-byte](https://github.com/Sumit884-byte) sent inline media once on the TCP request plane and prepended the KServe batch dimension for Triton metadata ([#14801](https://github.com/ai-dynamo/dynamo/pull/14801), [#14996](https://github.com/ai-dynamo/dynamo/pull/14996)).
-- [@bojiang-li](https://github.com/bojiang-li) used the root cache for container user overrides with a group and three more operator, cache, and multimodal fixes ([#14820](https://github.com/ai-dynamo/dynamo/pull/14820)).
-- [@host452b](https://github.com/host452b) enforced media download limits ([#15005](https://github.com/ai-dynamo/dynamo/pull/15005)).
-- [@andrewpaprotsky](https://github.com/andrewpaprotsky) added the operator LPX integration and four follow-up LPX changes ([#15062](https://github.com/ai-dynamo/dynamo/pull/15062)).
-- [@Atharva-Kanherkar](https://github.com/Atharva-Kanherkar) preserved URL path case in the multimodal image cache key ([#15101](https://github.com/ai-dynamo/dynamo/pull/15101)).
-- [@sherlockwu](https://github.com/sherlockwu) gated SGLang auto tool-call grammars on reasoning and forwarded tool-message media in Python chat processors ([#15227](https://github.com/ai-dynamo/dynamo/pull/15227), [#15237](https://github.com/ai-dynamo/dynamo/pull/15237)).
-- [@livingshade](https://github.com/livingshade) added SGLang EAGLE3 speculative decoding tests and a guide ([#15251](https://github.com/ai-dynamo/dynamo/pull/15251), [#15268](https://github.com/ai-dynamo/dynamo/pull/15268)).
-- [@c2w-sea](https://github.com/c2w-sea) declared the ModelExpress startup weight version for vLLM ([#15252](https://github.com/ai-dynamo/dynamo/pull/15252)).
-- [@junuxyz](https://github.com/junuxyz) moved vLLM runtime configurations, examples, and recipes to explicit NIXL roles ([#15256](https://github.com/ai-dynamo/dynamo/pull/15256), [#15366](https://github.com/ai-dynamo/dynamo/pull/15366)).
-- [@surajssd](https://github.com/surajssd) broke a KV router request-lease ownership cycle and retried NATS connections at startup ([#15258](https://github.com/ai-dynamo/dynamo/pull/15258), [#15269](https://github.com/ai-dynamo/dynamo/pull/15269)).
-- [@JasperChan929](https://github.com/JasperChan929) charged and gated explicit hard pins at ThunderAgent admission ([#15290](https://github.com/ai-dynamo/dynamo/pull/15290)).
-- [@dundysm](https://github.com/dundysm) kept `multi_modal_data` on non-Qwen vLLM decode for image KV identity ([#15371](https://github.com/ai-dynamo/dynamo/pull/15371)).
-- [@charan-rathore](https://github.com/charan-rathore) placed the vLLM-Omni video `negative_prompt` in the prompt entry ([#15402](https://github.com/ai-dynamo/dynamo/pull/15402)).
-- [@awesome-pro](https://github.com/awesome-pro) generated the nightly release ledger for the docs ([#15410](https://github.com/ai-dynamo/dynamo/pull/15410)).
-- [@sunil1511](https://github.com/sunil1511) added shared NGC model fetching with SGLang and vLLM integration ([#15441](https://github.com/ai-dynamo/dynamo/pull/15441)).
-- [@neilkg](https://github.com/neilkg) passed the checkpoint tokenizer to SGLang parsers and eight more frontend and SGLang fidelity fixes ([#15509](https://github.com/ai-dynamo/dynamo/pull/15509)).
-- [@kathleenfrench](https://github.com/kathleenfrench) dropped the stale `dynamoGraphDeploymentRef` from LPX bindings ([#15522](https://github.com/ai-dynamo/dynamo/pull/15522)).
-- [@geelen](https://github.com/geelen) let recipe cards without logos use the full header width ([#15546](https://github.com/ai-dynamo/dynamo/pull/15546)).
-- [@joshhay95](https://github.com/joshhay95) selected GPU-local partitions for hybrid and HX LPX builds ([#15563](https://github.com/ai-dynamo/dynamo/pull/15563), [#15706](https://github.com/ai-dynamo/dynamo/pull/15706)).
-- [@ericcurtin](https://github.com/ericcurtin) rejected vLLM-Omni TTS tasks the checkpoint cannot serve ([#15591](https://github.com/ai-dynamo/dynamo/pull/15591)).
-- [@mattwittwer](https://github.com/mattwittwer) rejected non-numeric `logit_bias` keys in the frontend ([#16322](https://github.com/ai-dynamo/dynamo/pull/16322)).
-- [@Jianhong-Zhang](https://github.com/Jianhong-Zhang) upgraded SGLang XPU to v0.5.19 on oneAPI 2026.0 ([#16684](https://github.com/ai-dynamo/dynamo/pull/16684)).
+- @Victor49152 matched the Qwen vision utilities to the DeepStack vision embedding size ([#11244](https://github.com/ai-dynamo/dynamo/pull/11244)).
+- @Stelath preserved raw reasoning output in the Responses API ([#11604](https://github.com/ai-dynamo/dynamo/pull/11604)).
+- @RealNicolasBourbaki propagated the worker ID into snapshot-restored vLLM engine cores ([#12545](https://github.com/ai-dynamo/dynamo/pull/12545)).
+- @gitover22 published KV cache gauges from vLLM prefill workers ([#12559](https://github.com/ai-dynamo/dynamo/pull/12559)).
+- @aswinvisva forwarded `mm_processor_kwargs` to the TensorRT-LLM engine and enabled NVDEC decoding of `data:` URI videos ([#13856](https://github.com/ai-dynamo/dynamo/pull/13856), [#15219](https://github.com/ai-dynamo/dynamo/pull/15219)).
+- @ShaneGZhu made the ThunderAgent cost model aware of data-parallel ranks ([#14000](https://github.com/ai-dynamo/dynamo/pull/14000)).
+- @aylonsk bounded the KV router state-agent discovery wait at worker startup and four more Planner and router fixes ([#14003](https://github.com/ai-dynamo/dynamo/pull/14003)).
+- @Champollion9012 recorded the router prefill start only for phases that run prefill ([#14019](https://github.com/ai-dynamo/dynamo/pull/14019)).
+- @sbak5 added per-request lifecycle instrumentation to the runtime ([#14101](https://github.com/ai-dynamo/dynamo/pull/14101)).
+- @ZenAlexa rejected oversized TCP request frames before send ([#14110](https://github.com/ai-dynamo/dynamo/pull/14110)).
+- @Vinya567 added FP16 and BF16 tensor protocol variants and Triton `/v1/classify` support ([#14150](https://github.com/ai-dynamo/dynamo/pull/14150), [#15396](https://github.com/ai-dynamo/dynamo/pull/15396)).
+- @cyclinder preserved forced SGLang tool guidance in the frontend ([#14179](https://github.com/ai-dynamo/dynamo/pull/14179)).
+- @trevor-m fixed SGLang compatibility for `get_model_config` and `use_mla_backend` ([#14234](https://github.com/ai-dynamo/dynamo/pull/14234)).
+- @SeungminHeo added A.X-K2 H200 vLLM recipes with a disaggregated benchmark ([#14318](https://github.com/ai-dynamo/dynamo/pull/14318)).
+- @Efeselimsurekli documented that the operator `compilationCache` is version-specific ([#14381](https://github.com/ai-dynamo/dynamo/pull/14381)).
+- @git-jxj rejected unsupported tools in the Responses API before dispatch ([#14440](https://github.com/ai-dynamo/dynamo/pull/14440)).
+- @diffractiongoo shared the process runtime with model fetching ([#14534](https://github.com/ai-dynamo/dynamo/pull/14534)).
+- @nvjullin forwarded `session_id` and `parent_session_id` to the SGLang engine ([#14611](https://github.com/ai-dynamo/dynamo/pull/14611)).
+- @tianhaox fixed the decode warm-up for hybrid KDA and Mamba models, validated on GLM-5.3-Flash ([#14614](https://github.com/ai-dynamo/dynamo/pull/14614)).
+- @jacksonrnewhouse drained SSE streams after graceful generation stops ([#14645](https://github.com/ai-dynamo/dynamo/pull/14645)).
+- @zhaohuizh shared prompt tokens across request clones ([#14701](https://github.com/ai-dynamo/dynamo/pull/14701)).
+- @Arsene12358 settled vLLM KV warm-up stages through a per-step round on every attention data-parallel rank ([#14728](https://github.com/ai-dynamo/dynamo/pull/14728)).
+- @Prudctual carried typed pre-stream errors on the QUIC response plane and passed `response_format` into vLLM-Omni video inputs ([#14789](https://github.com/ai-dynamo/dynamo/pull/14789), [#14844](https://github.com/ai-dynamo/dynamo/pull/14844)).
+- @Sumit884-byte sent inline media once on the TCP request plane and prepended the KServe batch dimension for Triton metadata ([#14801](https://github.com/ai-dynamo/dynamo/pull/14801), [#14996](https://github.com/ai-dynamo/dynamo/pull/14996)).
+- @bojiang-li used the root cache for container user overrides with a group and three more operator, cache, and multimodal fixes ([#14820](https://github.com/ai-dynamo/dynamo/pull/14820)).
+- @host452b enforced media download limits ([#15005](https://github.com/ai-dynamo/dynamo/pull/15005)).
+- @andrewpaprotsky added the operator LPX integration and four follow-up LPX changes ([#15062](https://github.com/ai-dynamo/dynamo/pull/15062)).
+- @Atharva-Kanherkar preserved URL path case in the multimodal image cache key ([#15101](https://github.com/ai-dynamo/dynamo/pull/15101)).
+- @sherlockwu gated SGLang auto tool-call grammars on reasoning and forwarded tool-message media in Python chat processors ([#15227](https://github.com/ai-dynamo/dynamo/pull/15227), [#15237](https://github.com/ai-dynamo/dynamo/pull/15237)).
+- @livingshade added SGLang EAGLE3 speculative decoding tests and a guide ([#15251](https://github.com/ai-dynamo/dynamo/pull/15251), [#15268](https://github.com/ai-dynamo/dynamo/pull/15268)).
+- @c2w-sea declared the ModelExpress startup weight version for vLLM ([#15252](https://github.com/ai-dynamo/dynamo/pull/15252)).
+- @junuxyz moved vLLM runtime configurations, examples, and recipes to explicit NIXL roles ([#15256](https://github.com/ai-dynamo/dynamo/pull/15256), [#15366](https://github.com/ai-dynamo/dynamo/pull/15366)).
+- @surajssd broke a KV router request-lease ownership cycle and retried NATS connections at startup ([#15258](https://github.com/ai-dynamo/dynamo/pull/15258), [#15269](https://github.com/ai-dynamo/dynamo/pull/15269)).
+- @JasperChan929 charged and gated explicit hard pins at ThunderAgent admission ([#15290](https://github.com/ai-dynamo/dynamo/pull/15290)).
+- @dundysm kept `multi_modal_data` on non-Qwen vLLM decode for image KV identity ([#15371](https://github.com/ai-dynamo/dynamo/pull/15371)).
+- @charan-rathore placed the vLLM-Omni video `negative_prompt` in the prompt entry ([#15402](https://github.com/ai-dynamo/dynamo/pull/15402)).
+- @awesome-pro generated the nightly release ledger for the docs ([#15410](https://github.com/ai-dynamo/dynamo/pull/15410)).
+- @sunil1511 added shared NGC model fetching with SGLang and vLLM integration ([#15441](https://github.com/ai-dynamo/dynamo/pull/15441)).
+- @neilkg passed the checkpoint tokenizer to SGLang parsers and eight more frontend and SGLang fidelity fixes ([#15509](https://github.com/ai-dynamo/dynamo/pull/15509)).
+- @kathleenfrench dropped the stale `dynamoGraphDeploymentRef` from LPX bindings ([#15522](https://github.com/ai-dynamo/dynamo/pull/15522)).
+- @geelen let recipe cards without logos use the full header width ([#15546](https://github.com/ai-dynamo/dynamo/pull/15546)).
+- @joshhay95 selected GPU-local partitions for hybrid and HX LPX builds ([#15563](https://github.com/ai-dynamo/dynamo/pull/15563), [#15706](https://github.com/ai-dynamo/dynamo/pull/15706)).
+- @ericcurtin rejected vLLM-Omni TTS tasks the checkpoint cannot serve ([#15591](https://github.com/ai-dynamo/dynamo/pull/15591)).
+- @mattwittwer rejected non-numeric `logit_bias` keys in the frontend ([#16322](https://github.com/ai-dynamo/dynamo/pull/16322)).
+- @Jianhong-Zhang upgraded SGLang XPU to v0.5.19 on oneAPI 2026.0 ([#16684](https://github.com/ai-dynamo/dynamo/pull/16684)).
 
 </Accordion>

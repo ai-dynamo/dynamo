@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-global-router-store-dynamodb"
+description = "DynamoDB persistence for Global Router session affinity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dynamo-global-router = { workspace = true }
+async-trait = { workspace = true }
+aws-sdk-dynamodb = { workspace = true }
+blake3 = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+dynamo-global-common = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

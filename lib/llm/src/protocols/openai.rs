@@ -34,6 +34,7 @@ pub mod responses;
 pub mod stream_aggregator;
 pub(crate) mod strict_schema;
 pub mod tools;
+pub mod transcriptions;
 pub mod validate;
 pub mod videos;
 
@@ -344,6 +345,7 @@ pub fn convert_backend_top_logprobs(
                 top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok))
             };
             dynamo_protocols::types::TopLogprobs {
+                token_id: None,
                 token: tok,
                 logprob: top_lp.logprob as f32,
                 bytes,
@@ -358,6 +360,7 @@ pub fn convert_backend_top_logprobs(
             selected_token.to_string()
         };
         result.push(dynamo_protocols::types::TopLogprobs {
+            token_id: None,
             bytes: token_to_utf8_bytes(&token),
             token,
             logprob: selected_logprob,

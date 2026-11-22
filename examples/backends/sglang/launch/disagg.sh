@@ -66,8 +66,6 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_P
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
-#AssertionError: Prefill round robin balance is required when dp size > 1. Please make sure that the prefill instance is launched with `--load-balance-method round_robin` and `--prefill-round-robin-balance` is set for decode server.
-
 # run prefill worker
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,

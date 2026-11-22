@@ -76,6 +76,18 @@ pub enum PoolKeyError {
     InvalidField { field: &'static str },
 }
 
+/// The pool's name for people, `<cluster_id>/<namespace>/<dgd_name>`, as logs
+/// and metrics show it. A pool's identity is its [`PoolId`].
+impl fmt::Display for PoolKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}",
+            self.cluster_id, self.namespace, self.dgd_name
+        )
+    }
+}
+
 impl PoolKey {
     pub fn new(
         cluster_id: impl Into<String>,
@@ -210,6 +222,14 @@ mod tests {
     fn api_representation_is_an_opaque_string() {
         let id = V1PoolIdDeriver.derive(&key("ohio", "dynamo", "mocker-1"));
         assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{id}\""));
+    }
+
+    #[test]
+    fn a_key_displays_as_its_name_for_people() {
+        assert_eq!(
+            key("ohio", "dynamo", "mocker-1").to_string(),
+            "ohio/dynamo/mocker-1"
+        );
     }
 
     #[test]

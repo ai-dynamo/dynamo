@@ -9,15 +9,14 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_kv_router::protocols::ActiveLoad;
-use dynamo_kv_router::scheduling::BusyThresholds;
-use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
+use dynamo_slot_tracker::host::{BusyThresholds, SchedulerLoadSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
+use crate::kv_router::ActiveLoad;
 use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
@@ -148,21 +147,45 @@ impl LoadThresholdConfig {
 /// only `/busy_threshold` writes it. Reads are wait-free: `get` copies the current value out
 /// of an [`ArcSwap`] without taking a lock, so a pending write never stalls the request path.
 #[derive(Clone)]
-pub struct LoadThresholdHandle(Arc<ArcSwap<LoadThresholdConfig>>);
+pub struct LoadThresholdHandle {
+    config: Arc<ArcSwap<LoadThresholdConfig>>,
+    enabled: bool,
+}
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(config)))
+        Self {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            enabled: true,
+        }
+    }
+
+    /// A handle that ignores thresholds, for a frontend in direct routing mode.
+    /// Its monitor never subscribes to KV metrics.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new(LoadThresholdConfig::default())
+        }
+    }
+
+    /// False for a handle from [`Self::disabled`].
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
-        LoadThresholdConfig::clone(&self.0.load())
+        LoadThresholdConfig::clone(&self.config.load())
     }
 
     /// Merge the set fields of `config` into the current thresholds. Concurrent writers
-    /// retry through `rcu`; they are rare and never block readers.
+    /// retry through `rcu`; they are rare and never block readers. A handle from
+    /// [`Self::disabled`] ignores the update.
     pub fn update(&self, config: &LoadThresholdConfig) {
-        self.0.rcu(|current| {
+        if !self.enabled {
+            return;
+        }
+        self.config.rcu(|current| {
             let mut next = LoadThresholdConfig::clone(current);
             if let Some(value) = config.active_decode_blocks_threshold {
                 next.active_decode_blocks_threshold = Some(value);
@@ -178,7 +201,7 @@ impl LoadThresholdHandle {
     }
 
     pub fn is_configured(&self) -> bool {
-        self.0.load().is_configured()
+        self.config.load().is_configured()
     }
 }
 
@@ -212,7 +235,7 @@ impl Default for DecodeOverloadLatchState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RemoteActiveLoadSnapshot {
-    worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+    worker: dynamo_router_protocol::worker::WorkerWithDpRank,
     active_decode_blocks: Option<u64>,
     active_prefill_tokens: Option<u64>,
     kv_used_blocks: Option<u64>,
@@ -221,7 +244,7 @@ struct RemoteActiveLoadSnapshot {
 impl From<ActiveLoad> for RemoteActiveLoadSnapshot {
     fn from(load: ActiveLoad) -> Self {
         Self {
-            worker: dynamo_kv_router::protocols::WorkerWithDpRank::new(
+            worker: dynamo_router_protocol::worker::WorkerWithDpRank::new(
                 load.worker_id,
                 load.dp_rank,
             ),
@@ -242,7 +265,7 @@ impl LoadObservation {
     fn parts(
         self,
     ) -> (
-        dynamo_kv_router::protocols::WorkerWithDpRank,
+        dynamo_router_protocol::worker::WorkerWithDpRank,
         Option<u64>,
         Option<u64>,
         Option<u64>,
@@ -876,15 +899,26 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             };
 
         // Subscribe to KV metrics over the configured event transport. This is
-        // optional; cleanup of TTFT and ITL metrics continues without it.
-        let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
-            Ok(sub) => Some(sub),
-            Err(e) => {
-                tracing::warn!(
-                    "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
-                    e
-                );
-                None
+        // optional; cleanup of TTFT and ITL metrics continues without it. The
+        // reports feed only threshold-based overload detection, and the
+        // subscription connects to every worker, so skip it when the threshold
+        // handle is disabled.
+        let kv_metrics_rx = if !self.thresholds.handle().is_enabled() {
+            tracing::debug!(
+                endpoint = %endpoint.id(),
+                "KvWorkerMonitor: threshold handle disabled, skipping the KV metrics subscription"
+            );
+            None
+        } else {
+            match KvMetricsSubscriber::for_endpoint(endpoint).await {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(
+                        "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
+                        e
+                    );
+                    None
+                }
             }
         };
 
@@ -1268,8 +1302,9 @@ mod tests {
         WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
         overload_reconciliation_needed, publish_overloaded_instances_if_needed,
     };
-    use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
-    use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
+    use crate::kv_router::ActiveLoad;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -2037,7 +2072,7 @@ mod tests {
 
     #[test]
     fn cleanup_removes_every_load_series_for_the_worker_ranks() {
-        use dynamo_kv_router::sequences::LocalWorkerLoad;
+        use dynamo_slot_tracker::host::LocalWorkerLoad;
         use prometheus::core::Collector;
 
         const WORKER_ID: u64 = 0x10696;
