@@ -6,10 +6,11 @@
 mod inputs;
 mod progress;
 pub mod runtime;
-use crate::placement::LaneKey;
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycle};
+
+use crate::placement::LaneKey;
 use std::error::Error;
 use std::sync::Arc;
 
