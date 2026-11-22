@@ -2127,6 +2127,9 @@ pub struct OpenAIPreprocessor {
     /// parser) and any model that sets `normalize_tool_call_args: true` in its
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
+    /// The card renders with the native tekken formatter, which never prints
+    /// tool-call IDs and needs no 9-character truncation.
+    tekken_formatter: bool,
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
@@ -3484,6 +3487,12 @@ impl OpenAIPreprocessor {
             beam_route,
             mistral_tool_call_grammar,
             normalize_tool_call_args,
+            // Same check that selects the formatter in `prompt_formatter_from_mdc`.
+            tekken_formatter: mdc
+                .tokenizer
+                .as_ref()
+                .and_then(crate::model_card::TokenizerKind::tekken_file)
+                .is_some(),
             media_loader,
             token_budget,
             context_length,
@@ -4199,7 +4208,8 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
-        let truncate_tool_call_ids = self.tool_call_parser.as_deref() == Some("mistral");
+        let truncate_tool_call_ids =
+            self.tool_call_parser.as_deref() == Some("mistral") && !self.tekken_formatter;
         let formatted_prompt = if self.normalize_tool_call_args
             || truncate_tool_call_ids
             || emulate_continuation
@@ -9406,6 +9416,39 @@ mod token_data_tests {
             prompt.as_str()
         );
         assert!(prompt.segments().is_some());
+    }
+
+    #[test]
+    fn mistral_tekken_card_keeps_parallel_tool_call_ids_distinct() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-mistral-tekken",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("mistral".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let call = |id: &str, city: &str| {
+            serde_json::json!({
+                "id": id, "type": "function",
+                "function": {"name": "get_weather", "arguments": format!("{{\"city\": \"{city}\"}}")}
+            })
+        };
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "mistral",
+            "messages": [
+                {"role": "user", "content": "Weather in Paris and Rome?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    call("first_123456789", "Paris"),
+                    call("second_123456789", "Rome")
+                ]},
+                {"role": "tool", "tool_call_id": "first_123456789", "content": "18C"},
+                {"role": "tool", "tool_call_id": "second_123456789", "content": "21C"}
+            ]
+        }))
+        .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert!(prompt.as_str().contains("18C"), "{}", prompt.as_str());
+        assert!(prompt.as_str().contains("21C"), "{}", prompt.as_str());
     }
 
     #[tokio::test]
@@ -22085,7 +22128,6 @@ mod custom_content_template_tests {
         let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
         assert_eq!(rendered.as_str(), "[CALL 85787c6db][RESULT 85787c6db]");
 
-        // IDs that already fit are left alone.
         let request = tool_result_turn("VwLkM9Fp1");
         let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
         assert_eq!(rendered.as_str(), "[CALL VwLkM9Fp1][RESULT VwLkM9Fp1]");
