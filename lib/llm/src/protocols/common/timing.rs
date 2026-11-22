@@ -56,6 +56,34 @@ impl std::fmt::Display for RequestPhase {
     }
 }
 
+/// The worker selected for one phase of an attempt.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RoutedWorker {
+    pub(crate) id: Option<u64>,
+    pub(crate) dp_rank: Option<u32>,
+    /// Stored at routing time so metrics need no MDC lookup.
+    pub(crate) worker_type: Option<&'static str>,
+}
+
+/// The workers of the latest routed attempt. Each field is first-write-wins within an attempt.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RoutedWorkers {
+    pub(crate) prefill: RoutedWorker,
+    pub(crate) decode: RoutedWorker,
+    /// A retry began, so its first write replaces these workers. Until then they still name
+    /// the failed attempt, for a request that ends before it is routed again.
+    superseded: bool,
+}
+
+impl RoutedWorkers {
+    fn current_attempt(&mut self) -> &mut Self {
+        if self.superseded {
+            *self = Self::default();
+        }
+        self
+    }
+}
+
 /// Per-request tracker for timing and routing metrics.
 ///
 /// Captures information throughout the request lifecycle:
@@ -72,13 +100,14 @@ impl std::fmt::Display for RequestPhase {
 /// observation and ignore later writes. In disaggregated serving, both prefill and decode
 /// phases may call `record_first_token`; `OnceLock` ensures the prefill phase's TTFT is
 /// preserved. Also used for one-shot metadata: `prefill_start_time`, KV hit info,
-/// ISL/cached tokens, worker types, and tokenizer latency.
+/// ISL/cached tokens, and tokenizer latency.
 ///
 /// **`Mutex` (last-write-wins):** Used for values where later phases should overwrite
 /// earlier ones. `request_finish_time` is updated incrementally at each output block
 /// boundary so that `avg_itl_ms()` stays current during streaming, and the decode
 /// phase's final finish naturally overwrites the prefill phase's earlier finish.
-/// `phase` also uses a Mutex since it transitions across phases.
+/// `phase` also uses a Mutex since it transitions across phases, and so does `workers`,
+/// which a migration replaces as a whole.
 ///
 /// **`AtomicU64`:** Used for frequently updated counters (`osl_tokens`) and
 /// accumulated detokenize timing, where lock-free updates are beneficial.
@@ -127,28 +156,8 @@ pub struct RequestTracker {
     /// Output sequence length in tokens - updated atomically as tokens stream back
     osl_tokens: AtomicU64,
 
-    /// Prefill worker ID (for disaggregated serving) - set once when known.
-    prefill_worker_id: OnceLock<u64>,
-
-    /// Prefill DP rank - set once when known.
-    prefill_dp_rank: OnceLock<u32>,
-
-    /// Decode worker ID - set once when known.
-    decode_worker_id: OnceLock<u64>,
-
-    /// Decode DP rank - set once when known.
-    decode_dp_rank: OnceLock<u32>,
-
-    /// Worker type for the prefill worker ("prefill" or "decode").
-    /// Stored at routing time to avoid MDC lookup when updating Prometheus metrics.
-    /// In aggregated mode, this will be "decode" since the same worker handles both.
-    /// This is necessary because TTFT metrics need to know the worker type label,
-    /// and looking up MDC by worker_id would require iterating all cards (O(n)).
-    prefill_worker_type: OnceLock<&'static str>,
-
-    /// Worker type for the decode worker (always "decode").
-    /// Stored for symmetry with prefill_worker_type, though decode is always "decode".
-    decode_worker_type: OnceLock<&'static str>,
+    /// Prefill and decode workers. In aggregated mode both name the same worker.
+    workers: Mutex<RoutedWorkers>,
 
     /// Request phase (Prefill/Decode/Aggregated)
     phase: Mutex<RequestPhase>,
@@ -255,12 +264,7 @@ impl RequestTracker {
             isl_tokens: OnceLock::new(),
             cached_tokens: OnceLock::new(),
             osl_tokens: AtomicU64::new(0),
-            prefill_worker_id: OnceLock::new(),
-            prefill_dp_rank: OnceLock::new(),
-            decode_worker_id: OnceLock::new(),
-            decode_dp_rank: OnceLock::new(),
-            prefill_worker_type: OnceLock::new(),
-            decode_worker_type: OnceLock::new(),
+            workers: Mutex::new(RoutedWorkers::default()),
             phase: Mutex::new(RequestPhase::Aggregated),
             phase_semaphore: Arc::new(Semaphore::new(1)),
             tokenize_latency: OnceLock::new(),
@@ -436,83 +440,51 @@ impl RequestTracker {
         *self.phase.lock()
     }
 
-    fn record_once_u64(slot: &OnceLock<u64>, value: u64, field_name: &'static str) {
-        if let Some(existing) = slot.get() {
-            if *existing != value {
-                tracing::error!(
-                    field = field_name,
-                    existing = *existing,
-                    new = value,
-                    "Conflicting request tracker write"
-                );
-            }
-            return;
-        }
-        let _ = slot.set(value);
-    }
-
-    fn record_once_u32(slot: &OnceLock<u32>, value: u32, field_name: &'static str) {
-        if let Some(existing) = slot.get() {
-            if *existing != value {
-                tracing::error!(
-                    field = field_name,
-                    existing = *existing,
-                    new = value,
-                    "Conflicting request tracker write"
-                );
-            }
-            return;
-        }
-        let _ = slot.set(value);
-    }
-
-    fn record_once_worker_type(
-        slot: &OnceLock<&'static str>,
-        value: &'static str,
+    fn record_once<T: Copy + PartialEq + std::fmt::Debug>(
+        slot: &mut Option<T>,
+        value: T,
         field_name: &'static str,
     ) {
-        if let Some(existing) = slot.get() {
-            if *existing != value {
-                tracing::error!(
-                    field = field_name,
-                    existing = *existing,
-                    new = value,
-                    "Conflicting request tracker write"
-                );
-            }
-            return;
+        let existing = *slot.get_or_insert(value);
+        if existing != value {
+            tracing::error!(
+                field = field_name,
+                ?existing,
+                new = ?value,
+                "Conflicting request tracker write"
+            );
         }
-        let _ = slot.set(value);
     }
 
     fn record_prefill_worker(
-        &self,
+        worker: &mut RoutedWorker,
         instance_id: u64,
         dp_rank: Option<u32>,
         worker_type: &'static str,
     ) {
-        Self::record_once_u64(&self.prefill_worker_id, instance_id, "prefill_worker_id");
+        Self::record_once(&mut worker.id, instance_id, "prefill_worker_id");
         if let Some(rank) = dp_rank {
-            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+            Self::record_once(&mut worker.dp_rank, rank, "prefill_dp_rank");
         }
-        Self::record_once_worker_type(
-            &self.prefill_worker_type,
-            worker_type,
-            "prefill_worker_type",
-        );
+        Self::record_once(&mut worker.worker_type, worker_type, "prefill_worker_type");
     }
 
     fn record_decode_worker(
-        &self,
+        worker: &mut RoutedWorker,
         instance_id: u64,
         dp_rank: Option<u32>,
         worker_type: &'static str,
     ) {
-        Self::record_once_u64(&self.decode_worker_id, instance_id, "decode_worker_id");
+        Self::record_once(&mut worker.id, instance_id, "decode_worker_id");
         if let Some(rank) = dp_rank {
-            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+            Self::record_once(&mut worker.dp_rank, rank, "decode_dp_rank");
         }
-        Self::record_once_worker_type(&self.decode_worker_type, worker_type, "decode_worker_type");
+        Self::record_once(&mut worker.worker_type, worker_type, "decode_worker_type");
+    }
+
+    /// Start a migration retry: the next worker recorded replaces those of the failed attempt.
+    pub(crate) fn begin_retry(&self) {
+        self.workers.lock().superseded = true;
     }
 
     /// Record worker ID, optional DP rank, and worker type based on the current phase.
@@ -520,12 +492,21 @@ impl RequestTracker {
     /// Worker ID and type are recorded as soon as they are known. DP rank is recorded only
     /// when it is concrete, allowing the unresolved rank to remain unset until later.
     pub fn record_worker(&self, instance_id: u64, dp_rank: Option<u32>, worker_type: &'static str) {
-        match self.phase() {
-            RequestPhase::Prefill => self.record_prefill_worker(instance_id, dp_rank, worker_type),
-            RequestPhase::Decode => self.record_decode_worker(instance_id, dp_rank, worker_type),
+        let phase = self.phase();
+        let mut guard = self.workers.lock();
+        let RoutedWorkers {
+            prefill, decode, ..
+        } = guard.current_attempt();
+        match phase {
+            RequestPhase::Prefill => {
+                Self::record_prefill_worker(prefill, instance_id, dp_rank, worker_type)
+            }
+            RequestPhase::Decode => {
+                Self::record_decode_worker(decode, instance_id, dp_rank, worker_type)
+            }
             RequestPhase::Aggregated => {
-                self.record_prefill_worker(instance_id, dp_rank, worker_type);
-                self.record_decode_worker(instance_id, dp_rank, worker_type);
+                Self::record_prefill_worker(prefill, instance_id, dp_rank, worker_type);
+                Self::record_decode_worker(decode, instance_id, dp_rank, worker_type);
             }
         }
     }
@@ -605,49 +586,55 @@ impl RequestTracker {
 
     /// Get worker ID information if any worker IDs have been recorded.
     pub fn get_worker_info(&self) -> Option<WorkerIdInfo> {
-        let prefill = self.prefill_worker_id();
-        let decode = self.decode_worker_id();
+        let RoutedWorkers {
+            prefill, decode, ..
+        } = self.workers();
 
-        if prefill.is_none() && decode.is_none() {
+        if prefill.id.is_none() && decode.id.is_none() {
             return None;
         }
 
         Some(WorkerIdInfo {
-            prefill_worker_id: prefill,
-            prefill_dp_rank: self.prefill_dp_rank(),
-            decode_worker_id: decode,
-            decode_dp_rank: self.decode_dp_rank(),
+            prefill_worker_id: prefill.id,
+            prefill_dp_rank: prefill.dp_rank,
+            decode_worker_id: decode.id,
+            decode_dp_rank: decode.dp_rank,
         })
+    }
+
+    /// All worker fields under one lock, so they describe the same attempt.
+    pub(crate) fn workers(&self) -> RoutedWorkers {
+        *self.workers.lock()
     }
 
     /// Get the decode worker ID if recorded.
     pub fn decode_worker_id(&self) -> Option<u64> {
-        self.decode_worker_id.get().copied()
+        self.workers.lock().decode.id
     }
 
     /// Get the decode DP rank if recorded.
     pub fn decode_dp_rank(&self) -> Option<u32> {
-        self.decode_dp_rank.get().copied()
+        self.workers.lock().decode.dp_rank
     }
 
     /// Get the prefill worker ID if recorded.
     pub fn prefill_worker_id(&self) -> Option<u64> {
-        self.prefill_worker_id.get().copied()
+        self.workers.lock().prefill.id
     }
 
     /// Get the prefill DP rank if recorded.
     pub fn prefill_dp_rank(&self) -> Option<u32> {
-        self.prefill_dp_rank.get().copied()
+        self.workers.lock().prefill.dp_rank
     }
 
     /// Get the prefill worker type if recorded.
     pub fn prefill_worker_type(&self) -> Option<&'static str> {
-        self.prefill_worker_type.get().copied()
+        self.workers.lock().prefill.worker_type
     }
 
     /// Get the decode worker type if recorded.
     pub fn decode_worker_type(&self) -> Option<&'static str> {
-        self.decode_worker_type.get().copied()
+        self.workers.lock().decode.worker_type
     }
 
     /// Inject timing measured in another process (a standalone router); `get_timing_info`
@@ -673,19 +660,24 @@ impl RequestTracker {
     /// Overlay worker attribution forwarded by a standalone router (on the first chunk's
     /// `routing_data.worker_id`) onto this tracker so `get_worker_info`, the metrics
     /// annotation, and `build_response_nvext` surface it on the split-router path.
-    /// First-write-wins per field: this process's own recordings take precedence.
+    /// First-write-wins per field within an attempt: this process's own recordings take
+    /// precedence.
     pub fn set_external_worker_info(&self, info: WorkerIdInfo) {
+        let mut guard = self.workers.lock();
+        let RoutedWorkers {
+            prefill, decode, ..
+        } = guard.current_attempt();
         if let Some(id) = info.prefill_worker_id {
-            Self::record_once_u64(&self.prefill_worker_id, id, "prefill_worker_id");
+            Self::record_once(&mut prefill.id, id, "prefill_worker_id");
         }
         if let Some(rank) = info.prefill_dp_rank {
-            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+            Self::record_once(&mut prefill.dp_rank, rank, "prefill_dp_rank");
         }
         if let Some(id) = info.decode_worker_id {
-            Self::record_once_u64(&self.decode_worker_id, id, "decode_worker_id");
+            Self::record_once(&mut decode.id, id, "decode_worker_id");
         }
         if let Some(rank) = info.decode_dp_rank {
-            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+            Self::record_once(&mut decode.dp_rank, rank, "decode_dp_rank");
         }
     }
 
@@ -994,7 +986,7 @@ mod tests {
         tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
 
         // A later forward from a standalone router must not clobber local attribution
-        // (OnceLock first-write-wins).
+        // (first-write-wins within an attempt).
         tracker.set_external_worker_info(WorkerIdInfo {
             prefill_worker_id: Some(7),
             prefill_dp_rank: Some(1),
@@ -1006,6 +998,41 @@ mod tests {
         assert_eq!(tracker.prefill_dp_rank(), Some(0));
         assert_eq!(tracker.decode_worker_id(), Some(42));
         assert_eq!(tracker.decode_dp_rank(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn retry_replaces_both_phases_once_routed() {
+        let tracker = RequestTracker::new();
+        drop(tracker.set_phase(RequestPhase::Prefill).await);
+        tracker.record_worker(1, Some(1), WORKER_TYPE_PREFILL);
+        drop(tracker.set_phase(RequestPhase::Decode).await);
+        tracker.record_worker(2, Some(2), WORKER_TYPE_DECODE);
+        let failed = tracker.get_worker_info();
+
+        tracker.begin_retry();
+        assert_eq!(tracker.get_worker_info(), failed, "nothing is routed yet");
+
+        // This retry bypasses remote prefill, so it has no prefill worker.
+        tracker.record_worker(3, None, WORKER_TYPE_DECODE);
+        let bypassed = WorkerIdInfo {
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            decode_worker_id: Some(3),
+            decode_dp_rank: None,
+        };
+        assert_eq!(tracker.get_worker_info(), Some(bypassed));
+        assert_eq!(tracker.prefill_worker_type(), None);
+
+        // A standalone router's forward can be the first write of an attempt.
+        tracker.begin_retry();
+        let forwarded = WorkerIdInfo {
+            prefill_worker_id: Some(4),
+            prefill_dp_rank: Some(4),
+            decode_worker_id: Some(5),
+            decode_dp_rank: Some(5),
+        };
+        tracker.set_external_worker_info(forwarded.clone());
+        assert_eq!(tracker.get_worker_info(), Some(forwarded));
     }
 
     #[test]
