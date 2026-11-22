@@ -379,7 +379,10 @@ class AISCoreEnginePerfModel:
         for batch_size in _capacity_batch_sizes(max_batch):
             ttft_s = self._prefill_time_for_batch(prefill_isl, batch_size)
             if ttft_s is None:
-                return None
+                if self._attention_dp_size == 1:
+                    return None
+                # A DP candidate can fall outside the estimator's profile.
+                continue
             if ttft_s == 0:
                 continue
             capacity = EngineCapacity(

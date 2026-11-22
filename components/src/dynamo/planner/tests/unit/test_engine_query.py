@@ -291,6 +291,50 @@ def test_attention_dp_prefill_capacity_keeps_long_prompt_on_one_rank() -> None:
     assert _prefill_query_shapes(forward) == [[(1, 64), (0, 0)], [(1, 32), (0, 0)]]
 
 
+@pytest.mark.parametrize(
+    ("ranks", "priced_batches", "expected_batch", "attempt_count"),
+    [
+        (2, (1, 2), 2, 4),
+        (2, (2, 4), 4, 4),
+        (2, (), None, 4),
+        (1, (1, 2), None, 3),
+    ],
+    ids=["larger-out-of-profile", "holes-in-profile", "no-estimates", "single-rank"],
+)
+def test_prefill_capacity_with_partial_estimator_coverage(
+    ranks: int,
+    priced_batches: tuple[int, ...],
+    expected_batch: Optional[int],
+    attempt_count: int,
+) -> None:
+    isl = 32
+    attempted: list[int] = []
+
+    def estimate(metrics_by_rank: list[dict[str, Any]]) -> Optional[float]:
+        tokens = sum(
+            rank["scheduled_requests"]["sum_prefill_tokens"] for rank in metrics_by_rank
+        )
+        batch = tokens // isl
+        attempted.append(batch)
+        return 10.0 if batch in priced_batches else None
+
+    model, _ = _model(
+        worker_type="prefill",
+        estimate=estimate,
+        max_num_batched_tokens=128 // ranks,
+        attention_dp_size=ranks,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=isl, osl=0))
+
+    if expected_batch is None:
+        assert capacity is None
+    else:
+        assert capacity is not None
+        assert capacity.rps == pytest.approx(expected_batch / 0.01)
+    assert attempted == list(range(1, attempt_count + 1))
+
+
 def test_attention_dp_synthetic_work_is_split_across_ranks():
     model, forward_pass_model = _model(
         worker_type="decode",
