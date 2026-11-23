@@ -16,7 +16,9 @@ use tokio::time::Instant;
 
 use crate::classifier::{ClassificationOverrides, ClassifyRequest};
 
-pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress};
+pub use crate::classifier::{
+    AbortCause, RequestLifecycle, RequestProgress, RequestProgressUpdater,
+};
 pub use crate::placement::LaneKey;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{
@@ -33,6 +35,17 @@ mod sealed {
 }
 
 impl sealed::Sealed for ClassifyRequest {}
+
+/// A request's progress reading and the write capability paired with it, starting at
+/// `initial_context_tokens`. The classifier runtime creates the pair for each request it
+/// classifies; a host calls this where it has no runtime, as in its tests. A plugin only
+/// reads a [`RequestProgress`]; its tests get one through
+/// `dynamo_kv_router::plugins::testing::request_progress`.
+pub fn request_progress(
+    initial_context_tokens: usize,
+) -> (RequestProgress, RequestProgressUpdater) {
+    RequestProgress::new(initial_context_tokens)
+}
 
 /// How the kernel builds the request a classifier reads, and what it reads back. A plugin
 /// reads a [`ClassifyRequest`] and calls its `set_*` methods; its tests get one through
