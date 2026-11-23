@@ -413,7 +413,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
-    m.add_class::<llm::kv::ActiveSequenceEventPublisher>()?;
+    m.add_class::<llm::kv::WorkerSequenceEventPublisher>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SessionBindingStream>()?;
     #[cfg(feature = "select-service")]

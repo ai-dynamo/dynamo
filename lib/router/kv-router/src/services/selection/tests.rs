@@ -1983,12 +1983,11 @@ async fn worker_events_release_peer_load_after_router_shutdown() {
         .await
         .unwrap();
     let worker_id = 1;
-    let mut worker = ActiveSequenceEventPublisher::new(
+    let mut worker = WorkerSequenceEventPublisher::new(
         "tcp://127.0.0.1:*",
         "model".to_string(),
         "default".to_string(),
         WorkerWithDpRank::new(worker_id, 0),
-        4,
     )
     .unwrap();
     for service in [&service_a, &service_b] {

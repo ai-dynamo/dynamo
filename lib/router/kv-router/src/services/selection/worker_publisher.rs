@@ -12,21 +12,19 @@ use crate::services::common::replica_sync::REPLICA_TOPIC;
 use crate::services::common::zmq::create_bound_pub_socket_sync;
 
 /// Publishes worker-origin active-sequence events directly to selector subscribers.
-pub struct ActiveSequenceEventPublisher {
+pub struct WorkerSequenceEventPublisher {
     socket: zmq::Socket,
     endpoint: String,
     event: ScopedReplicaEvent,
 }
 
-impl ActiveSequenceEventPublisher {
+impl WorkerSequenceEventPublisher {
     pub fn new(
         bind_endpoint: &str,
         model_name: String,
         routing_group: String,
         worker: WorkerWithDpRank,
-        block_size: u32,
     ) -> Result<Self> {
-        anyhow::ensure!(block_size > 0, "block_size must be positive");
         let socket = create_bound_pub_socket_sync(bind_endpoint)?;
         let endpoint = socket
             .get_last_endpoint()?
@@ -37,7 +35,7 @@ impl ActiveSequenceEventPublisher {
             event: ScopedReplicaEvent {
                 model_name,
                 routing_group,
-                block_size,
+                block_size: 0,
                 event: ActiveSequenceEvent {
                     request_id: String::new(),
                     worker,

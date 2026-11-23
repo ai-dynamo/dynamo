@@ -309,11 +309,10 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
 async def test_worker_publisher_updates_reservation_load(monkeypatch, unused_tcp_port):
     monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1, replica_sync_port=unused_tcp_port)
-    publisher = llm.ActiveSequenceEventPublisher(
+    publisher = llm.WorkerSequenceEventPublisher(
         model_name="model",
         routing_group="default",
         worker_id=1,
-        block_size=4,
         bind_endpoint="tcp://127.0.0.1:*",
     )
 

@@ -53,7 +53,7 @@ pub use service::{
     local_selection_core_with_host, warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "replica-sync-zmq")]
-pub use worker_publisher::ActiveSequenceEventPublisher;
+pub use worker_publisher::WorkerSequenceEventPublisher;
 #[cfg(feature = "ingest-zmq")]
 pub use zmq_ingress::ZmqDirectIngress;
 

@@ -257,10 +257,16 @@ impl Members {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MemberAction {
+    Register,
+    Deregister,
+}
+
 struct PeerCommand {
     kind: MemberKind,
     endpoint: String,
-    register: bool,
+    action: MemberAction,
     response: oneshot::Sender<Result<bool>>,
 }
 
@@ -344,11 +350,13 @@ impl PeerManager {
     }
 
     pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
-        self.update(MemberKind::Peer, endpoint, true).await
+        self.update(MemberKind::Peer, endpoint, MemberAction::Register)
+            .await
     }
 
     pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
-        self.update(MemberKind::Peer, endpoint, false).await
+        self.update(MemberKind::Peer, endpoint, MemberAction::Deregister)
+            .await
     }
 
     pub(crate) fn list_peers(&self) -> Vec<String> {
@@ -359,16 +367,24 @@ impl PeerManager {
         &self,
         endpoint: String,
     ) -> Result<bool, ReplicaPeerError> {
-        self.update(MemberKind::WorkerPublisher, endpoint, true)
-            .await
+        self.update(
+            MemberKind::WorkerPublisher,
+            endpoint,
+            MemberAction::Register,
+        )
+        .await
     }
 
     pub(crate) async fn deregister_worker_publisher(
         &self,
         endpoint: String,
     ) -> Result<bool, ReplicaPeerError> {
-        self.update(MemberKind::WorkerPublisher, endpoint, false)
-            .await
+        self.update(
+            MemberKind::WorkerPublisher,
+            endpoint,
+            MemberAction::Deregister,
+        )
+        .await
     }
 
     pub(crate) fn list_worker_publishers(&self) -> Vec<String> {
@@ -380,7 +396,7 @@ impl PeerManager {
         &self,
         kind: MemberKind,
         endpoint: String,
-        register: bool,
+        action: MemberAction,
     ) -> Result<bool, ReplicaPeerError> {
         validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
@@ -388,7 +404,7 @@ impl PeerManager {
             .send(PeerCommand {
                 kind,
                 endpoint,
-                register,
+                action,
                 response,
             })
             .await
@@ -436,9 +452,10 @@ fn handle_peer_command(
     let PeerCommand {
         kind,
         endpoint,
-        register,
+        action,
         response,
     } = command;
+    let register = matches!(action, MemberAction::Register);
     let mut members = members.write();
     if members.of(kind).contains(&endpoint) == register {
         let _ = response.send(Ok(false));

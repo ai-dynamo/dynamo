@@ -79,31 +79,29 @@ mod demand_driven;
 
 #[cfg(feature = "select-service")]
 #[pyclass(frozen)]
-pub(crate) struct ActiveSequenceEventPublisher {
+pub(crate) struct WorkerSequenceEventPublisher {
     // The GIL protects the borrow state while the socket is used without it.
-    inner: GILProtected<RefCell<Option<selection::ActiveSequenceEventPublisher>>>,
+    inner: GILProtected<RefCell<Option<selection::WorkerSequenceEventPublisher>>>,
     endpoint: String,
 }
 
 #[cfg(feature = "select-service")]
 #[pymethods]
-impl ActiveSequenceEventPublisher {
+impl WorkerSequenceEventPublisher {
     #[new]
-    #[pyo3(signature = (*, model_name, routing_group, worker_id, block_size, dp_rank=0, bind_endpoint="tcp://*:*"))]
+    #[pyo3(signature = (*, model_name, routing_group, worker_id, dp_rank=0, bind_endpoint="tcp://*:*"))]
     fn new(
         model_name: String,
         routing_group: String,
         worker_id: WorkerId,
-        block_size: u32,
         dp_rank: DpRank,
         bind_endpoint: &str,
     ) -> PyResult<Self> {
-        let publisher = selection::ActiveSequenceEventPublisher::new(
+        let publisher = selection::WorkerSequenceEventPublisher::new(
             bind_endpoint,
             model_name,
             routing_group,
             dynamo_router_protocol::worker::WorkerWithDpRank::new(worker_id, dp_rank),
-            block_size,
         )
         .map_err(to_pyerr)?;
         Ok(Self {

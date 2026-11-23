@@ -36,7 +36,7 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   selector applies them to its booking, local or replicated, and never
   republishes them. An event that arrives before the replicated booking is held
   briefly, so the late booking cannot restore finished load.
-- External hosts use `ActiveSequenceEventPublisher` to encode and publish these
+- External hosts use `WorkerSequenceEventPublisher` to encode and publish these
   events without depending on the replica wire format. Delivery is best effort.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate

@@ -941,7 +941,7 @@ class SelectionService:
         """Endpoints of the subscribed worker publishers, sorted."""
         ...
 
-class ActiveSequenceEventPublisher:
+class WorkerSequenceEventPublisher:
     """Nonblocking ZMQ publisher for worker-origin active-sequence events.
 
     Publishing releases the GIL. A publish or close call raises RuntimeError if
@@ -954,7 +954,6 @@ class ActiveSequenceEventPublisher:
         model_name: str,
         routing_group: str,
         worker_id: int,
-        block_size: int,
         dp_rank: int = 0,
         bind_endpoint: str = "tcp://*:*",
     ) -> None:
