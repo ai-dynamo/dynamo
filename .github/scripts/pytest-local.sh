@@ -177,6 +177,11 @@ fi
 
 pytest_args+=(-m "${PYTEST_MARKS}")
 
+# TODO: remove after the requested CUDA cache comparison.
+if [[ -n "${PYTEST_NODE_ID:-}" ]]; then
+  pytest_args+=("${PYTEST_NODE_ID}")
+fi
+
 echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
 umask 0022
 cd "${CONTAINER_WORKSPACE}"

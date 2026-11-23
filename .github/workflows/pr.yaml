@@ -132,6 +132,7 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      - sidecar-vllm-cache-comparison
       - sidecar-trtllm-nightly-config-test
       - vllm-build
       - vllm-local-dev-build
@@ -822,6 +823,29 @@ jobs:
   # ============================================================================
   # TEST PIPELINES
   # ============================================================================
+
+  # TODO: remove after the maintainer's CUDA cache comparison.
+  sidecar-vllm-cache-comparison:
+    name: sidecar-runtime
+    needs: [changed-files, vllm-build, sidecar-build]
+    if: needs.changed-files.outputs.sidecar == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      framework: vllm
+      test_type: vLLM Sidecar CUDA Cache Comparison
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sidecar and vllm and gpu_1
+      gpu_test_timeout_minutes: 75
+      dd_flaky_retry_enabled: 'false'
+      sidecar_cache_comparison: true
+      sidecar_backend: vllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
 
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
