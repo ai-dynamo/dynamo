@@ -4,6 +4,7 @@
 module.exports = async function rerunFailedCI({ github, context, core }) {
   const COPY_PR_BOT_ID = 138252374;
   const ACTIONS_BOT_ID = 41898282;
+  const GLAMR_USER_ID = 282374502;
   const FAILED = new Set(['failure', 'timed_out']);
   const MAX_RUN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -17,26 +18,36 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
 
   const { issue, comment, action } = context.payload;
   if (context.eventName !== 'issue_comment' || action !== 'created' || !issue.pull_request) return;
-  if (!/^\/rerun ci$/i.test(comment.body.trim())) return;
+  const body = comment.body.trim();
+  const glamrRequest = /^(?:factory|nursery): @dynamo-ops please rerun failed CI for ([0-9a-f]{40})$/.exec(body);
+  if (glamrRequest ? comment.user.id !== GLAMR_USER_ID : !/^\/rerun ci$/i.test(body)) return;
 
   const repo = context.repo;
   const issueArgs = { ...repo, issue_number: issue.number };
+  const pullArgs = { ...repo, pull_number: issue.number };
   const eventMarker = `<!-- dynamo-rerun-ci:comment:${comment.id} -->`;
+  const glamrMarker = glamrRequest && `<!-- dynamo-rerun-ci:glamr-head:${glamrRequest[1]} -->`;
   const comments = await github.paginate(github.rest.issues.listComments, { ...issueArgs, per_page: 100 });
   const replies = comments.filter(trustedReply);
-  if (replies.some(reply => reply.body.includes(eventMarker))) return;
+  if (replies.some(reply => reply.body.includes(eventMarker) ||
+      (glamrMarker && reply.body.includes(glamrMarker)))) return;
 
-  const respond = body => github.rest.issues.createComment({
-    ...issueArgs, body: `${eventMarker}\n${body}`,
-  });
-  // Effective repository permission is authoritative; author_association is not.
-  const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
-    ...repo, username: comment.user.login,
-  });
-  if (!['write', 'maintain', 'admin'].includes(access.permission)) {
-    await respond('The `/rerun ci` command requires repository write access.');
-    return;
+  if (!glamrRequest) {
+    const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+      ...repo, username: comment.user.login,
+    });
+    if (!['write', 'maintain', 'admin'].includes(access.permission)) {
+      await github.rest.issues.createComment({
+        ...issueArgs, body: `${eventMarker}\nThe \`/rerun ci\` command requires repository write access.`,
+      });
+      return;
+    }
   }
+
+  const { data: pull } = await github.rest.pulls.get(pullArgs);
+  const sha = pull.head.sha;
+  if (glamrRequest && (pull.state !== 'open' || sha !== glamrRequest[1] ||
+      pull.user.id !== GLAMR_USER_ID || pull.head.repo?.owner.id !== GLAMR_USER_ID)) return;
 
   try {
     await github.rest.reactions.createForIssueComment({
@@ -46,9 +57,6 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
     core.warning(`Could not acknowledge CI retry command ${comment.id}. Continuing without a reaction.`);
   }
 
-  const pullArgs = { ...repo, pull_number: issue.number };
-  const { data: pull } = await github.rest.pulls.get(pullArgs);
-  const sha = pull.head.sha;
   const branch = `pull-request/${issue.number}`;
   // This protected mirror records copy-pr-bot's approval of this exact commit.
   async function currentApproval(requireCopy) {
@@ -119,6 +127,7 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
   const reservations = [];
   const render = () => [
     eventMarker,
+    ...(glamrMarker && reservations.length ? [glamrMarker] : []),
     ...reservations,
     `CI retry for \`${sha}\`.`,
     '',
@@ -138,7 +147,7 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
   };
 
   for (const [index, { run, link, messageIndex }] of candidates.entries()) {
-    if (!(await currentApproval(run.event === 'push'))) {
+    if (!(await currentApproval(glamrRequest !== null || run.event === 'push'))) {
       for (const pending of candidates.slice(index)) {
         messages[pending.messageIndex] = `${pending.link}: not requested because the PR revision or required copied branch changed.`;
       }

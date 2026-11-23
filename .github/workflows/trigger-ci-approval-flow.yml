@@ -41,6 +41,7 @@
 
 # Maintainers can retry failed jobs from existing PR runs with `/rerun ci`.
 # Copied-branch retries require approval for the current PR head.
+# glamr-failed-ci-retry: v1
 
 name: Trigger CI Approval Flow
 
@@ -336,7 +337,10 @@ jobs:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/rerun ci')
+      (contains(github.event.comment.body, '/rerun ci') ||
+       (vars.GLAMR_CI_REQUESTS_DISABLED != 'true' &&
+        github.event.comment.user.id == 282374502 &&
+        contains(github.event.comment.body, '@dynamo-ops please rerun failed CI for ')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

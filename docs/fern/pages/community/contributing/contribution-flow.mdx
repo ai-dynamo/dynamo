@@ -87,6 +87,7 @@ or multiple major components require a
     Full CI uses a `pull-request/<number>` branch.
     `copy-pr-bot` creates it after automatic CI approval or `/ok to test <sha>`.
     Retries for these workflows require approval for the current commit.
+    GLAMR can request one retry on its own fork PR after CI is approved for that commit.
 
     For fork PRs, GitHub can omit PR links for checks such as Pre Merge.
     When those links are missing, the command cannot retry the checks.
