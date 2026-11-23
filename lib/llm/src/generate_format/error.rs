@@ -51,11 +51,11 @@ impl WorkerError {
     /// Dispatch counts `Overload` as an unavailable request plus a rejection.
     /// A canonical `RateLimited` or `CapacityExhausted` rejection, such as a
     /// request classifier's, takes its status from the shared HTTP policy, as
-    /// on the OpenAI path. That includes a backend-raised
-    /// `BackendError::WorkerOverloaded`, which normalizes to
-    /// `CapacityExhausted`. The check runs after the legacy rejection row, so
-    /// the legacy `ResourceExhausted` and `WorkerOverloaded` types keep their
-    /// 503.
+    /// on the OpenAI path. That includes a `BackendError::WorkerOverloaded`
+    /// raised in this process, which normalizes to `CapacityExhausted`. A
+    /// remote worker's arrives as the legacy `ResourceExhausted` and keeps 503.
+    /// The check runs after the legacy rejection row, so the legacy
+    /// `ResourceExhausted` and `WorkerOverloaded` types keep their 503.
     pub fn dispatch(error: &(dyn std::error::Error + 'static), invalid: Option<String>) -> Self {
         if request_deadline_exceeded(error) {
             Self::new(
