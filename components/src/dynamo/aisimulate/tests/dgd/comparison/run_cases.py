@@ -333,6 +333,98 @@ def _single_sweeper_backend(sweeper_input: dict[str, Any]) -> str:
     return backends[0]
 
 
+def _single_sweeper_choice(
+    search_space: dict[str, Any], field: str, *, aliases: dict[str, str] | None = None
+) -> str:
+    choices = search_space.get(field)
+    if (
+        not isinstance(choices, list)
+        or len(choices) != 1
+        or not isinstance(choices[0], str)
+    ):
+        raise ValueError(f"comparison cases require exactly one search_space.{field}")
+    value = choices[0]
+    return (aliases or {}).get(value, value)
+
+
+def recommendation_config(case: ComparisonCase) -> dict[str, Any]:
+    """Translate one legacy comparison input to the public recommend schema."""
+    legacy = case.sweeper_input
+    search_space = legacy.get("search_space")
+    workload = legacy.get("workload")
+    goal = legacy.get("goal")
+    sweep = legacy.get("sweep")
+    if not all(
+        isinstance(section, dict) for section in (search_space, workload, goal, sweep)
+    ):
+        raise TypeError(
+            "sweeper input must define search_space, workload, goal, and sweep"
+        )
+
+    mode = _single_sweeper_choice(
+        search_space,
+        "deployment_mode",
+        aliases={"agg": "aggregated", "disagg": "disaggregated"},
+    )
+    backend = _single_sweeper_choice(search_space, "backend")
+    worker = {"parallelism": {"preset": "default"}}
+    workers = (
+        {"aggregated": worker}
+        if mode == "aggregated"
+        else {"prefill": copy.deepcopy(worker), "decode": copy.deepcopy(worker)}
+    )
+
+    max_rounds = sweep.get("max_rounds", 20)
+    candidates_per_round = sweep.get(
+        "candidates_per_round", sweep.get("parallel_evals", 16)
+    )
+    max_eval_seconds = sweep.get("max_eval_seconds", 600.0)
+    sla = goal.get("sla")
+    engine = {
+        "mode": mode,
+        "model": search_space["model_name"],
+        "hardware": search_space["hardware_sku"],
+        "backend": backend,
+        "workers": workers,
+    }
+    if "context_length" in search_space:
+        engine["context_length"] = search_space["context_length"]
+
+    config = {
+        "traffic": {
+            "source": {
+                "type": "synthetic",
+                "input_tokens": workload["isl"],
+                "output_tokens": workload["osl"],
+            },
+            "load": {
+                "type": "constant_rate",
+                "requests_per_second": workload["request_rate"],
+            },
+            "stop": {
+                "requests_per_load_unit": workload["num_request_ratio"],
+            },
+        },
+        "engine": engine,
+        "optimization": {
+            "target": goal["target"],
+            "constraints": {
+                "max_candidate_gpus": search_space["gpu_budget"],
+            },
+        },
+        "optimizer": {
+            "algorithm": sweep.get("algorithm", "bayesian"),
+            "max_trials": max_rounds * candidates_per_round,
+            "parallelism": sweep.get("parallel_evals", 16),
+            "candidate_timeout_seconds": max_eval_seconds,
+            "seed": sweep.get("seed", 42),
+        },
+    }
+    if sla is not None:
+        config["evaluation"] = {"sla": copy.deepcopy(sla)}
+    return config
+
+
 def _derive_runtime_image(profiler_image: str, backend: str) -> str:
     """Use the v1 profiler's published-image convention without loading it eagerly."""
     from dynamo.profiler.utils.profile_common import derive_backend_image

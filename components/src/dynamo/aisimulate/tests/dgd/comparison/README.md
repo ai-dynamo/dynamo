@@ -5,23 +5,31 @@ SPDX-License-Identifier: Apache-2.0
 
 # Sweeper DGD comparison cases
 
-This directory compares DGDs generated for the same deployment intent by the existing DGDR
-v1beta1 profiler and AI Simulate Sweeper. See [DESIGN.md](DESIGN.md) for the file contracts and
-the distinction between cases, hardware configurations, suites, goldens, and local diagnostics.
+This directory owns model, backend, and hardware inputs used by two complementary paths:
+
+- automatic `aisim recommend --stack dynamo --output dgd` coverage through the default AIC
+  generator; and
+- manual comparison of the historical DGDR v1beta1 profiler, Sweeper AIC renderer, and Sweeper
+  direct renderer.
+
+See [DESIGN.md](DESIGN.md) for the file contracts and the distinction between cases, hardware
+configurations, suites, goldens, and local diagnostics.
 
 `testsuite-issue-8469.yaml` retains the rows from issue #8469. Every row has paired v1beta1 and
 Sweeper inputs. Known rendering problems are recorded on the affected suite row with a reason and
 optional evidence links. Only an explicit `match` regex accepts a known failure; reason-only
-historical entries remain diagnostic and fail closed. A missing generated variant has no placeholder
-golden.
+historical entries remain diagnostic and fail closed. `exceptions.recommend.aic` records deliberate
+automatic CLI failures with an exact diagnostic regex. A missing generated variant has no
+placeholder golden.
 
-Rows marked `automatic: true` also run as parametrized Planner CPU integration tests in
-[`test_model_corpus.py`](../test_model_corpus.py). Those rows use explicitly seeded searches,
-generate into pytest's temporary directory, and compare every generated variant with its own
-checked-in parsed-YAML golden. A mismatch writes an adjacent `.new.yaml` proposal and prints the
-unified diff and acceptance command in the failing test output. The smaller
-[DGD CLI E2E table](../e2e/test_dgd_cli.py) continues to cover the public CLI with tiny fixed
-searches. Neither path deploys generated manifests or recipes.
+Every suite row runs as a parametrized Planner CPU integration test in
+[`test_model_corpus.py`](../test_model_corpus.py). The test composes the case and hardware inputs,
+executes the public CLI, and requires either a successful default-AIC DGD with a checked-in
+parsed-YAML golden or a deliberate negative expectation with an exact diagnostic. Searches are
+explicitly seeded and generate into pytest's temporary directory. A golden mismatch writes an
+adjacent `.new.yaml` proposal and prints the unified diff and acceptance command in the failing test
+output. The smaller [DGD CLI E2E table](../e2e/test_dgd_cli.py) uses the same command and assertions
+with tiny fixed searches. Neither path deploys generated manifests or recipes.
 
 The portable runner and comparison-corpus direction build on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031).
@@ -57,7 +65,7 @@ Use `--output-dir` to write into a temporary directory instead of updating the c
 Each Sweeper case performs one search. The selected Candidate is passed to both the AIC and direct
 renderers, so renderer differences cannot be caused by separate searches.
 
-Automatic rows explicitly set the AISimulate search algorithm and seed in their case input. The
+All case inputs explicitly set the AISimulate search algorithm and seed. The
 repository's exact AISimulate wheel pin supplies the model metadata, performance data, sampler, and
 renderers used by the Planner test image.
 

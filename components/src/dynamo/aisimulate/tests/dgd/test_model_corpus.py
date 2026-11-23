@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import re
 from pathlib import Path
 
@@ -35,7 +34,7 @@ assert _CASES, f"no comparison cases found in {_SUITE}"
 
 
 def _write_cli_config(case: run_cases.ComparisonCase, path: Path) -> dict:
-    config = copy.deepcopy(case.sweeper_input)
+    config = run_cases.recommendation_config(case)
     options = case.generation_options
     dgd = {
         "name": run_cases._dgd_name(case.name),

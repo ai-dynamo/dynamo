@@ -130,6 +130,80 @@ def test_load_case_composes_hardware_and_derives_dgd_options(
     assert case.generated_dir == tmp_path / "output/h200-sxm-8gpu/qwen"
 
 
+def test_recommendation_config_preserves_comparison_intent(
+    monkeypatch, tmp_path
+) -> None:
+    case_path, _ = _write_case_and_hardware(tmp_path, monkeypatch)
+    (case_path / "sweeper.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "search_space": {
+                    "model_name": "Qwen/Qwen3-32B",
+                    "deployment_mode": ["disagg"],
+                    "backend": ["vllm"],
+                    "context_length": 131072,
+                },
+                "workload": {
+                    "isl": 1024,
+                    "osl": 128,
+                    "request_rate": 10,
+                    "num_request_ratio": 10,
+                },
+                "goal": {
+                    "target": "goodput_per_gpu",
+                    "sla": {"ttft_ms": 2000, "itl_ms": 25},
+                },
+                "sweep": {
+                    "max_rounds": 2,
+                    "candidates_per_round": 3,
+                    "parallel_evals": 1,
+                    "max_eval_seconds": 120,
+                    "algorithm": "bayesian",
+                    "seed": 42,
+                },
+            }
+        )
+    )
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+
+    assert run_cases.recommendation_config(case) == {
+        "traffic": {
+            "source": {
+                "type": "synthetic",
+                "input_tokens": 1024,
+                "output_tokens": 128,
+            },
+            "load": {"type": "constant_rate", "requests_per_second": 10},
+            "stop": {"requests_per_load_unit": 10},
+        },
+        "engine": {
+            "mode": "disaggregated",
+            "model": "Qwen/Qwen3-32B",
+            "hardware": "h200_sxm",
+            "backend": "vllm",
+            "context_length": 131072,
+            "workers": {
+                "prefill": {"parallelism": {"preset": "default"}},
+                "decode": {"parallelism": {"preset": "default"}},
+            },
+        },
+        "evaluation": {"sla": {"ttft_ms": 2000, "itl_ms": 25}},
+        "optimization": {
+            "target": "goodput_per_gpu",
+            "constraints": {"max_candidate_gpus": 8},
+        },
+        "optimizer": {
+            "algorithm": "bayesian",
+            "max_trials": 6,
+            "parallelism": 1,
+            "candidate_timeout_seconds": 120,
+            "seed": 42,
+        },
+    }
+
+
 def test_discovered_recipe_requirements_preserve_source_and_merge_proposals(
     monkeypatch, tmp_path
 ) -> None:
@@ -243,11 +317,13 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
 def test_repository_suite_rows_have_paired_inputs(tmp_path) -> None:
     for entry in run_cases.load_suite(run_cases._ROOT / "testsuite-issue-8469.yaml"):
         assert run_cases.missing_case_inputs(entry.case) == (), entry.case
-        run_cases.load_case(
+        case = run_cases.load_case(
             entry.case,
             run_cases.load_hardware(entry.hardware),
             output_root=tmp_path / "out",
         )
+        assert case.sweeper_input["sweep"]["algorithm"] == "bayesian"
+        assert case.sweeper_input["sweep"]["seed"] == 42
 
 
 def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> None:
@@ -312,6 +388,40 @@ def test_load_suite_parses_expected_renderer_failure(tmp_path) -> None:
         match="TEP.*not implemented",
     )
     assert entry.exception_for("render", "sweeper-aic") is None
+
+
+def test_load_suite_parses_expected_recommend_failure(tmp_path) -> None:
+    suite = tmp_path / "suite.yaml"
+    suite.write_text(
+        yaml.safe_dump(
+            {
+                "tests": [
+                    {
+                        "case": "qwen",
+                        "hardware": "h200-sxm-8gpu",
+                        "exceptions": {
+                            "recommend": {
+                                "aic": {
+                                    "status": "broken",
+                                    "reason": "The request is intentionally infeasible.",
+                                    "match": "no feasible candidate",
+                                }
+                            },
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        )
+    )
+
+    [entry] = run_cases.load_suite(suite)
+
+    assert entry.exception_for("recommend", "aic") == run_cases.SuiteException(
+        status="broken",
+        reason="The request is intentionally infeasible.",
+        match="no feasible candidate",
+    )
 
 
 @pytest.mark.parametrize(

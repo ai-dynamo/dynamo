@@ -283,18 +283,23 @@ Composed inputs and Candidates are useful for explaining a diff, but are not sta
 goldens. No custom report schema is defined; process output and the test framework carry execution
 status.
 
-Rows marked `automatic: true` are exact-diff gates. Their case inputs explicitly pin the search
-algorithm and seed, while the Planner test image pins AISimulate's model metadata, performance
-inputs, sampler, and renderers. Each pytest case writes to `tmp_path`, compares parsed YAML against
-the owning suite's checked-in goldens, and leaves those goldens unchanged. A missing or changed
-golden produces an adjacent `.new.yaml` proposal plus a unified diff and acceptance command in the
-failure output.
+Every suite row is an automatic public-CLI gate. Its case input explicitly pins the search algorithm
+and seed, while the Planner test image pins AISimulate's model metadata, performance inputs,
+sampler, and renderers. Each pytest case composes the case and hardware input, executes
+`aisim recommend --stack dynamo --output dgd`, and requires either:
 
-The full comparison runner remains available for manual corpus generation, including rows whose
-historical search is not yet stable enough for an exact gate. Its unit tests cover composition and
-failure isolation. The automatic model corpus complements the public
-[DGD CLI E2E table](../e2e/test_dgd_cli.py), which uses tiny fixed searches. DGDR v1beta2 Request,
-Run, Candidate, and Job orchestration is covered separately by
+- a successful default-AIC output matching `dgd-sweeper-aic.yaml`; or
+- an explicit `exceptions.recommend.aic` negative expectation with a precise diagnostic regex.
+
+Each case writes to `tmp_path`, compares parsed YAML against the owning suite's checked-in AIC
+golden, and leaves that golden unchanged. A missing or changed golden produces an adjacent
+`.new.yaml` proposal plus a unified diff and acceptance command in the failure output.
+
+The full comparison runner remains available for manual profiler/AIC/direct generation and
+cross-generator investigation. Its unit tests cover composition and failure isolation. Direct
+renderer failures never remove a row from mandatory Recommend/AIC coverage. The model corpus
+complements the smaller public [DGD CLI E2E table](../e2e/test_dgd_cli.py), which uses tiny fixed
+searches. DGDR v1beta2 Request, Run, Candidate, and Job orchestration is covered separately by
 `tests/deploy/test_dgdr_v1beta2.py`.
 
 ## Non-goals

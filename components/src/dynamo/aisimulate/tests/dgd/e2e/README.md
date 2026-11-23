@@ -49,6 +49,7 @@ change is unintended, fix the regression and discard that proposal. Proposal
 files remain visible in the working tree; there is no batch-update mode. Passing
 tests never rewrite a golden.
 
-The [comparison corpus](../comparison/README.md) is a separate, manually invoked
-recipe/performance-database comparison. Replay CLI prediction and recommendation
-round trips remain in the Replay test suite.
+The [comparison corpus](../comparison/README.md) reuses the same CLI runner and
+golden contract for its full model/backend/hardware table. Its manual runner
+separately retains historical profiler and direct-renderer comparison. Replay CLI
+prediction and recommendation round trips remain in the Replay test suite.
