@@ -387,8 +387,7 @@ async fn retired_prefill_enforces_handoff_consumption_policy() {
         (true, true, true, false),
         (true, true, false, true),
     ] {
-        for (retire_after_entry, replace_before_retirement) in
-            [(false, false), (true, false), (true, true)]
+        for (retire_after_entry, replacement_kind) in [(false, 0), (true, 0), (true, 1), (true, 2)]
         {
             let router = fresh_decode_router_with_mode(if query {
                 RouterMode::KV
@@ -433,8 +432,21 @@ async fn retired_prefill_enforces_handoff_consumption_policy() {
                 });
                 // Paused time advances after generate parks at the phase barrier.
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                if replace_before_retirement {
+                if replacement_kind == 1 {
                     router.set_target(Some(WorkerSetTarget::Legacy(replacement.clone())));
+                } else if replacement_kind == 2 {
+                    let (_admissions, admitted_ids) = watch::channel(Vec::new());
+                    router.set_target(Some(WorkerSetTarget::Committed(
+                        crate::discovery::CommittedWorkerSetTarget {
+                            endpoint: replacement.clone(),
+                            group: "optional-prefill".into(),
+                            generation: 1,
+                            card: Arc::new(crate::model_card::ModelDeploymentCard::with_name_only(
+                                "optional-prefill",
+                            )),
+                            admitted_ids,
+                        },
+                    )));
                 }
                 router.set_target(None);
                 drop(barrier);
@@ -446,10 +458,7 @@ async fn retired_prefill_enforces_handoff_consumption_policy() {
                 router.set_target(None);
                 router.generate(SingleIn::new(request), host.clone()).await
             };
-            assert_eq!(
-                router.binding().is_none(),
-                replace_before_retirement && !query
-            );
+            assert_eq!(router.binding().is_none(), replacement_kind != 0 && !query);
             if requires_prefill && handoff && !staged && !query {
                 let error = result.unwrap_err();
                 assert!(crate::migration::is_migratable(error.as_ref()), "{error}");
@@ -611,6 +620,14 @@ async fn conditional_bypass_retains_text_releasable_and_staged_requests() {
     ] {
         let mut request = SingleIn::new(inference_request());
         request.encoder_result = has_encoder.then(|| serde_json::json!({"opaque":"handoff"}));
+        if has_encoder {
+            request.multi_modal_data = Some(HashMap::from([(
+                "image".into(),
+                vec![MultimodalData::RawUrl(
+                    "https://example.com/image.png".into(),
+                )],
+            )]));
+        }
         request.staged_kv_cleanup = staged_kv;
         request.insert(
             ENCODER_RESULT_RELEASE_SUPPORTED,
@@ -732,7 +749,9 @@ async fn nonreleasable_handoff_survives_late_client_cancellation() {
 #[tokio::test]
 async fn raw_media_encode_fallback_keeps_prefill_but_text_can_bypass() {
     let fixture = ConditionalFixture::new("raw-media-prefill-fallback").await;
-    fixture.router.set_test_binding(Some(fixture.binding(true)));
+    fixture
+        .router
+        .set_test_binding(Some(fixture.binding(false)));
     fixture
         .router
         .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
@@ -788,7 +807,7 @@ pub(in crate::kv_router) async fn reject_stale_media_plan(
         .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
     let tracker = Arc::new(RequestTracker::new());
     let barrier = tracker.set_phase(RequestPhase::Aggregated).await;
-    request.tracker = Some(tracker);
+    request.tracker = Some(tracker.clone());
     let task = tokio::spawn({
         let router = fixture.router.clone();
         let host = fixture.host.clone();
@@ -834,6 +853,7 @@ pub(in crate::kv_router) async fn reject_stale_media_plan(
         fixture.dispatch.phases.lock().is_empty(),
         "no native request was dispatched"
     );
+    assert_eq!(tracker.phase(), RequestPhase::Prefill);
     let loads = fixture
         .host
         .kv_router()
@@ -857,4 +877,85 @@ pub(in crate::kv_router) async fn reject_stale_media_plan(
     assert_eq!(fixture.completions.load(Ordering::Relaxed), 0);
     fixture.runtime.shutdown();
     error
+}
+
+#[tokio::test]
+async fn changed_prefill_binding_after_decode_tracking_aborts_before_dispatch() {
+    let fixture = ConditionalFixture::new("post-tracking-prefill-change").await;
+    fixture
+        .router
+        .set_test_binding(Some(fixture.binding(false)));
+    fixture
+        .router
+        .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
+    let mut request = SingleIn::new(inference_request());
+    request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
+    request.ensure_tracker();
+    let tracker = request.tracker.as_ref().unwrap().clone();
+    {
+        let _permit = tracker.set_phase(RequestPhase::Decode).await;
+    }
+    let decision = fixture
+        .router
+        .plan_conditional_disagg_decode(&request, request.id())
+        .await
+        .unwrap()
+        .expect("optional Prefill permits an encoder handoff bypass");
+    let worker = decision.plan.worker().worker_id;
+    request.routing_mut().decode_worker_id = Some(worker);
+    let expected_binding = decision.encoder_binding;
+    assert!(
+        fixture
+            .router
+            .allows_encoder_bypass(expected_binding.as_ref())
+    );
+    assert!(tracker.decode_worker_id().is_none());
+    let error = fixture
+        .host
+        .dispatch_kv_plan_with_validation(request, decision.plan, || async {
+            assert_eq!(
+                tracker.decode_worker_id(),
+                Some(worker),
+                "binding validation must run after routing-decision tracking"
+            );
+            fixture.router.set_test_binding(Some(fixture.binding(true)));
+            if fixture
+                .router
+                .allows_encoder_bypass(expected_binding.as_ref())
+            {
+                return Ok(());
+            }
+            let _permit = tracker.set_phase(RequestPhase::Prefill).await;
+            Err(prefill_changed_error())
+        })
+        .await
+        .expect_err("a newly mandatory Prefill stage cannot be bypassed");
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::WorkerUnavailable],
+        &[]
+    ));
+    assert_eq!(tracker.phase(), RequestPhase::Prefill);
+    assert!(fixture.dispatch.phases.lock().is_empty());
+    let loads = fixture
+        .host
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        loads.iter().map(|load| load.active_requests).sum::<usize>(),
+        0,
+        "a rejected tracked plan must return its booking"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fixture.aborts.load(Ordering::Relaxed) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.classifications.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.completions.load(Ordering::Relaxed), 0);
+    fixture.runtime.shutdown();
 }
