@@ -894,11 +894,12 @@ impl MetricsRegistry {
     /// (`metric_families_combined`) include its families. The registry is
     /// shared, not copied: collectors registered into it later are seen too.
     ///
-    /// For a component that owns its own `prometheus::Registry`, such as the
-    /// HTTP frontend. The registry stays attached until the returned handle is
-    /// dropped, so a component that is torn down and rebuilt on the same
-    /// runtime does not leave its old metrics behind. Each call attaches a new
-    /// child; attaching one registry twice gathers it twice.
+    /// For a component that owns its own `prometheus::Registry`. The registry
+    /// stays attached until the returned handle is dropped, so a component that
+    /// is torn down and rebuilt on the same runtime does not leave its old
+    /// metrics behind. Attach each registry once: this is not enforced, and a
+    /// registry attached twice is gathered twice, and every series in it
+    /// then warns as a duplicate on each scrape and export.
     #[must_use = "the registry is detached when the handle is dropped"]
     pub fn add_prometheus_registry(
         &self,
@@ -1394,20 +1395,14 @@ pub struct AttachedPrometheusRegistry {
     child: Arc<std::sync::RwLock<prometheus::Registry>>,
 }
 
-impl std::fmt::Debug for AttachedPrometheusRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AttachedPrometheusRegistry")
-            .field("attached", &(self.parent.strong_count() > 0))
-            .finish_non_exhaustive()
-    }
-}
-
 impl Drop for AttachedPrometheusRegistry {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.upgrade() {
+            // Never panic in `drop`: a poisoned lock would otherwise make every
+            // later drop panic, and a panic while unwinding aborts.
             parent
                 .write()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|registry| !Arc::ptr_eq(&registry.prometheus_registry, &self.child));
         }
     }

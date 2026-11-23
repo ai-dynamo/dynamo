@@ -3111,16 +3111,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated_to_sse_event(annotated)
 }
 
-/// Create a new router with optional DRT metrics integration.
-///
-/// When `drt_metrics` is provided, `/metrics` serves the DRT registry tree's
-/// combined output, the same merged view the DRT's OTLP export reads, with each
-/// family declared once. `registry` must then be attached to that tree with
-/// [`MetricsRegistry::add_prometheus_registry`](dynamo_runtime::metrics::MetricsRegistry::add_prometheus_registry)
-/// for its families to appear; `HttpService::build` does this once the service
-/// is fully built. Without `drt_metrics` (standalone KVBM), `/metrics` serves
-/// `registry` alone. Crate-private so that a DRT-backed router cannot be wired
-/// without that attachment from outside.
+/// The `/metrics` router. With `drt_metrics`, `registry` must be attached to that tree.
 pub(crate) fn router(
     registry: Registry,
     path: Option<String>,
@@ -3141,22 +3132,12 @@ pub(crate) fn router(
 }
 
 impl MetricsHandlerState {
-    /// The `/metrics` body.
-    ///
-    /// With a DRT, its combined output, which includes this service's registry
-    /// once it is attached. If that gather fails, fall back to this service's
-    /// own metrics rather than serving nothing.
+    /// The `/metrics` body: with a DRT, its combined output, which includes
+    /// this service's registry once it is attached; otherwise this service's
+    /// own registry.
     fn render(&self) -> anyhow::Result<String> {
         if let Some(drt_metrics) = &self.drt_metrics {
-            match drt_metrics.prometheus_expfmt_combined() {
-                Ok(text) => return Ok(text),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Failed to gather DRT metrics; serving HTTP service metrics only"
-                    );
-                }
-            }
+            return drt_metrics.prometheus_expfmt_combined();
         }
         let mut buffer = vec![];
         prometheus::TextEncoder::new().encode(&self.registry.gather(), &mut buffer)?;
@@ -3164,30 +3145,19 @@ impl MetricsHandlerState {
     }
 }
 
-/// Unified metrics handler. See [`MetricsHandlerState::render`].
-///
 /// Renders on the blocking pool: the gather runs update callbacks, some of
 /// which take the Python GIL.
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
     match tokio::task::spawn_blocking(move || state.render()).await {
-        Ok(Ok(metrics)) => (StatusCode::OK, metrics).into_response(),
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "Failed to encode metrics");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to encode metrics",
-            )
-                .into_response()
-        }
-        Err(error) => {
-            tracing::warn!(%error, "metrics render task failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to encode metrics",
-            )
-                .into_response()
-        }
+        Ok(Ok(metrics)) => return (StatusCode::OK, metrics).into_response(),
+        Ok(Err(error)) => tracing::warn!(%error, "Failed to encode metrics"),
+        Err(error) => tracing::error!(%error, "metrics render panicked"),
     }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to encode metrics",
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -6419,87 +6389,16 @@ mod tests {
             (state, attachment)
         }
 
-        /// With the local registry attached, the OTLP export path
-        /// (`metric_families_combined`) sees it, and `/metrics` declares each
-        /// family exactly once.
+        /// A frontend family whose type conflicts with a DRT family of the same
+        /// name is skipped (#18910): the DRT tree is gathered first, so its
+        /// family wins, and every other frontend family is still served.
         #[test]
-        fn local_registry_is_exported_and_scraped_once() {
+        fn conflicting_frontend_family_loses_to_drt_and_others_are_served() {
             let drt = MetricsRegistry::new();
-            counter(
-                &drt.get_prometheus_registry(),
-                "dynamo_component_probe_total",
-            );
-            let local = Registry::new();
-            counter(&local, "dynamo_frontend_requests_total");
-            let (state, _attachment) = attached(local, &drt);
-
-            let exported: Vec<String> = drt
-                .metric_families_combined()
-                .families
-                .iter()
-                .map(|family| family.name().to_string())
-                .collect();
-            assert!(exported.contains(&"dynamo_frontend_requests_total".to_string()));
-            assert!(exported.contains(&"dynamo_component_probe_total".to_string()));
-
-            let text = state.render().unwrap();
-            assert_eq!(
-                declared(&text),
-                [
-                    "dynamo_component_probe_total",
-                    "dynamo_frontend_requests_total"
-                ],
-                "{text}"
-            );
-        }
-
-        /// A family in both registries with the same help and type is merged
-        /// into one family, with the series from both.
-        #[test]
-        fn family_in_both_registries_is_declared_once() {
-            let drt = MetricsRegistry::new();
-            counter(&drt.get_prometheus_registry(), "dynamo_shared_total");
-            let local = Registry::new();
-            let labelled = prometheus::IntCounterVec::new(
-                prometheus::Opts::new("dynamo_shared_total", "help"),
-                &["source"],
-            )
-            .unwrap();
-            labelled.with_label_values(&["local"]).inc();
-            local.register(Box::new(labelled)).unwrap();
-            let (state, _attachment) = attached(local, &drt);
-
-            let text = state.render().unwrap();
-            assert_eq!(declared(&text), ["dynamo_shared_total"], "{text}");
-            assert!(
-                text.contains("dynamo_shared_total{source=\"local\"} 1"),
-                "{text}"
-            );
-        }
-
-        /// Without a DRT (standalone KVBM, tests) only the local registry is
-        /// served.
-        #[test]
-        fn without_drt_serves_local_registry() {
-            let local = Registry::new();
-            counter(&local, "kvbm_probe_total");
-            let state = MetricsHandlerState {
-                registry: Arc::new(local),
-                drt_metrics: None,
-            };
-            assert_eq!(declared(&state.render().unwrap()), ["kvbm_probe_total"]);
-        }
-
-        /// While a help/type conflict still fails the whole DRT gather (#18910),
-        /// `/metrics` falls back to the HTTP service's own metrics rather than
-        /// an error.
-        #[test]
-        fn merge_conflict_falls_back_to_local_registry() {
-            let drt = MetricsRegistry::new();
+            let gauge = prometheus::IntGauge::new("dynamo_conflict", "gauge help").unwrap();
+            gauge.set(3);
             drt.get_prometheus_registry()
-                .register(Box::new(
-                    prometheus::IntGauge::new("dynamo_conflict", "gauge help").unwrap(),
-                ))
+                .register(Box::new(gauge))
                 .unwrap();
             let local = Registry::new();
             counter(&local, "dynamo_conflict");
@@ -6507,6 +6406,15 @@ mod tests {
             let (state, _attachment) = attached(local, &drt);
 
             let text = state.render().unwrap();
+            assert!(
+                text.lines()
+                    .any(|line| line == "# TYPE dynamo_conflict gauge"),
+                "{text}"
+            );
+            assert!(
+                text.lines().any(|line| line == "dynamo_conflict 3"),
+                "{text}"
+            );
             assert_eq!(
                 declared(&text),
                 ["dynamo_conflict", "dynamo_frontend_requests_total"],

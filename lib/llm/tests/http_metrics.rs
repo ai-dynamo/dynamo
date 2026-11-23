@@ -955,6 +955,35 @@ fn otlp_export_families(drt_metrics: &dynamo_runtime::metrics::MetricsRegistry) 
     family_names(&drt_metrics.metric_families_combined().families)
 }
 
+/// A DistributedRuntime with no external services, for the OTLP export tests.
+async fn process_local_drt() -> dynamo_runtime::DistributedRuntime {
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    DistributedRuntime::new(
+        Runtime::from_current().unwrap(),
+        DistributedConfig::process_local(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Assert that every family in a service's own `registry` is in the DRT's OTLP
+/// export -- checked against that registry directly, not only against
+/// `/metrics`, which reads the same merged tree as the export. Returns the
+/// registry's family names.
+fn assert_registry_is_exported(
+    registry: &prometheus::Registry,
+    drt_metrics: &dynamo_runtime::metrics::MetricsRegistry,
+) -> Names {
+    let own = family_names(&registry.gather());
+    let exported = otlp_export_families(drt_metrics);
+    let not_exported: Vec<_> = own.difference(&exported).collect();
+    assert!(
+        not_exported.is_empty(),
+        "in the service's registry but not exported: {not_exported:?}"
+    );
+    own
+}
+
 fn spawn_service(
     service: HttpService,
     listener: tokio::net::TcpListener,
@@ -995,9 +1024,8 @@ async fn scrape(port: u16) -> String {
 
 /// A frontend wired to a DistributedRuntime exports over OTLP whatever the
 /// DRT's `metric_families_combined()` returns. That must include every family
-/// in the HTTP service's own registry -- checked against that registry
-/// directly, not only against `/metrics`, which reads the same merged tree as
-/// the export. `/metrics` must declare each family once.
+/// in the HTTP service's own registry, and `/metrics` must declare each family
+/// once.
 ///
 /// Then the service is shut down and a second one is built on the same DRT:
 /// the first one's registry must leave the tree with it, so the second
@@ -1005,15 +1033,9 @@ async fn scrape(port: u16) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_frontend_metrics_reach_the_otlp_export_path() {
     use dynamo_runtime::metrics::MetricsHierarchy;
-    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let drt = DistributedRuntime::new(
-            Runtime::from_current().unwrap(),
-            DistributedConfig::process_local(),
-        )
-        .await
-        .unwrap();
+        let drt = process_local_drt().await;
         let drt_metrics = drt.get_metrics_registry().clone();
         // A metric the DRT tree owns, so the scrape has both halves to merge.
         drt_metrics
@@ -1050,8 +1072,6 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
         let text = scrape(port).await;
         let declared = declared_families(&text);
         let scraped: Names = declared.iter().cloned().collect();
-        // Report family names, not the raw body: the names are all a failure
-        // needs, and the body would be echoed verbatim into the test log.
         let duplicated: Names = scraped
             .iter()
             .filter(|name| declared.iter().filter(|d| d == name).count() > 1)
@@ -1061,10 +1081,7 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
             duplicated.is_empty(),
             "/metrics declares these families more than once: {duplicated:?}"
         );
-        let exported = otlp_export_families(&drt_metrics);
-
-        // Independent source: the HTTP service's own registry.
-        let own = family_names(&own_registry.gather());
+        let own = assert_registry_is_exported(&own_registry, &drt_metrics);
         for name in [
             "dynamo_frontend_requests_total",
             "dynamo_frontend_request_duration_seconds",
@@ -1072,11 +1089,7 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
         ] {
             assert!(own.contains(name), "{name} not in the service's registry");
         }
-        let not_exported: Vec<_> = own.difference(&exported).collect();
-        assert!(
-            not_exported.is_empty(),
-            "in the HTTP service's registry but not exported: {not_exported:?}"
-        );
+        let exported = otlp_export_families(&drt_metrics);
         assert!(exported.contains("dynamo_component_otlp_parity_probe_total"));
 
         let missing: Vec<_> = scraped.difference(&exported).collect();
@@ -1102,7 +1115,7 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
         // first service's request series may be served or exported. (Nor are
         // the process-wide request-plane/tokio/transport/frontend-perf statics:
         // they are registered once per process, into the first service's
-        // registry only -- see `HttpService::_drt_metrics_attachment`.)
+        // registry only.)
         let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
@@ -1145,31 +1158,20 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
 async fn test_kserve_frontend_metrics_reach_the_otlp_export_path() {
     use dynamo_llm::grpc::service::kserve::KserveService;
     use dynamo_runtime::metrics::MetricsHierarchy;
-    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let drt = DistributedRuntime::new(
-            Runtime::from_current().unwrap(),
-            DistributedConfig::process_local(),
-        )
-        .await
-        .unwrap();
+        let drt = process_local_drt().await;
         let drt_metrics = drt.get_metrics_registry().clone();
 
         let service = KserveService::builder()
             .runtime(Some(drt.clone()))
             .build()
             .unwrap();
-        let own = family_names(&service.http_service().prometheus_registry().gather());
+        let own =
+            assert_registry_is_exported(service.http_service().prometheus_registry(), &drt_metrics);
         assert!(
             own.contains("dynamo_frontend_metrics_start_time_seconds"),
             "{own:?}"
-        );
-        let exported = otlp_export_families(&drt_metrics);
-        let not_exported: Vec<_> = own.difference(&exported).collect();
-        assert!(
-            not_exported.is_empty(),
-            "in the KServe HTTP service's registry but not exported: {not_exported:?}"
         );
 
         drop(service);

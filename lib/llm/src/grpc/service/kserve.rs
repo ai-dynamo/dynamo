@@ -190,7 +190,9 @@ pub struct KserveServiceConfig {
     #[builder(default = "None")]
     http_cancel_token: Option<CancellationToken>,
 
-    /// Distributed runtime used to publish frontend load to the Pool Relay.
+    /// Distributed runtime. Used to publish frontend load to the Pool Relay,
+    /// and to attach the metrics HTTP service's registry to the DRT tree, so
+    /// `/metrics` serves the whole tree and OTLP exports the frontend families.
     #[builder(default = "None")]
     runtime: Option<dynamo_runtime::DistributedRuntime>,
 
