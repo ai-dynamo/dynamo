@@ -3999,9 +3999,10 @@ mod tests {
     }
 
     /// A direct instance with no registered direct dispatch fails the request
-    /// as `Internal` and is not reported down.
+    /// as `Internal` and is not reported down. The router does not cache that
+    /// miss: once a dispatch is registered, the same router reaches it.
     #[tokio::test]
-    async fn direct_instances_without_a_registered_dispatch_fail_internal() {
+    async fn direct_instances_fail_internal_until_a_dispatch_is_registered() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -4014,7 +4015,7 @@ mod tests {
             .endpoint("test_endpoint".to_string());
         let client = endpoint.client().await.unwrap();
         register_direct_instance(&drt, &endpoint).await;
-        client.wait_for_instances().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
 
         let router = PushRouter::<u64, TestResponse>::from_client_with_options(
             client.clone(),
@@ -4038,6 +4039,17 @@ mod tests {
             client.instance_ids_avail().len(),
             1,
             "a missing registration must not report the worker down"
+        );
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        drt.register_direct_dispatch::<u64, TestResponse>(dispatch.clone())
+            .unwrap();
+        let mut stream = router.generate(SingleIn::new(2u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.unary.lock().unwrap()[..],
+            [(2, "http://engine:30001".to_string(), Some(instance_id))],
+            "a dispatch registered after the router missed it must be found"
         );
 
         rt.shutdown();
