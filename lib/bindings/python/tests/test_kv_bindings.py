@@ -720,8 +720,9 @@ async def test_kv_router_generate_from_request_matches_pythonize(
     actual = await _received_request(
         received, lambda: router.generate_from_request(preprocessed)
     )
-    # The router adds its routing hints on the way to the worker.
+    # The router adds routing hints and elapsed time on the way to the worker.
     actual.pop("routing")
+    actual.pop("elapsed_since_arrival_ms")
     # JSON text also pins key order and NaN -> null.
     assert json.dumps(actual) == json.dumps(expected)
 
