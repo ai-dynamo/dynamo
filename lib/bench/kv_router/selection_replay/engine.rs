@@ -138,9 +138,8 @@ pub struct RunResult {
     /// Fixed mode: how late window requests and engine actions were issued, in ns.
     pub request_issue_lag_ns: Option<PercentileStats<u64>>,
     pub engine_issue_lag_ns: Option<PercentileStats<u64>>,
-    /// Saturation: the share of the window the request issuer waited on the bench's
-    /// own threads, prompt preparation and engine actions, each wait counted by the
-    /// share of admission slots free as it ended.
+    /// Saturation: the request issuer's waits on prompt preparation and engine actions,
+    /// each weighted by the share of admission slots free as it ended, over the window.
     pub harness_wait_share: Option<f64>,
     /// Saturation: how often every admission in the window waited on an engine
     /// action, as a queueing router's do, so trace time ran on until one finished.
@@ -513,7 +512,7 @@ fn replay(
 type PreparedPrompt = Result<(Vec<u32>, PromptBlocks)>;
 
 /// Issues each request at its arrival. Returns the window requests' issue lags
-/// (fixed mode) and the time they waited on the bench's own threads (saturation).
+/// (fixed mode) and their weighted waits on the bench's own threads (saturation).
 fn issue_requests(
     shared: &Arc<Shared>,
     prep: Vec<Receiver<PreparedPrompt>>,
@@ -540,12 +539,12 @@ fn issue_requests(
                     .fetch_max(request.arrival_us, Ordering::AcqRel);
                 wait_for_engines(shared, request.arrival_us)?;
                 if shared.in_window(request.arrival_us) {
-                    // Nothing is issued during the wait, so the slots free at its end
-                    // are the most that were free in it: count it by that share.
-                    let waited_ns = shared.clock.now_ns() - waited_from;
+                    // Only this thread issues, so the slots free now are the most that were
+                    // free during the wait.
+                    let waited_ns = u128::from(shared.clock.now_ns() - waited_from);
                     let outstanding = shared.outstanding.load(Ordering::Acquire);
-                    let free = admission_window.saturating_sub(outstanding) as u64;
-                    harness_wait_ns += waited_ns * free / admission_window as u64;
+                    let free = admission_window.saturating_sub(outstanding) as u128;
+                    harness_wait_ns += (waited_ns * free / admission_window as u128) as u64;
                 }
                 wait_for_admission_slot(shared, admission_window)?;
             }

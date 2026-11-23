@@ -102,11 +102,12 @@ router holds every admission slot waiting on an engine action, trace time moves
 on to the next one (`stall_advances`). The result is booked requests per second,
 from the first window request issued to the last one answered, booked or
 rejected. `harness_wait_share` is the share of the window the bench's own
-threads, not the router, held back: each wait of the request issuer on prompt
-preparation or engine actions, counted by the share of admission slots free as
-it ended. Above 5% the run is invalid. A full window counts nothing, so the
-share does not show admissions a queueing router parks on engine actions;
-`stall_advances` counts the times they held every slot.
+threads, not the router, held back: the request issuer's waits on prompt
+preparation and engine actions, each weighted by the share of admission slots
+free as it ended. Above 5% the run is invalid. With a queueing router the
+bench's engine timing can still set the rate while both signals read clean: a
+wait with every slot taken counts nothing, and `stall_advances` counts only full
+windows that went 10 ms without an admission finishing.
 
 In both modes, an index more than 20,000 events behind during the window means
 the router routed on a stale index because it could not take the load: the run
