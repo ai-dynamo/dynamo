@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Engines that embed this crate pin an older Rust than Dynamo does (SGLang 1.92, vLLM 1.95).
+# `clippy::incompatible_msrv` then flags a standard library API newer than this.
+msrv = "1.92.0"

@@ -18,7 +18,7 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `concurrent_radix_tree_compressed/` | `ConcurrentRadixTreeCompressed` — thread-safe compressed trie; see its `README.md` |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
 | `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTreeCompressed` or `PositionalIndexer` |
-| `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
+| `local.rs` | `LocalKvIndexer` — worker-side recovery source: a window of recent events for replay and a block ledger per residency owner (`dynamo-kv-ledger`) that tree dumps are cut from |
 | `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
 | `tests.rs` | Integration tests for all indexer variants |
@@ -368,7 +368,7 @@ There are three main production indexer shapes. This section maps deployment sce
 
 | Variant | Struct | Concurrency | Routing | When to use |
 |---------|--------|-------------|---------|-------------|
-| `RadixTree` | `RadixTree` | Single-threaded | N/A (local) | Worker-side `LocalKvIndexer`, unit tests |
+| `RadixTree` | `RadixTree` | Single-threaded | N/A (local) | Single-threaded `KvIndexer`, unit tests |
 | `ThreadPoolIndexer<CRTC>` | `ThreadPoolIndexer<ConcurrentRadixTreeCompressed>` | N write threads + inline reads | Full-mesh, all workers | Default for most deployments |
 | `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRTC>>` | Sharded write pools | Prefix TRIE + anchors | High worker counts, correctness-first sharding |
 
@@ -376,7 +376,6 @@ There are three main production indexer shapes. This section maps deployment sce
 
 **`RadixTree` (non-concurrent)**
 - Never use on the router/scheduler side.
-- Correct choice inside `LocalKvIndexer` — worker-side, single-tokio-task access, no lock needed.
 - Also useful in unit tests where you want a simple, deterministic index.
 
 **`ThreadPoolIndexer<ConcurrentRadixTreeCompressed>`**
@@ -398,7 +397,7 @@ There are three main production indexer shapes. This section maps deployment sce
 ```text
 Start
   │
-  ├─ Single worker or worker-side local index?
+  ├─ Single worker?
   │      └─ RadixTree
   │
   ├─ < ~1 000 workers, no sharding needed?

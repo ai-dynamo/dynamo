@@ -80,6 +80,7 @@
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/router/                                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/                                                                                         @ai-dynamo/dynamo-router-codeowners
+/lib/kv-ledger/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
 /lib/router/kv-hints/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/protocol/                                                                                   @ai-dynamo/dynamo-router-codeowners

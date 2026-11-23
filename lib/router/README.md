@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The Dynamo router as a set of small crates. Every arrow into a stage starts at the scheduler kernel: stages never message each other, the kernel carries one stage's output to the next as that stage's own input type, and `dynamo-kv-router` composes the result behind features.
 
-## The thirteen crates
+## The fourteen crates
 
 | Crate | One sentence | Depends on |
 |---|---|---|
@@ -16,7 +16,8 @@ The Dynamo router as a set of small crates. Every arrow into a stage starts at t
 | `dynamo-router-protocol` | The identities and worker-facing vocabulary every crate names | serde, serde_json, thiserror |
 | `dynamo-kv-events` | Everything about KV events: types, engine codec, replay cursor, the residency vocabulary (tiers, domains, owners) | protocol, kv-hashing, serde, rmp-serde |
 | `dynamo-kv-hints` | KV transfer hints the router hands engines: the wire, the source choice, the worker transfer keys | protocol, kv-hashing, kv-indexer, serde, rustc-hash |
-| `dynamo-kv-indexer` | KV events in, prefix knowledge out; owns its service DTOs, identity config, the transfer candidate vocabulary, and the residency owner key | protocol, kv-events, kv-hashing |
+| `dynamo-kv-ledger` | One KV event stream as a replay window and a block ledger that snapshots are cut from; the worker-side `LocalKvIndexer` runs on it, and an engine's Rust frontend can embed it | rustc-hash |
+| `dynamo-kv-indexer` | KV events in, prefix knowledge out; owns its service DTOs, identity config, the transfer candidate vocabulary, and the residency owner key | protocol, kv-events, kv-hashing, kv-ledger |
 | `dynamo-slot-tracker` | Bookings per rank in, load and fullness out; owns its replication wire | protocol, kv-hashing |
 | `dynamo-session-affinity` | Session bindings in, constraints out; owns the affinity target and its replication wire | protocol |
 | `dynamo-worker-selection` | Pick one rank from a candidate table under a policy; owns the rows and the plugin API | protocol, slot-tracker, session-affinity |

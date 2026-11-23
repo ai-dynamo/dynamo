@@ -23,6 +23,7 @@ testing = ["dynamo-router-protocol/testing"]
 [dependencies]
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
+dynamo-kv-ledger = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-tokens = { workspace = true }
 

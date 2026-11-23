@@ -11,7 +11,7 @@ use dynamo_backend_common::{
 };
 use dynamo_kv_events::event::{KV_EVENT_SUBJECT, KvCacheEventData, RouterEvent};
 use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
-use dynamo_kv_indexer::host::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
+use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
@@ -114,11 +114,10 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
     .expect("KV relay did not become ready");
 
     let cancel = dynamo_runtime::CancellationToken::new();
-    let indexer = LocalKvIndexer::new(
+    let indexer = KvIndexer::new(
         cancel.clone(),
         block_size,
         Arc::new(KvIndexerMetrics::new_unregistered()),
-        100,
     );
     let prompt = vec![11, 22, 33, 44, 55, 66, 77, 88];
     let prompt_hashes = compute_block_hash_for_seq(&prompt, block_size, Default::default());
@@ -145,7 +144,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
                             .map(|block| block.block_hash),
                     );
                 }
-                indexer.apply_event_with_buffer(event).await.unwrap();
+                indexer.apply_event(event).await;
             }
             let scores = indexer
                 .find_matches_for_request(&prompt, None, None, None)
@@ -178,7 +177,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
                 if let KvCacheEventData::Removed(data) = &event.event.data {
                     stored_hashes.retain(|hash| !data.block_hashes.contains(hash));
                 }
-                indexer.apply_event_with_buffer(event).await.unwrap();
+                indexer.apply_event(event).await;
             }
             let scores = indexer
                 .find_matches_for_request(&prompt, None, None, None)

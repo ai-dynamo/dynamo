@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kv-ledger"
+description = "One ordered KV cache event stream as a replay window and a block ledger that snapshots are cut from"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+# An engine embeds this crate and builds it with its own, older toolchain, so it depends on
+# nothing in the Dynamo workspace and names its own version requirement.
+[dependencies]
+rustc-hash = "2.1.1"

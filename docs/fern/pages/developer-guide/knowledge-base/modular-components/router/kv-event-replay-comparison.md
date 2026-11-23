@@ -20,16 +20,16 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Core buffer** | `collections.deque[tuple[int, bytes]]` with `maxlen` | `VecDeque<RouterEvent>` with `max_buffer_size` |
 | **Buffer semantics** | FIFO ring, old entries silently dropped | FIFO ring, old entries silently dropped |
 | **Event ordering** | Monotonic sequence number (8-byte int) | Monotonic `event_id` with consecutive-ID validation |
-| **Lookup** | Linear scan (`for seq, buf in buffer`) | Binary search (`binary_search_by_key`) |
+| **Lookup** | Linear scan (`for seq, buf in buffer`) | Offset from the oldest buffered ID |
 | **Serialization** | Pre-serialized msgpack bytes stored in buffer | Structured events stored; serialized on demand |
-| **Fallback when buffer too old** | Consumer must rebuild externally | Full RadixTree snapshot |
+| **Fallback when buffer too old** | Consumer must rebuild externally | Snapshot of the block ledger |
 | **Initial sync** | Not built in — consumer starts from live stream | Tree dump (request with `start_event_id=None`) |
-| **Recoverable state** | Buffer only | RadixTree snapshot (buffer is an optimization layer) |
-| **Compression / dedup** | Events stored as-is (pre-serialized) | RadixTree compresses shared prefixes across sequences |
-| **Expiration** | Replay history expires through `maxlen` eviction | Replay history expires through buffer eviction; event-backed tree state changes through worker events, not router TTL pruning |
+| **Recoverable state** | Buffer only | Block ledger snapshot (buffer is an optimization layer) |
+| **Compression / dedup** | Events stored as-is (pre-serialized) | The ledger holds each block once per owner; a dump merges device-tier blocks into chains |
+| **Expiration** | Replay history expires through `maxlen` eviction | Replay history expires through buffer eviction; event-backed ledger state changes through worker events, not router TTL pruning |
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
-| **Thread model** | Background thread with queue | Single-threaded tokio runtime on dedicated OS thread |
+| **Thread model** | Background thread with queue | Updated inline by the publisher under a mutex; dumps are built on the blocking pool |
 | **Delivery guarantee** | Fire-and-forget live delivery; replay is bounded by retained history | Fire-and-forget live delivery; recovery can return retained events or a snapshot |
 | **Duplicate/stale events** | Consumer filters by sequence number | Router filters stale event IDs and coordinates per-rank recovery |
 
@@ -51,15 +51,15 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 - Linear scan on every replay request (no indexing into the buffer).
 - Consumer handles dedup by checking `replay_seq > last_seq`.
 
-### Dynamo: Buffer + Indexer with Tree Dump Fallback
+### Dynamo: Buffer + Ledger with Tree Dump Fallback
 
-Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
+Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) keeps a window of recent events and a ledger of the blocks each residency owner holds. Both come from the `dynamo-kv-ledger` crate, which has no Dynamo dependencies so that an engine's own Rust frontend can embed it:
 
 ```text
 LocalKvIndexer
-├── indexer: KvIndexer          // Current state and snapshot source (RadixTree)
-├── event_buffer: VecDeque      // Circular buffer for fast replay
-└── max_buffer_size: usize
+└── Replay
+    ├── history: recent RouterEvents   // Bounded window for fast replay
+    └── state: owner -> Ledger         // Current blocks; tree dumps are cut from it
 ```
 
 When the router queries a worker, the local indexer can return six response variants:
@@ -67,7 +67,7 @@ When the router queries a worker, the local indexer can return six response vari
 | Response | When | What happens |
 |----------|------|--------------|
 | `Events` | Requested start is available in the buffer | Returns retained events and a real-event watermark |
-| `TreeDump` | Initial/full recovery or retained events cannot cover the request | Returns a full RadixTree snapshot as synthetic events plus the latest real-event watermark |
+| `TreeDump` | Initial/full recovery or retained events cannot cover the request | Returns the ledger's blocks as synthetic `Stored` events, then the buffered events applied since that snapshot was cut, plus the latest real-event watermark |
 | `TreeDumpFailed` | The worker cannot construct an exact snapshot and the client opted into explicit failure | Reports a non-authoritative failure; the router retries within its existing bounds and preserves state and cursor if no snapshot becomes available |
 | `TooNew` | Requested range begins after the newest available event | Reports the available watermark without applying state |
 | `InvalidRange` | The requested end precedes the start | Rejects the malformed range |
@@ -108,7 +108,7 @@ Snapshot construction failures preserve existing state and cursor after bounded 
 - You are running multiple router replicas that may start at different times and should independently rebuild cache state from workers.
 - You want dedup and recovery handled by the infrastructure rather than implementing it in each consumer.
 
-The two approaches share the same core idea — a FIFO ring buffer for catching up on small, transient gaps. Dynamo adds a RadixTree underneath, which enables a current-state snapshot fallback at the cost of additional memory and complexity. vLLM keeps replay history in the buffer, which is sufficient when consumers are stable and gaps remain inside the retained window.
+The two approaches share the same core idea — a FIFO ring buffer for catching up on small, transient gaps. Dynamo adds a block ledger underneath, which enables a current-state snapshot fallback at the cost of additional memory and complexity. vLLM keeps replay history in the buffer, which is sufficient when consumers are stable and gaps remain inside the retained window.
 
 For deployments using Dynamo's KV-aware routing, the local indexer is used automatically. For standalone vLLM deployments where you want to build your own event consumer, vLLM's replay buffer provides a lightweight starting point.
 

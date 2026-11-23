@@ -1106,31 +1106,14 @@ mod tests_startup_helpers {
             assert_eq!(subject, KV_EVENT_SUBJECT);
         } // drop lock
 
-        // Verify event was applied to local indexer
-        // We can check by querying the workers that have blocks
-        let get_workers_tx = local_indexer.get_workers_sender();
-        let mut found = false;
-        for _ in 0..20 {
-            // Try up to 20 times (200ms total)
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            get_workers_tx
-                .send(GetWorkersRequest { resp: resp_tx })
-                .await
-                .unwrap();
-            let workers: Vec<u64> = resp_rx.await.unwrap();
-
-            if workers.contains(&1) {
-                found = true;
-                break;
-            }
-
-            // Wait before retrying
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-
-        // Worker 1 should be in the set (we used worker_id=1)
+        // Verify event was applied to local indexer: a full recovery returns worker 1's block
+        let WorkerKvQueryResponse::TreeDump { events, .. } =
+            local_indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("a full recovery should return a tree dump");
+        };
         assert!(
-            found,
+            events.iter().any(|event| event.worker_id == 1),
             "Worker 1 was not found in the indexer after processing"
         );
 
@@ -1194,21 +1177,16 @@ mod tests_startup_helpers {
             .unwrap()
             .unwrap();
 
-        // Local indexer should have no block
-        let mut no_blocks = false;
-        for _ in 0..20 {
-            // Try up to 20 times (200ms total)
-            let scores = local_indexer
-                .find_matches(vec![LocalBlockHash(200)])
-                .await
-                .unwrap();
-            if scores.scores.is_empty() {
-                no_blocks = true;
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-        assert!(no_blocks, "worker should have no blocks after removal");
+        // Local indexer should have no block: a full recovery returns nothing to install
+        let WorkerKvQueryResponse::TreeDump { events, .. } =
+            local_indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("a full recovery should return a tree dump");
+        };
+        assert!(
+            events.is_empty(),
+            "worker should have no blocks after removal"
+        );
 
         // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
@@ -1276,21 +1254,16 @@ mod tests_startup_helpers {
             .unwrap()
             .unwrap();
 
-        // Local indexer should have no block
-        let mut no_blocks = false;
-        for _ in 0..20 {
-            // Try up to 20 times (200ms total)
-            let scores = local_indexer
-                .find_matches(vec![LocalBlockHash(200)])
-                .await
-                .unwrap();
-            if scores.scores.is_empty() {
-                no_blocks = true;
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-        assert!(no_blocks, "worker should have no blocks after clearing");
+        // Local indexer should have no block: a full recovery returns nothing to install
+        let WorkerKvQueryResponse::TreeDump { events, .. } =
+            local_indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("a full recovery should return a tree dump");
+        };
+        assert!(
+            events.is_empty(),
+            "worker should have no blocks after clearing"
+        );
 
         // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
@@ -2332,14 +2305,10 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn recovery_barrier_waits_for_the_index_like_live_ingestion() {
-        use dynamo_kv_indexer::host::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
-        for (is_rejected, is_offline) in [(false, false), (true, false), (false, true)] {
-            let indexer_cancel = CancellationToken::new();
-            if is_offline {
-                indexer_cancel.cancel();
-            }
+        use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer, WorkerKvQueryResponse};
+        for is_unreachable in [false, true] {
             let indexer = Arc::new(LocalKvIndexer::new(
-                indexer_cancel,
+                CancellationToken::new(),
                 4,
                 Arc::new(KvIndexerMetrics::new_unregistered()),
                 16,
@@ -2358,8 +2327,9 @@ mod event_processor_tests {
                 EventDedupPolicy::RefCounted,
             ));
             let (done, ack) = tokio::sync::oneshot::channel();
-            // A missing parent reaches the index and is rejected there, as on the live path.
-            let parent = is_rejected.then_some(999);
+            // A block under a parent the rank does not hold reaches the index, and a recovery
+            // leaves it out: a router's prefix tree could not place it.
+            let parent = is_unreachable.then_some(999);
             tx.send(local_gpu_batch(vec![stored_event(0, parent, 10, 0)]).into())
                 .unwrap();
             tx.send(PublisherInput::Barrier(done)).unwrap();
@@ -2367,20 +2337,19 @@ mod event_processor_tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if is_offline {
-                assert!(result.is_err());
-                // The listener must still be able to publish its terminal status.
-                assert!(!cancel.is_cancelled());
-            } else {
-                result.unwrap();
-                // No flush/sleep: the barrier means the index finished the batch,
-                // even with an otherwise long publisher batching timeout.
-                let matches = indexer
-                    .find_matches(vec![LocalBlockHash(10)])
-                    .await
-                    .unwrap();
-                assert_eq!(matches.scores.is_empty(), is_rejected);
-            }
+            result.unwrap();
+            // No flush/sleep: the barrier means the index holds the batch, even with an
+            // otherwise long publisher batching timeout.
+            let WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id,
+                ..
+            } = indexer.get_events_in_id_range(None, None).await
+            else {
+                panic!("a full recovery should return a tree dump");
+            };
+            assert_eq!(last_event_id, 1);
+            assert_eq!(events.is_empty(), is_unreachable);
             drop(tx);
             task.await.unwrap();
         }
