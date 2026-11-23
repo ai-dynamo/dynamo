@@ -697,7 +697,9 @@ vllm_configs = {
             pytest.mark.timeout(
                 300
             ),  # 1.1B loads quickly; margin covers CI model download
-            pytest.mark.post_merge,
+            # TODO: revert to pytest.mark.post_merge after pre_merge validation
+            # on this PR (see .ai/ci-guidelines.md).
+            pytest.mark.pre_merge,
         ],
         model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         # TinyLlama-1.1B caps at 2048 positions; agg.sh defaults to 4096.
