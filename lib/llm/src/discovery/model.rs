@@ -96,7 +96,7 @@ pub(crate) struct GenerateEngineSelection {
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
 pub(crate) struct SystemOneExecutionSelection {
-    pub(crate) backend: crate::protocols::systemone::ScoringBackend,
+    pub(crate) backend: crate::model_card::ScoringBackend,
     pub(crate) canonical_model: String,
     pub(crate) engine: GenerateStreamingEngine,
     pub(crate) card: ModelDeploymentCard,
@@ -1619,10 +1619,7 @@ mod tests {
         });
         model.add_worker_set("ns".into(), workers);
         let selected = model.get_systemone_execution_selection(2).unwrap();
-        assert_eq!(
-            selected.backend,
-            crate::protocols::systemone::ScoringBackend::Sglang
-        );
+        assert_eq!(selected.backend, crate::model_card::ScoringBackend::Sglang);
     }
 
     #[test]

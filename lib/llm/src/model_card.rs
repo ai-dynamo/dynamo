@@ -1257,6 +1257,38 @@ pub struct ModelDeploymentCard {
 
 pub use dynamo_lora::LoraInfo;
 
+/// The engine whose native scoring profile serves SystemOne decisions for a model, derived
+/// from the capabilities its workers advertise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoringBackend {
+    Sglang,
+    Vllm,
+}
+
+impl ScoringBackend {
+    pub fn format(self) -> &'static str {
+        match self {
+            Self::Sglang => "sglang",
+            Self::Vllm => "vllm",
+        }
+    }
+
+    pub fn output_tokens(self) -> usize {
+        match self {
+            Self::Sglang => 0,
+            Self::Vllm => 1,
+        }
+    }
+
+    pub fn max_candidates(self) -> usize {
+        match self {
+            Self::Sglang => 255,
+            // The qualified causal profile uses A-Z labels, not the engine's 128-ID limit.
+            Self::Vllm => 26,
+        }
+    }
+}
+
 impl ModelDeploymentCard {
     /// Number of typed metadata slots (`model_info`, `tokenizer`,
     /// `prompt_formatter`, `chat_template_file`, `gen_config`). Used as
@@ -1365,15 +1397,14 @@ impl ModelDeploymentCard {
         mdc_local_path(&self.slug, self.mdcsum())
     }
 
-    pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
+    pub fn is_systemone_serial_eligible(&self) -> bool {
         self.systemone_backend().is_some()
     }
 
-    pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
+    pub fn systemone_backend(&self) -> Option<ScoringBackend> {
         use crate::local_model::runtime_config::{
             VLLM_CAUSAL_DECISION_V1, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         };
-        use crate::protocols::systemone::ScoringBackend;
         let sglang = self
             .runtime_config
             .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
@@ -1537,8 +1568,8 @@ impl ModelDeploymentCard {
                 // Preserve legacy checksums when serial scoring is unavailable.
                 if let Some(backend) = self.systemone_backend() {
                     match backend {
-                        crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
-                        crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
+                        ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
+                        ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
                     }
                 }
 
