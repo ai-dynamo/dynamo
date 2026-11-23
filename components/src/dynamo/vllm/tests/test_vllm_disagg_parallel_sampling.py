@@ -64,6 +64,7 @@ def _handler(cls, mode: DisaggregationMode):
                 multi_modal_data=None,
                 mm_processor_kwargs=None,
                 pre_rendered_prompt=None,
+                custom_data=None,
             )
         )
     )

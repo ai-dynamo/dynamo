@@ -846,7 +846,8 @@ def _validate_disagg_parallel_sampling(
         "Use aggregated serving or send separate n=1 requests.",
     )
 
-def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
+
+def _build_vllm_kv_hints(request: Mapping[str, Any]) -> KvHintsEnvelope | None:
     """Convert Dynamo's typed KV hint message to vLLM's envelope type."""
     raw_envelope = request.get("kv_hint")
     if raw_envelope is None:
@@ -3869,7 +3870,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         )
 
-        _validate_disagg_parallel_sampling(sampling_params, enabled=is_decode_only)
+        _validate_disagg_parallel_sampling(
+            sampling_params, enabled=mode == DisaggregationMode.DECODE
+        )
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)
