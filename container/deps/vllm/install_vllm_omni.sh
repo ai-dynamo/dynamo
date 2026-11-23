@@ -59,12 +59,17 @@ if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
   # raises; an API newer than the SDK breaks SDK imports.
   mapfile -t otel_packages < <(python3 -c '
 import importlib.metadata as md
-for name in ("opentelemetry-sdk", "opentelemetry-exporter-otlp", "opentelemetry-exporter-prometheus"):
+# Capped at the tested release; the SDK pins the API. Move with Omni and vLLM.
+for name, version in (
+    ("opentelemetry-sdk", "1.45.2"),
+    ("opentelemetry-exporter-otlp", "1.45.2"),
+    ("opentelemetry-exporter-prometheus", "0.66b2"),
+):
     try:
         md.distribution(name)
     except md.PackageNotFoundError:
         continue
-    print(name)
+    print(f"{name}<={version}")
 ')
   uv pip install --system \
     --prerelease=allow \
