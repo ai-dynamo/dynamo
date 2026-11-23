@@ -249,7 +249,7 @@ pub fn register_lora_allocation_metrics(registry: &Registry) -> Result<(), prome
 }
 
 struct ModelServingLoadCollector {
-    manager: Option<Arc<ModelManager>>,
+    manager: Arc<ModelManager>,
     metrics: ServingLoadCollector,
 }
 
@@ -258,10 +258,8 @@ impl Collector for ModelServingLoadCollector {
         self.metrics.desc()
     }
     fn collect(&self) -> Vec<MetricFamily> {
-        if let Some(manager) = &self.manager {
-            for view in manager.committed_model_views() {
-                self.metrics.initialize_model(&view.name);
-            }
+        for view in self.manager.committed_model_views() {
+            self.metrics.initialize_model(&view.name);
         }
         self.metrics.collect()
     }
@@ -270,7 +268,7 @@ impl Collector for ModelServingLoadCollector {
 pub(super) fn register_with_model_manager(
     metrics: &Metrics,
     registry: &Registry,
-    manager: Option<Arc<ModelManager>>,
+    manager: Arc<ModelManager>,
 ) -> Result<(), prometheus::Error> {
     metrics.register_with_serving_load_collector(
         registry,
@@ -850,7 +848,7 @@ mod tests {
         let metrics = Metrics::new();
         let manager = Arc::new(ModelManager::new());
         let registry = Registry::new();
-        register_with_model_manager(&metrics, &registry, Some(manager.clone())).unwrap();
+        register_with_model_manager(&metrics, &registry, manager.clone()).unwrap();
         let children = |model: &str| {
             registry
                 .gather()

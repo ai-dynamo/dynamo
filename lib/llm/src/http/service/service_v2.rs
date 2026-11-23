@@ -1365,7 +1365,7 @@ impl HttpServiceConfigBuilder {
         metrics::register_with_model_manager(
             &state.metrics_clone(),
             &registry,
-            Some(state.manager_clone()),
+            state.manager_clone(),
         )?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
