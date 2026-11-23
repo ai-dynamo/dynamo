@@ -309,20 +309,13 @@ impl WireFixture for Fixture {
         for (candidates, (native, index)) in alternatives.iter().zip(native_positions) {
             assert_eq!(
                 candidates.len(),
-                request.output_options.logprobs.unwrap() as usize + 1
+                request.output_options.logprobs.unwrap() as usize
             );
-            let expected = std::iter::once((
-                native.token_ids[index],
-                native.ranks[index],
-                f64::from(native.logprobs[index]),
-            ))
-            .chain(
-                native.candidate_tokens[index]
-                    .tokens
-                    .iter()
-                    .map(|token| (token.id, token.rank, f64::from(token.logprob))),
-            )
-            .collect::<Vec<_>>();
+            let expected = native.candidate_tokens[index]
+                .tokens
+                .iter()
+                .map(|token| (token.id, token.rank, f64::from(token.logprob)))
+                .collect::<Vec<_>>();
             assert_eq!(
                 candidates
                     .iter()

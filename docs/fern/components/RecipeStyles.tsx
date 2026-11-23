@@ -2265,7 +2265,6 @@ body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) [data-varian
 body:has(input[name="recipe-variant"][value="standard"]:checked) [data-variant]:not([data-variant~="standard"]),
 body:has(input[name="recipe-variant"][value="efa"]:checked) [data-variant]:not([data-variant~="efa"]),
 body:has(input[name="recipe-variant"][value="kv-router"]:checked) [data-variant]:not([data-variant~="kv-router"]),
-body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]),
 body:has(input[name="recipe-variant"][value="round-robin"]:checked) [data-variant]:not([data-variant~="round-robin"]),
 body:has(input[name="recipe-variant"][value="session-affinity"]:checked) [data-variant]:not([data-variant~="session-affinity"]) {
     display: none;
@@ -2285,8 +2284,7 @@ body:has(input[name="recipe-variant"][value="trtllm-disagg"]:checked) tr[data-va
 body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-variant~="vllm-disagg"],
 body:has(input[name="recipe-variant"][value="standard"]:checked) tr[data-variant~="standard"],
 body:has(input[name="recipe-variant"][value="efa"]:checked) tr[data-variant~="efa"],
-body:has(input[name="recipe-variant"][value="kv-router"]:checked) tr[data-variant~="kv-router"],
-body:has(input[name="recipe-variant"][value="kvbm"]:checked) tr[data-variant~="kvbm"] {
+body:has(input[name="recipe-variant"][value="kv-router"]:checked) tr[data-variant~="kv-router"] {
     opacity: 1;
     font-weight: 600;
 }

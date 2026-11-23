@@ -17,6 +17,7 @@ mod booking;
 mod busy;
 mod cleanup;
 mod compressed_path_arena;
+mod decode_progress;
 pub mod host;
 mod multi_worker;
 mod prefill_tracker;

@@ -14,6 +14,7 @@ chunks back to its ``generate()`` call.
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib
 import ipaddress
 import json
@@ -78,6 +79,8 @@ _CLIENT_ERROR_STATUS = 400
 _ABORT_GRACE_S = 3.0
 # Per-token NVTX ranges are guarded on this so they cost one branch when off.
 _NVTX = _nvtx.ENABLED
+# gc.set_threshold() once the engine is up: see _tune_gc().
+_GC_THRESHOLDS = (50_000, 50, 100)
 
 
 class TokenspeedLLMEngine(LLMEngine):
@@ -88,12 +91,14 @@ class TokenspeedLLMEngine(LLMEngine):
         kv_block_size: int | None = None,
         engine_startup_timeout: float = 3600.0,
         bootstrap_host: str | None = None,
+        freeze_gc_after_init: bool = False,
     ):
         self.server_args = server_args
         self.engine_argv = list(engine_argv or [])
         self.kv_block_size = kv_block_size
         self.engine_startup_timeout = engine_startup_timeout
         self.bootstrap_host = bootstrap_host
+        self.freeze_gc_after_init = freeze_gc_after_init
         self.disaggregation_mode = resolve_disaggregation_mode(server_args)
         # Attention-DP ranks, one engine each.
         self._dp_size = attention_dp_size(server_args)
@@ -132,6 +137,7 @@ class TokenspeedLLMEngine(LLMEngine):
             kv_block_size=config.kv_block_size,
             engine_startup_timeout=config.engine_startup_timeout,
             bootstrap_host=config.bootstrap_host,
+            freeze_gc_after_init=config.freeze_gc_after_init,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -213,6 +219,8 @@ class TokenspeedLLMEngine(LLMEngine):
             len(engines),
             self._model_max_len,
         )
+        if self.freeze_gc_after_init:
+            _tune_gc()
 
         return EngineConfig(
             model=self.server_args.model,
@@ -885,6 +893,27 @@ def _stop_launcher(process: subprocess.Popen) -> None:
     except ProcessLookupError:
         pass
     process.wait()
+
+
+def _tune_gc() -> None:
+    """--freeze-gc-after-init: keep the cyclic collector off the start-up heap
+    and the output backlog.
+
+    Every collection holds the GIL, so it stalls every stream. A full
+    collection walks all tracked objects: ``gc.freeze()`` takes the several
+    hundred thousand that imports and engine start-up leave alive out of its
+    reach. Under load the output chunks waiting in per-request lists are live
+    too, and the default thresholds re-walk them several times a second;
+    ``_GC_THRESHOLDS`` makes those middle and full collections rare.
+    """
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(*_GC_THRESHOLDS)
+    logger.info(
+        "GC: froze %d start-up objects, thresholds %s",
+        gc.get_freeze_count(),
+        gc.get_threshold(),
+    )
 
 
 def _tokenspeed_engine_module() -> Any:

@@ -101,6 +101,25 @@ Support by backend:
 
 On a TensorRT-LLM decode worker, engine priority scheduling and generation admission by original arrival are alternatives; see the TensorRT-LLM tab above.
 
+## Prioritize Short Replies Automatically
+
+When requests wait for a free slot in the engine, serving the shortest replies first lowers the typical wait. The built-in `output_length_prediction` request classifier does this without client hints. It learns reply lengths while the frontend runs, predicts each request's reply length from its session's earlier replies and its prompt length, and forwards the prediction as the request's priority: a shorter predicted reply gets a higher priority.
+
+Enable it in the router policy file:
+
+```yaml title="policy.yaml"
+request_classifier:
+  type: output_length_prediction
+```
+
+- Turn on engine priority scheduling as described in [Backend engine](#2-backend-engine). An engine that does not order by priority ignores the prediction.
+- The prediction replaces any `priority` the client sent. `strict_priority` and the router queue order are unchanged.
+- Predictions use the [session ID](session-ids.mdx). A request without one is predicted from its prompt length and the replies of all sessions.
+- Each frontend learns on its own and starts from scratch when it restarts. The first requests use a fixed prior of 400 tokens.
+- Long replies wait longer. Bound that wait with the engine's own starvation control, if it has one.
+
+The classifier takes no parameters. It runs on aggregated and decode routing with the embedded KV router.
+
 ## Check That It Works
 
 Use a benchmark that sends different `priority` values on individual requests. For AIPerf, use a version with per-request `extra` payload support. Older versions only support global `--extra-inputs`, which cannot produce mixed-priority tiers in one run.

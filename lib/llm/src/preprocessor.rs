@@ -13,6 +13,7 @@
 
 mod edit;
 pub mod media;
+pub(crate) mod mistral_grammar;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
 
@@ -31,7 +32,7 @@ use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionToolChoiceOption, EncodingFormat, InputAudioFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
 use dynamo_runtime::config::{
@@ -395,6 +396,8 @@ fn tool_content_part_as_user(
     })
 }
 
+type MediaInfo = (&'static str, Option<url::Url>, Option<String>);
+
 enum MultimodalContentPart<'a> {
     User(&'a ChatCompletionRequestUserMessageContentPart),
     Tool(&'a ChatCompletionRequestToolMessageContentPart),
@@ -434,8 +437,8 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
-        match self {
+    fn media_info(&self) -> Result<Option<MediaInfo>> {
+        Ok(match self {
             Self::User(part) => match *part {
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
                     "image_url",
@@ -452,6 +455,18 @@ impl<'a> MultimodalContentPart<'a> {
                     part.audio_url.as_ref().map(|media| media.url.clone()),
                     part.uuid.clone(),
                 )),
+                ChatCompletionRequestUserMessageContentPart::InputAudio(part) => {
+                    let format = match &part.input_audio.format {
+                        InputAudioFormat::Wav => "wav",
+                        InputAudioFormat::Mp3 => "mpeg",
+                    };
+                    let url = url::Url::parse(&format!(
+                        "data:audio/{format};base64,{}",
+                        part.input_audio.data
+                    ))
+                    .map_err(|_| invalid_argument_error("Invalid input_audio data"))?;
+                    Some(("audio_url", Some(url), None))
+                }
                 _ => None,
             },
             Self::Tool(part) => match *part {
@@ -472,7 +487,7 @@ impl<'a> MultimodalContentPart<'a> {
                 )),
                 _ => None,
             },
-        }
+        })
     }
 }
 
@@ -763,6 +778,9 @@ struct ChoiceReasoningState {
 struct ReasoningUsageEstimator {
     total: u32,
     active_choices: HashSet<u32>,
+    // Tokens of empty chunks for a choice still in reasoning, settled by its next
+    // release: a tool call drops them, since `glm47` emits a call only once complete.
+    held: HashMap<u32, u32>,
 }
 
 impl ReasoningUsageEstimator {
@@ -779,31 +797,80 @@ impl ReasoningUsageEstimator {
             .choices
             .iter()
             .any(|choice| choice.delta.reasoning_content.is_some());
-        let active_without_visible_output = chunk.inner.choices.iter().any(|choice| {
-            self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
-        });
+        let held_choice = chunk
+            .inner
+            .choices
+            .iter()
+            .find(|choice| {
+                self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
+            })
+            .map(|choice| choice.index);
         let usage_chunk_while_reasoning =
             chunk.inner.choices.is_empty() && !self.active_choices.is_empty();
 
-        if token_count > 0
-            && (has_reasoning || active_without_visible_output || usage_chunk_while_reasoning)
-        {
-            self.total = self.total.saturating_add(token_count);
+        if token_count > 0 {
+            if has_reasoning || usage_chunk_while_reasoning {
+                self.total = self.total.saturating_add(token_count);
+            } else if let Some(index) = held_choice {
+                let held = self.held.entry(index).or_default();
+                *held = held.saturating_add(token_count);
+            }
         }
 
         for choice in &chunk.inner.choices {
             if choice.delta.reasoning_content.is_some() {
+                self.settle_held(choice.index, true);
                 self.active_choices.insert(choice.index);
             } else if choice_has_visible_output(choice) {
+                let released_tool_call = choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                self.settle_held(choice.index, !released_tool_call);
                 self.active_choices.remove(&choice.index);
             }
+        }
+    }
+
+    fn settle_held(&mut self, index: u32, was_reasoning: bool) {
+        if let Some(held) = self.held.remove(&index)
+            && was_reasoning
+        {
+            self.total = self.total.saturating_add(held);
         }
     }
 
     fn annotate(&self, usage: &mut dynamo_protocols::types::CompletionUsage) {
         let details = usage.completion_tokens_details.get_or_insert_default();
         if details.reasoning_tokens.unwrap_or(0) == 0 {
-            details.reasoning_tokens = Some(self.total);
+            // Text still held when usage arrives was never released as anything
+            // else, so it stays reasoning.
+            let unsettled = self
+                .held
+                .values()
+                .fold(0u32, |sum, held| sum.saturating_add(*held));
+            details.reasoning_tokens = Some(self.total.saturating_add(unsettled));
+        }
+    }
+}
+
+/// Tell the request classifier, if one left its handle on `tracker`, how each choice that
+/// finishes in `response` ended.
+fn record_reply_end(
+    tracker: &RequestTracker,
+    response: &Annotated<NvCreateChatCompletionStreamResponse>,
+) {
+    let finished = response
+        .data
+        .iter()
+        .flat_map(|data| &data.inner.choices)
+        .filter_map(|choice| choice.finish_reason);
+    for finish_reason in finished {
+        if let Some(progress) = tracker.classifier_progress() {
+            progress.record_reply_end(
+                finish_reason == dynamo_protocols::types::FinishReason::ToolCalls,
+            );
         }
     }
 }
@@ -1922,6 +1989,10 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
         }
     }
 
+    fn raw_tools(&self) -> Option<minijinja::value::Value> {
+        self.inner.raw_tools()
+    }
+
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
         self.inner.tool_choice()
     }
@@ -2064,6 +2135,8 @@ pub struct OpenAIPreprocessor {
     /// parsers). Gates Beam-only request semantics: `preserve_thinking`, the
     /// `builtin_tools` rendering view and stop-token visibility for the parser.
     beam_route: bool,
+    /// Tool-call grammar when the Unified `mistral_4` family serves this model.
+    mistral_tool_call_grammar: Option<mistral_grammar::MistralToolCallGrammar>,
     /// Normalize historical tool-call `function.arguments` from a JSON string
     /// to an object before MiniJinja rendering.  Enabled for GLM-5.2 (glm47
     /// parser) and any model that sets `normalize_tool_call_args: true` in its
@@ -2257,6 +2330,11 @@ impl OpenAIPreprocessor {
                      output token ({requested_tokens} tokens minimum)"
                 ),
             };
+            // Do not add `.public_message(...)` here to make this text client-visible:
+            // `public_message` and `public_details` assign the same `DynamoError`
+            // field (last writer wins), which would erase the `ContextLength`
+            // details. The HTTP renderers derive the public wording from those
+            // details instead.
             return Err(DynamoError::builder()
                 .error_type(ErrorType::InvalidArgument)
                 .message(format!(
@@ -2268,6 +2346,7 @@ impl OpenAIPreprocessor {
                 .public_details(PublicDetails::ContextLength {
                     limit: combined_limit as u64,
                     actual: Some(requested_tokens as u64),
+                    prompt_tokens: Some(prompt_len as u64),
                 })
                 .build()
                 .into());
@@ -2996,15 +3075,16 @@ impl OpenAIPreprocessor {
         validate_chat_parsers: bool,
     ) -> Result<Arc<Self>> {
         let validate_chat_parsers = validate_chat_parsers && mdc.model_type.supports_chat();
+        use crate::protocols::openai::chat_completions::unified_parser;
+
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
-        let Some(ref model_info) = mdc.model_info else {
+        let Some(model_info) = mdc.resolved_model_info()? else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
-        let model_info = model_info.get_model_info()?;
         // The tokenizer trait exposes no ids, so the card keeps the bound.
         let tokenizer_id_bound = mdc.tokenizer_id_bound().unwrap_or_else(|| {
             tracing::warn!(
@@ -3020,13 +3100,25 @@ impl OpenAIPreprocessor {
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
             )?;
+            unified_parser::check_family_tokens(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+                tokenizer.as_ref(),
+            )?;
+        }
+        let unified_family = if mdc.model_type.supports_chat() {
+            unified_parser::selected_family(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+            )
+        } else {
+            None
+        };
+        if validate_chat_parsers {
             tracing::info!(
                 model = %mdc.display_name,
                 parser_version = ?crate::protocols::openai::chat_completions::tool_parser_v2::selected_version()?,
-                unified_family = ?crate::protocols::openai::chat_completions::unified_parser::selected_family(
-                    tool_call_parser.as_deref(),
-                    mdc.runtime_config.reasoning_parser.as_deref(),
-                ),
+                unified_family = ?unified_family,
                 tool_parser = ?tool_call_parser,
                 reasoning_parser = ?mdc.runtime_config.reasoning_parser,
                 "Selected model parser route"
@@ -3038,18 +3130,37 @@ impl OpenAIPreprocessor {
                     mdc.runtime_config.reasoning_parser.as_deref(),
                 ),
             ] {
-                if let Some(warning) = parser.and_then(
-                    crate::protocols::openai::chat_completions::unified_parser::deprecated_alias_warning,
-                ) {
+                if let Some(warning) = parser.and_then(unified_parser::deprecated_alias_warning) {
                     tracing::warn!(model = %mdc.display_name, slot, "{warning}");
                 }
             }
         }
         let parser_requires_special_tokens = mdc.model_type.supports_chat()
             && Self::parser_requires_special_tokens(
+                unified_family,
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
             )?;
+        let mistral_tool_call_grammar = if mdc.model_type.supports_chat()
+            && unified_family == Some(unified_parser::MISTRAL_UNIFIED_FAMILY)
+        {
+            match mistral_grammar::MistralToolCallGrammar::for_model(
+                &mdc.runtime_config,
+                tokenizer.as_ref(),
+            ) {
+                Ok(grammar) => Some(grammar),
+                Err(error) => {
+                    tracing::warn!(
+                        model = %mdc.display_name,
+                        error = format!("{error:#}"),
+                        "Tool calls are not grammar-enforced for the Unified mistral_4 family"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
@@ -3386,6 +3497,7 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             parser_requires_special_tokens,
             beam_route,
+            mistral_tool_call_grammar,
             normalize_tool_call_args,
             media_loader,
             token_budget,
@@ -4054,6 +4166,10 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<(Option<RenderedPrompt>, PromptReasoningPrefill)> {
         let continue_final = request.get_continue_final_message() == Some(true);
+        // Formatters that leave the final turn open themselves need neither the
+        // continuation marker nor the truncation below.
+        let emulate_continuation =
+            continue_final && !self.formatter.renders_continuation_natively();
         if continue_final
             && self
                 .formatter
@@ -4082,7 +4198,7 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
-        let final_message_start_tag = (continue_final
+        let final_message_start_tag = (emulate_continuation
             && crate::protocols::openai::chat_completions::unified_parser::configured_family(
                 self.tool_call_parser.as_deref(),
                 self.runtime_config.reasoning_parser.as_deref(),
@@ -4099,14 +4215,14 @@ impl OpenAIPreprocessor {
             None
         };
         let formatted_prompt = if self.normalize_tool_call_args
-            || continue_final
+            || emulate_continuation
             || rendering.is_some()
             || named_tool.is_some()
         {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
+                continue_final_message: emulate_continuation,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
                 rendering,
@@ -4116,7 +4232,7 @@ impl OpenAIPreprocessor {
         };
         let (formatted_prompt, header_search_end) = match formatted_prompt {
             Some(prompt) => {
-                let prompt = if continue_final {
+                let prompt = if emulate_continuation {
                     apply_continue_final_message(prompt)
                         .map_err(|error| invalid_argument_error(format!("{error:#}")))?
                 } else {
@@ -4219,6 +4335,11 @@ impl OpenAIPreprocessor {
                     {
                         *url = serde_json::Value::String(String::new());
                     }
+                }
+                if let Some(audio) = part.get_mut("input_audio")
+                    && let Some(data) = audio.get_mut("data")
+                {
+                    *data = serde_json::Value::String(String::new());
                 }
             }
         }
@@ -4347,7 +4468,7 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                let Some((type_str, url, uuid)) = content_part.media_info()? else {
                     if let Some(part) = content_part.custom_part() {
                         if !self.runtime_config.runtime_flag_enabled(
                             crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
@@ -5596,6 +5717,10 @@ impl OpenAIPreprocessor {
     }
 
     fn prompt_overflow_error(token_count: usize, combined_limit: usize) -> DynamoError {
+        // Do not add `.public_message(...)` after `.public_details(...)`:
+        // both builder setters assign the same `DynamoError` field (last writer
+        // wins), which would erase the `ContextLength` limit/actual details that
+        // the HTTP renderers use to produce the client-visible message.
         DynamoError::builder()
             .error_type(ErrorType::InvalidArgument)
             .message(format!(
@@ -5607,6 +5732,7 @@ impl OpenAIPreprocessor {
             .public_details(PublicDetails::ContextLength {
                 limit: combined_limit as u64,
                 actual: Some(token_count as u64),
+                prompt_tokens: Some(token_count as u64),
             })
             .build()
     }
@@ -5872,6 +5998,14 @@ impl OpenAIPreprocessor {
         stream
     }
 
+    /// The Unified family that parses this model's output.
+    fn unified_family(&self) -> Option<&'static str> {
+        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        )
+    }
+
     fn tool_processing_route(
         &self,
         request: &NvCreateChatCompletionRequest,
@@ -5955,12 +6089,14 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
-            request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-            uses_tool_call_structural_tag,
-        )?;
+        let guided_tool_constraint =
+            crate::preprocessor::tool_choice::guided_tool_constraint_for_model(
+                request,
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+                self.unified_family(),
+                uses_tool_call_structural_tag,
+            )?;
         let tool_processing_route = self.tool_processing_route(request, &guided_tool_constraint)?;
         self.postprocessor_parsing_stream_with_constraint(
             stream,
@@ -7270,15 +7406,11 @@ impl OpenAIPreprocessor {
     /// from `true` to `false` so the parsers actually see the markers
     /// they're matching on.
     fn parser_requires_special_tokens(
+        unified_family: Option<&'static str>,
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> Result<bool> {
-        if let Some(family) =
-            crate::protocols::openai::chat_completions::unified_parser::selected_family(
-                tool_call_parser,
-                reasoning_parser,
-            )
-        {
+        if let Some(family) = unified_family {
             // The unified grammar owns token preservation, including native tool markers.
             return dynamo_parsers_v2::create_unified_parser_for_family(family, &[])
                 .with_context(|| {
@@ -7720,7 +7852,8 @@ impl OpenAIPreprocessor {
     ///   reasoning is split from the answer, and reasoning is surfaced as content
     ///   only when no content was generated (non-streaming, in the aggregator).
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
-    /// For Mistral: disabled unless `reasoning_effort` is present and not `none`.
+    /// For Mistral: disabled unless `reasoning_effort` is present and not `none`
+    ///   on the legacy parsers; the unified `mistral_4` family never disables it.
     /// For Gemma 4: reasoning is opt-in and disabled unless chat_template_args
     ///   explicitly enables thinking. Gemma 4's chat template injects reasoning
     ///   markers only when enable_thinking=true. The exception is the unified route
@@ -7771,6 +7904,11 @@ impl OpenAIPreprocessor {
                 "muse_spark" => false,
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
+                }
+                // Mistral output starts in content and only `[THINK]` opens
+                // reasoning; disabling would fold an emitted thought into `content`.
+                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY => {
+                    false
                 }
                 _ => thinking == Some(false),
             };
@@ -8837,6 +8975,7 @@ impl
         let trace_finish_reason_metadata =
             crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
+        let reply_tracker = tracker.clone();
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
 
@@ -8890,6 +9029,14 @@ impl
             guided_tool_constraint,
             tool_processing_route,
         )?;
+        // After tool-call parsing, which is what turns `stop` into `tool_calls`. The router
+        // leaves its handle before `next.generate` returns, so one check here is enough.
+        let reply_tracker = reply_tracker.filter(|tracker| tracker.classifier_progress().is_some());
+        let transformed_stream = edit::edit_items(transformed_stream, move |response| {
+            if let Some(tracker) = &reply_tracker {
+                record_reply_end(tracker, response);
+            }
+        });
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Request payload capture is a pass-through: every chunk reaches the HTTP
@@ -9245,6 +9392,41 @@ mod token_data_tests {
             .await
             .unwrap();
         assert_eq!(preprocessed.token_ids.as_slice(), token_data);
+    }
+
+    #[test]
+    fn mistral_tekken_card_continues_turns_and_keeps_client_tools() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-mistral-tekken",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "mistral",
+            "messages": [
+                {"role": "user", "content": "Give JSON"},
+                {"role": "assistant", "content": "```json\n  "}
+            ],
+            "tools": [{"type": "function", "function": {"name": "now", "parameters": {}}}],
+            "continue_final_message": true,
+            "add_generation_prompt": false
+        }))
+        .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        // The client's empty parameters survive the Jinja schema backfill.
+        assert!(
+            prompt.as_str().contains(r#""parameters": {}"#),
+            "{}",
+            prompt.as_str()
+        );
+        // Native continuation keeps the newline that marker truncation would trim.
+        assert!(
+            prompt.as_str().ends_with("[INST]Give JSON[/INST]```json\n"),
+            "{}",
+            prompt.as_str()
+        );
+        assert!(prompt.segments().is_some());
     }
 
     #[tokio::test]
@@ -9623,7 +9805,8 @@ mod strip_tests {
             "role": "user",
             "content": [
                 {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
-                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}},
+                {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
             ]
         }]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
@@ -9633,6 +9816,7 @@ mod strip_tests {
             parts[1]["audio_url"]["url"],
             "https://example.com/audio.wav"
         );
+        assert_eq!(parts[2]["input_audio"]["data"], "");
     }
 
     #[test]
@@ -11126,6 +11310,175 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_unified_mistral_keeps_reasoning_when_effort_none() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use crate::protocols::openai::chat_completions::unified_parser::{
+            self, UnifiedRequestPolicy, parse_complete_with_policy,
+        };
+        for body in [
+            serde_json::json!({
+                "model": "mistral",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "none",
+            }),
+            serde_json::json!({
+                "model": "mistral",
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"reasoning_effort": "none"},
+            }),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(body.clone()).unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+            assert_eq!(
+                dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
+                Some(false),
+                "{body}"
+            );
+            let reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                &request,
+                Some("mistral"),
+                Some("mistral"),
+                None,
+                Some(unified_parser::MISTRAL_UNIFIED_FAMILY),
+            );
+            let output = parse_complete_with_policy(
+                unified_parser::MISTRAL_UNIFIED_FAMILY,
+                "[THINK]plan[/THINK]answer",
+                &GuidedToolConstraint::None,
+                &[],
+                UnifiedRequestPolicy {
+                    reasoning_disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(output.reasoning, "plan", "{body}");
+            assert_eq!(output.text, "answer", "{body}");
+        }
+    }
+
+    // The Unified mistral_4 family is the default generation, and its forced-choice
+    // grammar keeps the native call format, so the stream parser must read native
+    // calls for `auto` and forced choices alike.
+    #[tokio::test]
+    async fn unified_mistral_streams_native_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::unified_mistral_streams_native_calls"),
+            &[],
+        ) {
+            return;
+        }
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-mistral-tekken");
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some("mistral".to_string());
+        card.runtime_config.reasoning_parser = Some("mistral".to_string());
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        for tool_choice in [
+            ChatCompletionToolChoiceOption::Auto,
+            ChatCompletionToolChoiceOption::Required,
+        ] {
+            let request = parser_route_test_request(tool_choice);
+            let chunks = [
+                serde_json::json!({"content": "[THINK]need the weather[/THINK][TOOL_CALLS]get_"}),
+                serde_json::json!({"content": "weather[ARGS]{\"city\":\"Paris\"}"}),
+                serde_json::json!({}),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, delta)| {
+                let finish_reason = (index == 2).then_some("stop");
+                Annotated::from_data(
+                    serde_json::from_value::<NvCreateChatCompletionStreamResponse>(
+                        serde_json::json!({"id":"test", "object":"chat.completion.chunk",
+                        "created":0, "model":"test", "choices":[{"index":0,
+                        "delta":delta, "finish_reason":finish_reason}]}),
+                    )
+                    .unwrap(),
+                )
+            });
+            let output = preprocessor
+                .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+                .unwrap();
+            // Default options skip the batch pass, so the calls come from the stream.
+            let result =
+                crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                    output,
+                    crate::protocols::openai::ParsingOptions::default(),
+                )
+                .await
+                .unwrap();
+            let choice = &result.inner.choices[0];
+            assert_eq!(
+                choice.message.reasoning_content.as_deref(),
+                Some("need the weather")
+            );
+            assert_eq!(choice.message.content, None);
+            assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+            let calls = choice.message.tool_calls.as_ref().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+                serde_json::json!({"city":"Paris"})
+            );
+        }
+    }
+
+    // A tokenizer whose vocabulary has no `[ARGS]` predates the v11 Mistral call
+    // format, so `mistral` fails chat setup unless DYN_PARSER_VERSION=1 selects the
+    // v1 parsers. Completions pipelines parse no tool calls and still build.
+    #[test]
+    fn pre_v11_mistral_tokenizer_requires_v1_parsers() {
+        const CHILD: &str = "DYNAMO_PRE_V11_MISTRAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for version in [None, Some("1"), Some("2")] {
+                let mut command = crate::test_utils::isolated_command(
+                    "preprocessor::tests::pre_v11_mistral_tokenizer_requires_v1_parsers",
+                );
+                command.env(CHILD, "1");
+                if let Some(version) = version {
+                    command.env(env_llm::DYN_PARSER_VERSION, version);
+                }
+                crate::test_utils::assert_isolated_success(
+                    &command.output().expect("run isolated test executable"),
+                );
+            }
+            return;
+        }
+        let v1_selected = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("1");
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.model_type = crate::model_type::ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some("mistral".to_string());
+        let tokenizer = card.tokenizer().unwrap();
+        assert!(OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer).is_ok());
+        if !v1_selected {
+            let error = OpenAIPreprocessor::new(card)
+                .err()
+                .expect("a pre-v11 tokenizer must fail chat setup");
+            assert!(
+                error.to_string().contains("DYN_PARSER_VERSION=1"),
+                "{error:#}"
+            );
+            return;
+        }
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+
+        let route = preprocessor
+            .tool_processing_route(
+                &parser_route_test_request(ChatCompletionToolChoiceOption::Auto),
+                &crate::protocols::openai::GuidedToolConstraint::None,
+            )
+            .unwrap();
+        assert!(!matches!(route, ToolProcessingRoute::Unified(_)));
+        assert_eq!(preprocessor.unified_family(), None);
+    }
+
     #[tokio::test]
     async fn gemma_prompt_channel_preserves_optional_label_ownership() {
         use crate::protocols::openai::chat_completions::unified_parser;
@@ -11877,7 +12230,16 @@ mod tests {
     #[test]
     fn deepseek_v41_preserves_markers_and_initializes_backend_reasoning() {
         for (tool, reasoning) in [(Some("deepseek_v41"), None), (None, Some("deepseek_v41"))] {
-            assert!(OpenAIPreprocessor::parser_requires_special_tokens(tool, reasoning).unwrap());
+            assert!(
+                OpenAIPreprocessor::parser_requires_special_tokens(
+                    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                        tool, reasoning,
+                    ),
+                    tool,
+                    reasoning,
+                )
+                .unwrap()
+            );
         }
         assert_eq!(
             OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(
@@ -11956,7 +12318,8 @@ mod tests {
         tool_choice: ChatCompletionToolChoiceOption,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
-responses_tools: None,
+            responses_tools: None,
+            chat_template_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                 .model("test")
                 .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -12445,11 +12808,11 @@ responses_tools: None,
                 .message()
                 .contains("requires the v1 tool-call jail")
         );
-        match crate::http::service::error::http_action_for_error(dynamo_error) {
-            crate::http::service::error::ClientErrorAction::Respond { status, .. } => {
+        match dynamo_error::http::http_action_for_error(dynamo_error) {
+            dynamo_error::http::ClientErrorAction::Respond { status, .. } => {
                 assert_eq!(status.as_u16(), 400);
             }
-            crate::http::service::error::ClientErrorAction::NoDelivery => {
+            dynamo_error::http::ClientErrorAction::NoDelivery => {
                 panic!("invalid parser-route requests must return an HTTP response");
             }
         }
@@ -12634,6 +12997,129 @@ responses_tools: None,
                 .as_ref()
                 .and_then(|details| details.reasoning_tokens),
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_excludes_a_held_tool_call() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use crate::protocols::openai::chat_completions::unified_parser;
+        let thought = ["The user", " wants", " a file", ".</think>"];
+        let call = format!(
+            "<tool_call>write<arg_key>content</arg_key><arg_value>{}</arg_value></tool_call>",
+            "x".repeat(40)
+        );
+        let pieces: Vec<String> = thought
+            .iter()
+            .map(|piece| piece.to_string())
+            .chain(
+                call.as_bytes()
+                    .chunks(4)
+                    .map(|piece| String::from_utf8(piece.to_vec()).unwrap()),
+            )
+            .collect();
+        let mut chunks: Vec<_> = pieces
+            .iter()
+            .map(|piece| reasoning_usage_chunk(None, Some(piece), 1))
+            .collect();
+        chunks
+            .last_mut()
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap()
+            .inner
+            .choices[0]
+            .finish_reason = Some(FinishReason::ToolCalls);
+        chunks.push(reasoning_usage_trailer(pieces.len() as u32, None));
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "write".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"content": {"type": "string"}}
+            })),
+            strict: None,
+        }];
+        let raw = unified_parser::apply_stream_with_constraint(
+            stream::iter(chunks),
+            Some(tools),
+            GuidedToolConstraint::None,
+            dynamo_parsers_v2::UnifiedParserStartingState::Reasoning,
+            "glm47",
+            true,
+        );
+        let output =
+            OpenAIPreprocessor::apply_unified_response_policies(Box::pin(raw), true, false, false)
+                .collect::<Vec<_>>()
+                .await;
+
+        assert!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .flat_map(|chunk| &chunk.inner.choices)
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the parser must emit the held call"
+        );
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(thought.len() as u32),
+            "only the thought chunks are reasoning, not the chunks of the held call"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_settles_held_tokens_per_choice() {
+        let on_choice = |index: u32, mut chunk: Annotated<NvCreateChatCompletionStreamResponse>| {
+            chunk.data.as_mut().unwrap().inner.choices[0].index = index;
+            chunk
+        };
+        let mut tool_call = on_choice(1, reasoning_usage_chunk(None, None, 1));
+        tool_call.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls = Some(vec![
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("call-1".to_string()),
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some("write".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
+                custom: None,
+            },
+        ]);
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            on_choice(0, reasoning_usage_chunk(Some("a"), None, 1)),
+            on_choice(1, reasoning_usage_chunk(Some("b"), None, 1)),
+            on_choice(0, reasoning_usage_chunk(None, None, 1)),
+            on_choice(1, reasoning_usage_chunk(None, None, 1)),
+            tool_call,
+            reasoning_usage_trailer(5, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3),
+            "choice 0's unreleased token stays reasoning; choice 1's call drops only its own"
         );
     }
 
@@ -12869,6 +13355,46 @@ responses_tools: None,
         choice.delta.content = None;
         choice.finish_reason = Some(FinishReason::Stop);
         chunk
+    }
+
+    #[test]
+    fn a_tool_call_on_any_choice_marks_the_reply() {
+        fn chunk(
+            finish_reasons: &[Option<FinishReason>],
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut chunk = chat_stream_chunk(0, None);
+            let choices = &mut chunk.data.as_mut().unwrap().inner.choices;
+            let choice = choices.pop().unwrap();
+            choices.extend(
+                finish_reasons
+                    .iter()
+                    .zip(0..)
+                    .map(|(&finish_reason, index)| ChatChoiceStream {
+                        index,
+                        finish_reason,
+                        ..choice.clone()
+                    }),
+            );
+            chunk
+        }
+        fn recorded(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Option<bool> {
+            let (progress, updater) = dynamo_admission::host::RequestProgress::new(0);
+            let tracker = RequestTracker::new();
+            tracker.set_classifier_progress(updater);
+            for chunk in chunks {
+                record_reply_end(&tracker, chunk);
+            }
+            progress.reply_tool_call()
+        }
+        use FinishReason::{Stop, ToolCalls};
+
+        let both = chunk(&[Some(Stop), Some(ToolCalls)]);
+        assert_eq!(recorded(&[both]), Some(true));
+        // A choice that stops later does not clear it.
+        let then_stop = [chunk(&[Some(ToolCalls)]), chunk(&[Some(Stop)])];
+        assert_eq!(recorded(&then_stop), Some(true));
+        assert_eq!(recorded(&[chunk(&[Some(Stop)])]), Some(false));
+        assert_eq!(recorded(&[chunk(&[None])]), None);
     }
 
     fn glm47_stream_chunk(
@@ -14630,8 +15156,15 @@ responses_tools: None,
             ) {
                 let version = std::env::var(env_llm::DYN_PARSER_VERSION).unwrap();
                 assert_eq!(
-                    OpenAIPreprocessor::parser_requires_special_tokens(Some("hermes"), None)
-                        .unwrap(),
+                    OpenAIPreprocessor::parser_requires_special_tokens(
+                        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                            Some("hermes"),
+                            None,
+                        ),
+                        Some("hermes"),
+                        None,
+                    )
+                    .unwrap(),
                     version != "1",
                     "Hermes special-token requirement for DYN_PARSER_VERSION={version}"
                 );
@@ -14768,7 +15301,14 @@ responses_tools: None,
         ];
         for (tool, reasoning, expected, desc) in cases {
             assert_eq!(
-                OpenAIPreprocessor::parser_requires_special_tokens(*tool, *reasoning).unwrap(),
+                OpenAIPreprocessor::parser_requires_special_tokens(
+                    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                        *tool, *reasoning,
+                    ),
+                    *tool,
+                    *reasoning,
+                )
+                .unwrap(),
                 *expected,
                 "FAILED: {desc}",
             );
@@ -16283,8 +16823,8 @@ responses_tools: None,
                 };
                 let error = error.downcast_ref::<DynamoError>().unwrap();
                 assert!(matches!(
-                    crate::http::service::error::http_action_for_error(error),
-                    crate::http::service::error::ClientErrorAction::Respond {
+                    dynamo_error::http::http_action_for_error(error),
+                    dynamo_error::http::ClientErrorAction::Respond {
                         status: axum::http::StatusCode::BAD_REQUEST,
                         ..
                     }
@@ -16463,6 +17003,95 @@ responses_tools: None,
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
+    /// Replies with one chunk that finishes with `stop`. Leaves a classifier handle on the
+    /// request's tracker as the router does at dispatch, and replaces it while the reply
+    /// streams as a retry's dispatch does.
+    struct RepliesWith {
+        text: &'static str,
+        classifier_progress: dynamo_admission::host::RequestProgressUpdater,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for RepliesWith
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            let tracker = request.tracker.clone().unwrap();
+            tracker.set_classifier_progress(dynamo_admission::host::RequestProgress::new(0).1);
+            let classifier_progress = self.classifier_progress.clone();
+            let output = BackendOutput {
+                token_ids: vec![],
+                tokens: vec![],
+                text: Some(self.text.to_string()),
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                stop_reason: None,
+                index: Some(0),
+                completion_usage: None,
+                disaggregated_params: None,
+                encoder_result: None,
+                worker_trace_link: None,
+                engine_data: None,
+                routing_data: None,
+                jailed_text: None,
+            };
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async move {
+                    tracker.set_classifier_progress(classifier_progress);
+                    Annotated::from_data(output)
+                })),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_operator_tells_the_classifier_a_reply_ended_in_a_tool_call() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "auto",
+        }))
+        .unwrap();
+        let (progress, classifier_progress) = dynamo_admission::host::RequestProgress::new(0);
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(RepliesWith {
+            text: r#"<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>"#,
+            classifier_progress,
+        });
+
+        let mut stream =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                .await
+                .unwrap();
+        while stream.next().await.is_some() {}
+
+        // The worker finished with `stop`; only the tool-call parser makes that `tool_calls`.
+        assert_eq!(progress.reply_tool_call(), Some(true));
+    }
+
     /// Records dispatched requests, then fails before any output.
     #[derive(Default)]
     struct PromptRecordingBackend {
@@ -16608,6 +17237,50 @@ responses_tools: None,
         .unwrap()
         {
             dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    #[test]
+    fn audio_urls_and_input_audio_render_as_placeholders() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% for part in m.content %}{{ part.type }};{% endfor %}{% endfor %}",
+        );
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        let audio_url = serde_json::json!({
+            "type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}
+        });
+        for (messages, expected) in [
+            (
+                serde_json::json!([{"role": "user", "content": [audio_url.clone()]}]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{
+                    "role": "tool", "tool_call_id": "call-1", "content": [audio_url.clone()]
+                }]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{"role": "user", "content": [
+                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+                    audio_url
+                ]}]),
+                "audio;audio;",
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model", "messages": messages
+                }))
+                .unwrap();
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), expected);
         }
     }
 
