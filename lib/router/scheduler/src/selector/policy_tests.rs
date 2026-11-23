@@ -1111,6 +1111,86 @@ fn custom_picker_receives_affinity_target_without_narrowing_candidates() {
 }
 
 #[test]
+fn picker_reads_the_callers_pin_and_no_pin_for_an_exclusive_affinity_target() {
+    use dynamo_session_affinity::WorkerAffinityTarget;
+
+    /// Picks the only row, after checking the pin and the affinity target the request shows.
+    struct ExpectPin {
+        pin: Option<WorkerWithDpRank>,
+        affinity_target: Option<WorkerAffinityTarget>,
+    }
+
+    impl WorkerPicker for ExpectPin {
+        fn pick(
+            &self,
+            request: &WorkerSelectionRequest<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            assert_eq!(request.info().pinned_worker(), self.pin);
+            assert_eq!(request.affinity_target(), self.affinity_target);
+            assert_eq!(input.candidates().len(), 1);
+            Ok(0)
+        }
+    }
+
+    let worker1 = WorkerWithDpRank::from_worker_id(1);
+    let workers = HashMap::from([
+        (0, TaintedWorkerConfig::default()),
+        (1, TaintedWorkerConfig::default()),
+    ]);
+    let trace = Some(SelectionTraceSpec { top_k: 1 });
+
+    // The caller's pin reaches the policy, and the trace records it.
+    let mut pinned = base_request(16);
+    pinned.pinned_worker = Some(worker1);
+    let policy = WorkerSelectionPolicy::new(
+        "test",
+        Vec::new(),
+        Box::new(ExpectPin {
+            pin: Some(worker1),
+            affinity_target: None,
+        }),
+    );
+    let (selected, pinned_trace) = policy
+        .select_worker_traced(
+            WorkerSelectionInput::configured(&workers, &pinned, pinned.eligibility(), 16),
+            trace,
+        )
+        .unwrap();
+    assert_eq!(selected.worker, worker1);
+    assert!(pinned_trace.expect("trace requested").pinned);
+
+    // An eligible exclusive affinity target narrows the rows to the target, as the queue
+    // actor's eligibility does, but it is not a pin: the policy reads it as the affinity target.
+    let target = WorkerAffinityTarget::from(worker1);
+    let mut bound = base_request(16);
+    bound.affinity_target = Some(target);
+    let policy = WorkerSelectionPolicy::new(
+        "test",
+        Vec::new(),
+        Box::new(ExpectPin {
+            pin: None,
+            affinity_target: Some(target),
+        }),
+    )
+    .with_exclusive_affinity(true);
+    assert!(uses_exclusive_affinity(&policy));
+    let (selected, bound_trace) = policy
+        .select_worker_traced(
+            WorkerSelectionInput::configured(
+                &workers,
+                &bound,
+                bound.eligibility().with_affinity_target(target),
+                16,
+            ),
+            trace,
+        )
+        .unwrap();
+    assert_eq!(selected.worker, worker1);
+    assert!(!bound_trace.expect("trace requested").pinned);
+}
+
+#[test]
 fn rejected_filters_do_not_materialize_scorer_inputs() {
     struct RejectWithoutSignals;
 
