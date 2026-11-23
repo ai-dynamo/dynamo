@@ -410,7 +410,8 @@ etcd:
   replicaCount: 1
 
   # Authentication and authorization settings
-  # Explicitly remove authentication for simplified internal communication
+  # Authentication and TLS are off by default. To turn them on, see
+  # "Enable authentication and TLS on the bundled etcd" in this chart's README.
   auth:
     rbac:
       # Whether to create RBAC authentication (disabled for internal use)

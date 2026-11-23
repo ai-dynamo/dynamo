@@ -333,6 +333,8 @@ navigation:
         contents:
           - page: Secure Deployment Guidelines
             path: pages/developer-guide/security/secure-deployment-guidelines.md
+          - page: etcd Authentication
+            path: pages/developer-guide/security/etcd-authentication.md
 
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
