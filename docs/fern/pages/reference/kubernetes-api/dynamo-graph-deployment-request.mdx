@@ -360,10 +360,6 @@ When `spec.image` is omitted, the operator defaults it on creation to
 requires `operatorVersion` to be valid semantic versioning, so the default
 image has a parseable version tag.
 
-The profiling Job's separate `output-copier` image is digest-pinned by default.
-To mirror or override it, set `dynamo-operator.dgdr.outputCopierImage`; see the
-[Helm chart configuration](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image).
-
 The DGDR-level `spec.runtimeVersionOverride` supplies a default for generated
 DGD components. After the profiler materializes the DGD and applies
 `spec.overrides.dgd`, the operator copies the DGDR value only to components that

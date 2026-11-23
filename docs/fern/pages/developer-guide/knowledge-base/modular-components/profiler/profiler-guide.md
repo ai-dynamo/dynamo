@@ -679,9 +679,30 @@ spec:
                 claimName: dynamo-pvc
 ```
 
-The v1beta1 profiling Job's `output-copier` sidecar relays status and writes results to the
-output ConfigMap. It uses a digest-pinned image by default; configure private-registry images
-and per-request overrides as described in the [Helm chart](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image).
+The profiling job also runs an `output-copier` sidecar that relays profiler status and
+writes results to the output ConfigMap. The default image is digest-pinned; see the
+[Helm chart](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image) for operator-wide configuration.
+In air-gapped or private-registry clusters, override the sidecar image via
+`overrides.profilingJob`:
+
+```yaml
+overrides:
+  profilingJob:
+    template:
+      spec:
+        containers:
+        - name: output-copier
+          image: internal-registry/kubectl:1.29
+```
+
+The replacement image must include `kubectl` and a shell at `/bin/sh` that supports
+`set -o pipefail` (for example bash; a dash-only `/bin/sh` is not sufficient), plus the
+utilities used by the sidecar script: `grep`, `awk`, `tr`, `sed`, `date`, `cat`, and
+`sleep`. If `kubectl` is missing from the image, the sidecar exits immediately with an error
+instead of polling forever, so the profiling job fails and the DGDR moves to `Failed`.
+For `output-copier`, only `image` and `resources` are merged; other fields
+(`env`, `envFrom`, `volumeMounts`, `securityContext`, `command`/`args`) are ignored so
+controller-owned mounts such as `profiling-output` at `/data` stay intact.
 
 **ConfigMaps:**
 - `dgdr-output-<name>`: Generated DGD configuration
