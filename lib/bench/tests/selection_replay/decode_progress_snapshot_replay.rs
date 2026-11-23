@@ -43,7 +43,7 @@ struct Fixture {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
-    id: String,
+    scoring_ids: Vec<String>,
     block_size: u32,
     foreground_prompt_tokens: usize,
     warm_overlap_blocks: usize,
@@ -294,25 +294,24 @@ async fn replays_decode_progress_decision_snapshots() {
         "/testdata/decode_progress_replay/selection-inputs.json"
     )))
     .unwrap();
-    let mut rows = Vec::new();
+    let mut rows = BTreeMap::new();
     for case in fixture.cases {
         let params = params(&case);
         let mut choices = BTreeMap::new();
-        for (name, router) in [
-            ("default", router_config(None).unwrap()),
-            ("two_tier", config("baseline.yaml")),
+        for (name, router, expected) in [
+            ("default", router_config(None).unwrap(), warm()),
+            ("two_tier", config("baseline.yaml"), cold()),
         ] {
             let builtin = BenchHost::start(&router, Default::default(), &params)
                 .await
                 .unwrap();
             let choice = rebuild(&case, builtin, true).await;
-            let worker = if choice == warm() {
-                "warm"
-            } else {
-                assert_eq!(choice, cold());
-                "cold"
-            };
-            choices.insert(name, worker);
+            assert_eq!(
+                choice, expected,
+                "{name} placement for {:?}",
+                case.scoring_ids
+            );
+            choices.insert(name, if choice == warm() { "warm" } else { "cold" });
         }
 
         let observed = Arc::new(Mutex::new(None));
@@ -354,10 +353,14 @@ async fn replays_decode_progress_decision_snapshots() {
                 .map(|r| r.output_limit as usize - r.generated_tokens)
                 .sum::<usize>()
         );
-        rows.push(serde_json::json!({"id": case.id, "choices": choices, "visible": reading}));
+        for id in case.scoring_ids {
+            let row = serde_json::json!({"id": id, "choices": choices, "visible": reading});
+            assert!(rows.insert(id, row).is_none());
+        }
     }
     assert_eq!(rows.len(), 4);
     if let Some(output) = std::env::var_os("DYNAMO_DECODE_REPLAY_OUTPUT") {
+        let rows: Vec<_> = rows.into_values().collect();
         std::fs::write(output, serde_json::to_string_pretty(&rows).unwrap() + "\n").unwrap();
     }
 }
