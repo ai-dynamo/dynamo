@@ -376,9 +376,11 @@ impl GenerateRoutedExperts {
         let Self::Tensor(tensor) = self else {
             return Ok(());
         };
+        // No routed tokens is valid: vLLM accepts a start at the prompt's end,
+        // and with one output token it returns no rows.
         anyhow::ensure!(
-            tensor.shape.len() == 3 && tensor.shape.iter().all(|dimension| *dimension > 0),
-            "structured routed_experts shape must contain three positive dimensions"
+            tensor.shape.len() == 3 && tensor.shape[1..].iter().all(|dimension| *dimension > 0),
+            "structured routed_experts shape must have three dimensions, the last two positive"
         );
         let width = match tensor.dtype.as_str() {
             "uint8" | "int8" => 1,

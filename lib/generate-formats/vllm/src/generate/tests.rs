@@ -581,6 +581,16 @@ fn generate_response_accepts_structured_routed_experts() {
             dtype: "uint8".to_string(),
         }))
     );
+
+    let no_routed_tokens = GenerateRoutedExperts::Tensor(GenerateRoutedExpertsTensor {
+        data: String::new(),
+        shape: vec![0, 48, 8],
+        start: 3,
+        dtype: "uint8".to_string(),
+    });
+    no_routed_tokens
+        .validate()
+        .expect("no routed tokens is valid");
 }
 
 #[test]
