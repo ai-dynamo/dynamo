@@ -3,8 +3,7 @@
 
 //! Frontend metric snapshots published on the event plane.
 //!
-//! All fields in this first release are required. Fields added later must use
-//! `#[serde(default)]`, and `Option` when absence does not mean zero.
+//! The frame types and their wire rule are in [`dynamo_http_server::load`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,10 +27,6 @@ pub(crate) fn frontend_load_namespace(configured: Option<String>) -> String {
         .or_else(|| std::env::var("DYN_NAMESPACE").ok())
         .unwrap_or_else(|| "dynamo".to_string())
 }
-
-pub(crate) use dynamo_http_server::load::{
-    FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals,
-};
 
 /// Start periodic publishing after the caller checks `DYN_SERVING_LOAD_PUBLISH`.
 pub(crate) fn start_frontend_load_publisher(
@@ -103,60 +98,4 @@ pub(crate) fn start_frontend_load_publisher(
             }
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A Relay decodes frames from newer frontends that carry fields it does not
-    /// know, but never invents identity or zero load for a frame missing them.
-    #[test]
-    fn frames_decode_across_versions() {
-        use dynamo_runtime::transports::event_plane::Codec;
-        use serde_json::json;
-
-        let codec = Codec::default();
-        let decode = |frame: serde_json::Value| {
-            codec.decode_payload::<FrontendLoadFrame>(&codec.encode_payload(&frame).unwrap())
-        };
-        let gauges = json!({
-            "requests_awaiting_first_token": 1, "requests_generating": 3,
-            "awaiting_first_token_input_tokens": 5, "inflight_input_tokens": 7,
-            "added_gauge": 1,
-        });
-        let totals = json!({
-            "requests_started": 4, "requests_completed": 1, "requests_failed": 0,
-            "requests_cancelled": 0, "input_tokens": 9, "output_tokens": 2,
-            "added_total": 1,
-        });
-
-        let newer = decode(json!({
-            "frontend_instance_id": 10, "incarnation": 1, "sequence": 2,
-            "is_serving_ready": true, "added_frame_field": 1,
-            "models": [{
-                "model": "a", "is_ready": true, "aliases": [], "added_model_field": "x",
-                "gauges": gauges, "totals": totals,
-            }],
-        }))
-        .unwrap();
-        assert!(newer.is_serving_ready);
-        assert_eq!(newer.models[0].gauges.requests_generating, 3);
-        assert_eq!(newer.models[0].totals.requests_started, 4);
-
-        assert!(
-            decode(json!({
-                "incarnation": 1, "sequence": 2, "is_serving_ready": true, "models": [],
-            }))
-            .is_err()
-        );
-        assert!(
-            decode(json!({
-                "frontend_instance_id": 10, "incarnation": 1, "sequence": 2,
-                "is_serving_ready": true,
-                "models": [{"model": "a", "is_ready": true, "aliases": [], "totals": totals}],
-            }))
-            .is_err()
-        );
-    }
 }
