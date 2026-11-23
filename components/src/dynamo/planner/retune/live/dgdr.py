@@ -91,7 +91,6 @@ from dynamo.planner.retune.live.contracts import (
     WindowCutResult,
     WindowCutter,
 )
-from dynamo.planner.retune.live.input_overrides import expand_input_override_nulls
 from dynamo.planner.retune.live.reconciler import trace_pvc_source
 from dynamo.planner.retune.live.window_cut import bucket_history
 from dynamo.planner.retune.sweep import (
@@ -758,9 +757,7 @@ def input_mismatches(
         },
         "dgdr_run": {"max_candidates": _get(spec, ("recommendation", "maxCandidates"))},
     }
-    overrides = (
-        expand_input_override_nulls(_get(spec, ("aisim", "inputOverrides"))) or {}
-    )
+    overrides = _get(spec, ("aisim", "inputOverrides"), {}) or {}
     # Normalize like the API server (JSON numbers, no tuples).
     expected = json.loads(json.dumps(_overlay(typed, overrides)))
     actual = json.loads(json.dumps(effective))
