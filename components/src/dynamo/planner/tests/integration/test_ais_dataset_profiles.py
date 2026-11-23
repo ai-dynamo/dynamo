@@ -309,6 +309,8 @@ def test_profile_estimates_next_request_with_existing_planner_logic(dataset_prof
 def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role):
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    # AISim queries only the versions in its window for b200_sxm/vllm.
+    vllm_version = "0.32.0"
     bundled = Path(engine.__file__).parents[1] / "systems"
     root = tmp_path / "dataset"
     systems = root / "systems"
@@ -337,7 +339,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
     # Retain the published tables unchanged and compile their actual op graphs.
     files = [
         bundled / "b200_sxm.yaml",
-        *sorted((bundled / "data/b200_sxm").glob("*/vllm/0.24.0/*")),
+        *sorted((bundled / "data/b200_sxm").glob(f"*/vllm/{vllm_version}/*")),
     ]
     for source in files:
         relative = str(source.relative_to(bundled))
@@ -353,7 +355,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
                 "Qwen/Qwen3-0.6B",
                 "b200_sxm",
                 "vllm",
-                "0.24.0",
+                vllm_version,
                 systems_path=str(systems),
                 database_mode="SILICON",
                 shared_layer=False,
@@ -380,7 +382,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
         model="Qwen/Qwen3-0.6B",
         system="b200_sxm",
         backend="vllm",
-        backend_version="0.24.0",
+        backend_version=vllm_version,
         worker_type=role,
         estimation_mode="op_level",
         fallback_policy="deny",
