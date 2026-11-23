@@ -42,6 +42,10 @@ hf-xet>=1.5.2
 huggingface-hub>=1.23.0,<2.0
 # Kustomize recipe template renderer
 jinja2==3.1.6
+# Validates structured-output responses against the request's JSON Schema in
+# serve tests. Present transitively via mistral-common; declared so that a
+# dependency cleanup cannot remove it from under the tests.
+jsonschema>=4.0
 # For Kubernetes operations in deploy tests
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0

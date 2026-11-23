@@ -40,6 +40,8 @@ while [[ $# -gt 0 ]]; do
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             echo "  DEFAULT_KV_CACHE_BYTES  KV cache cap when not profiling (default: 1119388000)"
+            echo "  VLLM_REASONING_PARSER   vLLM reasoning parser (default: none); pair with DYN_REASONING_PARSER"
+            echo "  DYN_REASONING_PARSER    Dynamo frontend reasoning parser (default: unset)"
             echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             exit 0
             ;;
@@ -85,7 +87,7 @@ vllm-rs serve "$MODEL" \
     --grpc-port "$VLLM_GRPC_PORT" \
     --data-parallel-size "${VLLM_DATA_PARALLEL_SIZE:-1}" \
     --max-model-len "$MAX_MODEL_LEN" \
-    --reasoning-parser none \
+    --reasoning-parser "${VLLM_REASONING_PARSER:-none}" \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

@@ -1344,6 +1344,124 @@ class StreamingToolCallingChatPayload(BasePayload):
         return call["function"]["arguments"]
 
 
+def _response_schema(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The JSON Schema a chat request's response_format requires, if any."""
+    response_format = body.get("response_format") or {}
+    if response_format.get("type") != "json_schema":
+        return None
+    return response_format["json_schema"]["schema"]
+
+
+def _validate_structured_content(body: Dict[str, Any], content: str) -> Any:
+    """Parse structured output and check it against the request's JSON Schema."""
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise AssertionError(
+            "Structured output is not valid JSON; the grammar was not enforced. "
+            f"Content: {content!r}"
+        ) from e
+    schema = _response_schema(body)
+    if schema is not None:
+        # Imported here, not at module level: tests/utils is imported by every
+        # serve test, including in the pytest-marker-report hook, which does not
+        # install jsonschema.
+        import jsonschema
+
+        try:
+            jsonschema.validate(parsed, schema)
+        except jsonschema.ValidationError as e:
+            raise AssertionError(
+                f"Structured output violates the requested schema: {e.message}. "
+                f"Content: {content!r}"
+            ) from e
+    return parsed
+
+
+@dataclass
+class StreamingStructuredOutputPayload(StreamingChatPayload):
+    """Assemble a streamed structured-output reply and check it against its schema."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        parsed = _validate_structured_content(self.body, content)
+        logger.info("Streamed structured output validated: %s", parsed)
+
+
+_REASONING_MARKUP = ("<think>", "</think>")
+
+
+def _validate_reasoning_split(reasoning: str, content: str) -> None:
+    assert reasoning.strip(), (
+        "Missing reasoning_content: the reasoning parser did not separate the "
+        f"model's thinking. Content: {content!r}"
+    )
+    assert content.strip(), f"Missing final answer after reasoning: {reasoning!r}"
+    for tag in _REASONING_MARKUP:
+        assert tag not in reasoning, f"{tag!r} leaked into reasoning: {reasoning!r}"
+        assert tag not in content, f"{tag!r} leaked into the answer: {content!r}"
+
+
+@dataclass
+class ReasoningChatPayload(ChatPayload):
+    """Check that a reasoning model's reply is split into reasoning and answer.
+
+    The answer must be complete (finish_reason "stop"). expected_response is
+    matched against the answer only, and a json_schema response_format must
+    hold for the answer, so the grammar has to start after the reasoning.
+    """
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"].get("content") or ""
+
+    def validate(self, response: Any, content: str) -> None:
+        choice = response.json()["choices"][0]
+        reasoning = choice["message"].get("reasoning_content") or ""
+        _validate_reasoning_split(reasoning, content)
+        assert choice["finish_reason"] == "stop", f"Incomplete answer: {choice}"
+        if _response_schema(self.body) is not None:
+            _validate_structured_content(self.body, content)
+        super().validate(response, content)
+
+
+@dataclass
+class StreamingReasoningChatPayload(BasePayload):
+    """Streaming ReasoningChatPayload: reasoning deltas must all precede the answer."""
+
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        text = response.content.decode("utf-8")
+        events = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ]
+        assert events[-1:] == ["[DONE]"], "Stream did not end with [DONE]"
+        chunks = parse_sse_json_chunks(text)
+        assert not any("error" in chunk for chunk in chunks), chunks
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        assert all(choice["index"] == 0 for choice in choices), choices
+        reasoning_parts: List[str] = []
+        content_parts: List[str] = []
+        for choice in choices:
+            delta = choice.get("delta") or {}
+            if delta.get("reasoning_content"):
+                assert not "".join(content_parts).strip(), (
+                    "reasoning_content arrived after the answer started: "
+                    f"{''.join(content_parts)!r}"
+                )
+                reasoning_parts.append(delta["reasoning_content"])
+            content_parts.append(delta.get("content") or "")
+        finish_reasons = [choice.get("finish_reason") for choice in choices]
+        assert finish_reasons[-1:] == ["stop"], f"Incomplete answer: {finish_reasons}"
+        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
+        content = "".join(content_parts)
+        _validate_reasoning_split("".join(reasoning_parts), content)
+        return content
+
+
 @dataclass
 class GuidedDecodingChatPayload(ChatPayload):
     """ChatPayload that validates a json_schema response_format produces valid JSON."""
@@ -1364,13 +1482,7 @@ class GuidedDecodingChatPayload(ChatPayload):
         self.needs_token_ids = needs_token_ids
 
     def validate(self, response, content: str) -> None:
-        try:
-            parsed = json.loads(content)
-        except (json.JSONDecodeError, TypeError) as e:
-            raise AssertionError(
-                "Guided decoding response is not valid JSON — grammar backend "
-                f"likely disabled. Content: {content!r}"
-            ) from e
+        parsed = _validate_structured_content(self.body, content)
 
         assert isinstance(parsed, dict), (
             "Guided decoding response should be a JSON object, "

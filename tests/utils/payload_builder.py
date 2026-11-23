@@ -24,6 +24,7 @@ from tests.utils.payloads import (
     EngineFailurePayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
+    HttpErrorPayload,
     ImagesAccountingPayload,
     ImagesPayload,
     ImageTokenMetricsPayload,
@@ -33,6 +34,7 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
+    ReasoningChatPayload,
     ResponsesPayload,
     ResponsesPayloadWithLogprobs,
     ResponsesStreamPayload,
@@ -43,6 +45,8 @@ from tests.utils.payloads import (
     SGLangMetricsPayload,
     StopStringChatPayload,
     StreamingChatPayload,
+    StreamingReasoningChatPayload,
+    StreamingStructuredOutputPayload,
     StreamingToolCallingChatPayload,
     ToolCallingChatPayload,
     TRTLLMMetricsPayload,
@@ -971,6 +975,116 @@ def chat_logprobs_and_structured_output_payloads(
         needs_token_ids=True,
     )
     return [chat_payload_default(), logprobs, unicode_logprobs, structured]
+
+
+# Nested object, enums, a bounded array, an integer and a boolean: each is a
+# separate grammar rule, and the response is checked against the whole schema.
+_DEPLOYMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "service": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "enum": ["api", "worker"]},
+                "replicas": {"type": "integer"},
+            },
+            "required": ["name", "replicas"],
+            "additionalProperties": False,
+        },
+        "regions": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["us", "eu", "ap"]},
+            "minItems": 1,
+            "maxItems": 3,
+        },
+        "healthy": {"type": "boolean"},
+    },
+    "required": ["service", "regions", "healthy"],
+    "additionalProperties": False,
+}
+
+
+def _json_schema_format(name: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    return {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}
+
+
+def structured_output_payloads() -> list[BasePayload]:
+    """A nested JSON Schema, buffered and streamed, and an invalid schema."""
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Describe a healthy deployment of the api service "
+                "with three replicas in the us and eu regions.",
+            }
+        ],
+        "max_tokens": 128,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "response_format": _json_schema_format("deployment", _DEPLOYMENT_SCHEMA),
+    }
+    nested = GuidedDecodingChatPayload(
+        body=body,
+        expected_response=[],
+        expected_log=[],
+        expected_finish_reason="stop",
+    )
+    streamed = StreamingStructuredOutputPayload(
+        body={**body, "stream": True},
+        expected_response=[],
+        expected_log=[],
+        expected_finish_reason="stop",
+    )
+    invalid = HttpErrorPayload(
+        body={
+            **body,
+            "response_format": _json_schema_format(
+                "invalid",
+                {"type": "object", "properties": {"ok": {"type": "not-a-type"}}},
+            ),
+        },
+        endpoint="/v1/chat/completions",
+        expected_response=[],
+        expected_log=[],
+    )
+    return [nested, streamed, invalid]
+
+
+def reasoning_payloads() -> list[BasePayload]:
+    """Thinking on: reasoning and answer split, buffered, streamed, and with a schema.
+
+    Needs a reasoning model served with Dynamo's reasoning parser, and for the
+    schema case the engine's parser too, so the grammar starts after the thinking.
+    """
+    body = {
+        "messages": [
+            {"role": "user", "content": "What is 17 + 25? Reply with just the number."}
+        ],
+        # Room to finish thinking: the answer must be complete, not cut off.
+        "max_tokens": 2048,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    answer_schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    return [
+        ReasoningChatPayload(body=body, expected_response=["42"], expected_log=[]),
+        StreamingReasoningChatPayload(
+            body={**body, "stream": True}, expected_response=["42"], expected_log=[]
+        ),
+        ReasoningChatPayload(
+            body={
+                **body,
+                "response_format": _json_schema_format("sum", answer_schema),
+            },
+            expected_response=["42"],
+            expected_log=[],
+        ),
+    ]
 
 
 def forced_tool_call_payloads() -> list[BasePayload]:

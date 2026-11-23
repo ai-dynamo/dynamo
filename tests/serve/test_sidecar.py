@@ -34,8 +34,10 @@ from tests.utils.payload_builder import (
     http_cancellation_payloads,
     kv_routing_payload,
     lora_chat_payload,
+    reasoning_payloads,
     sglang_generate_cancellation_payloads,
     stop_string_payloads,
+    structured_output_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -110,6 +112,7 @@ DISAGGREGATED_CANCELLATION_MAX_TOKENS = 1024
 def _aggregated_payloads(metrics: EngineMetrics):
     return [
         *chat_logprobs_and_structured_output_payloads(),
+        *structured_output_payloads(),
         *forced_tool_call_payloads(),
         *http_cancellation_payloads(metrics, max_tokens=CANCELLATION_MAX_TOKENS),
     ]
@@ -225,11 +228,16 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
             "DYN_TOOL_CALL_PARSER": "hermes",
+            # Qwen3 reasons: Dynamo splits reasoning from the answer, and
+            # vLLM's parser starts grammars after the thinking.
+            "DYN_REASONING_PARSER": "qwen3",
+            "VLLM_REASONING_PARSER": "qwen3",
         },
         request_payloads=[
             *_aggregated_payloads(
                 VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
             ),
+            *reasoning_payloads(),
             # The frontend matches stop strings; vLLM never receives them.
             *stop_string_payloads(
                 VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
