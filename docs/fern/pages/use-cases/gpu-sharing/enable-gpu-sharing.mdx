@@ -361,9 +361,11 @@ Two stacks can place several pods on one GPU. GPU fractions caps each pod's comp
 
     ## Install
 
-    Label each GPU node, then install the chart. It selects a scheduler image for the cluster's Kubernetes version.
+    Label the GPU node, then install the chart. The chart selects a scheduler image for the cluster's Kubernetes version. List the nodes and set `GPU_NODE` before labeling:
 
     ```bash
+    kubectl get nodes -L nvidia.com/gpu.product,nvidia.com/gpu.count
+    export GPU_NODE=<node-name>
     kubectl label node "$GPU_NODE" gpu=on --overwrite
 
     helm repo add hami-charts https://project-hami.github.io/HAMi/

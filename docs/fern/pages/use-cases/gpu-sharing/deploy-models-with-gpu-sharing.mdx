@@ -173,9 +173,9 @@ A Kubernetes Job on `$GPU_NODE` downloads `Qwen/Qwen3-4B` at a pinned revision i
     <Steps>
     <Step title="Request a share for each worker" id="hami-request-a-share">
 
-    A worker asks for its share with one annotation and three resource limits on its container. This is the worker of each DGD this guide deploys:
+    A worker asks for its share with one annotation, three resource limits, and `GPU_CORE_UTILIZATION_POLICY=force` on its container. This is the worker of each DGD this guide deploys:
 
-    ```yaml {6,14-16}
+    ```yaml {6,14-19}
     - name: worker
       type: worker
       podTemplate:
@@ -192,6 +192,9 @@ A Kubernetes Job on `$GPU_NODE` downloads `Qwen/Qwen3-4B` at a pinned revision i
                   nvidia.com/gpu: "1"
                   nvidia.com/gpumem: "20000"
                   nvidia.com/gpucores: "50"
+              env:
+                - name: GPU_CORE_UTILIZATION_POLICY
+                  value: force
     ```
 
     | Field | What it does |
@@ -200,6 +203,7 @@ A Kubernetes Job on `$GPU_NODE` downloads `Qwen/Qwen3-4B` at a pinned revision i
     | `nvidia.com/gpu: "1"` | Asks for one vGPU, a slot on one physical GPU |
     | `nvidia.com/gpumem: "20000"` | Caps the container at 20,000 MiB of GPU memory |
     | `nvidia.com/gpucores: "50"` | Caps the container at 50% of the GPU's compute |
+    | `GPU_CORE_UTILIZATION_POLICY` set to `force` | Enforces the `gpucores` cap when this worker is the only one on the GPU. HAMi 2.11.0 turns the default compute limit off in that case |
     | `runtimeClassName: nvidia` | Gives the container the driver libraries |
 
     The pod keeps the default `schedulerName`. HAMi's admission webhook changes it to `hami-scheduler` when the pod requests HAMi resources.
@@ -218,14 +222,21 @@ A Kubernetes Job on `$GPU_NODE` downloads `Qwen/Qwen3-4B` at a pinned revision i
     </Step>
     <Step title="Deploy two models onto one GPU" id="hami-deploy-two-models">
 
-    [`baseline/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/gen-dgds.sh) renders one DGD per model, each with a frontend and a worker that asks for `nvidia.com/gpu: "1"`. Render two, add the annotation and the HAMi limits from the first step, and apply them:
+    [`baseline/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/baseline/gen-dgds.sh) renders one DGD per model, each with a frontend and a worker that asks for `nvidia.com/gpu: "1"`. Render two, add the annotation, the HAMi limits, and `GPU_CORE_UTILIZATION_POLICY=force` from the first step, and apply them:
 
     ```bash
     NUM_MODELS=2 NODE_NAME="$GPU_NODE" baseline/gen-dgds.sh | awk '{ print }
       /experiment\.nvidia\.com\/role: worker/ {
+        in_worker = 1
         indent = substr($0, 1, index($0, "experiment") - 3)
         print indent "annotations:"
         print indent "  hami.io/gpu-scheduler-policy: binpack"
+      }
+      in_worker && /^ *env:$/ {
+        indent = substr($0, 1, index($0, "env") - 1)
+        print indent "  - name: GPU_CORE_UTILIZATION_POLICY"
+        print indent "    value: force"
+        in_worker = 0
       }
       /^ *limits:$/ { in_limits = 1 }
       in_limits && /nvidia\.com\/gpu:/ {
