@@ -443,8 +443,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            # TODO: restore post_merge after the requested UCX comparison.
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
         ],

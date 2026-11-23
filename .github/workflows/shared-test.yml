@@ -152,11 +152,6 @@ on:
         required: false
         type: string
         default: ''
-      sidecar_ucx_comparison:
-        description: 'Temporary: repeat the exact vLLM sidecar test with and without CUDA IPC GET'
-        required: false
-        type: boolean
-        default: false
       sidecar_binary_artifact:
         description: 'Name of the workflow artifact (from shared-build-sidecar.yml) containing the amd64 dynamo-*-sidecar binaries. Required when sidecar_backend is set.'
         required: false
@@ -492,21 +487,7 @@ jobs:
           TRITON_ARTIFACTORY_TOKEN: ${{ secrets.TRITON_ARTIFACTORY_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
-          SIDECAR_UCX_COMPARISON: ${{ inputs.sidecar_ucx_comparison }}
-        run: |
-          if [[ "${SIDECAR_UCX_COMPARISON}" == 'true' ]]; then
-            bash .github/scripts/sidecar-ucx-compare.sh
-          else
-            bash .github/scripts/pytest-local.sh
-          fi
-      - name: Upload every UCX comparison attempt
-        if: ${{ always() && inputs.sidecar_ucx_comparison && steps.checkout.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: sidecar-ucx-comparison-${{ github.sha }}-${{ job.check_run_id }}
-          path: test-results/ucx-comparison/
-          retention-days: 7
-          if-no-files-found: error
+        run: bash .github/scripts/pytest-local.sh
       - name: Upload Coverage Data (GPU sequential)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.gpu-sequential-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
