@@ -4,9 +4,8 @@
 //! What an in-tree host names from the KV indexer stage, in one place: the indexer handles it
 //! builds and feeds, the registry it opens partitions in, the lookup and recording types it
 //! reads back, and the service DTOs. Every item is re-exported from its owning module; this
-//! list is the host contract (hosts inventory v2, section 3). Tier 1 never imports it. The DC
-//! relay has its own contract: the re-export list at the root of the `cuckoo` module, whose
-//! submodules are private.
+//! list is the host contract. The DC relay has its own contract: the re-export list at the root
+//! of the `cuckoo` module, whose submodules are private.
 
 pub use crate::api::{KvStateProtocolVersion, WorkerKvQueryResponse};
 pub use crate::approximate_lru::{
@@ -18,7 +17,7 @@ pub use crate::branch_sharded::BranchShardedIndexer;
 pub use crate::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use crate::config::ApproximateCachePolicyKind;
 pub use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
-pub use crate::kv_indexer::KvIndexer;
+pub use crate::kv_indexer::{KvIndexer, apply_prune_removes, apply_routing_decision};
 pub use crate::local::LocalKvIndexer;
 pub use crate::lower_tier::LowerTierMatchDetails;
 pub use crate::lower_tier_indexers::{
@@ -26,8 +25,8 @@ pub use crate::lower_tier_indexers::{
 };
 #[cfg(feature = "export")]
 pub use crate::metrics::{
-    CKF_MUTATION_HELP, CKF_MUTATION_LABELS, KV_CACHE_EVENT_WARNINGS_HELP,
-    KV_CACHE_EVENT_WARNINGS_LABELS, KV_CACHE_EVENTS_APPLIED_HELP, KV_CACHE_EVENTS_APPLIED_LABELS,
+    KV_CACHE_EVENT_WARNINGS_HELP, KV_CACHE_EVENT_WARNINGS_LABELS, KV_CACHE_EVENTS_APPLIED_HELP,
+    KV_CACHE_EVENTS_APPLIED_LABELS,
 };
 pub use crate::metrics::{
     KvIndexerMetrics, METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND,
@@ -39,7 +38,7 @@ pub use crate::observation::{
 };
 pub use crate::overlap::OverlapScores;
 pub use crate::positional::PositionalIndexer;
-pub use crate::pruning::PruneConfig;
+pub use crate::pruning::{BlockEntry, PruneConfig, PruneManager};
 pub use crate::radix_tree::RadixTree;
 pub use crate::recording::ApproximateRequestLease;
 pub use crate::registry::IndexRegistry;

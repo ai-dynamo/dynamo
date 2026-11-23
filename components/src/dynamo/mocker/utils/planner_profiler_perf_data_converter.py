@@ -1,145 +1,136 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""
-Convert planner profiler results to mocker-compatible NPZ format.
+"""Turn a profiler results directory into an AIS perf model.
 
-Uses the FPM-based regression models from ``dynamo.planner.core.perf_model``
-to evaluate prefill TTFT and decode ITL on a regular grid, producing the
-lookup tables that the mocker uses for latency simulation.
+The profiler's thorough mode measures prefill time against input length and
+decode time against KV usage and context length. Each measured point becomes
+one forward pass, as the Planner reads the same directory. One AISimulate
+``fpm_regression`` model per worker type is tuned with them and its state is
+saved next to a file that names the three states.
 
-Example prefill query:
-    input:
-        isl: 3000
+The mocker does this at startup for ``--planner-profile-data DIRECTORY``. To
+keep the result, or to give it to replay as ``ais_perf_model=``:
 
-    1. binary search prefill_isl to find isl_idx
-    2. predicted TTFT is prefill_ttft_ms[isl_idx]
-
-Example decode query:
-    input:
-        active_kv_tokens: 10000
-        batch_size: 100
-
-    1. derive decode_context_length = active_kv_tokens / batch_size = 100
-    2. binary search decode_active_kv_tokens to find kv_idx
-    3. binary search decode_context_length to find context_idx
-    4. predicted ITL is decode_itl[kv_idx, context_idx]
+    python -m dynamo.mocker.utils.planner_profiler_perf_data_converter \\
+        PROFILE_RESULTS_DIR OUTPUT_DIR --model MODEL
+    python -m dynamo.mocker --ais-perf-model OUTPUT_DIR/ais_perf_model.json ...
 """
 
+import json
 import logging
+import secrets
+import shutil
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import numpy as np
+
+from dynamo.common.ais_perf_model import save_tuned_state_snapshot
+from dynamo.common.forward_pass_metrics import FPM_VERSION, ForwardPassMetrics
 
 logger = logging.getLogger(__name__)
 
+DOCUMENT_NAME = "ais_perf_model.json"
+# What AISimulate accepts for an identity fact that the producer does not know.
+_UNKNOWN = "unknown"
 
-def convert_profile_results_to_npz(
+
+def _iterations(fpms: list[ForwardPassMetrics]) -> list[list[dict[str, Any]]]:
+    """Return one single-rank forward pass per measured point."""
+    iterations = []
+    for fpm in fpms:
+        payload = msgspec.to_builtins(fpm)
+        payload["version"] = FPM_VERSION
+        iterations.append([payload])
+    return iterations
+
+
+def write_ais_perf_model(
     profile_results_dir: str | Path,
-    output_path: str | Path,
-    resolution: int = 100,
+    output_dir: str | Path,
+    *,
+    model: str,
+    backend: str = "vllm",
+    nextn: int = 0,
 ) -> Path:
-    """Convert planner profiler results to mocker-compatible NPZ format.
+    """Write the AIS perf model of a profiler results directory.
 
-    Loads the profiler's raw data (npz or JSON), fits FPM regression
-    models, and evaluates them on a regular grid to produce the lookup
-    tables the mocker expects.
+    ``output_dir`` must not exist. It gets one state folder for each worker
+    type (``prefill``, ``decode``, ``aggregated``) and the file
+    ``ais_perf_model.json``, whose path is returned and is an AIS perf model
+    value. The folder can be moved as a whole.
 
-    Args:
-        profile_results_dir: Path containing selected_prefill_interpolation
-            and selected_decode_interpolation subdirectories with raw_data.
-        output_path: Full path where the output perf_data.npz will be written.
-        resolution: Resolution for the evaluation grid (default: 100).
+    ``model``, ``backend`` and ``nextn``, the speculative decoding depth of
+    the engine that uses the models, are recorded as their identity. The
+    hardware and the parallelism are recorded as unknown, and the KV capacity
+    of the profiled decode engine as the deployment limit ``max_kv_tokens``,
+    which an engine without its own KV capacity takes.
 
-    Returns:
-        Path to the generated NPZ file.
+    Too few distinct points for a fit are a ``ValueError``, and
+    ``output_dir`` is not created.
     """
-    from dynamo.planner.core.perf_model import (
-        DecodeRegressionModel,
-        PrefillRegressionModel,
-    )
+    # Imported on first use: the Planner package needs AISimulate, and a
+    # mocker with a lookup-table file imports this module without either.
     from dynamo.planner.monitoring.perf_metrics import (
         _convert_decode_profiling,
         _convert_prefill_profiling,
+        _read_decode_profiling,
     )
 
-    profile_results_dir = str(Path(profile_results_dir).resolve())
-    output_path = Path(output_path)
+    source = str(Path(profile_results_dir).resolve())
+    output = Path(output_dir).resolve()
+    if output.exists():
+        raise FileExistsError(f"{output} already exists")
 
-    logger.info(f"Converting profile results from {profile_results_dir}...")
+    prefill = _iterations(_convert_prefill_profiling(source))
+    decode = _iterations(_convert_decode_profiling(source))
+    max_kv_tokens = _read_decode_profiling(source)[3]
+    identity = {
+        "model": model,
+        "backend": backend,
+        "nextn": nextn,
+        "system": _UNKNOWN,
+        "tp": _UNKNOWN,
+        "pp": _UNKNOWN,
+        "attention_dp": _UNKNOWN,
+        "estimation_mode": "fpm_regression",
+        "deployment_limits": {"max_kv_tokens": max_kv_tokens},
+    }
 
-    result: dict[str, Any] = {}
-
-    # --- Prefill: fit 1D model, evaluate TTFT on ISL grid ---
-    prefill_fpms = _convert_prefill_profiling(profile_results_dir)
-    if not prefill_fpms:
-        raise FileNotFoundError(
-            f"No prefill profiling data found in {profile_results_dir}"
-        )
-
-    prefill_model = PrefillRegressionModel(
-        max_num_fpm_samples=len(prefill_fpms) + 10,
-        min_observations=1,
-    )
-    prefill_model.load_benchmark_fpms(prefill_fpms)
-    if not prefill_model._ensure_fitted():
-        raise RuntimeError("Failed to fit prefill regression from profiling data")
-
-    isl_values = [
-        float(fpm.scheduled_requests.sum_prefill_tokens) for fpm in prefill_fpms
-    ]
-    prefill_x = np.linspace(min(isl_values), max(isl_values), resolution)
-    prefill_y = np.array(
-        [prefill_model._predict_wall_time(isl) * 1000.0 for isl in prefill_x]
-    )
-
-    result["prefill_isl"] = prefill_x.tolist()
-    result["prefill_ttft_ms"] = prefill_y.tolist()
-
-    # --- Decode: fit 2D model, evaluate ITL on (kv_tokens, context_length) grid ---
-    decode_fpms = _convert_decode_profiling(profile_results_dir)
-    if not decode_fpms:
-        raise FileNotFoundError(
-            f"No decode profiling data found in {profile_results_dir}"
-        )
-
-    decode_model = DecodeRegressionModel(
-        max_num_fpm_samples=len(decode_fpms) + 10,
-        min_observations=1,
-    )
-    decode_model.load_benchmark_fpms(decode_fpms)
-    if not decode_model._ensure_fitted():
-        raise RuntimeError("Failed to fit decode regression from profiling data")
-
-    max_kv = max(
-        float(fpm.scheduled_requests.sum_decode_kv_tokens) for fpm in decode_fpms
-    )
-    ctx_values = [
-        float(fpm.scheduled_requests.sum_decode_kv_tokens)
-        / max(1, fpm.scheduled_requests.num_decode_requests)
-        for fpm in decode_fpms
-        if fpm.scheduled_requests.num_decode_requests > 0
-    ]
-    max_ctx = max(ctx_values) if ctx_values else 8192.0
-
-    decode_active_kv_tokens = np.linspace(0, max_kv, resolution)
-    decode_context_length = np.linspace(1, max_ctx, resolution)
-
-    decode_itl = np.zeros((resolution, resolution))
-    for i, kv in enumerate(decode_active_kv_tokens):
-        for j, ctx in enumerate(decode_context_length):
-            bs = max(1, kv / ctx) if ctx > 0 else 1
-            decode_itl[i, j] = decode_model._predict_2d(bs, kv) * 1000.0
-
-    result["decode_active_kv_tokens"] = decode_active_kv_tokens.tolist()
-    result["decode_context_length"] = decode_context_length.tolist()
-    result["decode_itl"] = decode_itl.tolist()
-
-    np.savez(output_path, **result)
-
-    logger.info(f"Wrote perf data to {output_path}")
-    return output_path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Written next to the output and renamed, so a failure leaves nothing.
+    staging = output.parent / f".{output.name}.{secrets.token_hex(8)}.tmp"
+    staging.mkdir()
+    written = False
+    try:
+        entries = []
+        for worker_type, iterations in (
+            ("prefill", prefill),
+            ("decode", decode),
+            ("aggregated", prefill + decode),
+        ):
+            save_tuned_state_snapshot(
+                {**identity, "worker_type": worker_type},
+                iterations,
+                staging / worker_type,
+            )
+            entries.append(
+                {
+                    "worker_type": worker_type,
+                    # Relative to the file, so the folder can be moved.
+                    "from": {"state_snapshot": {"path": worker_type}},
+                }
+            )
+        (staging / DOCUMENT_NAME).write_text(json.dumps(entries, indent=2) + "\n")
+        staging.rename(output)
+        written = True
+    finally:
+        if not written:
+            shutil.rmtree(staging, ignore_errors=True)
+    logger.info("Wrote the AIS perf model of %s to %s", source, output)
+    return output / DOCUMENT_NAME
 
 
 def is_profile_results_dir(path: Path) -> bool:
@@ -196,20 +187,42 @@ if __name__ == "__main__":
 
     configure_dynamo_logging()
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profile_results_dir", type=str, required=True)
-    parser.add_argument("--resolution", type=int, default=100)
-    parser.add_argument("--output_dir", type=str, default="")
-    args = parser.parse_args()
-
-    if not args.output_dir:
-        output_dir = Path(args.profile_results_dir).resolve()
-    else:
-        output_dir = Path(args.output_dir).resolve()
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "perf_data.npz"
-
-    convert_profile_results_to_npz(
-        args.profile_results_dir, output_path, args.resolution
+    parser = argparse.ArgumentParser(
+        description="Turn a profiler results directory into an AIS perf model."
+    )
+    parser.add_argument(
+        "profile_results_dir",
+        type=Path,
+        help="Directory with the profiler's prefill and decode data.",
+    )
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        help="Directory to create. It gets ais_perf_model.json, the value to pass "
+        "as --ais-perf-model.",
+    )
+    parser.add_argument(
+        "--model", required=True, help="Name of the profiled model, recorded as is."
+    )
+    parser.add_argument(
+        "--backend",
+        default="vllm",
+        help="Backend of the profiled engine (default: vllm).",
+    )
+    parser.add_argument(
+        "--nextn",
+        type=int,
+        default=0,
+        help="Speculative decoding depth of the engine that uses the models, the "
+        "mocker's --ais-nextn (default: 0).",
+    )
+    cli_args = parser.parse_args()
+    print(
+        write_ais_perf_model(
+            cli_args.profile_results_dir,
+            cli_args.output_dir,
+            model=cli_args.model,
+            backend=cli_args.backend,
+            nextn=cli_args.nextn,
+        )
     )

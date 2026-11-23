@@ -13,10 +13,22 @@ const CAPACITY_UPDATE_LIMIT: usize = 256;
 
 /// Capacity changes are hints to re-read state, not lifecycle mutations. A full
 /// buffer can therefore collapse into a full recheck without losing progress.
+/// The dispatch gate's wake rides the same channel under its own flag, so the
+/// actor can tell a freed worker from a gate that released a held head.
 pub(super) struct CapacityUpdates {
     workers: ArrayQueue<WorkerWithDpRank>,
     full_recheck: AtomicBool,
+    gate_recheck: AtomicBool,
     notify: Notify,
+}
+
+/// What one drain of the channel found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Drained {
+    /// Capacity changed on more workers than the buffer holds, or on an unnamed one.
+    pub(super) full_recheck: bool,
+    /// The dispatch gate asked for its held heads to be re-asked.
+    pub(super) gate_recheck: bool,
 }
 
 impl CapacityUpdates {
@@ -24,6 +36,7 @@ impl CapacityUpdates {
         Self {
             workers: ArrayQueue::new(CAPACITY_UPDATE_LIMIT),
             full_recheck: AtomicBool::new(false),
+            gate_recheck: AtomicBool::new(false),
             notify: Notify::new(),
         }
     }
@@ -37,15 +50,24 @@ impl CapacityUpdates {
         self.notify.notify_one();
     }
 
+    /// Record that the dispatch gate may now let a held head go.
+    pub(super) fn record_gate(&self) {
+        self.gate_recheck.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
     pub(super) async fn notified(&self) {
         self.notify.notified().await;
     }
 
-    /// Take one bounded batch into actor-owned scratch storage. Clear the full
-    /// flag before draining: overflow during this drain belongs to the next
-    /// wake and must not be cleared after its producer has signalled.
-    pub(super) fn drain_into(&self, workers: &mut FxHashSet<WorkerWithDpRank>) -> bool {
-        let full_recheck = self.full_recheck.swap(false, Ordering::AcqRel);
+    /// Take one bounded batch into actor-owned scratch storage. Clear the flags
+    /// before draining: overflow during this drain belongs to the next wake and
+    /// must not be cleared after its producer has signalled.
+    pub(super) fn drain_into(&self, workers: &mut FxHashSet<WorkerWithDpRank>) -> Drained {
+        let drained = Drained {
+            full_recheck: self.full_recheck.swap(false, Ordering::AcqRel),
+            gate_recheck: self.gate_recheck.swap(false, Ordering::AcqRel),
+        };
         workers.clear();
         for _ in 0..CAPACITY_UPDATE_LIMIT {
             let Some(worker) = self.workers.pop() else {
@@ -53,10 +75,13 @@ impl CapacityUpdates {
             };
             workers.insert(worker);
         }
-        if !self.workers.is_empty() || self.full_recheck.load(Ordering::Acquire) {
+        if !self.workers.is_empty()
+            || self.full_recheck.load(Ordering::Acquire)
+            || self.gate_recheck.load(Ordering::Acquire)
+        {
             self.notify.notify_one();
         }
-        full_recheck
+        drained
     }
 }
 
@@ -80,7 +105,7 @@ mod tests {
         }
         updates.record(Some(second));
         updates.notified().await;
-        assert!(updates.drain_into(&mut workers));
+        assert!(updates.drain_into(&mut workers).full_recheck);
         assert_eq!(workers, FxHashSet::from_iter([first]));
 
         // A signalled wait can lose the actor's select race to an admission
@@ -91,13 +116,25 @@ mod tests {
         updates.record(Some(second));
         drop(waiting);
         updates.notified().await;
-        assert!(!updates.drain_into(&mut workers));
+        assert_eq!(updates.drain_into(&mut workers), Drained::default());
         assert_eq!(workers, FxHashSet::from_iter([second]));
 
         updates.record(None);
         updates.notified().await;
-        assert!(updates.drain_into(&mut workers));
+        assert!(updates.drain_into(&mut workers).full_recheck);
         assert!(workers.is_empty());
-        assert!(!updates.drain_into(&mut workers));
+        assert_eq!(updates.drain_into(&mut workers), Drained::default());
+
+        // The gate's wake is told apart from a capacity change.
+        updates.record_gate();
+        updates.notified().await;
+        assert_eq!(
+            updates.drain_into(&mut workers),
+            Drained {
+                full_recheck: false,
+                gate_recheck: true,
+            }
+        );
+        assert!(workers.is_empty());
     }
 }

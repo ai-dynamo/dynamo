@@ -4,9 +4,7 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionToolType,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
     CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
@@ -435,8 +433,16 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                 }
             }
             dynamo_protocols::types::Stop::StringArray(sequences) => {
+                // Treat `"stop": []` as no client-supplied stop strings, matching
+                // stock vLLM and stock SGLang. OpenAI's published schema specifies
+                // one to four items for the array form.
+                // `get_stop()` maps the empty list to `None`.
+                // OpenAI Chat Completions schema https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                // OpenAI Completions schema https://developers.openai.com/api/reference/resources/completions/methods/create
+                // Stock vLLM sampling parameters https://github.com/vllm-project/vllm/blob/62d4bc3c7e33b1b6c906e233e6af2d3506c482ca/vllm/sampling_params.py#L581-L584
+                // Stock SGLang sampling parameters https://github.com/sgl-project/sglang/blob/297e54fd105e974cdf401e5b4d20253a22c16f90/python/sglang/srt/sampling/sampling_params.py#L331-L352
                 if sequences.is_empty() {
-                    anyhow::bail!("Stop sequences array cannot be empty");
+                    return Ok(());
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
                     return Err(crate::protocols::common::invalid_argument_error(format!(
@@ -481,22 +487,6 @@ pub fn validate_messages(messages: &[ChatCompletionRequestMessage]) -> Result<()
     // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
-        let has_custom_content = match message {
-            ChatCompletionRequestMessage::User(user) => matches!(
-                &user.content,
-                ChatCompletionRequestUserMessageContent::Array(parts)
-                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestUserMessageContentPart::Custom(_)))
-            ),
-            ChatCompletionRequestMessage::Tool(tool) => matches!(
-                &tool.content,
-                ChatCompletionRequestToolMessageContent::Array(parts)
-                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestToolMessageContentPart::Custom(_)))
-            ),
-            _ => false,
-        };
-        if has_custom_content {
-            anyhow::bail!("messages[{message_index}].content custom parts are not supported");
-        }
         if let ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
@@ -1020,7 +1010,7 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
 
     #[test]
-    fn custom_message_content_is_rejected_before_model_validation() {
+    fn custom_message_content_preserves_model_validation() {
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
         let custom = json!({"type":"custom", "kind":"sensor", "fields":{"payload":"value"}});
@@ -1028,16 +1018,13 @@ mod tests {
             json!({"role":"user", "content":[custom.clone()]}),
             json!({"role":"tool", "tool_call_id":"call_1", "content":[custom]}),
         ] {
-            for model in ["test", ""] {
-                let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
-                    "model":model, "messages":[message.clone()]
-                }))
-                .unwrap();
-                assert_eq!(
-                    request.validate().unwrap_err().to_string(),
-                    "messages[0].content custom parts are not supported"
-                );
-            }
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[message]
+            }))
+            .unwrap();
+            request.validate().unwrap();
+            request.inner.model.clear();
+            assert!(request.validate().is_err());
         }
     }
 
@@ -1405,6 +1392,21 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_empty_array_as_no_stop() {
+        validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![]))).unwrap();
+        // An empty string, alone or as an element, is still rejected.
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::String(String::new()))).is_err()
+        );
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![
+                String::new()
+            ])))
+            .is_err()
+        );
     }
 
     #[test]

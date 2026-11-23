@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisim.config.common import Choices, IntegerRange, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dynamo.aisimulate.domains import CHOICE_FORM, CHOICES, KNOB_FORM, RANGE, SCALAR

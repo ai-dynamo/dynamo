@@ -28,7 +28,7 @@ on:
         type: string
         default: '0'
       containers:
-        description: 'Containers to stage: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,sidecar.'
+        description: 'Containers to stage: all | none | csv of vllm[:runtime|:efa|:enterprise],sglang[...],trtllm[...],frontend,operator,planner,sidecar. A bare vllm means runtime and efa; all also includes the enterprise image when the branch builds it.'
         required: false
         type: string
         default: all
@@ -226,6 +226,9 @@ jobs:
                   if tok in COMPONENTS:
                       out.append(tok)
                       continue
+                  if tok == "vllm:enterprise":
+                      out.append("vllm-enterprise")
+                      continue
                   fw, _, var = tok.partition(":")
                   if fw not in FRAMEWORKS:
                       fail(f"unknown container token '{tok}'")
@@ -234,7 +237,7 @@ jobs:
                   elif var in VARIANTS:
                       out.append(f"{fw}-{var}")
                   else:
-                      fail(f"unknown variant in '{tok}' (use runtime|efa)")
+                      fail(f"unknown variant in '{tok}' (use runtime|efa, or vllm:enterprise)")
               # A separators-only spec (e.g. ',') is an empty selection, not 'all'.
               return ",".join(dedupe(out)) or "none"
 
@@ -343,6 +346,26 @@ jobs:
           for tok in "${!CTR[@]}"; do
             if ctr_selected "${tok}"; then TAGS+=("${SHA}-${CTR[$tok]}"); fi
           done
+          # The enterprise vLLM image comes from enterprise-ci.yml, which builds on
+          # release-branch pushes only once the branch carries that trigger. Wait
+          # for it when selected by name, or under "all" when the branch builds it.
+          # A failed read must not look like "no enterprise build": that would let
+          # an "all" rc publish without the enterprise image. Only a 404 means absent.
+          ENTERPRISE_ON_BRANCH=false
+          if [ "${CSET}" = "all" ]; then
+            ENT_HTTP=$(curl -sS --retry 5 --retry-delay 2 -o "${RUNNER_TEMP}/enterprise-ci.yml" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/${REPO}/contents/.github/workflows/enterprise-ci.yml?ref=${SHA}") || ENT_HTTP=000
+            case "${ENT_HTTP}" in
+              200) if grep -q "release/\*\.\*\.\*" "${RUNNER_TEMP}/enterprise-ci.yml"; then ENTERPRISE_ON_BRANCH=true; fi ;;
+              404) ;;
+              *) echo "::error::could not read enterprise-ci.yml at ${SHA} (HTTP ${ENT_HTTP})"; exit 1 ;;
+            esac
+          fi
+          if ctr_selected vllm-enterprise && { [ "${CSET}" != "all" ] || [ "${ENTERPRISE_ON_BRANCH}" = "true" ]; }; then
+            TAGS+=("${SHA}-vllm-runtime-enterprise")
+          fi
           if [ "${WHEELS:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime"); fi
           if [ "${CRATES:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime-test"); fi
 
@@ -386,16 +409,43 @@ jobs:
             if ! STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null); then
               API_OK=false; STATUS=pending
             fi
-            if [ "${API_OK}" = "true" ]; then
+            # The enterprise tag comes from enterprise-ci.yml, not post-merge, so
+            # post-merge completing says nothing about it; probe its own run.
+            pm_missing=()
+            ent_missing=false
+            for TAG in "${missing[@]}"; do
+              if [ "${TAG}" = "${SHA}-vllm-runtime-enterprise" ]; then ent_missing=true; else pm_missing+=("${TAG}"); fi
+            done
+            if [ "${ent_missing}" = "true" ]; then
+              if ENT_RUNS=$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/${REPO}/actions/workflows/enterprise-ci.yml/runs?head_sha=${SHA}&event=push&per_page=1") \
+                && ENT_COUNT=$(echo "${ENT_RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null) \
+                && ENT_STATUS=$(echo "${ENT_RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null); then
+                if [ "${ENT_COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
+                  echo "::error::enterprise CI never started for ${SHA} (push event); ${SHA}-vllm-runtime-enterprise is missing"
+                  exit 1
+                fi
+                if [ "${ENT_STATUS}" = "completed" ]; then
+                  ENT_CONCLUSION=$(echo "${ENT_RUNS}" | jq -r '.workflow_runs[0].conclusion // "unknown"')
+                  echo "::error::enterprise CI for ${SHA} completed (${ENT_CONCLUSION}) without ${SHA}-vllm-runtime-enterprise"
+                  exit 1
+                fi
+              else
+                echo "enterprise-ci runs API probe failed (transient); skipping its fast-fail this round"
+              fi
+            fi
+            if [ "${API_OK}" = "true" ] && [ ${#pm_missing[@]} -gt 0 ]; then
               if [ "${COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
-                echo "::error::post-merge CI never started for ${SHA}; is the branch tip built? required image(s) missing: ${missing[*]}"
+                echo "::error::post-merge CI never started for ${SHA}; is the branch tip built? required image(s) missing: ${pm_missing[*]}"
                 exit 1
               fi
               if [ "${COUNT}" != "0" ] && [ "${STATUS}" = "completed" ]; then
-                echo "::error::post-merge CI completed but required image(s) still missing: ${missing[*]}"
+                echo "::error::post-merge CI completed but required image(s) still missing: ${pm_missing[*]}"
                 exit 1
               fi
-            else
+            elif [ "${API_OK}" != "true" ]; then
               echo "workflow-runs API probe failed (transient); skipping fast-fail checks this round"
             fi
 
