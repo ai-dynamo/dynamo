@@ -47,17 +47,22 @@ def test_run_dgd_recommend_uses_workspace_relative_config(
     assert observed["kwargs"]["cwd"] == Path("/workspace")
 
 
-def test_assert_dgd_outputs_allows_omitted_block_size(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("backend", "include_vllm_args"),
+    [("vllm", True), ("trtllm", False)],
+)
+def test_assert_dgd_outputs_handles_backend_specific_args(
+    monkeypatch, tmp_path: Path, backend: str, include_vllm_args: bool
 ) -> None:
     config = {
+        "backend": backend,
         "deployment_mode": "agg",
         "model_name": "example/model",
         "context_length": 4096,
-        "agg_replicas": 1,
-        "agg_tp": 1,
-        "agg_pp": 1,
-        "agg_attention_dp": 1,
+        "replicas": 1,
+        "tp": 1,
+        "pp": 1,
+        "attention_dp": 1,
         "agg_max_num_seqs": 8,
         "agg_max_num_batched_tokens": 4096,
         "agg_num_gpu_blocks": 128,
@@ -81,7 +86,7 @@ def test_assert_dgd_outputs_allows_omitted_block_size(
             }
         )
     )
-    args = [
+    vllm_args = [
         "--model",
         "example/model",
         "--tensor-parallel-size",
@@ -99,6 +104,7 @@ def test_assert_dgd_outputs_allows_omitted_block_size(
         "--num-gpu-blocks-override",
         "128",
     ]
+    args = vllm_args if include_vllm_args else []
     (tmp_path / "deployment.yaml").write_text(
         yaml.safe_dump(
             {
