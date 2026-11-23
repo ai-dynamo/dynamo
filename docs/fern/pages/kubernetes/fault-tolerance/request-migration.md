@@ -84,7 +84,7 @@ kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
 curl -s localhost:8000/metrics | grep dynamo_frontend_model_migration
 ```
 
-- `dynamo_frontend_model_migration_total` — total migrations, labeled by `model` and `migration_type` (`new_request` vs `ongoing_request`).
+- `dynamo_frontend_model_migration_total` — total permitted migration attempts, labeled by `model` and `migration_type` (`new_request` vs `ongoing_request`). Each retry counts once when it begins, even if it later fails or is cancelled. The initial request and retries blocked by the migration limit or sequence-length cap do not count.
 - `dynamo_frontend_model_migration_duration_seconds` — time from detecting a migratable failure until recovery, terminal failure, or cancellation, labeled by `model`, `migration_type`, and `outcome` (`success`, `failure`, or `cancelled`). Use the histogram's `_count` series to count completed migration events by outcome.
 - `dynamo_frontend_model_migration_max_seq_len_exceeded_total` — times migration was disabled because a request exceeded `--migration-max-seq-len`.
 

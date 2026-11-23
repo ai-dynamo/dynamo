@@ -19,6 +19,7 @@ from dynamo.common.configuration.groups.http_args import HttpConfigBase, from_en
 
 from .url_validator import (
     _MAX_REDIRECTS,
+    MediaSizeError,
     UrlValidationError,
     UrlValidationPolicy,
     describe_error_detail,
@@ -68,8 +69,8 @@ class HttpStatusError(HttpError):
         # ``message`` is bounded in the *attribute*, not just in the rendered
         # string: errors.rs::extract_http_like_error reads ``.status`` and
         # ``.message`` off this class by name and, per the SECURITY note there,
-        # forwards ``.message`` verbatim to the client on a 4xx. Nothing in the
-        # rendered text reaches that path. ``url`` is not part of that protocol,
+        # keeps it private unless it exactly matches an approved public message.
+        # Nothing in the rendered text reaches that path. ``url`` is not part of that protocol,
         # so it keeps its full value for debugging.
         message = describe_error_detail(message, _MAX_MESSAGE_LENGTH)
         super().__init__(f"HTTP {status} for {describe_media_source(url)}: {message}")
@@ -93,7 +94,7 @@ async def collect_capped(
     async for chunk in chunks:
         total += len(chunk)
         if max_bytes is not None and total > max_bytes:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"Media exceeds the {max_bytes} byte download limit: "
                 f"{describe_media_source(url)}"
             )
@@ -128,7 +129,8 @@ class HttpClient(abc.ABC):
         Single-shot: no retries. Raises one of the unified exception
         classes above; callers never see native aiohttp classes.
 
-        ``policy=None``: use the backend's built-in redirect handling.
+        ``policy=None``: follow redirects, up to the backend's limit, without
+        validating each hop against a URL policy.
 
         ``max_bytes`` set: refuse a body larger than that while it is being
         read, so an attacker-chosen URL cannot buffer an unbounded response.
@@ -204,7 +206,7 @@ class HttpClient(abc.ABC):
         policy: Optional[UrlValidationPolicy] = None,
         read_timeout: Optional[float] = None,
     ) -> bytes:
-        """Backend's native redirect-following GET (no SSRF policy applied).
+        """Redirect-following GET with no URL policy on any hop.
 
         ``policy`` is not applied to the URL here. It is passed so a backend
         can honor a request that is stricter than the deployment baseline at

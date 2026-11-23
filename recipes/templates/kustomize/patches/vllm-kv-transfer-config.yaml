@@ -30,7 +30,7 @@ spec:
             - name: main
               env:
                 - name: KV_TRANSFER_CONFIG
-                  value: &kv-transfer-config 'your-kv-transfer-config'
+                  value: 'your-prefill-kv-transfer-config'
     - name: DecodeWorker
       podTemplate:
         spec:
@@ -38,4 +38,4 @@ spec:
             - name: main
               env:
                 - name: KV_TRANSFER_CONFIG
-                  value: *kv-transfer-config
+                  value: 'your-decode-kv-transfer-config'

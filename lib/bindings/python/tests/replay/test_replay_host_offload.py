@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_trace_replay
 
 from .replay_utils import _report_summary
@@ -24,14 +24,18 @@ BLOCK_SIZE = 4
 
 
 def _engine_args(native_host_offload, num_gpu_blocks):
-    return MockEngineArgs(
-        block_size=BLOCK_SIZE,
-        num_gpu_blocks=num_gpu_blocks,
-        max_num_seqs=1,
-        max_num_batched_tokens=64,
-        speedup_ratio=1000.0,
-        kv_cache_bytes_per_token=1024,
-        native_host_offload=native_host_offload,
+    return normalize_mocker_config(
+        {
+            "engine": {
+                "block_size": BLOCK_SIZE,
+                "num_gpu_blocks": num_gpu_blocks,
+                "max_num_seqs": 1,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0,
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": native_host_offload,
+            }
+        }
     )
 
 

@@ -4,37 +4,53 @@
 """Unit tests for SGLang backend components."""
 
 import argparse
+import asyncio
+import json
 import logging
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+import torch
 import yaml
+from packaging.requirements import Requirement
+from safetensors.torch import save_file
+from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.runtime.server_args import auto_tune
+from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.init_llm as init_llm_mod
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang._compat import (
     add_sglang_cli_compat,
     cache_salt_kwargs,
+    diffusers_text_encoder_precision_kwargs,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
     override_server_args,
     publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
+    sglang_has_wide_mm_pad_values,
+    sglang_uses_engine_owned_mm_identity,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
 )
 from dynamo.sglang.args import (
+    CUDA_COREDUMP_WAIT_ENV,
+    _default_cuda_coredump_wait,
     _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
@@ -42,14 +58,21 @@ from dynamo.sglang.args import (
     should_fetch_model,
     use_modelexpress_remote_instance,
 )
-from dynamo.sglang.backend_args import DynamoSGLangConfig
+from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.publisher import finish_worker_teardown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
+
+try:
+    from sglang.multimodal_gen.runtime.loader.utils import checkpoint_component_sizes
+except ImportError:
+    # SGLang 0.5.22 has no sizing check. Remove when minimum is 0.5.23+.
+    checkpoint_component_sizes = None
 
 try:
     from dynamo.sglang import register as sglang_register
@@ -106,6 +129,88 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
+def test_freeze_gc_after_init_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_FREEZE_GC_AFTER_INIT", raising=False)
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+
+    assert not DynamoSGLangConfig.from_cli_args(
+        parser.parse_args([])
+    ).freeze_gc_after_init
+    assert DynamoSGLangConfig.from_cli_args(
+        parser.parse_args(["--freeze-gc-after-init"])
+    ).freeze_gc_after_init
+
+    monkeypatch.setenv("DYN_SGL_FREEZE_GC_AFTER_INIT", "true")
+    env_parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(env_parser)
+    assert DynamoSGLangConfig.from_cli_args(
+        env_parser.parse_args([])
+    ).freeze_gc_after_init
+
+
+@pytest.mark.parametrize(
+    "mode, role_flags, supported",
+    [
+        ("null", {}, True),
+        ("decode", {}, True),
+        ("prefill", {}, False),
+        ("null", {"embedding_worker": True}, False),
+    ],
+)
+def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
+    mode, role_flags, supported
+):
+    server_args = SimpleNamespace(disaggregation_mode=mode)
+    dynamo_args = SimpleNamespace(freeze_gc_after_init=True, **role_flags)
+
+    if supported:
+        sglang_args.Config(server_args, dynamo_args)
+    else:
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            sglang_args.Config(server_args, dynamo_args)
+
+
+@pytest.fixture
+def clean_coredump_env(monkeypatch):
+    # Register the key so teardown removes the value the helper writes.
+    monkeypatch.setenv(CUDA_COREDUMP_WAIT_ENV, "")
+    monkeypatch.delenv(CUDA_COREDUMP_WAIT_ENV)
+    monkeypatch.delenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", raising=False)
+    return monkeypatch
+
+
+def test_cuda_coredump_wait_skipped_when_coredumps_disabled(clean_coredump_env):
+    from sglang.srt.environ import envs
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert os.environ[CUDA_COREDUMP_WAIT_ENV] == "0"
+    assert envs.SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS.get() == 0.0
+
+
+def test_cuda_coredump_wait_keeps_explicit_value(clean_coredump_env):
+    clean_coredump_env.setenv(CUDA_COREDUMP_WAIT_ENV, "30")
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert os.environ[CUDA_COREDUMP_WAIT_ENV] == "30"
+
+
+def test_cuda_coredump_wait_kept_when_user_coredumps_enabled(clean_coredump_env):
+    clean_coredump_env.setenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP", "1")
+
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=None))
+
+    assert CUDA_COREDUMP_WAIT_ENV not in os.environ
+
+
+def test_cuda_coredump_wait_kept_with_crash_dump_folder(clean_coredump_env, tmp_path):
+    _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=str(tmp_path)))
+
+    assert CUDA_COREDUMP_WAIT_ENV not in os.environ
+
+
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
     kwargs = _diffusion_generator_kwargs(
         SimpleNamespace(
@@ -134,6 +239,119 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
 
     assert kwargs["num_gpus"] == 1
     assert "master_port" not in kwargs
+
+
+def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
+    """Write metadata and tiny weights for SGLang's real checkpoint sizing."""
+    components = {name: ["transformers", "CLIPTextModel"] for name in encoders}
+    components |= {
+        "tokenizer": ["transformers", "CLIPTokenizer"],
+        "unet": ["diffusers", "UNet2DConditionModel"],
+        "vae": ["diffusers", "AutoencoderKL"],
+        "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+    }
+    for name in components:
+        (root / name).mkdir()
+    for name in encoders:
+        save_file({"weight": torch.zeros(1)}, str(root / name / "model.safetensors"))
+    index = {
+        # No native SGLang pipeline, so SGLang falls back to Diffusers.
+        "_class_name": "StableDiffusionXLPipeline",
+        "_diffusers_version": "0.24.0",
+        "feature_extractor": [None, None],
+        **components,
+    }
+    (root / "model_index.json").write_text(json.dumps(index))
+    return str(root)
+
+
+def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
+    """Resolve each encoder's precision the way SGLang's memory sizing does."""
+    server_args = SimpleNamespace(
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions=kwargs.get("component_precisions", {}),
+    )
+    return {name: resolve_component_precision(server_args, name) for name in encoders}
+
+
+@pytest.mark.parametrize(
+    "encoders",
+    [
+        pytest.param(["text_encoder", "text_encoder_2"], id="sdxl"),
+        pytest.param(
+            ["text_encoder", "text_encoder_2", "text_encoder_3"], id="three-encoders"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "index_cached", [True, False], ids=["index-cached", "weights-only"]
+)
+@pytest.mark.skipif(
+    checkpoint_component_sizes is None,
+    reason="SGLang 0.5.22 has no memory sizing check",
+)
+def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
+    tmp_path, encoders, index_cached, monkeypatch
+):
+    """Keep cached multi-encoder checkpoints usable by SGLang's auto-tuner."""
+    kwargs = {
+        "model_path": _write_diffusers_checkpoint(tmp_path, encoders),
+        "num_gpus": 1,
+    }
+    # Exercise the auto-tuner too: a fix there must prompt shim removal even
+    # when the fallback precision tuple stays unchanged.
+    server_args = SimpleNamespace(
+        model_path=kwargs["model_path"],
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions={},
+        performance_mode="auto",
+        batching_max_size=1,
+        quantization=None,
+        transformer_weights_path=None,
+        nunchaku_config=None,
+        component_paths={},
+        component_weights_paths={},
+        component_quantizations={},
+        model_subfolder=None,
+        revision=None,
+        tp_size=1,
+    )
+    monkeypatch.setattr(auto_tune.current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(auto_tune.current_platform, "is_mps", lambda: False)
+    monkeypatch.setattr(
+        auto_tune.current_platform, "device_shares_host_memory", lambda: False
+    )
+    tuner = SimpleNamespace(
+        server_args=server_args, _get_min_available_device_memory_gb=lambda: 80
+    )
+    with pytest.raises(
+        ValueError, match="No configured precision for 'text_encoder_2'"
+    ):
+        auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+
+    if not index_cached:
+        index_path = tmp_path / "model_index.json"
+        index = index_path.read_text()
+        index_path.unlink()
+        from_kwargs = PipelineConfig.from_kwargs
+
+        def resolve_config(config_kwargs):
+            # Stand in for the metadata fetch during SGLang config resolution.
+            index_path.write_text(index)
+            return from_kwargs(config_kwargs)
+
+        monkeypatch.setattr(PipelineConfig, "from_kwargs", resolve_config)
+
+    patched = diffusers_text_encoder_precision_kwargs(kwargs)
+
+    assert "component_precisions" not in kwargs
+    server_args.component_precisions = patched["component_precisions"]
+    assert auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+    # The fallback loads every component at dit_precision (bf16).
+    assert _resolve_text_encoder_precisions(patched, encoders) == {
+        "text_encoder": torch.float16,
+        **{name: torch.bfloat16 for name in encoders[1:]},
+    }
 
 
 def test_override_server_args_uses_declarative_resolution(monkeypatch):
@@ -461,6 +679,45 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
     assert config.server_args.incremental_streaming_output is True
 
 
+@pytest.mark.asyncio
+async def test_parse_args_gateway_workers_sets_raw_tokenizer_worker_num(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    # PortArgs.init_new reads the raw tokenizer_worker_num; a resolved-only
+    # value leaves the leader without a worker IPC socket.
+    seen = {}
+
+    def resolve(parsed_args):
+        seen["tokenizer_worker_num"] = parsed_args.tokenizer_worker_num
+        return SimpleNamespace(
+            disaggregation_mode="null",
+            dllm_algorithm=None,
+            kv_events_config=None,
+            tokenizer_worker_num=parsed_args.tokenizer_worker_num,
+            get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+        )
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model-path", str(tmp_path), "--gateway-workers", "2")
+
+    await parse_args(sys.argv[1:])
+
+    assert seen["tokenizer_worker_num"] == 2
+
+    seen.clear()
+    mock_sglang_cli(
+        "--model-path",
+        str(tmp_path),
+        "--gateway-workers",
+        "3",
+        "--tokenizer-worker-num",
+        "2",
+    )
+    with pytest.raises(ValueError, match="conflicts with --tokenizer-worker-num"):
+        await parse_args(sys.argv[1:])
+    assert not seen
+
+
 def _dcp_server_args_stub(**overrides):
     """Minimal resolved ServerArgs surface that parse_args reads."""
     stub = SimpleNamespace(
@@ -471,6 +728,8 @@ def _dcp_server_args_stub(**overrides):
         attention_backend=None,
         prefill_attention_backend=None,
         decode_attention_backend=None,
+        dsa_prefill_backend=None,
+        dsa_decode_backend=None,
         use_mla_backend=lambda: False,
         get_model_config=lambda: SimpleNamespace(is_multimodal=False),
     )
@@ -496,6 +755,26 @@ async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
     assert "'fa3'" in message
     assert "--dcp-size 1" in message
     assert "automatically" in message
+
+
+@pytest.mark.asyncio
+async def test_parse_args_rejects_default_chat_template_kwargs(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            default_chat_template_kwargs={"clear_thinking": False}
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "has no effect on a Dynamo worker" in message
+    assert "python -m dynamo.frontend" in message
 
 
 @pytest.mark.asyncio
@@ -615,13 +894,24 @@ async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
     [
         {"dcp_size": 2, "attention_backend": "triton"},
         {"dcp_size": 1, "attention_backend": "fa3"},
-        {"dcp_size": 2, "attention_backend": "fa3", "use_mla_backend": lambda: True},
+        {
+            "dcp_size": 2,
+            "attention_backend": "flashinfer",
+            "use_mla_backend": lambda: True,
+        },
+        {
+            "dcp_size": 2,
+            "attention_backend": "fa3",
+            "disaggregation_mode": "prefill",
+            "use_mla_backend": lambda: True,
+        },
     ],
-    ids=["dcp-capable-backend", "dcp-disabled", "mla-model"],
+    ids=["dcp-capable-backend", "dcp-disabled", "mla-model", "mla-prefill-worker"],
 )
 async def test_parse_args_accepts_supported_dcp_configurations(
     monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
+    """Accept supported backends, disabled DCP, and MLA prefill-only workers."""
     server_args = _dcp_server_args_stub(**overrides)
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
@@ -632,6 +922,320 @@ async def test_parse_args_accepts_supported_dcp_configurations(
 
     assert config.server_args is server_args
     assert config.use_resolved_server_args(server_args) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides, default_backend, expected_backend, automatic",
+    [
+        ({"attention_backend": "fa3"}, None, "fa3", False),
+        ({"decode_attention_backend": "fa4"}, None, "fa4", False),
+        ({"attention_backend": "flashmla"}, None, "flashmla", False),
+        # No backend passed: SGLang picks fa3 for MLA on Hopper.
+        ({}, "fa3", "fa3", True),
+    ],
+    ids=["explicit-fa3", "decode-fa4", "explicit-flashmla", "hopper-default-fa3"],
+)
+async def test_parse_args_rejects_mla_dcp_on_backend_without_dcp_decode(
+    monkeypatch,
+    mock_sglang_cli,
+    tmp_path,
+    overrides,
+    default_backend,
+    expected_backend,
+    automatic,
+):
+    """MLA DCP decode must reject a backend that returns no LSE before the engine.
+
+    Otherwise SGLang crashes at decode CUDA graph capture with
+    ``too many values to unpack (expected 2)``.
+    """
+    if automatic:
+        monkeypatch.setattr(
+            "dynamo.sglang._compat.sglang_get_default_attn_backend",
+            lambda *_: default_backend,
+        )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2, use_mla_backend=lambda: True, **overrides
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert f"decode attention backend '{expected_backend}'" in message
+    assert "--attention-backend flashinfer" in message
+    assert "--dcp-size 1" in message
+    assert ("automatically" in message) is automatic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"attention_backend": "dsa"}],
+    ids=["dsa-model-default", "explicit-dsa"],
+)
+async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
+    monkeypatch, mock_sglang_cli, tmp_path, overrides
+):
+    """Older SGLang builds must reject DSA decode without DCP support."""
+    # The platform default alone would accept; the DSA override must win.
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend",
+        lambda *_: "flashinfer",
+    )
+    # DSA is rejected only on SGLang builds without DSA DCP decode (< 0.5.22).
+    # Pin that condition so the test does not depend on the installed SGLang.
+    monkeypatch.setattr(
+        "dynamo.sglang.args.sglang_dsa_supports_decode_context_parallel",
+        lambda _: False,
+    )
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV32ForCausalLM"], index_topk=2048
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2,
+            use_mla_backend=lambda: True,
+            get_model_config=lambda: SimpleNamespace(
+                is_multimodal=False, hf_config=hf_config
+            ),
+            **overrides,
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path), **overrides)
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'dsa'" in message
+    assert "Use --dcp-size 1." in message
+    assert "flashinfer" not in message
+    assert ("automatically" in message) is not overrides
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decode_backend", ["cutedsl_mla", "fa3"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration"],
+)
+async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
+    monkeypatch, mock_sglang_cli, tmp_path, decode_backend, architecture
+):
+    """Defer Kimi-K3/K3.1 backend prediction; still check the resolved decode."""
+    platform_default = Mock(return_value="fa3")
+    monkeypatch.setattr(
+        "dynamo.sglang._compat.sglang_get_default_attn_backend", platform_default
+    )
+    hf_config = SimpleNamespace(architectures=[architecture])
+    server_args = _dcp_server_args_stub(
+        dcp_size=2,
+        use_mla_backend=lambda: True,
+        get_model_config=lambda: SimpleNamespace(
+            is_multimodal=False, hf_config=hf_config
+        ),
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert server_args.decode_attention_backend is None
+    platform_default.assert_not_called()
+    engine_args = SimpleNamespace(**vars(server_args))
+    engine_args.prefill_attention_backend = "trtllm_mla"
+    engine_args.decode_attention_backend = decode_backend
+    if decode_backend == "fa3":
+        with pytest.raises(ValueError, match="decode attention backend 'fa3'"):
+            config.use_resolved_server_args(engine_args)
+    else:
+        resolved = config.use_resolved_server_args(engine_args)
+        assert resolved.decode_attention_backend == "cutedsl_mla"
+        assert config.server_args is resolved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["dsa", "nsa"])
+async def test_parse_args_accepts_sparse_mla_dcp_when_engine_supports_it(
+    monkeypatch, mock_sglang_cli, tmp_path, backend
+):
+    monkeypatch.setattr(sglang_compat, "_sglang_has_dsa_dcp_module", lambda _: True)
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=100)
+    )
+    server_args = _dcp_server_args_stub(
+        dcp_size=8,
+        use_mla_backend=lambda: True,
+        attention_backend=backend,
+        dsa_prefill_backend="trtllm",
+        dsa_decode_backend="trtllm",
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend=backend)
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert config.use_resolved_server_args(server_args).attention_backend == backend
+
+
+@pytest.mark.parametrize("probe_result", [object(), None, ModuleNotFoundError()])
+def test_dsa_dcp_module_probe_handles_older_engines(monkeypatch, probe_result):
+    def find_spec(module_name):
+        assert module_name == "sglang.srt.layers.attention.dsa.dsa_dcp"
+        if isinstance(probe_result, Exception):
+            raise probe_result
+        return probe_result
+
+    monkeypatch.setattr(sglang_compat.importlib.util, "find_spec", find_spec)
+    probe = sglang_compat._sglang_has_dsa_dcp_module
+    probe.cache_clear()
+    try:
+        assert probe("sglang.srt.layers.attention.dsa.dsa_dcp") is (
+            probe_result is not None and not isinstance(probe_result, Exception)
+        )
+    finally:
+        probe.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefill,decode,sm,kimi_k31,sharded,supported",
+    [
+        ("fa3", "fa3", 90, False, False, False),
+        ("flashmla_kv", "flashmla_kv", 90, False, False, False),
+        (None, "fa3", 90, False, False, False),
+        ("fa3", None, 90, False, False, False),
+        ("trtllm", "trtllm", 90, False, False, False),
+        (None, "trtllm", 90, False, False, False),
+        (None, "flashmla_kv", 100, False, False, False),
+        ("trtllm", "trtllm", 100, False, False, True),
+        ("trtllm", "trtllm", 103, False, False, True),
+        ("trtllm", "trtllm", 107, False, False, False),
+        ("flashmla_kv", "flashmla_kv", 107, True, False, False),
+        ("flashmla_kv", "flashmla_kv", 107, True, True, True),
+        ("flashmla_kv", "flashmla_kv", 90, True, True, True),
+        ("trtllm", "trtllm", 107, True, True, True),
+        ("trtllm", "flashmla_kv", 107, True, True, False),
+        ("flashmla_kv", "trtllm", 100, True, True, False),
+        ("prims_ts", "prims_ts", 100, False, False, False),
+        ("prims_ts", "prims_ts", 103, True, False, False),
+        ("prims_ts", "prims_ts", 100, True, True, True),
+        ("prims_ts", "prims_ts", 103, True, True, True),
+        ("prims_ts", "prims_ts", 107, True, True, True),
+        ("prims_ts", "prims_ts", 90, True, True, False),
+        ("prims_ts", "prims_ts", 120, True, True, False),
+        (None, "prims_ts", 103, True, True, True),
+        ("prims_ts", "trtllm", 100, True, True, False),
+    ],
+)
+async def test_dsa_dcp_requires_supported_kernel_pair(
+    monkeypatch,
+    mock_sglang_cli,
+    tmp_path,
+    prefill,
+    decode,
+    sm,
+    kimi_k31,
+    sharded,
+    supported,
+):
+    monkeypatch.setattr(
+        sglang_compat,
+        "_sglang_has_dsa_dcp_module",
+        lambda name: not name.endswith("dsa_dcp_sharded") or sharded,
+    )
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=sm)
+    )
+    architecture = (
+        "KimiK31ForConditionalGeneration" if kimi_k31 else "DeepseekV32ForCausalLM"
+    )
+    server_args = _dcp_server_args_stub(
+        dcp_size=8,
+        use_mla_backend=lambda: True,
+        attention_backend="dsa",
+        dsa_prefill_backend=prefill,
+        dsa_decode_backend=decode,
+        get_model_config=lambda: SimpleNamespace(
+            is_multimodal=False, hf_config=SimpleNamespace(architectures=[architecture])
+        ),
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend="dsa")
+
+    if supported:
+        config = await parse_args(sys.argv[1:])
+        resolved = config.use_resolved_server_args(server_args)
+        assert resolved.dsa_prefill_backend == prefill
+        assert resolved.dsa_decode_backend == decode
+    else:
+        with pytest.raises(ValueError, match="selected DSA kernels"):
+            await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_dsa_dcp_rechecks_unresolved_kernels_after_engine_selection(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(sglang_compat, "_sglang_has_dsa_dcp_module", lambda _: True)
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=100)
+    )
+    raw_args = _dcp_server_args_stub(
+        dcp_size=8, use_mla_backend=lambda: True, attention_backend="dsa"
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: raw_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend="dsa")
+    config = await parse_args(sys.argv[1:])
+
+    engine_args = SimpleNamespace(**vars(raw_args))
+    engine_args.dsa_prefill_backend = engine_args.dsa_decode_backend = "fa3"
+    with pytest.raises(ValueError, match="selected DSA kernels"):
+        config.use_resolved_server_args(engine_args)
+
+
+def _raise_runtime_error(*_):
+    """Simulate a model-config lookup failure during backend prediction."""
+    raise RuntimeError("model config unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "default_backend",
+    ["flashinfer", None, _raise_runtime_error],
+    ids=["dcp-capable-default", "unknown-default", "default-lookup-fails"],
+)
+async def test_parse_args_accepts_mla_dcp_when_default_backend_is_not_known_bad(
+    monkeypatch, mock_sglang_cli, tmp_path, default_backend, caplog
+):
+    """Keep valid or unknown MLA defaults usable, warning if prediction fails."""
+    helper = (
+        default_backend if callable(default_backend) else lambda *_: default_backend
+    )
+    monkeypatch.setattr("dynamo.sglang._compat.sglang_get_default_attn_backend", helper)
+    server_args = _dcp_server_args_stub(dcp_size=2, use_mla_backend=lambda: True)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with caplog.at_level(logging.WARNING):
+        config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    lookup_failed = default_backend is _raise_runtime_error
+    assert ("Could not predict SGLang's default" in caplog.text) is lookup_failed
 
 
 @pytest.mark.asyncio
@@ -787,8 +1391,18 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 
 @pytest.mark.asyncio
-async def test_external_mm_hashes_rebuild_padding_after_hash_override():
-    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+async def test_external_mm_hashes_rebuild_padding_after_hash_override(monkeypatch):
+    # Deferred so marker-only collection does not require SGLang runtime modules.
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+
+    # The repair applies to SGLang builds that still derive pad values from
+    # caller hashes.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: False,
+    )
+    item = MultimodalDataItem(modality=Modality.IMAGE, pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
 
@@ -818,6 +1432,59 @@ def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
             return None
 
     assert not supports_external_mm_hashes(LegacyEngine())
+
+
+def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatch):
+    # sgl-project/sglang#43043 builds derive wide pad values from their own
+    # identity; caller hashes no longer match Dynamo's pads and Kimi rejects them.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: True,
+    )
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert not supports_external_mm_hashes(MmHashEngine())
+
+
+@pytest.mark.parametrize("wide_schema", [False, True])
+def test_mm_identity_and_pad_format_capabilities(monkeypatch, wide_schema):
+    fields = ("hash", "pad_value", "modality")
+    if wide_schema:
+        fields += ("pad_values",)
+    mod = ModuleType("sglang.srt.managers.schedule_batch")
+    mod.MultimodalDataItem = type(
+        "MultimodalDataItem", (), {"__struct_fields__": fields}
+    )
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", mod)
+
+    class KimiProcessor:
+        uses_wide_image_identity = True
+
+    class CustomProcessor(KimiProcessor):
+        pass
+
+    class MmHashEngine:
+        def __init__(self, processor):
+            self.tokenizer_manager = SimpleNamespace(mm_processor=processor)
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    # The inherited capability survives external processor overrides.
+    custom = CustomProcessor()
+    assert sglang_uses_engine_owned_mm_identity(custom) is wide_schema
+    assert supports_external_mm_hashes(MmHashEngine(custom)) is not wide_schema
+    assert sglang_uses_engine_owned_mm_identity() is wide_schema
+
+    # Qwen accepts caller hashes, but its event tokens still use the wide format.
+    qwen = SimpleNamespace()
+    assert not sglang_uses_engine_owned_mm_identity(qwen)
+    assert supports_external_mm_hashes(MmHashEngine(qwen))
+    assert sglang_has_wide_mm_pad_values() is wide_schema
 
 
 @pytest.mark.parametrize(
@@ -1168,6 +1835,18 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
     config = await parse_args(sys.argv[1:])
     assert config.dynamo_args.namespace == "custom-ns"
+
+
+@pytest.mark.asyncio
+async def test_rerank_worker_disables_radix_cache(monkeypatch, mock_sglang_cli):
+    """Rerank workers must run each sequence in one forward: no cached prefix, no chunks."""
+    monkeypatch.setattr(sglang_args, "fetch_model", AsyncMock())
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", "--rerank-worker")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.disable_radix_cache is True
+    assert config.server_args.chunked_prefill_size == -1
 
 
 @pytest.mark.parametrize(
@@ -1619,6 +2298,203 @@ def test_use_modelexpress_remote_instance_rejects_other_load_paths(
     assert use_modelexpress_remote_instance(args) is False
 
 
+@pytest.mark.parametrize(
+    ("overrides", "input_name", "worker_name", "expected"),
+    [
+        ({}, "Tokens", "Aggregated", True),
+        ({"max_running_requests": None}, "Tokens", "Aggregated", False),
+        ({"max_running_requests": 2}, "Tokens", "Aggregated", False),
+        ({"disable_overlap_schedule": False}, "Tokens", "Aggregated", False),
+        ({"pp_size": 2}, "Tokens", "Aggregated", False),
+        ({"speculative_algorithm": "EAGLE"}, "Tokens", "Aggregated", False),
+        ({"dllm_algorithm": "LowConfidence"}, "Tokens", "Aggregated", False),
+        ({"enable_priority_scheduling": True}, "Tokens", "Aggregated", False),
+        (
+            {"enable_priority_scheduling": True, "disable_priority_preemption": True},
+            "Tokens",
+            "Aggregated",
+            True,
+        ),
+        ({}, "Text", "Aggregated", False),
+        ({}, "Tokens", "Decode", False),
+        ({}, "Tokens", "Prefill", False),
+        (
+            {"max_running_requests": 2, "dp_size": 2, "enable_dp_attention": True},
+            "Tokens",
+            "Aggregated",
+            False,
+        ),
+        ({"dp_size": 2}, "Tokens", "Aggregated", False),
+        ({"enable_dp_attention": True}, "Tokens", "Aggregated", False),
+        (
+            {"max_running_requests": 2, "attn_dp_size": 2},
+            "Tokens",
+            "Aggregated",
+            False,
+        ),
+        ({"ep_join_mode": "scale"}, "Tokens", "Aggregated", False),
+    ],
+)
+def test_systemone_serial_capability_registration_gate(
+    monkeypatch, overrides, input_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.19")
+    server_args = SimpleNamespace(
+        **{
+            "max_running_requests": 1,
+            "disable_overlap_schedule": True,
+            "pp_size": 1,
+            "speculative_algorithm": None,
+            "enable_priority_scheduling": False,
+            "disable_priority_preemption": False,
+            **overrides,
+        }
+    )
+    assert (
+        sglang_register._supports_systemone_serial(
+            server_args,
+            getattr(sglang_register.ModelInput, input_name),
+            sglang_register.ModelType.Chat,
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        ("0.5.18", False),
+        ("0.5.19", True),
+        ("0.5.19+cu129", True),
+        ("0.5.20", False),
+        ("0.5.22", True),
+        ("0.5.22+cu130", True),
+        ("0.5.23", True),
+        ("0.5.23+cu130", True),
+        ("0.5.19+debug", False),
+        ("0.5.22+debug", False),
+        ("0.5.22+cu130.debug", False),
+        ("0.5.22.post1", False),
+        ("0.5.22rc1", False),
+    ],
+)
+def test_systemone_serial_capability_version_gate(monkeypatch, installed, expected):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    monkeypatch.setattr(sglang_register, "version", lambda package: installed)
+    server_args = SimpleNamespace(
+        max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+    )
+    assert (
+        sglang_register._supports_systemone_serial(
+            server_args,
+            sglang_register.ModelInput.Tokens,
+            sglang_register.ModelType.Chat,
+            sglang_register.WorkerType.Aggregated,
+        )
+        is expected
+    )
+
+
+def test_systemone_unqualified_serial_version_warns(monkeypatch, caplog):
+    assert sglang_register is not None
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.20")
+    server_args = SimpleNamespace(
+        max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+    )
+    with caplog.at_level(logging.WARNING):
+        assert not sglang_register._supports_systemone_serial(
+            server_args,
+            sglang_register.ModelInput.Tokens,
+            sglang_register.ModelType.Chat,
+            sglang_register.WorkerType.Aggregated,
+        )
+    assert "0.5.20" in caplog.text
+    assert "decision" in caplog.text.lower()
+
+
+def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
+    assert sglang_register is not None
+    with (REPO_ROOT / "pyproject.toml").open("rb") as project_file:
+        project = tomllib.load(project_file)
+    dependency = next(
+        Requirement(value)
+        for value in project["project"]["optional-dependencies"]["sglang"]
+        if Requirement(value).name == "sglang"
+    )
+    pins = list(dependency.specifier)
+    assert len(pins) == 1 and pins[0].operator == "=="
+    monkeypatch.setattr(sglang_register, "version", lambda package: pins[0].version)
+    assert sglang_register._supports_systemone_serial(
+        SimpleNamespace(
+            max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+        ),
+        sglang_register.ModelInput.Tokens,
+        sglang_register.ModelType.Chat,
+        sglang_register.WorkerType.Aggregated,
+    ), "Qualify the pinned SGLang release before enabling its decision profile"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("serial", "installed"),
+    [
+        (False, "0.5.19"),
+        (True, "0.5.19"),
+        (True, "0.5.22+cu130"),
+        (True, "0.5.23"),
+    ],
+)
+async def test_systemone_serial_capability_published_only_when_isolated(
+    monkeypatch, caplog, serial, installed
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    published = {}
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda key, value: published.update({key: value})
+    )
+
+    async def fake_get_runtime_config(*args):
+        return runtime_config
+
+    async def fake_register_model(*args, **kwargs):
+        assert kwargs["runtime_config"] is runtime_config
+
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+    monkeypatch.setattr(sglang_register, "version", lambda package: installed)
+    server_args = SimpleNamespace(
+        model_path="Qwen/Qwen3-0.6B",
+        served_model_name="model",
+        page_size=16,
+        max_running_requests=1,
+        disable_overlap_schedule=serial,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
+    )
+    with caplog.at_level(logging.INFO):
+        assert await sglang_register._register_model_with_runtime_config(
+            engine=SimpleNamespace(),
+            endpoint=SimpleNamespace(),
+            server_args=server_args,
+            dynamo_args=dynamo_args,
+            worker_type=sglang_register.WorkerType.Aggregated,
+        )
+    assert published["sglang_generate"] == "true"
+    assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
+    assert ("including chat and completions" in caplog.text) is serial
+    if serial:
+        assert f"Published SGLang {installed} System One capability" in caplog.text
+        assert "separate served-model name or namespace-scoped frontend" in caplog.text
+
+
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
     args = SimpleNamespace(
         load_format="remote_instance",
@@ -1952,3 +2828,425 @@ async def test_lora_registration_model_type_gate(
     assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data
+
+
+async def _real_shaped_metrics_task() -> asyncio.Task:
+    """A metrics task shaped like publisher.run()/_idle(): parked on one await,
+    with no cleanup work after cancellation."""
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(metrics_loop())
+    await started.wait()
+    return task
+
+
+def _fake_teardown_targets(steps):
+    """A fake handler.cleanup + run_deferred_handlers pair for
+    finish_worker_teardown tests."""
+
+    def cleanup():
+        steps.append("handler.cleanup")
+
+    async def run_deferred_handlers():
+        steps.append("run_deferred_handlers")
+
+    return cleanup, run_deferred_handlers
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_surfaces_cancellation_during_metrics_unwind():
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_metrics = asyncio.Event()
+    steps = []
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_metrics.wait()
+            raise
+
+    async def deferred():
+        steps.append("run_deferred_handlers")
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    async def caller():
+        try:
+            await finish_worker_teardown(
+                metrics_task,
+                lambda: steps.append("handler.cleanup"),
+                deferred,
+            )
+        except asyncio.CancelledError:
+            steps.append("caller.cancelled")
+            raise
+
+    outer = asyncio.create_task(caller())
+
+    await unwinding.wait()
+    outer.cancel()
+    release_metrics.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers", "caller.cancelled"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_surfaces_cancellation_during_deferred_cleanup():
+    metrics_task = await _real_shaped_metrics_task()
+    deferred_started = asyncio.Event()
+    release_deferred = asyncio.Event()
+    steps = []
+
+    def cleanup():
+        steps.append("handler.cleanup")
+
+    async def deferred():
+        deferred_started.set()
+        await release_deferred.wait()
+        steps.append("run_deferred_handlers")
+
+    async def caller():
+        try:
+            await finish_worker_teardown(metrics_task, cleanup, deferred)
+        except asyncio.CancelledError:
+            steps.append("caller.cancelled")
+            raise
+
+    outer = asyncio.create_task(caller())
+    await deferred_started.wait()
+    outer.cancel()
+    release_deferred.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers", "caller.cancelled"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_is_silent_when_nothing_cancels():
+    """The ordinary shutdown path: teardown runs, nothing is raised."""
+    metrics_task = await _real_shaped_metrics_task()
+    steps = []
+    cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
+
+    await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_keeps_the_body_failure(caplog):
+    """When the worker body already failed, that exception is the diagnostic;
+    the cancellation is logged instead of replacing it."""
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_metrics = asyncio.Event()
+    steps = []
+    cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_metrics.wait()
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    async def failing_worker():
+        try:
+            raise RuntimeError("nats is down")
+        finally:
+            await finish_worker_teardown(
+                metrics_task, cleanup, run_deferred_handlers, body_failed=True
+            )
+
+    outer = asyncio.create_task(failing_worker())
+    await unwinding.wait()
+    outer.cancel()
+    release_metrics.set()
+
+    with pytest.raises(RuntimeError, match="nats is down"):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert "an earlier exception is already propagating" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("warmup_error", "message"),
+    [
+        (asyncio.TimeoutError(), "Prefill warmup timed out"),
+        (ValueError("boom"), "Prefill warmup failed: boom"),
+    ],
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_prefill_warmup_failure_cancels_metrics(
+    monkeypatch, warmup_error, message
+):
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    metrics_started = asyncio.Event()
+
+    async def metrics_loop():
+        metrics_started.set()
+        await asyncio.Event().wait()
+
+    async def fail_warmup(engine, port):
+        raise warmup_error
+
+    monkeypatch.setattr(disagg_mod, "warmup_prefill_engine", fail_warmup)
+    metrics_task = asyncio.create_task(metrics_loop())
+    await metrics_started.wait()
+
+    with pytest.raises(RuntimeError, match=message) as raised:
+        await init_llm_mod._warmup_prefill_engine(
+            object(),
+            SimpleNamespace(disaggregation_bootstrap_port=1234),
+            metrics_task,
+        )
+
+    assert raised.value.__cause__ is warmup_error
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    warmup_started = asyncio.Event()
+
+    async def suspended_warmup(engine, port):
+        warmup_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(disagg_mod, "warmup_prefill_engine", suspended_warmup)
+    metrics_task = await _real_shaped_metrics_task()
+    warmup_task = asyncio.create_task(
+        init_llm_mod._warmup_prefill_engine(
+            object(),
+            SimpleNamespace(disaggregation_bootstrap_port=1234),
+            metrics_task,
+        )
+    )
+    try:
+        await warmup_started.wait()
+        warmup_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await warmup_task
+
+        assert metrics_task.done()
+        assert metrics_task.cancelled()
+    finally:
+        if not metrics_task.done():
+            metrics_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await metrics_task
+
+
+def _decode_warmup_engine(events, image=False):
+    async def async_generate(**kwargs):
+        events.append(("generate", kwargs))
+
+    async def freeze_gc():
+        events.append(("freeze_gc", {}))
+
+    return SimpleNamespace(
+        async_generate=async_generate,
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(is_image_understandable_model=image),
+            freeze_gc=freeze_gc,
+        ),
+    )
+
+
+def _decode_warmup_server_args(**overrides):
+    values = dict(
+        skip_server_warmup=False,
+        skip_tokenizer_init=False,
+        ep_join_mode=None,
+        language_only=False,
+        language_model_only=False,
+        enable_encoder_swa_bounded_replay=False,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.fixture
+def record_text_warmup(monkeypatch):
+    events = []
+
+    async def warmup_engine(engine, server_args):
+        events.append(("warmup", {}))
+
+    monkeypatch.setattr(init_llm_mod, "warmup_engine", warmup_engine)
+    return events
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_matches_launch_server_order(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events), _decode_warmup_server_args()
+    )
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+    assert events[2][1]["input_ids"] == [0]
+    assert events[2][1]["sampling_params"]["max_new_tokens"] == 1
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skip_server_warmup_still_freezes_gc(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events),
+        _decode_warmup_server_args(skip_server_warmup=True),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skips_generation_on_scale_joiner(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events, image=True),
+        _decode_warmup_server_args(ep_join_mode="scale"),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_image_failure_aborts_startup(monkeypatch):
+    events = []
+
+    async def failing_image_warmup(engine):
+        raise RuntimeError("image warmup failed")
+
+    monkeypatch.setattr(init_llm_mod, "_image_warmup", failing_image_warmup)
+    with pytest.raises(RuntimeError, match="image warmup failed"):
+        await init_llm_mod._warmup_decode_engine(
+            _decode_warmup_engine(events, image=True), _decode_warmup_server_args()
+        )
+
+    assert events == []
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_final_generation_times_out(
+    monkeypatch, record_text_warmup
+):
+    events = record_text_warmup
+    engine = _decode_warmup_engine(events)
+
+    async def hanging_generate(**kwargs):
+        events.append(("generate", kwargs))
+        await asyncio.Event().wait()
+
+    engine.async_generate = hanging_generate
+    monkeypatch.setattr(init_llm_mod, "_warmup_timeout", lambda: 0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await init_llm_mod._warmup_decode_engine(engine, _decode_warmup_server_args())
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+
+
+@pytest.mark.parametrize(
+    ("image", "overrides", "expected"),
+    [
+        (True, {}, True),
+        (False, {}, False),
+        (True, {"skip_tokenizer_init": True}, False),
+        (True, {"language_only": True}, False),
+        (True, {"language_model_only": True}, False),
+        (True, {"enable_encoder_swa_bounded_replay": True}, False),
+    ],
+)
+def test_decode_warmup_chooses_image_request_like_launch_server(
+    monkeypatch, image, overrides, expected
+):
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    engine = _decode_warmup_engine([], image=image)
+
+    assert (
+        init_llm_mod._uses_image_warmup(engine, _decode_warmup_server_args(**overrides))
+        is expected
+    )
+
+
+def test_decode_warmup_image_check_tolerates_older_sglang_args(monkeypatch):
+    # SGLang 0.5.19 (the XPU image) has no enable_encoder_swa_bounded_replay.
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    server_args = SimpleNamespace(skip_tokenizer_init=False)
+    engine = _decode_warmup_engine([], image=True)
+
+    assert init_llm_mod._uses_image_warmup(engine, server_args) is True
+
+
+def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
+    from dynamo.runtime import logging as runtime_logging
+
+    configure_dynamo_logging = runtime_logging.configure_dynamo_logging
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_logging, "configure_dynamo_logging", lambda: None)
+        import dynamo.sglang.main as sglang_main
+
+    sglang_main.configure_dynamo_logging = configure_dynamo_logging
+    return sglang_main
+
+
+def test_main_propagates_cancellation(monkeypatch):
+    sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
+
+    async def cancelled_worker():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sglang_main, "worker", cancelled_worker)
+
+    with pytest.raises(asyncio.CancelledError):
+        sglang_main.main()
+
+
+def test_main_preserves_worker_failure(monkeypatch):
+    sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
+
+    async def failing_worker():
+        raise RuntimeError("worker failed")
+
+    monkeypatch.setattr(sglang_main, "worker", failing_worker)
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        sglang_main.main()

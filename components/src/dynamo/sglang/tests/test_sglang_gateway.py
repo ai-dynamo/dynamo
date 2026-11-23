@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,6 +36,85 @@ def _dyn(gateway_workers=None, **kw):
 def not_a_child(monkeypatch):
     monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
     monkeypatch.delenv(gateway.ENV_CHILD_INDEX, raising=False)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decode_gateway_parent_freezes_gc_before_children(
+    not_a_child, monkeypatch, enabled
+):
+    from dynamo.sglang import init_llm
+
+    events = []
+    server_args = _server_args(2)
+    engine = SimpleNamespace(
+        server_args=server_args, shutdown=lambda: events.append("shutdown")
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=_dyn(
+            namespace="test",
+            component="worker",
+            endpoint="generate",
+            freeze_gc_after_init=enabled,
+        ),
+        use_resolved_server_args=lambda args: args,
+    )
+    runtime = SimpleNamespace(endpoint=lambda name: object())
+    monkeypatch.setattr(init_llm.sgl, "Engine", lambda **kwargs: engine)
+    monkeypatch.setattr(
+        init_llm, "set_forward_pass_metrics_worker_id", lambda *args: None
+    )
+    monkeypatch.setattr(init_llm.gc, "collect", lambda: events.append("collect") or 0)
+    monkeypatch.setattr(init_llm.gc, "freeze", lambda: events.append("freeze"))
+
+    async def serve_children(actual_engine, count, shutdown_event, **kwargs):
+        assert actual_engine is engine
+        assert count == 2
+        events.append("children")
+
+    monkeypatch.setattr(init_llm, "serve_via_gateway_children", serve_children)
+    asyncio.run(init_llm.init_decode(runtime, config, asyncio.Event(), []))
+    assert events == (
+        ["collect", "freeze", "children", "shutdown"]
+        if enabled
+        else ["children", "shutdown"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_gateway_child", "child_index", "engine_freezes", "local_events"),
+    [
+        (False, 0, 1, []),
+        (True, 0, 1, []),
+        (True, 1, 0, ["collect", "freeze"]),
+    ],
+)
+def test_worker_gc_freeze_only_reaches_shared_engine_once(
+    monkeypatch, is_gateway_child, child_index, engine_freezes, local_events
+):
+    from dynamo.sglang import init_llm
+
+    freeze_engine = AsyncMock()
+    engine = SimpleNamespace(tokenizer_manager=SimpleNamespace(freeze_gc=freeze_engine))
+    actual_local_events = []
+    monkeypatch.setattr(init_llm, "gateway_child_index", lambda: child_index)
+    monkeypatch.setattr(
+        init_llm.gc,
+        "collect",
+        lambda: actual_local_events.append("collect") or 0,
+    )
+    monkeypatch.setattr(
+        init_llm.gc, "freeze", lambda: actual_local_events.append("freeze")
+    )
+
+    asyncio.run(
+        init_llm._freeze_worker_gc_after_init(
+            True, engine, is_gateway_child=is_gateway_child
+        )
+    )
+
+    assert freeze_engine.await_count == engine_freezes
+    assert actual_local_events == local_events
 
 
 def test_effective_count_from_either_flag(not_a_child):

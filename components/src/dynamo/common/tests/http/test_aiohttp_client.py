@@ -19,6 +19,7 @@ import asyncio
 import http.server
 import threading
 import time
+import traceback
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -124,9 +125,13 @@ def _cm_raising(exc_factory):
 
 def _make_client_with_session(session) -> AiohttpClient:
     client = AiohttpClient()
-    # Both strictness keys map to the same double, so a test does not have to
-    # care which session the policy under test selects.
-    client._sessions = {True: session, False: session}
+    # Every session key maps to the same double, so a test does not have to
+    # care which session the policy and the proxy under test select.
+    client._sessions = {
+        (True, False): session,
+        (False, False): session,
+        (False, True): session,
+    }
     return client
 
 
@@ -182,6 +187,61 @@ async def test_fetch_bytes_maps_connection_error() -> None:
     client = _make_client_with_session(session)
     with pytest.raises(mm_http.HttpConnectionError):
         await client.fetch_bytes("https://h/x", 30.0)
+
+
+def _response_error(
+    url: str, message: str = "Forbidden"
+) -> aiohttp.ClientResponseError:
+    return aiohttp.ClientResponseError(
+        # Any headers mapping works at runtime; multidict isn't importable in
+        # every environment that collects these tests.
+        request_info=aiohttp.RequestInfo(URL(url), "GET", {}),  # type: ignore[arg-type]
+        history=(),
+        status=403,
+        message=message,
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "raised"),
+    [
+        (lambda url: aiohttp.InvalidURL(url), mm_http.HttpConnectionError),
+        (
+            lambda url: aiohttp.ClientConnectionError(f"Cannot connect to {url}"),
+            mm_http.HttpConnectionError,
+        ),
+        (_response_error, mm_http.HttpStatusError),
+        # The reason phrase is the server's, and can echo the request URL.
+        (
+            lambda url: _response_error(url, message=f"Denied: {url}"),
+            mm_http.HttpStatusError,
+        ),
+    ],
+    ids=["client_error", "connection_error", "response_error", "response_reason"],
+)
+async def test_fetch_bytes_error_keeps_a_presigned_url_out(exc_factory, raised) -> None:
+    """aiohttp errors can quote the request URL; its signature must reach
+    neither the error that is logged and returned to the client nor a formatted
+    traceback of it (handlers log with exc_info)."""
+    signature = "0123456789abcdef" * 16
+    url = (
+        "https://bucket.s3.amazonaws.com/img.png?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Expires=900&X-Amz-Signature={signature}"
+    )
+    session = MagicMock(spec=aiohttp.ClientSession)
+    session.closed = False
+    original = exc_factory(url)
+    session.get = _cm_raising(lambda: original)
+    client = _make_client_with_session(session)
+    with pytest.raises(raised) as exc:
+        await client.fetch_bytes(url, 30.0)
+    # What aiohttp raised stays visible to callers, as a bounded copy.
+    assert type(exc.value.__cause__) is type(original)
+    # The bounded error text keeps both of its ends, so check for any fragment
+    # of the signature, not only the whole of it.
+    for text in (str(exc.value), "".join(traceback.format_exception(exc.value))):
+        assert "0123456789abcdef" not in text
+        assert "X-Amz-Signature" not in text
 
 
 async def test_redirect_resolved_through_policy_path() -> None:
@@ -359,7 +419,9 @@ async def test_no_proxy_exempts_a_host_from_the_gate(monkeypatch) -> None:
 
     client = AiohttpClient()
     # Must not raise: NO_PROXY sends this host direct.
-    await client._require_trusted_egress_proxy("https://example.com/x.png")
+    assert (
+        await client._require_trusted_egress_proxy("https://example.com/x.png") is False
+    )
     # A host NOT covered by NO_PROXY is still gated, which is the control.
     with pytest.raises(HttpConfigurationError):
         await client._require_trusted_egress_proxy("https://other.invalid/x.png")
@@ -394,8 +456,10 @@ async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
         monkeypatch.setenv(name, "http://proxy.internal:3128")
 
     client = AiohttpClient()
-    # Returns without raising, which is the whole assertion.
-    await client._require_trusted_egress_proxy("https://example.com/x.png")
+    # An http URL, so that HTTP_PROXY applies.
+    assert (
+        await client._require_trusted_egress_proxy("http://example.com/x.png") is True
+    )
     await client.close()
 
 
@@ -403,20 +467,43 @@ async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
 async def test_each_policy_pool_gets_the_full_connection_limit(monkeypatch) -> None:
     """The cap is per connect-time policy, and the help text says so.
 
-    Two pools can coexist, each with the configured limit, so a deployment
-    that enables internal access and also issues stricter per-request policies
-    can reach twice the value. Pinned here so the number and the documented
-    meaning cannot drift apart silently.
+    Three pools can coexist, each with the configured limit: permissive,
+    strict direct, and strict through a trusted proxy. So a deployment that
+    enables internal access, issues stricter per-request policies and trusts
+    a proxy for some hosts can reach three times the value. Pinned here so the
+    number and the documented meaning cannot drift apart silently.
     """
     monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
     client = AiohttpClient()
     try:
         permissive = await client._get_session(True)
         strict = await client._get_session(False)
+        proxied = await client._get_session(False, via_proxy=True)
         limit = client._config.max_connections
-        assert permissive is not strict
+        assert len({id(permissive), id(strict), id(proxied)}) == 3
         assert permissive.connector.limit == limit
         assert strict.connector.limit == limit
+        assert proxied.connector.limit == limit
+    finally:
+        await client.close()
+
+
+@_allows_cleanup_closed_notice
+async def test_direct_and_proxied_sessions_share_a_cookie_jar(monkeypatch) -> None:
+    """A redirect between a direct and a proxied hop keeps its cookies.
+
+    One session served both kinds of hop before the client split them, so the
+    two sessions of a connect policy share one jar. The permissive pool keeps
+    its own jar, as it did before.
+    """
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    client = AiohttpClient()
+    try:
+        direct = await client._get_session(False)
+        proxied = await client._get_session(False, via_proxy=True)
+        permissive = await client._get_session(True)
+        assert direct.cookie_jar is proxied.cookie_jar
+        assert permissive.cookie_jar is not direct.cookie_jar
     finally:
         await client.close()
 

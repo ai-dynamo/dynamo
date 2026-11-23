@@ -361,6 +361,7 @@ fn create_response_with_linear_probs(
                         alt_prob
                     );
                     TopLogprobs {
+                        token_id: None,
                         token: alt_token.to_string(),
                         logprob: alt_prob.ln(),
                         bytes: None,
@@ -396,6 +397,7 @@ fn create_response_with_linear_probs(
     };
 
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices: vec![choice],
@@ -409,6 +411,8 @@ fn create_response_with_linear_probs(
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -444,6 +448,7 @@ fn create_multi_choice_response(
                                 alt_prob
                             );
                             TopLogprobs {
+                                token_id: None,
                                 token: alt_token,
                                 logprob: alt_prob.ln(),
                                 bytes: None,
@@ -481,6 +486,7 @@ fn create_multi_choice_response(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices,
@@ -494,5 +500,7 @@ fn create_multi_choice_response(
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }

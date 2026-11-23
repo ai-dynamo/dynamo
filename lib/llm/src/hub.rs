@@ -13,12 +13,6 @@ use modelexpress_common::{cache as mx_cache, download as mx, envs as mx_envs};
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
-mod huggingface;
-
-pub(crate) use huggingface::{
-    HfRepoSpec, cached_hf_snapshot, download_hf_snapshot, finalize_hf_snapshot, huggingface_cache,
-};
-
 const NGC_URI_PREFIX: &str = "ngc://";
 
 fn provider_for(model_name: &str) -> MxModelProvider {
@@ -466,27 +460,27 @@ fn is_commit_sha_prefix(revision: &str) -> bool {
 /// names a snapshot directory, so it is the bar both for joining a revision into a
 /// cache path and for publishing one on a model deployment card.
 pub(crate) fn is_hf_commit_sha(revision: &str) -> bool {
-    huggingface::validate_hf_commit_sha(revision).is_ok()
+    dynamo_lora::validate_hf_commit_sha(revision).is_ok()
 }
 
 /// Whether `filename` is a safe relative path within a repository snapshot. Rejects
 /// absolute paths and `.`/`..` components, which would otherwise resolve outside the
 /// snapshot directory they are joined onto.
 pub(crate) fn is_hf_repo_file(filename: &str) -> bool {
-    huggingface::validate_hf_repo_file(filename).is_ok()
+    dynamo_lora::validate_hf_repo_file(filename).is_ok()
 }
 
 /// Whether `repo` is a safe repository id: no absolute or `..` segments, since it is
 /// both a cache key and an outbound Hub request path.
 pub(crate) fn is_hf_repo_path(repo: &str) -> bool {
-    huggingface::validate_hf_relative_path(repo, "repository id").is_ok()
+    dynamo_lora::validate_hf_relative_path(repo, "repository id").is_ok()
 }
 
 /// Whether `revision` is safe to join onto a cache directory. Looser than
 /// [`is_hf_commit_sha`], so a branch or tag still reaches the download, but it still
 /// rejects anything that could climb out of the cache root.
 fn is_joinable_revision(revision: &str) -> bool {
-    huggingface::validate_hf_relative_path(revision, "revision").is_ok()
+    dynamo_lora::validate_hf_relative_path(revision, "revision").is_ok()
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common

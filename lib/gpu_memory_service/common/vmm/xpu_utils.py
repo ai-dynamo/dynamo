@@ -82,6 +82,9 @@ class XpuVMM(VMMDevice):
         free_bytes = max(0, free_bytes - vmm_used)
         return (free_bytes, total_bytes)
 
+    def total_memory(self, device: int) -> int:
+        return self.device_memory_info(device)[1]
+
     def get_allocation_granularity(self, device: int) -> int:
         return _sycl_vmm.get_mem_granularity(device)
 

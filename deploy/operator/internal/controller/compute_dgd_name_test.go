@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -34,14 +33,14 @@ func TestComputeDGDName(t *testing.T) {
 		{
 			name: "no overrides — uses DGDR name with -dgd suffix",
 			dgdr: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-dgdr"},
+				Name: "my-dgdr",
 			},
 			expected: "my-dgdr-dgd",
 		},
 		{
 			name: "overrides.dgd is nil — uses DGDR name with -dgd suffix",
 			dgdr: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-dgdr"},
+				Name: "my-dgdr",
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Overrides: &nvidiacomv1beta1.OverridesSpec{DGD: nil},
 				},
@@ -51,7 +50,7 @@ func TestComputeDGDName(t *testing.T) {
 		{
 			name: "overrides.dgd has explicit metadata.name — uses override name",
 			dgdr: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-dgdr"},
+				Name: "my-dgdr",
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Overrides: &nvidiacomv1beta1.OverridesSpec{
 						DGD: &runtime.RawExtension{
@@ -65,7 +64,7 @@ func TestComputeDGDName(t *testing.T) {
 		{
 			name: "overrides.dgd has no metadata.name — falls back to DGDR name with -dgd suffix",
 			dgdr: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-dgdr"},
+				Name: "my-dgdr",
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Overrides: &nvidiacomv1beta1.OverridesSpec{
 						DGD: &runtime.RawExtension{
@@ -79,7 +78,7 @@ func TestComputeDGDName(t *testing.T) {
 		{
 			name: "two DGDRs with identical specs produce different names",
 			dgdr: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "tc-2-8-parallel-beta"},
+				Name: "tc-2-8-parallel-beta",
 			},
 			expected: "tc-2-8-parallel-beta-dgd",
 		},

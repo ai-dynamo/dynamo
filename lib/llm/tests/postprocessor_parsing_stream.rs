@@ -20,7 +20,7 @@ use dynamo_protocols::types::{
 };
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::protocols::annotated::Annotated;
-use futures::{StreamExt, stream};
+use futures::{FutureExt, StreamExt, channel::mpsc, stream};
 use serde_json::Value;
 
 #[path = "../../runtime/src/test_utils.rs"]
@@ -114,6 +114,158 @@ fn get_text(content: &ChatCompletionMessageContent) -> &str {
     }
 }
 
+// Parser conformance cannot configure Dynamo's reasoning-only deployment route.
+// Replay the recorded Hermes stream through the serving and unary boundaries.
+#[tokio::test]
+async fn reasoning_only_qwen3_preserves_recorded_hermes_content() {
+    const CHILD: &str = "DYNAMO_REASONING_ONLY_QWEN3_CHILD";
+    let Ok(selection) = std::env::var(CHILD) else {
+        for selection in ["unset", "auto", "deprecated_false", "1", "2"] {
+            let mut command = test_utils::isolated_command(
+                "reasoning_only_qwen3_preserves_recorded_hermes_content",
+            );
+            command.env(CHILD, selection);
+            match selection {
+                "unset" => {}
+                "deprecated_false" => {
+                    command.env(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "false");
+                }
+                value => {
+                    command.env(env_llm::DYN_PARSER_VERSION, value);
+                }
+            }
+            test_utils::assert_isolated_success(&command.output().unwrap());
+        }
+        return;
+    };
+    let fixture: Value = serde_json::from_str(include_str!(
+        "data/vllm/qwen3-0.6B/chat_completion_stream_8f33c28b-tool.json"
+    ))
+    .unwrap();
+    let recorded: Vec<_> = fixture["input_stream"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|chunk| {
+            let choices = chunk["data"]["choices"].as_array().unwrap();
+            assert_eq!(choices.len(), 1);
+            kimi_native_chunk(
+                choices[0]["delta"]["content"].as_str().unwrap_or_default(),
+                choices[0]["finish_reason"].as_str(),
+            )
+        })
+        .collect();
+    let raw: String = recorded
+        .iter()
+        .filter_map(|chunk| chunk.data.as_ref())
+        .flat_map(|response| &response.inner.choices)
+        .filter_map(|choice| choice.delta.content.as_ref())
+        .map(get_text)
+        .collect();
+    let literal_content = raw.split_once("</think>").unwrap().1;
+    assert!(literal_content.contains("<tool_call>"));
+    let expected_reasoning = fixture["expected_output"]["reasoning_content"]
+        .as_str()
+        .unwrap();
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    for request_mode in ["tools_auto", "tools_none", "no_tools"] {
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        match request_mode {
+            "tools_none" => request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::None),
+            "no_tools" => {
+                request.inner.tools = None;
+                request.inner.tool_choice = None;
+            }
+            _ => {}
+        }
+        // Cover the capture's original cadence and every valid UTF-8 split.
+        let schedules = std::iter::once(recorded.clone()).chain(
+            raw.char_indices()
+                .map(|(offset, _)| offset)
+                .chain(std::iter::once(raw.len()))
+                .map(|split| {
+                    vec![
+                        kimi_native_chunk(&raw[..split], None),
+                        kimi_native_chunk(&raw[split..], Some("stop")),
+                    ]
+                }),
+        );
+        for (schedule, chunks) in schedules.enumerate() {
+            // Preserve V1's chunk-sensitive reasoning ownership without using
+            // the selector under test to compute its own expected output.
+            let legacy = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+                stream::iter(chunks.clone()),
+                "qwen3".into(),
+                false,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let legacy = demux_by_choice(&legacy).remove(&0).unwrap();
+            if schedule == 0 {
+                assert_eq!(legacy.content, literal_content);
+                assert_eq!(legacy.reasoning, expected_reasoning);
+            }
+            let output = preprocessor
+                .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let streamed = demux_by_choice(&output).remove(&0).unwrap();
+            let expected_content = if selection == "2" {
+                fixture["expected_output"]["normal_content"]
+                    .as_str()
+                    .unwrap()
+            } else {
+                &legacy.content
+            };
+            let expected_reasoning = if selection == "2" {
+                expected_reasoning
+            } else {
+                &legacy.reasoning
+            };
+            assert_eq!(
+                streamed.content, expected_content,
+                "{selection}/{request_mode}"
+            );
+            assert_eq!(streamed.reasoning, expected_reasoning);
+            assert!(streamed.tool_calls.is_empty());
+            let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+                stream::iter(output),
+                ParsingOptions::new(None, Some("qwen3".into())),
+            )
+            .await
+            .unwrap();
+            let choice = &batch.inner.choices[0];
+            assert_eq!(
+                choice
+                    .message
+                    .content
+                    .as_ref()
+                    .map(get_text)
+                    .unwrap_or_default(),
+                expected_content
+            );
+            assert_eq!(
+                choice
+                    .message
+                    .reasoning_content
+                    .as_deref()
+                    .unwrap_or_default(),
+                expected_reasoning
+            );
+            assert!(
+                choice
+                    .message
+                    .tool_calls
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+            );
+            assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        }
+    }
+}
+
 /// Accumulates streamed tool call deltas into complete tool calls for assertion.
 #[derive(Default, Clone, Debug)]
 struct MergedToolCall {
@@ -182,7 +334,7 @@ async fn postprocessor_parsing_stream_replays_unit_test_fixture() {
 
 #[tokio::test]
 async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
-    let preprocessor = build_preprocessor(Some("qwen"), Some("hermes"));
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
     let (mut request, _expected_stream_json, input_chunks) =
         parse_fixture(&fixture_path("stream_interval_20.jsonl"));
 
@@ -327,6 +479,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -340,6 +493,8 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -371,6 +526,7 @@ fn mock_multi_choice_content_chunk(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -384,6 +540,8 @@ fn mock_multi_choice_content_chunk(
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -412,6 +570,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -425,6 +584,8 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -448,6 +609,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -461,6 +623,8 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -471,6 +635,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
 fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{CompletionUsage, CreateChatCompletionStreamResponse};
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![],
@@ -490,6 +655,8 @@ fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -518,6 +685,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         })
         .collect();
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -531,7 +699,88 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_mixed_deltas_and_detour()
+ {
+    use dynamo_protocols::types::{
+        ChatCompletionMessageToolCallChunk, FunctionCallStream, FunctionType,
+    };
+
+    let preprocessor = build_preprocessor(Some("deepseek_v41"), Some("deepseek_v41"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let mixed_delta = |content: Option<&str>, arguments: &str| {
+        let mut chunk = mock_content_chunk(content.unwrap_or_default());
+        let choice = &mut chunk.inner.choices[0];
+        choice.delta.content = content.map(|text| ChatCompletionMessageContent::Text(text.into()));
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
+            index: 0,
+            id: Some("call-same".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(arguments.to_string()),
+            }),
+        }]);
+        chunk
+    };
+
+    let mut terminal_mixed_delta = mixed_delta(Some("raw text after detour"), "\"}");
+    terminal_mixed_delta.inner.choices[0].finish_reason = Some(FinishReason::Stop);
+    let input_chunks = vec![
+        mixed_delta(Some("first raw text"), "{\"city\": "),
+        mixed_delta(Some("second raw text"), "\"Pa"),
+        mixed_delta(None, "ris"),
+        terminal_mixed_delta,
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let choices: Vec<_> = output_chunks
+        .iter()
+        .filter_map(|chunk| chunk.data.as_ref())
+        .flat_map(|data| data.inner.choices.iter())
+        .collect();
+    let calls: Vec<_> = choices
+        .iter()
+        .filter_map(|choice| choice.delta.tool_calls.as_ref())
+        .flatten()
+        .collect();
+    assert_eq!(calls.len(), 4, "each upstream tool-call delta must survive");
+    assert!(calls.iter().all(|call| call.index == 0));
+    assert_eq!(calls[0].id.as_deref(), Some("call-same"));
+    assert_eq!(calls[0].r#type, Some(FunctionType::Function));
+    assert!(calls[1..].iter().all(|call| call.id.is_none()));
+    assert!(calls[1..].iter().all(|call| call.r#type.is_none()));
+    let arguments: String = calls
+        .iter()
+        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+        .collect();
+    assert_eq!(arguments, "{\"city\": \"Paris\"}");
+
+    let content: String = choices
+        .iter()
+        .filter_map(|choice| choice.delta.content.as_ref())
+        .map(get_text)
+        .collect();
+    assert_eq!(
+        content,
+        "first raw textsecond raw textraw text after detour"
+    );
+    let finish_reasons: Vec<_> = choices
+        .iter()
+        .filter_map(|choice| choice.finish_reason)
+        .collect();
+    assert_eq!(finish_reasons, vec![FinishReason::ToolCalls]);
 }
 
 /// Regression for DeepSeek V4 tool-continuation turns.
@@ -1377,23 +1626,17 @@ async fn postprocessor_parsing_stream_disabled_reasoning_orders_eof_flush_by_cho
         .expect("postprocessor_parsing_stream should build");
     let output_chunks: Vec<_> = output_stream.collect().await;
 
-    let recovered = output_chunks
+    let indices: Vec<_> = output_chunks
         .iter()
         .filter_map(|output| output.data.as_ref())
-        .find(|data| {
-            data.inner.choices.iter().any(|choice| {
-                choice
-                    .delta
-                    .content
-                    .as_ref()
-                    .is_some_and(|content| get_text(content) == "<thi")
-            })
+        .flat_map(|data| &data.inner.choices)
+        .filter(|choice| {
+            choice
+                .delta
+                .content
+                .as_ref()
+                .is_some_and(|content| get_text(content) == "<thi")
         })
-        .expect("synthetic recovery chunk");
-    let indices: Vec<_> = recovered
-        .inner
-        .choices
-        .iter()
         .map(|choice| choice.index)
         .collect();
     assert_eq!(indices, vec![0, 1, 2]);
@@ -3557,10 +3800,11 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                         .postprocessor_parsing_stream(input, &request, false, false)
                         .unwrap();
                     let out = drain_stream(output).await;
-                    let disabled = if family == "gemma4" {
-                        thinking != Some(true)
-                    } else {
-                        thinking == Some(false)
+                    let disabled = match family {
+                        // Kept on with the Gemma 4 tool-call parser.
+                        "gemma4" => thinking != Some(true) && tool.is_none(),
+                        "glm47" => false,
+                        _ => thinking == Some(false),
                     };
                     assert_eq!(
                         out.reasoning,
@@ -3585,7 +3829,257 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
 }
 
 #[tokio::test]
-async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+async fn glm_thinking_off_preserves_generated_reasoning() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_thinking_off_preserves_generated_reasoning"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    for (reasoning, tool) in [
+        (Some("glm45"), None),
+        (None, Some("glm47")),
+        (Some("glm45"), Some("glm47")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning, tool);
+        for controls in [
+            serde_json::json!({"enable_thinking": false}),
+            serde_json::json!({"thinking": false}),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "glm-model",
+                    "messages": [{"role": "user", "content": "answer"}],
+                    "chat_template_kwargs": controls,
+                    "stream": true
+                }))
+                .unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+
+            for (raw, prefilled, expected_reasoning, expected_content) in [
+                ("<think>private</think>answer", false, "private", "answer"),
+                ("private</think>answer", true, "private", "answer"),
+                ("answer", false, "", "answer"),
+                (
+                    "private</think>{\"answer\":\"hello\"}",
+                    true,
+                    "private",
+                    r#"{"answer":"hello"}"#,
+                ),
+                (
+                    "<think>private</think>{\"answer\":\"hello\"}",
+                    false,
+                    "private",
+                    r#"{"answer":"hello"}"#,
+                ),
+                (r#"{"answer":"hello"}"#, false, "", r#"{"answer":"hello"}"#),
+            ] {
+                let mut request = request.clone();
+                if expected_content.starts_with('{') {
+                    request.inner.response_format = Some(
+                        serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap(),
+                    );
+                }
+                for split in 0..=raw.len() {
+                    let input = stream::iter(
+                        vec![
+                            mock_content_chunk(&raw[..split]),
+                            mock_content_chunk(&raw[split..]),
+                            mock_final_chunk(),
+                        ]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                    );
+                    let chunks: Vec<_> = preprocessor
+                        .postprocessor_parsing_stream(input, &request, prefilled, false)
+                        .unwrap()
+                        .collect()
+                        .await;
+                    let out = drain_stream(stream::iter(chunks.clone())).await;
+                    assert_eq!(
+                        out.reasoning, expected_reasoning,
+                        "{reasoning:?} {tool:?} {controls} {prefilled} split{split}"
+                    );
+                    assert_eq!(out.content, expected_content);
+                    assert!(out.tool_calls.is_empty());
+                    assert_eq!(out.finish_reasons, vec![FinishReason::Stop]);
+
+                    let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+                        stream::iter(chunks),
+                        ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned)),
+                    )
+                    .await
+                    .unwrap();
+                    let choice = &batch.inner.choices[0];
+                    assert_eq!(
+                        choice
+                            .message
+                            .reasoning_content
+                            .as_deref()
+                            .unwrap_or_default(),
+                        expected_reasoning
+                    );
+                    assert_eq!(
+                        choice
+                            .message
+                            .content
+                            .as_ref()
+                            .map(get_text)
+                            .unwrap_or_default(),
+                        expected_content
+                    );
+                    assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn glm_thinking_off_preserves_reasoning_and_tool_calls() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_thinking_off_preserves_reasoning_and_tool_calls"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let preprocessor = build_preprocessor(Some("glm45"), Some("glm47"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+    request.normalize_reasoning_template_args().unwrap();
+    let raw = "private</think>answer<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
+
+    for split in 0..=raw.len() {
+        let input = stream::iter(
+            vec![
+                mock_content_chunk(&raw[..split]),
+                mock_content_chunk(&raw[split..]),
+                mock_final_chunk(),
+            ]
+            .into_iter()
+            .map(Annotated::from_data),
+        );
+        let chunks: Vec<_> = preprocessor
+            .postprocessor_parsing_stream(input, &request, true, false)
+            .unwrap()
+            .collect()
+            .await;
+        let out = drain_stream(stream::iter(chunks.clone())).await;
+        let case = format!("GLM thinking off + tool call, split {split}");
+        assert_eq!(out.reasoning, "private", "{case}");
+        assert_eq!(out.content, "answer", "{case}");
+        assert_clean_tool_call(&case, &out.content, &out.tool_calls, "San Francisco");
+        assert_eq!(out.finish_reasons, vec![FinishReason::ToolCalls], "{case}");
+
+        let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter(chunks),
+            ParsingOptions::new(Some("glm47".into()), Some("glm45".into())),
+        )
+        .await
+        .unwrap();
+        let choice = &batch.inner.choices[0];
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("private"),
+            "{case}"
+        );
+        assert_eq!(
+            choice.message.content.as_ref().map(get_text),
+            Some("answer"),
+            "{case}"
+        );
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1, "{case}");
+        assert_eq!(calls[0].function.name, "get_weather", "{case}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"location": "San Francisco"}),
+            "{case}"
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(FinishReason::ToolCalls),
+            "{case}"
+        );
+    }
+}
+
+/// Gemma 4 with thinking off. With only the reasoning selector, the parser stays gated
+/// off and channel markers are literal content. With the Gemma 4 tool-call parser, the
+/// empty thought channel the model writes itself on the turn after a tool response
+/// leaves `content` and a tool call after it still parses:
+/// - unified route: reasoning parsing stays on;
+/// - legacy split route: only a leading empty channel is stripped, because its reasoning
+///   parser runs before the tool-call jail and would eat markers inside tool arguments.
+///
+/// Channel markers inside a tool argument stay intact on both routes.
+async fn assert_gemma4_without_enable_thinking() {
+    #[derive(Debug)]
+    enum Mode {
+        /// Reasoning parsing off, output unchanged.
+        Literal,
+        /// Legacy route with the Gemma 4 tool-call parser: leading empty channel stripped.
+        StripEmptyChannel,
+        /// Unified route with the Gemma 4 tool-call parser: reasoning parsed.
+        Parse,
+    }
+    const EMPTY_CHANNEL: &str = "<|channel>thought\n<channel|>";
+    let weather = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>";
+    let empty_then_call = format!("{EMPTY_CHANNEL}{weather}");
+    let marker_arg = "before<|channel>thought\nsecret<channel|>after";
+    let marker_call =
+        format!("<|tool_call>call:write_file{{content:<|\"|>{marker_arg}<|\"|>}}<tool_call|>");
+    let end_marker_arg = "before<channel|>after";
+    let end_marker_call =
+        format!("<|tool_call>call:write_file{{content:<|\"|>{end_marker_arg}<|\"|>}}<tool_call|>");
+    let weather_args = serde_json::json!({"city": "Paris"});
+    let marker_args = serde_json::json!({"content": marker_arg});
+    let end_marker_args = serde_json::json!({"content": end_marker_arg});
+    /// Raw output, reasoning and content when parsed, expected tool call.
+    type Case<'a> = (&'a str, &'a str, &'a str, Option<(&'a str, &'a Value)>);
+    let cases: [Case; 6] = [
+        (
+            marker_call.as_str(),
+            "",
+            "",
+            Some(("write_file", &marker_args)),
+        ),
+        (
+            end_marker_call.as_str(),
+            "",
+            "",
+            Some(("write_file", &end_marker_args)),
+        ),
+        ("final answer", "", "final answer", None),
+        (
+            "<|channel>thought\n<channel|>final answer",
+            "",
+            "final answer",
+            None,
+        ),
+        (
+            "<|channel>thought\nprivate<channel|>final answer",
+            "private",
+            "final answer",
+            None,
+        ),
+        (
+            empty_then_call.as_str(),
+            "",
+            "",
+            Some(("get_weather", &weather_args)),
+        ),
+    ];
     for (reasoning_selector, tool_selector) in [
         (Some("gemma4"), None),
         (None, Some("gemma4")),
@@ -3593,40 +4087,124 @@ async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
         (None, Some("gemma-4")),
     ] {
         let preprocessor = build_preprocessor(reasoning_selector, tool_selector);
-
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "dummy-gemma4-model",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "answer plainly"
-                }
-            ],
-            "stream": true
+            "messages": [{"role": "user", "content": "answer plainly"}],
+            "stream": true,
+            "tools": [
+                {"type": "function", "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {
+                        "city": {"type": "string"}
+                    }, "required": ["city"]}
+                }},
+                {"type": "function", "function": {
+                    "name": "write_file",
+                    "parameters": {"type": "object", "properties": {
+                        "content": {"type": "string"}
+                    }, "required": ["content"]}
+                }}
+            ]
         }))
         .unwrap();
-
-        let text = "<|channel>thought\nshould stay plain<channel|>final answer";
-        let input_stream = stream::iter(
-            vec![mock_content_chunk(text), mock_final_chunk()]
-                .into_iter()
-                .map(Annotated::from_data),
-        );
-
-        let output_stream = preprocessor
-            .postprocessor_parsing_stream(input_stream, &request, false, false)
-            .expect("postprocessor_parsing_stream should build");
-
-        let DrainOutput {
-            reasoning, content, ..
-        } = drain_stream(output_stream).await;
-
-        assert!(
-            reasoning.is_empty(),
-            "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
-        );
-        assert_eq!(content, text);
+        // The legacy split route (DYN_PARSER_VERSION=1) runs no reasoning parser for a
+        // tool-only selector; the unified route owns both channels.
+        let legacy = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("1");
+        let mode = match (legacy, reasoning_selector, tool_selector) {
+            (_, _, None) => Mode::Literal,
+            (false, _, Some(_)) => Mode::Parse,
+            (true, Some(_), Some(_)) => Mode::StripEmptyChannel,
+            (true, None, Some(_)) => Mode::Literal,
+        };
+        for (text, parsed_reasoning, parsed_content, expected_call) in cases {
+            if expected_call.is_some() && tool_selector.is_none() {
+                continue;
+            }
+            for split in 0..=text.len() {
+                if !text.is_char_boundary(split) {
+                    continue;
+                }
+                let input_stream = stream::iter(
+                    vec![
+                        mock_content_chunk(&text[..split]),
+                        mock_content_chunk(&text[split..]),
+                        mock_final_chunk(),
+                    ]
+                    .into_iter()
+                    .map(Annotated::from_data),
+                );
+                let output_stream = preprocessor
+                    .postprocessor_parsing_stream(input_stream, &request, false, false)
+                    .expect("postprocessor_parsing_stream should build");
+                let DrainOutput {
+                    reasoning,
+                    content,
+                    tool_calls,
+                    ..
+                } = drain_stream(output_stream).await;
+                let label = format!(
+                    "{text:?} {reasoning_selector:?} {tool_selector:?} {mode:?} split{split}"
+                );
+                if let Some((name, args)) = expected_call {
+                    assert_eq!(tool_calls.len(), 1, "{label}: {tool_calls:?}");
+                    assert_eq!(tool_calls[0].name.as_deref(), Some(name), "{label}");
+                    assert_eq!(
+                        &serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+                        args,
+                        "{label}"
+                    );
+                    assert!(reasoning.is_empty(), "{label}: {reasoning:?}");
+                    if !matches!(mode, Mode::Literal) {
+                        assert_eq!(content, "", "{label}");
+                    }
+                    continue;
+                }
+                assert!(tool_calls.is_empty(), "{label}: {tool_calls:?}");
+                let (want_reasoning, want_content) = match mode {
+                    Mode::Literal => ("", text),
+                    Mode::StripEmptyChannel => {
+                        ("", text.strip_prefix(EMPTY_CHANNEL).unwrap_or(text))
+                    }
+                    Mode::Parse => (parsed_reasoning, parsed_content),
+                };
+                assert_eq!(reasoning, want_reasoning, "{label}");
+                assert_eq!(content, want_content, "{label}");
+            }
+        }
     }
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser() {
+    assert_gemma4_without_enable_thinking().await;
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v1() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v1"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
+    assert_gemma4_without_enable_thinking().await;
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v2() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v2"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    assert_gemma4_without_enable_thinking().await;
 }
 
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
@@ -3897,6 +4475,74 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
     assert!(reasoning.is_empty());
     assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
     assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+}
+
+#[tokio::test]
+async fn minimax_m2_disabled_named_json_returns_tool_call() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "MiniMaxAI/MiniMax-M2.7",
+        "messages": [{"role": "user", "content": "Use the calculator tool for 937 * 18 + 42."}],
+        "stream": true,
+        "chat_template_kwargs": {"thinking": false},
+        "tool_choice": {"type": "function", "function": {"name": "calculate"}},
+        "tools": [{"type": "function", "function": {
+            "name": "calculate",
+            "description": "Evaluate a mathematical expression.",
+            "parameters": {"type": "object", "properties": {
+                "expression": {"type": "string"}
+            }, "required": ["expression"]}
+        }}]
+    }))
+    .unwrap();
+
+    for fragmented in [false, true] {
+        let pieces = if fragmented {
+            vec!["{\n  \"expression\":", " \"937 * 18 + 42\"\n}"]
+        } else {
+            vec!["{\n  \"expression\": \"937 * 18 + 42\"\n}"]
+        };
+        let chunks = pieces
+            .into_iter()
+            .map(mock_content_chunk)
+            .chain(std::iter::once(mock_final_chunk()))
+            .map(Annotated::from_data);
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+            .unwrap()
+            .inspect(|item| assert!(item.error.is_none(), "{item:?}"));
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        assert!(
+            content.is_empty(),
+            "fragmented={fragmented}: content leaked: {content}"
+        );
+        assert!(
+            reasoning.is_empty(),
+            "fragmented={fragmented}: reasoning leaked: {reasoning}"
+        );
+        assert_eq!(tool_calls.len(), 1, "fragmented={fragmented}");
+        assert_eq!(
+            tool_calls[0].name.as_deref(),
+            Some("calculate"),
+            "fragmented={fragmented}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+            serde_json::json!({"expression": "937 * 18 + 42"}),
+            "fragmented={fragmented}"
+        );
+        assert_eq!(
+            finish_reasons,
+            vec![FinishReason::ToolCalls],
+            "fragmented={fragmented}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4541,20 +5187,17 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flush_drops_llm
     assert_eq!(recovered, "<thi", "the recovery itself must still happen");
 }
 
-/// A backend that keeps streaming after a choice's `finish_reason` is out of
-/// protocol, but those bytes still reach the parser, so they still need a
-/// destination. The terminal drain marks the choice drained; a later content
-/// chunk reopens it, so `r2` is emitted rather than stranded.
-///
-/// What is NOT recovered is whatever the parser is still buffering internally at
-/// that point — here the dangling `</th`. Recovering it would mean calling
-/// `finish_reasoning_stream` a second time on the same parser, and the trait does
-/// not promise that is idempotent, so a parser that re-emits on a second
-/// finalize would duplicate text. Losing it is the better trade twice over: the
-/// stream is already out of protocol, and the bytes in question are a truncated
-/// marker fragment, which should never reach `content` anyway.
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_finish_survives() {
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -4591,11 +5234,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_f
     }
 
     assert_eq!(content, "A", "the answer is unchanged by the stray chunk");
-    assert_eq!(
-        reasoning, "r1r2",
-        "post-finish content is emitted, but the parser's dangling marker fragment is not \
-         re-finalized into the stream"
-    );
+    assert_eq!(reasoning, "r1");
 }
 
 /// Streaming and non-streaming must agree on a turn whose only answer text is
@@ -4994,6 +5633,157 @@ async fn postprocessor_parsing_stream_muse_auto_honors_disabled_reasoning() {
     assert!(out.content.contains("Look it up."));
     assert_eq!(out.content, "Look it up.It's 18C.");
     assert_eq!(out.tool_calls.len(), 1);
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_preserves_repeated_qwen_reason_text_tool_order() {
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let use_unified_v2 = dynamo_runtime::config::selected_parser_version().unwrap()
+        == dynamo_runtime::config::ParserVersion::V2;
+    eprintln!(
+        "repeated Qwen3 test route: {}",
+        if use_unified_v2 {
+            "UnifiedParser v2"
+        } else {
+            "legacy v1"
+        }
+    );
+    let locations = ["Paris", "Tokyo", "Oslo"];
+    let cycles = 100;
+    let (input_tx, input_rx) = futures::channel::mpsc::unbounded();
+    let input_stream = stream::unfold(input_rx, |mut rx| async move {
+        rx.next().await.map(|item| (item, rx))
+    });
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    tokio::pin!(output_stream);
+    let mut output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    for cycle in 0..cycles {
+        input_tx
+            .unbounded_send(Annotated::from_data(mock_content_chunk(if cycle == 0 {
+                "start "
+            } else {
+                " middle "
+            })))
+            .unwrap();
+        input_tx
+            .unbounded_send(Annotated::from_data(mock_content_chunk(
+                "<think>reason one</think>",
+            )))
+            .unwrap();
+        let call = format!(
+            "<tool_call>\n<function=get_weather>\n<parameter=location>\n{}\n</parameter>\n</function>\n</tool_call>",
+            locations[cycle % locations.len()]
+        );
+        input_tx
+            .unbounded_send(Annotated::from_data(mock_content_chunk(&call)))
+            .unwrap();
+
+        let mut saw_tool_call = false;
+        while !saw_tool_call {
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(1), output_stream.next())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("cycle {cycle}: no tool output before more input or EOF")
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("cycle {cycle}: postprocessor ended before EOF was sent")
+                    });
+            saw_tool_call = output.data.as_ref().is_some_and(|data| {
+                data.inner.choices.iter().any(|choice| {
+                    choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                })
+            });
+            output_chunks.push(output);
+        }
+        let current = demux_by_choice(&output_chunks)
+            .remove(&0)
+            .unwrap_or_else(|| panic!("cycle {cycle}: choice zero output missing"));
+        assert_eq!(current.tool_calls.len(), cycle + 1);
+        for (index, call) in current.tool_calls.values().enumerate() {
+            assert_eq!(call.name.as_deref(), Some("get_weather"));
+            let arguments: serde_json::Value = serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|e| panic!("cycle {cycle}: incomplete tool arguments: {e}"));
+            assert_eq!(arguments["location"], locations[index % locations.len()]);
+        }
+    }
+    input_tx
+        .unbounded_send(Annotated::from_data(mock_content_chunk(" end")))
+        .unwrap();
+    input_tx
+        .unbounded_send(Annotated::from_data(mock_final_chunk()))
+        .unwrap();
+    drop(input_tx);
+    output_chunks.extend(output_stream.collect::<Vec<_>>().await);
+
+    let mut event_order = Vec::new();
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            let mut kinds = Vec::new();
+            if let Some(value) = &choice.delta.content {
+                let text = get_text(value);
+                content.push_str(text);
+                if !text.is_empty() {
+                    kinds.push("text");
+                }
+            }
+            if let Some(value) = &choice.delta.reasoning_content {
+                reasoning.push_str(value);
+                if !value.is_empty() {
+                    kinds.push("reasoning");
+                }
+            }
+            if choice
+                .delta
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+            {
+                kinds.push("tool");
+            }
+            if kinds.len() > 1 {
+                event_order.push("multiple-fields");
+            } else if let Some(kind) = kinds.first()
+                && event_order.last() != Some(kind)
+            {
+                event_order.push(kind);
+            }
+        }
+    }
+
+    assert_eq!(
+        content,
+        format!("start {} end", " middle ".repeat(cycles - 1))
+    );
+    assert_eq!(reasoning, "reason one".repeat(cycles));
+    let mut expected_order = Vec::with_capacity(cycles * 3 + 1);
+    for _ in 0..cycles {
+        expected_order.extend(["text", "reasoning", "tool"]);
+    }
+    expected_order.push("text");
+    assert_eq!(event_order, expected_order, "streamed event order changed");
+    let choice = demux_by_choice(&output_chunks)
+        .remove(&0)
+        .expect("choice zero output");
+    assert_eq!(choice.tool_calls.len(), cycles);
+    for (index, call) in choice.tool_calls.values().enumerate() {
+        assert_eq!(call.name.as_deref(), Some("get_weather"));
+        let arguments: serde_json::Value = serde_json::from_str(&call.arguments).unwrap();
+        assert_eq!(arguments["location"], locations[index % locations.len()]);
+    }
+    assert!(choice.content.find("start").unwrap() < choice.content.find("middle").unwrap());
 }
 
 #[tokio::test]
@@ -5583,4 +6373,597 @@ async fn route_matrix_minimax_m2_named_native_xml_with_inner_brace_stays_native(
         serde_json::json!({"location": "San Francisco {CA}"}),
         "{case}: the inner brace must stay argument DATA, not become structure"
     );
+}
+
+#[tokio::test]
+async fn research_per_chunk_interleaving() {
+    if test_utils::run_isolated(
+        concat!(module_path!(), "::research_per_chunk_interleaving"),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
+    use futures::FutureExt;
+    for family in ["qwen3_coder", "deepseek_v4", "kimi_k2"] {
+        // Hold reasoning grammar fixed to isolate the selected tool parser and its routing.
+        let preprocessor = build_preprocessor(Some("qwen3"), Some(family));
+        let (header, value_end, inner_end, outer_end) = match family {
+            "qwen3_coder" => (
+                "<tool_call>\n<function=get_weather>\n<parameter=location>\n",
+                "\n</parameter>",
+                "\n</function>",
+                "\n</tool_call>",
+            ),
+            "deepseek_v4" => (
+                "<｜DSML｜tool_calls><｜DSML｜invoke name=\"get_weather\"><｜DSML｜parameter name=\"location\" string=\"true\">",
+                "</｜DSML｜parameter>",
+                "</｜DSML｜invoke>",
+                "</｜DSML｜tool_calls>",
+            ),
+            "kimi_k2" => (
+                "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"",
+                "\"",
+                "}",
+                "<|tool_call_end|><|tool_calls_section_end|>",
+            ),
+            _ => unreachable!(),
+        };
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let consumed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = consumed.clone();
+        let input = rx.inspect(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let output = preprocessor
+            .postprocessor_parsing_stream(input, &request, false, false)
+            .unwrap();
+        tokio::pin!(output);
+        let mut all = Vec::new();
+        let second_header = header.replace("functions.get_weather:0", "functions.get_weather:1");
+        let chunks = [
+            "text1 ",
+            "<think>",
+            "reason1",
+            "</think>",
+            header,
+            "Par",
+            "is",
+            value_end,
+            inner_end,
+            outer_end,
+            " text2 ",
+            "<think>",
+            "reason2",
+            "</think>",
+            second_header.as_str(),
+            "Tok",
+            "yo",
+            value_end,
+            inner_end,
+            outer_end,
+            " end",
+        ];
+        for (i, chunk) in chunks.iter().enumerate() {
+            tx.unbounded_send(Annotated::from_data(mock_content_chunk(chunk)))
+                .unwrap();
+            let mut rows = Vec::new();
+            while let Some(item) = output.next().now_or_never() {
+                let item = item.expect("source remains open");
+                if let Some(data) = &item.data {
+                    for choice in &data.inner.choices {
+                        rows.push(serde_json::to_value(&choice.delta).unwrap());
+                    }
+                }
+                all.push(item);
+            }
+            assert_eq!(consumed.load(std::sync::atomic::Ordering::SeqCst), i + 1);
+            let tool_call_emitted = rows.iter().any(|delta| {
+                delta["tool_calls"]
+                    .as_array()
+                    .is_some_and(|calls| !calls.is_empty())
+            });
+            let expected_tool_call = [4, 14].into_iter().any(|header_index| {
+                let outer_end_index = header_index + 5;
+                i == outer_end_index
+            });
+            assert_eq!(
+                tool_call_emitted,
+                expected_tool_call,
+                "family {family}, input chunk {}: unexpected tool-call release timing",
+                i + 1
+            );
+            if i == 9 || i == 19 {
+                let choice = demux_by_choice(&all).remove(&0).unwrap();
+                assert_eq!(choice.tool_calls.len(), if i == 9 { 1 } else { 2 });
+                for (j, call) in choice.tool_calls.values().enumerate() {
+                    assert_eq!(call.name.as_deref(), Some("get_weather"));
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&call.arguments).unwrap(),
+                        serde_json::json!({"location": (["Paris", "Tokyo"][j])})
+                    );
+                }
+            }
+        }
+        tx.unbounded_send(Annotated::from_data(mock_final_chunk()))
+            .unwrap();
+        drop(tx);
+        all.extend(output.collect::<Vec<_>>().await);
+        let choice = demux_by_choice(&all).remove(&0).unwrap();
+        assert_eq!(choice.content, "text1  text2  end");
+        assert_eq!(choice.reasoning, "reason1reason2");
+        assert_eq!(choice.tool_calls.len(), 2);
+    }
+}
+
+fn kimi_native_chunk(
+    text: &str,
+    finish: Option<&str>,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    Annotated::from_data(
+        serde_json::from_value(serde_json::json!({
+            "id":"kimi-regression", "object":"chat.completion.chunk", "created":0, "model":"test",
+            "choices":[{"index":0,"delta":{"content":text},"finish_reason":finish,"logprobs":null}]
+        }))
+        .unwrap(),
+    )
+}
+
+fn kimi_native_calls(
+    chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) -> BTreeMap<u32, MergedToolCall> {
+    let mut calls: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+    for response in chunks.iter().filter_map(|chunk| chunk.data.as_ref()) {
+        for choice in &response.inner.choices {
+            if let Some(deltas) = &choice.delta.tool_calls {
+                for delta in deltas {
+                    calls.entry(delta.index).or_default().merge_from(delta);
+                }
+            }
+        }
+    }
+    calls
+}
+
+// This asserts the serving adapter's pre-close progress and transport evidence;
+// parser-only conformance cannot express an open downstream stream or OpenAI IDs.
+#[tokio::test]
+async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings() {
+    // dynamo-parsers-v2 0.8.9 (frontend-crates #384) streams count-before-string
+    // native calls before closure, so every route the v2 crate serves (explicit
+    // v2 and auto) releases them early; only an explicit v1 selection still
+    // buffers them until completion.
+    let uses_unified = dynamo_runtime::config::selected_parser_version().unwrap()
+        != dynamo_runtime::config::ParserVersion::V1;
+    let q = "q".repeat(4096);
+    let mut k3_ids = std::collections::BTreeSet::new();
+    let shapes = [
+        (
+            "kimi_k2",
+            "kimi_k25",
+            "<think>reasoning</think>",
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.write_file:0<|tool_call_argument_begin|>{\"count\":7,\"content\":\"",
+            "\"}",
+            "<|tool_call_end|>",
+            "<|tool_calls_section_end|>",
+        ),
+        (
+            "kimi_k3",
+            "kimi_k3",
+            "<|open|>think<|sep|>reasoning<|close|>think<|sep|>",
+            "<|open|>tools<|sep|><|open|>call tool=\"write_file\" index=\"1\"<|sep|><|open|>argument key=\"count\" type=\"number\"<|sep|>7<|close|>argument<|sep|><|open|>argument key=\"content\" type=\"string\"<|sep|>",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+        ),
+        (
+            "kimi-k3",
+            "kimi-k3",
+            "<|open|>think<|sep|>reasoning<|close|>think<|sep|>",
+            "<|open|>tools<|sep|><|open|>call tool=\"write_file\" index=\"1\"<|sep|><|open|>json type=\"object\"<|sep|>{\"count\":7,\"content\":\"",
+            "\"}<|close|>json<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+        ),
+    ];
+    for (tool, reason, warmup, header, value_end, call_end, section_end) in shapes {
+        for size in [7, 1024] {
+            for thinking in ["default", "disabled", "prefill"] {
+                for tail in ["complete", "truncated", "sibling", "unclosed_valid_json"] {
+                    if !uses_unified
+                        && (thinking == "prefill" || !matches!(tail, "complete" | "truncated"))
+                    {
+                        continue;
+                    }
+                    // Structural tags use the same native bytes; generation-time backend installation is tested separately.
+                    for structural in [false, true] {
+                        let preprocessor = build_preprocessor(Some(reason), Some(tool));
+                        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                            "model":"test", "messages":[{"role":"user","content":"write"}], "stream":true,
+                            "tools":[{"type":"function","function":{"name":"write_file","parameters":{"type":"object","properties":{"count":{"type":"integer"},"content":{"type":"string"}}}}}]
+                        })).unwrap();
+                        if thinking == "disabled" {
+                            request.chat_template_args = Some(
+                                serde_json::from_value(
+                                    serde_json::json!({"enable_thinking":false}),
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        let (tx, rx) = mpsc::unbounded();
+                        let output = preprocessor
+                            .postprocessor_parsing_stream(
+                                rx,
+                                &request,
+                                thinking == "prefill",
+                                structural,
+                            )
+                            .unwrap();
+                        futures::pin_mut!(output);
+                        let warmup = if thinking == "disabled" {
+                            ""
+                        } else if thinking == "prefill" {
+                            if tool == "kimi_k2" {
+                                "reasoning</think>"
+                            } else {
+                                "reasoning<|close|>think<|sep|>"
+                            }
+                        } else {
+                            warmup
+                        };
+                        tx.unbounded_send(kimi_native_chunk(warmup, None)).unwrap();
+                        tx.unbounded_send(kimi_native_chunk(header, None)).unwrap();
+                        for bytes in q.as_bytes()[..3072].chunks(size) {
+                            tx.unbounded_send(kimi_native_chunk(
+                                std::str::from_utf8(bytes).unwrap(),
+                                None,
+                            ))
+                            .unwrap();
+                        }
+                        let mut chunks = Vec::new();
+                        while let Some(item) = output.next().now_or_never() {
+                            chunks.push(item.expect("source remains open"));
+                        }
+                        let early = kimi_native_calls(&chunks);
+                        let first_id = if uses_unified {
+                            assert_eq!(early.len(), 1, "{tool}/{size}/{thinking}");
+                            let call = early.get(&0).unwrap();
+                            let id = call.id.as_deref().expect("first chunk carries an ID");
+                            if tool == "kimi_k2" {
+                                assert_eq!(id, "functions.write_file:0");
+                            } else {
+                                let uuid = uuid::Uuid::parse_str(id.strip_prefix("call-").unwrap())
+                                    .unwrap();
+                                assert_eq!(uuid.get_version_num(), 4);
+                                assert!(k3_ids.insert(id.to_owned()), "K3 ID reused: {id}");
+                            }
+                            assert_eq!(call.name.as_deref(), Some("write_file"));
+                            assert_eq!(
+                                call.arguments.bytes().filter(|byte| *byte == b'q').count(),
+                                3072
+                            );
+                            Some(id.to_owned())
+                        } else {
+                            assert!(early.is_empty(), "legacy calls remain buffered");
+                            None
+                        };
+                        if tail != "truncated" {
+                            tx.unbounded_send(kimi_native_chunk(
+                                &format!("{}{value_end}", &q[3072..]),
+                                None,
+                            ))
+                            .unwrap();
+                            if tail != "unclosed_valid_json" {
+                                tx.unbounded_send(kimi_native_chunk(call_end, None))
+                                    .unwrap();
+                                if tail == "sibling" {
+                                    // Remove the section opener, retaining an incomplete second native call.
+                                    let sibling_header = header
+                                        .strip_prefix(if tool == "kimi_k2" {
+                                            "<|tool_calls_section_begin|>"
+                                        } else {
+                                            "<|open|>tools<|sep|>"
+                                        })
+                                        .unwrap();
+                                    let sibling_header = if tool == "kimi_k2" {
+                                        sibling_header.replace(":0", ":1")
+                                    } else {
+                                        sibling_header.replace("index=\"1\"", "index=\"2\"")
+                                    };
+                                    tx.unbounded_send(kimi_native_chunk(
+                                        &format!("{sibling_header}unfinished"),
+                                        None,
+                                    ))
+                                    .unwrap();
+                                } else {
+                                    tx.unbounded_send(kimi_native_chunk(section_end, None))
+                                        .unwrap();
+                                }
+                            }
+                        }
+                        let finish = if tail == "complete" { "stop" } else { "length" };
+                        tx.unbounded_send(kimi_native_chunk("", Some(finish)))
+                            .unwrap();
+                        drop(tx);
+                        chunks.extend(output.collect::<Vec<_>>().await);
+                        // Internal serialization must retain evidence through a serving hop.
+                        let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = chunks
+                            .into_iter()
+                            .map(|chunk| {
+                                serde_json::from_value(serde_json::to_value(chunk).unwrap())
+                                    .unwrap()
+                            })
+                            .collect();
+                        let calls = kimi_native_calls(&chunks);
+                        if uses_unified && tail != "truncated" {
+                            assert_eq!(calls[&0].id.as_deref(), first_id.as_deref());
+                            assert_eq!(
+                                serde_json::from_str::<Value>(&calls[&0].arguments).unwrap(),
+                                serde_json::json!({"count":7,"content":q})
+                            );
+                        }
+                        let options = ParsingOptions::new(Some(tool.into()), Some(reason.into()));
+                        let aggregate = NvCreateChatCompletionResponse::from_annotated_stream(
+                            stream::iter(chunks),
+                            options,
+                        )
+                        .await
+                        .unwrap();
+                        let choice = &aggregate.inner.choices[0];
+                        let final_calls = choice.message.tool_calls.as_deref().unwrap_or_default();
+                        // Reviewed Kimi parsers recover complete argument bodies at EOF;
+                        // mid-string truncation still leaves the call incomplete.
+                        let expected_count = usize::from(
+                            tail == "complete"
+                                || (uses_unified && tail == "sibling")
+                                || (uses_unified && tail == "unclosed_valid_json"),
+                        );
+                        assert_eq!(
+                            final_calls.len(),
+                            expected_count,
+                            "{tool}/{tail}/{thinking}/{structural}"
+                        );
+                        if !final_calls.is_empty() {
+                            assert_eq!(
+                                serde_json::from_str::<Value>(&final_calls[0].function.arguments)
+                                    .unwrap(),
+                                serde_json::json!({"count":7,"content":q})
+                            );
+                            if uses_unified {
+                                assert_eq!(Some(final_calls[0].id.as_str()), first_id.as_deref());
+                            }
+                        }
+                        assert_eq!(
+                            choice
+                                .message
+                                .reasoning_content
+                                .as_deref()
+                                .unwrap_or_default(),
+                            if thinking == "disabled" {
+                                ""
+                            } else {
+                                "reasoning"
+                            }
+                        );
+                        assert!(
+                            choice
+                                .message
+                                .content
+                                .as_ref()
+                                .map(get_text)
+                                .unwrap_or_default()
+                                .is_empty()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_backend_arguments_survive_postprocessing_and_aggregation() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::legacy_backend_arguments_survive_postprocessing_and_aggregation"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
+    backend_arguments_survive_postprocessing_and_aggregation(false).await;
+}
+
+#[tokio::test]
+async fn auto_backend_arguments_survive_postprocessing_and_aggregation() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::auto_backend_arguments_survive_postprocessing_and_aggregation"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "auto")],
+    ) {
+        return;
+    }
+    backend_arguments_survive_postprocessing_and_aggregation(true).await;
+}
+
+async fn backend_arguments_survive_postprocessing_and_aggregation(include_default_on: bool) {
+    let mut parser_pairs = vec![(None, None), (Some("hermes"), None)];
+    if include_default_on {
+        parser_pairs.push((Some("deepseek_v41"), Some("deepseek_v41")));
+    }
+    for (parser, reasoning) in parser_pairs {
+        let preprocessor = build_preprocessor(reasoning, parser);
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let requires_complete_call = include_default_on && parser == Some("hermes");
+        for finish in [
+            None,
+            Some(FinishReason::Stop),
+            Some(FinishReason::ToolCalls),
+            Some(FinishReason::Length),
+            Some(FinishReason::ContentFilter),
+        ] {
+            for arguments in [r#"{"location":"SF"}"#, r#"{"location":"SF""#, ""] {
+                let valid_json = serde_json::from_str::<serde_json::Value>(arguments).is_ok();
+                // Hermes unified parsing completes empty fragments only with a tool terminal.
+                let complete =
+                    valid_json || (arguments.is_empty() && finish == Some(FinishReason::ToolCalls));
+                let expected_finish = match finish {
+                    Some(FinishReason::Length) => FinishReason::Length,
+                    Some(FinishReason::ContentFilter) => FinishReason::ContentFilter,
+                    _ if requires_complete_call && !complete => FinishReason::Length,
+                    _ => FinishReason::ToolCalls,
+                };
+                let mixed_modes: &[bool] = if parser == Some("deepseek_v41") {
+                    &[false, true]
+                } else {
+                    &[false]
+                };
+                for &mixed in mixed_modes {
+                    for separate_terminal in [false, true] {
+                        if separate_terminal && finish.is_none() {
+                            continue;
+                        }
+                        let split = arguments.len() / 2;
+                        let mut first = mock_content_chunk("");
+                        first.inner.choices[0].delta.content =
+                            mixed.then(|| ChatCompletionMessageContent::Text("prefix ".into()));
+                        first.inner.choices[0].delta.tool_calls = Some(
+                    serde_json::from_value(serde_json::json!([{
+                        "index": 0, "id": "backend-call", "type": "function",
+                        "function": {"name": "get_weather", "arguments": &arguments[..split]}
+                    }]))
+                    .unwrap(),
+                );
+                        let mut second = mock_content_chunk("");
+                        second.inner.choices[0].delta.content =
+                            mixed.then(|| ChatCompletionMessageContent::Text("suffix".into()));
+                        second.inner.choices[0].delta.tool_calls = Some(
+                            serde_json::from_value(serde_json::json!([{
+                                "index": 0, "function": {"arguments": &arguments[split..]}
+                            }]))
+                            .unwrap(),
+                        );
+                        second.inner.choices[0].finish_reason =
+                            if separate_terminal { None } else { finish };
+                        let mut input =
+                            vec![Annotated::from_data(first), Annotated::from_data(second)];
+                        if separate_terminal {
+                            let mut terminal = mock_content_chunk("");
+                            terminal.inner.choices[0].finish_reason = finish;
+                            input.push(Annotated::from_data(terminal));
+                        }
+                        let responses = preprocessor
+                            .postprocessor_parsing_stream(
+                                stream::iter(input),
+                                &request,
+                                false,
+                                false,
+                            )
+                            .unwrap()
+                            .collect::<Vec<_>>()
+                            .await;
+                        let streamed: String = responses
+                            .iter()
+                            .filter_map(|r| r.data.as_ref())
+                            .flat_map(|r| &r.inner.choices)
+                            .filter_map(|c| c.delta.tool_calls.as_ref())
+                            .flatten()
+                            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                            .collect();
+                        assert_eq!(streamed, arguments, "stream {parser:?}/{finish:?}");
+                        if requires_complete_call
+                            || (parser == Some("deepseek_v41")
+                                && matches!(
+                                    finish,
+                                    None | Some(FinishReason::Stop | FinishReason::ToolCalls)
+                                ))
+                        {
+                            let streamed_finish = responses
+                                .iter()
+                                .filter_map(|response| response.data.as_ref())
+                                .flat_map(|response| &response.inner.choices)
+                                .filter_map(|choice| choice.finish_reason)
+                                .next_back();
+                            assert_eq!(
+                                streamed_finish,
+                                Some(expected_finish),
+                                "stream finish {parser:?}/{arguments}/{finish:?}/mixed={mixed}/separate={separate_terminal}"
+                            );
+                        }
+                        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                            stream::iter(responses),
+                            ParsingOptions::new(
+                                parser.map(str::to_string),
+                                reasoning.map(str::to_string),
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                        let choice = &response.inner.choices[0];
+                        let retained = expected_finish != FinishReason::Length || valid_json;
+                        assert_eq!(
+                            choice.message.tool_calls.is_some(),
+                            retained,
+                            "aggregate {parser:?}/{finish:?}/{arguments}"
+                        );
+                        if retained {
+                            let call = &choice.message.tool_calls.as_ref().unwrap()[0];
+                            assert_eq!(call.id, "backend-call");
+                            assert_eq!(call.function.name, "get_weather");
+                            assert_eq!(call.function.arguments, arguments);
+                        }
+                        assert_eq!(choice.finish_reason, Some(expected_finish));
+                        assert_eq!(
+                            match &choice.message.content {
+                                Some(ChatCompletionMessageContent::Text(text)) => text.as_str(),
+                                None => "",
+                                other => panic!("unexpected content: {other:?}"),
+                            },
+                            if mixed { "prefix suffix" } else { "" }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    for (reasoning, parser) in [
+        (None, Some("nemotron_deci")),
+        (Some("qwen3"), Some("deepseek_v4")),
+        (Some("qwen3"), Some("kimi_k2")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning, parser);
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let result = preprocessor.postprocessor_parsing_stream(
+            stream::iter([Annotated::from_data(mock_final_chunk())]),
+            &request,
+            false,
+            false,
+        );
+        let error = match result {
+            Ok(_) => panic!("explicit V2 accepted unsupported pair {reasoning:?}/{parser:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("no compatible unified v2 implementation"),
+            "{reasoning:?}/{parser:?}: {error}"
+        );
+    }
 }

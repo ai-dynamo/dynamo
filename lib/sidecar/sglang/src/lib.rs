@@ -4,42 +4,67 @@
 //! Dynamo SGLang sidecar.
 //!
 //! A [`SglangSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
-//! proxying inference to an out-of-process SGLang engine over SGLang's native
-//! `sglang.runtime.v1.SglangService` contract. Model identity, disaggregation
-//! role, parallelism, KV block sizing, and context length are discovered from
-//! the engine's gRPC metadata RPCs.
+//! proxying inference to an out-of-process SGLang engine over
+//! `sglang.api.v1.SglangService`, the native gRPC contract of SGLang's Rust
+//! server (`SGLANG_RUST_SERVER=1`). Model identity, disaggregation role,
+//! parallelism, KV block sizing, and context length are discovered from the
+//! engine's gRPC metadata RPCs.
 //!
-//! The crate never depends on `sglang` or any engine crate. It uses
-//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`/`prost`,
-//! `clap`, and tokio.
+//! SGLang's Rust server runs one listener per data-parallel group leader. One
+//! sidecar serves every listener of its node as one worker that owns their DP
+//! ranks. A request runs on the listener of the rank it names, and requests
+//! that name none take the node's listeners in turn.
+//!
+//! The crate never depends on the SGLang engine. It uses `sglang-api-types`,
+//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`, `clap`,
+//! and tokio.
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use dynamo_sidecar_common::SidecarStartupError;
 
 use args::Args;
-use headless::HeadlessSidecar;
 
 pub mod args;
 pub mod client;
+mod discovery;
 pub mod engine;
-mod headless;
+mod listeners;
 mod native_http;
+mod node;
 
-/// Generated SGLang gRPC types, temporarily exposed for the Mocker server
-/// until SGLang publishes its upstream protocol package.
+/// SGLang's `sglang.api.v1` types from the `sglang-api-types` crate, re-exported
+/// for the Mocker server.
 #[doc(hidden)]
 pub mod proto;
 mod protocol;
 
 pub use engine::SglangSidecarEngine;
 
+/// Endpoint that SGLang's `--sidecar` launcher injects into the sidecar process.
+const SGLANG_GRPC_ENDPOINT_ENV: &str = "SGLANG_GRPC_ENDPOINT";
+
+/// Use the injected endpoint only when neither `--grpc-endpoint` nor its env var is set.
+fn parse_args(argv: Vec<String>, injected_endpoint: Option<String>) -> clap::error::Result<Args> {
+    let mut command = Args::command();
+    if let Some(endpoint) = injected_endpoint {
+        // Leaked once per process so clap can take it as `&'static str` without its
+        // `string` feature, which would change the workspace's clap build.
+        let endpoint: &'static str = endpoint.leak();
+        command = command.mut_arg("grpc_endpoint", |arg| {
+            arg.default_value(endpoint).required(false)
+        });
+    }
+    Args::from_arg_matches(&command.try_get_matches_from(argv)?)
+}
+
 /// Parse and run the sidecar for both the Python launcher and Rust executable.
 /// Startup errors retain their type so callers can preserve CLI exit codes and
 /// distinguish invalid configuration from runtime failures.
 pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
-    let args = Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
+    let args = parse_args(argv, std::env::var(SGLANG_GRPC_ENDPOINT_ENV).ok())
+        .map_err(SidecarStartupError::from)?;
     SglangSidecarEngine::validate_args(&args).map_err(SidecarStartupError::from)?;
     dynamo_sidecar_common::run_task(|runtime, shutdown| async move {
         use dynamo_runtime::DistributedRuntime;
@@ -75,26 +100,12 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
             anyhow::bail!("runtime shut down during sidecar initialization");
         }
         let (drt, discovery) = result?;
-        match discovery {
-            client::StartupDiscovery::Follower => {
-                let follower =
-                    HeadlessSidecar::from_args(args).map_err(SidecarStartupError::from)?;
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => Ok(()),
-                    _ = runtime_shutdown.cancelled() => anyhow::bail!("runtime shut down during follower relay"),
-                    result = follower.run_inner(drt, shutdown.clone()) => result,
-                }
-            }
-            client::StartupDiscovery::Leader(discovery) => {
-                let (engine, config) = SglangSidecarEngine::from_discovered(args, *discovery)
-                    .map_err(SidecarStartupError::from)?;
-                dynamo_backend_common::Worker::new(Arc::new(engine), config)
-                    .run_with_drt(drt, shutdown)
-                    .await
-                    .map_err(Into::into)
-            }
-        }
+        let (engine, config) = SglangSidecarEngine::from_discovered(args, discovery)
+            .map_err(SidecarStartupError::from)?;
+        dynamo_backend_common::Worker::new(Arc::new(engine), config)
+            .run_with_drt(drt, shutdown)
+            .await
+            .map_err(Into::into)
     })
 }
 
@@ -108,5 +119,22 @@ mod tests {
         let error = error.downcast::<SidecarStartupError>().unwrap();
         assert!(matches!(error, SidecarStartupError::Cli(error)
             if error.kind() == clap::error::ErrorKind::DisplayHelp));
+    }
+
+    #[test]
+    fn injected_grpc_endpoint_is_used_only_without_explicit_endpoint() {
+        let endpoint = |argv: &[&str]| {
+            let argv = argv.iter().map(|arg| arg.to_string()).collect();
+            parse_args(argv, Some("127.0.0.1:31001".into()))
+                .unwrap()
+                .sidecar
+                .grpc_endpoint
+        };
+
+        assert_eq!(endpoint(&["sidecar"]).as_str(), "http://127.0.0.1:31001");
+        assert_eq!(
+            endpoint(&["sidecar", "--grpc-endpoint", "127.0.0.1:31003"]).as_str(),
+            "http://127.0.0.1:31003"
+        );
     }
 }

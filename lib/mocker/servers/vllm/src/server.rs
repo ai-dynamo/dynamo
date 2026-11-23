@@ -9,9 +9,11 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+    EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
-use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
+use dynamo_mocker::live::{
+    LiveEngine, LiveEngineConfig, LiveRequest, RequestOutputBuffering, stable_request_uuid,
+};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_vllm_sidecar::proto as pb;
@@ -27,11 +29,6 @@ mod request;
 const DP_RANK: u32 = 0;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
 type BoxedStatusResult<T> = Result<T, Box<Status>>;
-
-enum GenerationEvent {
-    Output(OutputSignal),
-    Aborted,
-}
 
 /// Wire-level role exposed by one mock server process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -55,6 +52,7 @@ impl fmt::Display for ServerMode {
 pub struct MockerServerConfig {
     pub model: String,
     pub mode: ServerMode,
+    pub supports_multimodal: bool,
     pub seed: u64,
     pub max_concurrent_requests: usize,
 }
@@ -64,6 +62,7 @@ impl Default for MockerServerConfig {
         Self {
             model: "mocker-model".to_string(),
             mode: ServerMode::Aggregated,
+            supports_multimodal: false,
             seed: 42,
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
         }
@@ -82,9 +81,9 @@ pub struct VllmMockerService {
 }
 
 impl VllmMockerService {
-    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockerConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            engine_args.engine_type == EngineType::Vllm,
+            engine_args.backend == EngineType::Vllm,
             "Mocker engine_type must be vllm"
         );
         anyhow::ensure!(engine_args.dp_size == 1, "Mocker dp_size must be 1");
@@ -97,6 +96,12 @@ impl VllmMockerService {
             "Mocker worker_type must be aggregated; use the server mode for the emulated wire role"
         );
         let engine_args = engine_args.normalized()?;
+        if config.supports_multimodal && engine_args.enable_prefix_caching {
+            tracing::warn!(
+                "Multimodal mock prefix caching uses token IDs only: different images can share \
+                 a cache entry. Disable prefix caching for image deployments."
+            );
+        }
         let max_concurrent_requests = config.max_concurrent_requests;
         let model_info = pb::ModelInfo {
             model_id: config.model.clone(),
@@ -105,7 +110,7 @@ impl VllmMockerService {
             supports_text_input: false,
             supports_token_ids_input: true,
             supports_lora: false,
-            supports_multimodal: false,
+            supports_multimodal: config.supports_multimodal,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
         };
@@ -133,14 +138,14 @@ impl VllmMockerService {
                 .map_err(|_| anyhow::anyhow!("block_size exceeds the Control API range"))?,
             total_kv_blocks: u64::try_from(engine_args.num_gpu_blocks)
                 .map_err(|_| anyhow::anyhow!("num_gpu_blocks exceeds the Control API range"))?,
-            max_running_requests: engine_args
-                .max_num_seqs
+            max_running_requests: (engine_args.max_num_seqs != usize::MAX)
+                .then_some(engine_args.max_num_seqs)
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("max_num_seqs exceeds the Control API range"))?
                 .unwrap_or_default(),
-            max_batched_tokens: engine_args
-                .max_num_batched_tokens
+            max_batched_tokens: (engine_args.max_num_batched_tokens != usize::MAX)
+                .then_some(engine_args.max_num_batched_tokens)
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| {
@@ -149,13 +154,14 @@ impl VllmMockerService {
                 .unwrap_or_default(),
             effective_attention_block_size: Some(engine_args.block_size as u64),
             rl_capabilities: None,
+            proto_version: pb::VERSION.to_string(),
         };
         // The wire role is separate from the aggregated scheduler used to
         // emulate disaggregated requests.
         let sink = if engine_args.needs_kv_publisher() && config.mode != ServerMode::Decode {
             match ZmqKvEventSink::bind(
-                engine_args.zmq_kv_events_port,
-                engine_args.zmq_replay_port,
+                engine_args.runtime.zmq_kv_events_port,
+                engine_args.runtime.zmq_replay_port,
                 DP_RANK,
                 server_info.kv_block_size,
             ) {
@@ -182,7 +188,8 @@ impl VllmMockerService {
             })
             .into_iter()
             .collect();
-        let engine = LiveEngine::start_with_config(
+        // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
+        let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
             DP_RANK,
             LiveEngineConfig {
@@ -192,6 +199,7 @@ impl VllmMockerService {
                 ),
                 ..Default::default()
             },
+            RequestOutputBuffering::FullResponse,
         )?;
         Ok(Self {
             config: Arc::new(config),
@@ -302,37 +310,6 @@ impl pb::inference_server::Inference for VllmMockerService {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let (prepared, mut live, permit) = self.start_generation(request).await?;
-        // Decouple LiveEngine's small fixed per-request buffer from client and
-        // transport pacing. A pump drains the engine promptly into a buffer
-        // bounded by this request's own token budget, so a bursty producer
-        // racing ahead of a slow gRPC consumer no longer trips LiveEngine's
-        // slow-consumer shedding and surfaces as a spurious INTERNAL. The buffer
-        // cannot grow past the request's declared output length, and dropping
-        // the client stream still cancels unfinished scheduler work.
-        let (signal_tx, mut signal_rx) =
-            tokio::sync::mpsc::channel(prepared.max_output_tokens.saturating_add(1));
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    // The client dropped the stream: stop and let `live` drop,
-                    // which cancels any unfinished scheduler work promptly.
-                    _ = signal_tx.closed() => break,
-                    signal = live.recv() => {
-                        let Some(signal) = signal else {
-                            if live.is_aborted() {
-                                let _ = signal_tx.send(GenerationEvent::Aborted).await;
-                            }
-                            break;
-                        };
-                        let completed = signal.completed;
-                        if signal_tx.send(GenerationEvent::Output(signal)).await.is_err() || completed {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
         let stream = async_stream::try_stream! {
             let _permit = permit;
             yield pb::GenerateResponse {
@@ -341,15 +318,7 @@ impl pb::inference_server::Inference for VllmMockerService {
             };
 
             let mut generated = 0usize;
-            while let Some(event) = signal_rx.recv().await {
-                let GenerationEvent::Output(signal) = event else {
-                    yield pb::GenerateResponse {
-                        prompt_info: None,
-                        outputs: Some(prepared.aborted_output(&[])
-                            .with_total_output_tokens(generated)),
-                    };
-                    return;
-                };
+            while let Some(signal) = live.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 generated += 1;
                 yield pb::GenerateResponse {
@@ -359,6 +328,14 @@ impl pb::inference_server::Inference for VllmMockerService {
                 if signal.completed {
                     return;
                 }
+            }
+            if live.is_aborted() {
+                yield pb::GenerateResponse {
+                    prompt_info: None,
+                    outputs: Some(prepared.aborted_output(&[])
+                        .with_total_output_tokens(generated)),
+                };
+                return;
             }
             Err(Status::internal(
                 "Mocker output channel closed before a terminal response",
@@ -370,6 +347,15 @@ impl pb::inference_server::Inference for VllmMockerService {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for VllmMockerService {
+    async fn shutdown(
+        &self,
+        _: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented(
+            "shutdown is not supported by the mocker",
+        ))
+    }
+
     async fn load_lora(
         &self,
         _request: Request<pb::LoadLoraRequest>,

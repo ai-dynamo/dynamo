@@ -18,7 +18,7 @@ use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the request-owned synthetic token plan independently of LiveEngine's
 // fixed per-request delivery buffer.
-pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
+pub(super) const MAX_NEW_TOKENS: u32 = 1_000_000;
 const MAX_CANDIDATES: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +77,13 @@ impl PreparedRequest {
         block_size: usize,
         max_model_len: Option<u32>,
     ) -> BoxedStatusResult<Self> {
+        if !config.supports_multimodal && !request.media.is_empty() {
+            return Err(Status::unimplemented(
+                "media is disabled; start the mock server with --supports-multimodal",
+            )
+            .into());
+        }
+        validate_media(&request.media)?;
         if !request.lora_name.is_empty() {
             return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
         }
@@ -343,7 +350,9 @@ impl PreparedRequest {
                 stop_reason: stop_token.map(pb::finish_info::StopReason::StopTokenId),
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
                 ec_transfer_params: None,
+                num_cached_tokens: None,
             }),
+            ..Default::default()
         }
     }
 
@@ -399,6 +408,45 @@ impl PreparedRequest {
             ]),
         }
     }
+}
+
+/// Check the media envelope without fetching, decoding, or retaining its payload.
+/// Image features do not change the mock's token accounting or synthetic output.
+fn validate_media(media: &[pb::MediaItem]) -> BoxedStatusResult<()> {
+    use pb::media_item::Source;
+
+    for item in media {
+        match pb::Modality::try_from(item.modality) {
+            Ok(pb::Modality::Image) => {}
+            Ok(pb::Modality::Audio | pb::Modality::Video) => {
+                return Err(
+                    Status::invalid_argument("the mock server supports image media only").into(),
+                );
+            }
+            Ok(pb::Modality::Unspecified) | Err(_) => {
+                return Err(
+                    Status::invalid_argument("media modality must be specified and valid").into(),
+                );
+            }
+        }
+        let has_payload = match item.source.as_ref() {
+            Some(Source::Url(value) | Source::DataUri(value)) => !value.trim().is_empty(),
+            Some(Source::RawBytes(value)) => !value.is_empty(),
+            Some(Source::Features(value)) => {
+                !value.identifier.trim().is_empty()
+                    && value.length > 0
+                    && value.kwargs.as_ref().is_some_and(|data| !data.is_empty())
+            }
+            None => false,
+        };
+        if !has_payload {
+            return Err(Status::invalid_argument(
+                "image media requires a non-empty source; features require kwargs, identifier, and length",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 impl KvTransferRole {
@@ -461,14 +509,14 @@ fn selected_logprob(token_id: u32) -> f32 {
 fn candidate_info(selected: u32, request: Option<&pb::CandidateTokens>) -> pb::CandidateTokenInfo {
     let ids: Vec<u32> = match request.and_then(|request| request.select.as_ref()) {
         None => Vec::new(),
-        Some(pb::candidate_tokens::Select::TopN(count)) => (1..=(*count as usize)
+        Some(pb::candidate_tokens::Select::TopN(count)) => (0..(*count as usize)
             .min(MAX_CANDIDATES))
             .map(|offset| selected.wrapping_add(offset as u32))
             .collect(),
         Some(pb::candidate_tokens::Select::TokenIds(ids)) => {
             ids.ids.iter().copied().take(MAX_CANDIDATES).collect()
         }
-        Some(pb::candidate_tokens::Select::All(true)) => (1..=MAX_CANDIDATES)
+        Some(pb::candidate_tokens::Select::All(true)) => (0..MAX_CANDIDATES)
             .map(|offset| selected.wrapping_add(offset as u32))
             .collect(),
         Some(pb::candidate_tokens::Select::All(false)) => Vec::new(),
@@ -479,8 +527,8 @@ fn candidate_info(selected: u32, request: Option<&pb::CandidateTokens>) -> pb::C
             .enumerate()
             .map(|(index, id)| pb::candidate_token_info::TokenInfo {
                 id,
-                logprob: selected_logprob(selected) - 0.1 * (index + 1) as f32,
-                rank: index as u32 + 2,
+                logprob: selected_logprob(selected) - 0.1 * index as f32,
+                rank: index as u32 + 1,
             })
             .collect(),
     }

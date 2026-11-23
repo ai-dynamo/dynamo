@@ -15,6 +15,10 @@ from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
+# Reuse salt for the health canary. TRT-LLM attention-DP dummy requests use an
+# unsalted [1] prompt, and an unsalted canary sharing that prefix crashes the rank.
+HEALTH_CHECK_CACHE_SALT = "dynamo-health-check"
+
 
 def _get_bos_token_id_from_tokenizer(tokenizer) -> int:
     """

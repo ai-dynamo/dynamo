@@ -46,6 +46,7 @@ class VllmPrepostTestHandler:
             "sampling_options": request.get("sampling_options"),
             "output_options": request.get("output_options"),
             "eos_token_ids": request.get("eos_token_ids"),
+            "agent_context": request.get("agent_context"),
             "decoded_prompt": self.tokenizer.decode(
                 token_ids,
                 skip_special_tokens=False,
@@ -76,9 +77,7 @@ async def main():
     runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
     runtime_config = ModelRuntimeConfig()
-    runtime_config.set_structural_tag_mode("on")
-    runtime_config.set_structural_tag_scope("always")
-    runtime_config.set_structural_tag_schema("strict")
+    runtime_config.set_structural_tag({"scope": "always", "schema": "strict"})
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,

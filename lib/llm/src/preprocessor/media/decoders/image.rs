@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Cursor;
 use std::sync::Once;
 
-use anyhow::Result;
-use image::{ColorType, ImageFormat};
+use anyhow::{Context as _, Result};
+use image::metadata::Orientation;
+use image::{ColorType, DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -14,7 +16,7 @@ use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
 use backends::{
     BackendAvailability, BackendDecline, DecodedImage, ImageDecodeBackend, ImageDecodeOutcome,
-    ImageDecodeRequest, image_reader_backend, turbojpeg_backend,
+    ImageDecodeRequest, PixelFormat, image_reader_backend, turbojpeg_backend,
 };
 
 mod backends;
@@ -92,6 +94,10 @@ pub struct ImageDecoder {
     #[serde(skip, default = "default_enable_libjpeg")]
     #[schema(ignore)]
     pub(crate) enable_libjpeg: bool,
+    /// Copied from [`super::MediaDecoder::apply_exif_orientation`] by the media loader.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) apply_exif_orientation: bool,
 }
 
 impl Default for ImageDecoder {
@@ -99,6 +105,7 @@ impl Default for ImageDecoder {
         Self {
             limits: ImageDecoderLimits::default(),
             enable_libjpeg: default_enable_libjpeg(),
+            apply_exif_orientation: false,
         }
     }
 }
@@ -123,6 +130,7 @@ impl Decoder for ImageDecoder {
                 let mut d = r.clone();
                 d.limits.clone_from(&self.limits);
                 d.enable_libjpeg = self.enable_libjpeg;
+                d.apply_exif_orientation = self.apply_exif_orientation;
                 d
             }
             None => self.clone(),
@@ -157,8 +165,84 @@ impl Decoder for ImageDecoder {
             decode_required_backend(image_reader, request)?
         };
 
+        let image = if self.apply_exif_orientation {
+            oriented(image, &bytes, &self.limits)?
+        } else {
+            image
+        };
         decoded_image_to_media_data(image)
     }
+}
+
+fn oriented(
+    image: DecodedImage,
+    bytes: &[u8],
+    limits: &ImageDecoderLimits,
+) -> Result<DecodedImage> {
+    let orientation = match image.source_format {
+        ImageFormat::WebP => webp_exif(bytes).and_then(Orientation::from_exif_chunk),
+        format => ImageReader::with_format(Cursor::new(bytes), format)
+            .into_decoder()
+            .and_then(|mut decoder| decoder.orientation())
+            .ok(),
+    }
+    .unwrap_or(Orientation::NoTransforms);
+    if orientation == Orientation::NoTransforms {
+        return Ok(image);
+    }
+    let DecodedImage {
+        source_format,
+        width,
+        height,
+        pixel_format,
+        pixels,
+    } = image;
+    let mut image = match pixel_format {
+        PixelFormat::L8 => {
+            image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+        PixelFormat::La8 => {
+            image::GrayAlphaImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+        PixelFormat::Rgb8 => {
+            image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+        PixelFormat::Rgba8 => {
+            image::RgbaImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+    }
+    .context("decoded pixels do not fit their dimensions")?;
+    image.apply_orientation(orientation);
+    DecodedImage::new(
+        source_format,
+        image.width(),
+        image.height(),
+        pixel_format,
+        image.into_bytes(),
+        limits,
+    )
+}
+
+// The EXIF chunk that image-webp records, read without its allocation of the declared size (up to
+// 4 GiB). The scan bound is image-webp's: the end of the VP8X chunk plus the RIFF size minus 12.
+fn webp_exif(bytes: &[u8]) -> Option<&[u8]> {
+    let le32 = |at: usize| {
+        let b = bytes.get(at..at + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    if bytes.get(12..16) != Some(b"VP8X".as_slice()) {
+        return None;
+    }
+    let mut offset = 20 + le32(16)?.next_multiple_of(2);
+    let end = offset + le32(4)?.saturating_sub(12);
+    while offset < end {
+        let size = le32(offset + 4)?;
+        if bytes.get(offset..offset + 4) == Some(b"EXIF".as_slice()) {
+            return bytes.get(offset + 8..offset + 8 + size);
+        }
+        offset += 8 + size.next_multiple_of(2);
+    }
+    None
 }
 
 fn ensure_fallback_allowed(
@@ -273,6 +357,106 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), format)
             .expect("Failed to encode test image");
         bytes
+    }
+
+    /// EXIF with orientation 6 (rotate 90 degrees clockwise), as a camera stores a portrait photo.
+    const EXIF_ROTATE_90: &[u8] =
+        b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+
+    fn encode_with_exif<E: image::ImageEncoder>(mut encoder: E, image: &image::RgbImage) {
+        encoder.set_exif_metadata(EXIF_ROTATE_90.to_vec()).unwrap();
+        encoder
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+    }
+
+    #[rstest]
+    fn test_exif_orientation_is_applied_only_when_enabled(
+        #[values(ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP)] format: ImageFormat,
+        #[values(false, true)] apply_exif_orientation: bool,
+    ) {
+        use dynamo_memory::actions::Slice as _;
+
+        let mut source = image::RgbImage::new(3, 2);
+        source.put_pixel(0, 0, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        match format {
+            ImageFormat::Png => {
+                encode_with_exif(image::codecs::png::PngEncoder::new(&mut bytes), &source)
+            }
+            ImageFormat::WebP => encode_with_exif(
+                image::codecs::webp::WebPEncoder::new_lossless(&mut bytes),
+                &source,
+            ),
+            _ => encode_with_exif(image::codecs::jpeg::JpegEncoder::new(&mut bytes), &source),
+        }
+
+        let decoded = ImageDecoder {
+            apply_exif_orientation,
+            ..Default::default()
+        }
+        .decode(create_encoded_media_data(bytes))
+        .unwrap();
+        // Upright: 2 wide, 3 tall, and the red pixel moved to the top right.
+        // Stored: 3 wide, 2 tall, and the red pixel stays at the top left.
+        let (shape, first_pixels) = if apply_exif_orientation {
+            (vec![3, 2, 3], [0, 0, 0, 255, 0, 0])
+        } else {
+            (vec![2, 3, 3], [255, 0, 0, 0, 0, 0])
+        };
+        assert_eq!(decoded.tensor_info.shape, shape);
+        if format != ImageFormat::Jpeg {
+            // SAFETY: nothing else holds the storage.
+            let pixels = unsafe { decoded.data.as_slice() }.unwrap();
+            assert_eq!(&pixels[..6], &first_pixels);
+        }
+    }
+
+    #[test]
+    fn test_webp_exif_is_read_where_image_webp_reads_it() {
+        let mut stored = Vec::new();
+        let source = image::RgbImage::new(3, 2);
+        encode_with_exif(
+            image::codecs::webp::WebPEncoder::new_lossless(&mut stored),
+            &source,
+        );
+        let exif = stored.windows(4).position(|w| w == b"EXIF").unwrap();
+        // The RIFF size ends image-webp's scan just before the EXIF chunk; VP8X no longer flags EXIF.
+        let mut past_riff = stored.clone();
+        past_riff[4..8].copy_from_slice(&(exif as u32 - 18).to_le_bytes());
+        past_riff[20] &= !0x08;
+        let mut oversized = stored.clone();
+        oversized[exif + 4..exif + 8].copy_from_slice(&(1u32 << 30).to_le_bytes());
+        assert_eq!(webp_exif(&stored), Some(EXIF_ROTATE_90));
+        assert_eq!(webp_exif(&past_riff), None);
+        assert_eq!(webp_exif(&oversized), None);
+    }
+
+    #[test]
+    fn test_exif_rotation_is_checked_against_limits() {
+        let mut bytes = Vec::new();
+        let source = image::RgbImage::new(3, 2);
+        encode_with_exif(image::codecs::png::PngEncoder::new(&mut bytes), &source);
+        let decoder = ImageDecoder {
+            limits: ImageDecoderLimits {
+                max_image_height: Some(2),
+                ..Default::default()
+            },
+            apply_exif_orientation: true,
+            ..Default::default()
+        };
+        let error = decoder
+            .decode(create_encoded_media_data(bytes))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Image dimensions exceed configured limits: 2x3"
+        );
     }
 
     #[rstest]
@@ -429,6 +613,7 @@ mod tests {
         };
         let server_config = ImageDecoder {
             limits: server_limits.clone(),
+            apply_exif_orientation: true,
             ..Default::default()
         }
         .with_libjpeg_for_benchmark(false);
@@ -452,6 +637,7 @@ mod tests {
         assert_eq!(merged.limits.max_image_height, Some(100));
         assert_eq!(merged.limits.max_alloc, Some(1024));
         assert!(!merged.enable_libjpeg);
+        assert!(merged.apply_exif_orientation);
     }
 
     // parse_bool_opt owns the accepted spellings; this locks the default-on
@@ -605,6 +791,60 @@ mod tests {
             }
             other => panic!("expected image metadata, got {other:?}"),
         }
+    }
+
+    /// Encoded 16-bit PNGs decode to the pixels that Pillow's `convert("RGB")` gives. The PNGs
+    /// come from pypng; the expected bytes from Pillow 11.3.0 `Image.open(png).convert("RGB")`.
+    #[rstest]
+    #[case::grey(
+        "iVBORw0KGgoAAAANSUhEUgAAAAUAAAABEAAAAABjBedsAAAAE0lEQVR4nGNgYGD4z8hQavD/PwAMawOk1Qn3MgAAAABJRU5ErkJggg==",
+        1,
+        &[0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+    )]
+    #[case::grey_with_trns_key(
+        "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABEAAAAABuG5crAAAAAnRSTlMAyOMsh7oAAAAPSURBVHicYyg1YDjx/z8ACQoDbMNVpCIAAAAASUVORK5CYII=",
+        1,
+        &[255, 255, 255, 200, 200, 200, 255, 255, 255]
+    )]
+    #[case::grey_alpha(
+        "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABEAQAAADheQB8AAAAFUlEQVR4nGMoNWBgYDjx/z8jQwMDABkKA+2nh8FBAAAAAElFTkSuQmCC",
+        2,
+        &[117, 117, 117, 0, 0, 0, 1, 1, 1]
+    )]
+    #[case::rgb(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABEAIAAAAr0DSeAAAAFUlEQVR4nGNg/P+fgeH/q4T6/wwNACjSBkc6FpyfAAAAAElFTkSuQmCC",
+        3,
+        &[1, 255, 0, 234, 127, 0]
+    )]
+    #[case::rgba(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABEAYAAACksqPJAAAAGklEQVR4nGNg/P+fgeF/A8OrhPr/DA3//wMAQ1sIxQ74P4cAAAAASUVORK5CYII=",
+        4,
+        &[1, 255, 0, 234, 127, 0]
+    )]
+    fn test_sixteen_bit_png_matches_pillow_rgb(
+        #[case] png_b64: &str,
+        #[case] channels: usize,
+        #[case] pillow_rgb: &[u8],
+    ) {
+        use base64::{Engine as _, engine::general_purpose};
+        use dynamo_memory::actions::Slice as _;
+
+        let png = general_purpose::STANDARD.decode(png_b64).unwrap();
+        let decoded = ImageDecoder::default()
+            .decode(create_encoded_media_data(png))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape[2], channels);
+        // SAFETY: nothing else holds the storage.
+        let pixels = unsafe { decoded.data.as_slice() }.unwrap();
+        // Pillow's convert("RGB") repeats a grey sample and drops alpha.
+        let rgb: Vec<u8> = pixels
+            .chunks(channels)
+            .flat_map(|pixel| match channels {
+                1 | 2 => [pixel[0]; 3],
+                _ => [pixel[0], pixel[1], pixel[2]],
+            })
+            .collect();
+        assert_eq!(rgb, pillow_rgb);
     }
 
     fn pil_parity_fixture() -> (Vec<u8>, Vec<u8>, u32, u32) {

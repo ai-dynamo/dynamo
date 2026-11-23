@@ -5,9 +5,12 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
+import yaml
 
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.utils.vllm_omni import vllm_omni_skip_reason
 
 if _omni_skip_reason := vllm_omni_skip_reason():
@@ -17,6 +20,8 @@ try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
 except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+
+import vllm_omni
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -48,6 +53,47 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
+    "omni_cosmos3_edge_i2v": VLLMOmniConfig(
+        name="omni_cosmos3_edge_i2v",
+        directory=vllm_dir,
+        script_name="agg_omni_cosmos3_i2v.sh",
+        script_args=["--model", "nvidia/Cosmos3-Edge", "--no-guardrails"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.installs_extra_dependencies,
+            pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(12.0),  # GH200 peak 10.2 GiB, plus headroom.
+            # Diffusion allocates no KV cache; declare zero for the GPU scheduler.
+            pytest.mark.requested_vllm_kv_cache_bytes(0),
+        ],
+        model="nvidia/Cosmos3-Edge",
+        # Omni 0.31's Cosmos pipeline imports media_utils, which requires PyAV.
+        # Install it only for this worker; the runtime image intentionally omits it.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
+        health_check_workers=True,
+        health_check_worker_count=1,
+        request_payloads=[
+            I2VPayload(
+                body={
+                    "prompt": "A red cube on a table rotates slowly.",
+                    "size": "256x256",
+                    "response_format": "b64_json",
+                    "nvext": {
+                        "num_inference_steps": 5,
+                        "num_frames": 17,
+                        "fps": 24,
+                        "guidance_scale": 6.0,
+                        "seed": 42,
+                    },
+                },
+                expected_video_shape=(17, 256, 256),
+                expected_video_fps=24,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_disagg_t2i": VLLMOmniConfig(
         name="omni_disagg_t2i",
         directory=vllm_dir,
@@ -148,7 +194,10 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.installs_extra_dependencies,
         ],
+        # Wan imports PyAV at load; the image omits it (#15898).
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
         model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         request_payloads=[
             I2VPayload(
@@ -193,6 +242,34 @@ vllm_omni_configs = {
                 repeat_count=1,
                 expected_response=[],
                 expected_log=[],
+            ),
+        ],
+    ),
+    # vLLM defaults to FlashInfer only on SM100 (B200/GB200). CI's Blackwell
+    # runners are SM120 and default to FlashAttention, so force it here.
+    "omni_audio_flashinfer": VLLMOmniConfig(
+        name="omni_audio_flashinfer",
+        directory=vllm_dir,
+        script_name="agg_omni_audio.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+        ],
+        model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "input": "Hello, this is a test of Dynamo audio generation.",
+                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    "voice": "vivian",
+                    "language": "English",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[r"Warming up FlashInfer attention"],
+                min_duration_s=1.0,
+                min_rms=0.01,
             ),
         ],
     ),
@@ -273,7 +350,10 @@ vllm_omni_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 6_473_647_000
             ),  # KV cache cap (2x safety over min=3_236_823_040)
+            pytest.mark.installs_extra_dependencies,
         ],
+        # PyAV for Wan, see omni_i2v.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[
             VideoGenerationPayload(
@@ -295,6 +375,16 @@ vllm_omni_configs = {
 }
 
 
+def _write_flashinfer_qwen3_tts_stage_config(tmp_path: Path) -> str:
+    source = Path(vllm_omni.__file__).parent / "deploy" / "qwen3_tts.yaml"
+    config = yaml.safe_load(source.read_text())
+    for stage in config["stages"]:
+        stage["attention_config"] = {"backend": "FLASHINFER"}
+    path = tmp_path / "qwen3_tts_flashinfer.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    return str(path)
+
+
 @pytest.fixture(params=params_with_model_mark(vllm_omni_configs))
 def vllm_omni_config_test(request):
     """Fixture that provides different vLLM-Omni test configurations."""
@@ -310,6 +400,7 @@ def test_omni_serve_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
+    tmp_path,
 ):
     """Test dynamo serve deployments with vLLM-Omni configurations."""
     config = dataclasses.replace(
@@ -320,6 +411,12 @@ def test_omni_serve_deployment(
         if config.name == "omni_audio" and detect_target_device() == "xpu"
         else None
     )
+    if config.name == "omni_audio_flashinfer":
+        extra_env = {
+            "DYN_OMNI_STAGE_CONFIGS_PATH": _write_flashinfer_qwen3_tts_stage_config(
+                tmp_path
+            )
+        }
     run_serve_deployment(
         config, request, ports=dynamo_dynamic_ports, extra_env=extra_env
     )

@@ -31,6 +31,7 @@ use lease::*;
 pub use lock::*;
 
 use super::utils::build_in_runtime;
+use crate::config::env_config::positive_secs_or_default;
 use crate::config::environment_names::etcd as env_etcd;
 
 const DEFAULT_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -454,12 +455,7 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<GetOptions>,
     ) -> Result<Vec<KeyValue>> {
-        let mut get_response = self
-            .connector
-            .get_client()
-            .kv_client()
-            .get(key, options)
-            .await?;
+        let mut get_response = self.connector.kv_client().get(key, options).await?;
         Ok(get_response.take_kvs())
     }
 
@@ -480,7 +476,6 @@ impl Client {
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
         let mut get_response = self
             .connector
-            .get_client()
             .kv_client()
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
@@ -669,7 +664,7 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<(i64, Option<Vec<KeyValue>>)> {
-        let mut kv_client = self.connector.get_client().kv_client();
+        let mut kv_client = self.connector.kv_client();
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
@@ -700,7 +695,7 @@ impl Client {
         tx: &mpsc::Sender<WatchEvent>,
         cancel_token: &CancellationToken,
     ) -> Result<()> {
-        let mut kv_client = connector.get_client().kv_client();
+        let mut kv_client = connector.kv_client();
         let get_result = tokio::select! {
             _ = cancel_token.cancelled() => anyhow::bail!("watch resync cancelled"),
             result = tokio::time::timeout(
@@ -785,15 +780,14 @@ impl Client {
     ) -> Result<WatchStream> {
         loop {
             match connector
-                .get_client()
                 .watch_client()
                 .watch(
                     prefix.as_str(),
                     Some(
+                        // No prev_kv: events are read for their new key and value only.
                         WatchOptions::new()
                             .with_prefix()
-                            .with_start_revision(start_revision)
-                            .with_prev_key(),
+                            .with_start_revision(start_revision),
                     ),
                 )
                 .await
@@ -1018,29 +1012,12 @@ fn default_lease_ttl() -> u64 {
 }
 
 fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
-    match value {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-        },
-        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
-    }
+    positive_secs_or_default(
+        env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+        value,
+        DEFAULT_STARTUP_CONNECT_TIMEOUT,
+        |message| tracing::warn!("{message}"),
+    )
 }
 
 /// Resolve the etcd channel keepalive `(interval, timeout)`, or `None` when disabled
@@ -1074,29 +1051,12 @@ fn keep_alive_from_values(
             ETCD_SERVER_KEEPALIVE_MIN_TIME.as_secs()
         );
     }
-    let timeout = match timeout {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
-                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
-                );
-                DEFAULT_KEEPALIVE_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
-                );
-                DEFAULT_KEEPALIVE_TIMEOUT
-            }
-        },
-        None => DEFAULT_KEEPALIVE_TIMEOUT,
-    };
+    let timeout = positive_secs_or_default(
+        env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
+        timeout,
+        DEFAULT_KEEPALIVE_TIMEOUT,
+        |message| tracing::warn!("{message}"),
+    );
     Some((interval, timeout))
 }
 
@@ -1309,6 +1269,32 @@ mod unit_tests {
     use super::*;
 
     #[test]
+    fn timeout_warnings_keep_transport_target() {
+        let warnings = crate::config::env_config::tests::capture_warnings(
+            "dynamo_runtime::transports::etcd",
+            || {
+                for value in [None, Some("45"), Some("0"), Some("invalid")] {
+                    let _ = startup_connect_timeout_from_value(value);
+                    let _ = keep_alive_from_values(None, value);
+                }
+                let _ = keep_alive_from_values(Some("0"), Some("invalid"));
+            },
+        );
+        assert_eq!(warnings.lines().count(), 4);
+        for (name, default) in [
+            (env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS, 120),
+            (env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS, 10),
+        ] {
+            assert!(warnings.contains(&format!(
+                "{name} must be >= 1; got 0. Falling back to {default}."
+            )));
+            assert!(warnings.contains(&format!(
+                "Invalid {name}='invalid' (invalid digit found in string). Falling back to {default}."
+            )));
+        }
+    }
+
+    #[test]
     fn parses_startup_connect_timeout() {
         assert_eq!(
             startup_connect_timeout_from_value(None),
@@ -1500,6 +1486,54 @@ mod tests {
         assert!(result.is_err(), "");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_prefix_reads_beyond_default_grpc_limit() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+        let config = DistributedConfig::from_settings();
+
+        rt_clone.primary().block_on(async move {
+            let drt = DistributedRuntime::new(rt, config).await.unwrap();
+            test_large_prefix_reads(drt).await.unwrap();
+        });
+    }
+
+    async fn test_large_prefix_reads(drt: DistributedRuntime) -> Result<()> {
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
+        let prefix = format!("v1/test_large_prefix_{}/", uuid::Uuid::new_v4());
+
+        // Each 1 MiB put fits etcd's default 1.5 MiB request limit; together the six exceed
+        // tonic's 4 MiB default response limit.
+        let value = vec![b'x'; 1 << 20];
+        let keys = 6;
+        for i in 0..keys {
+            client.kv_put(format!("{prefix}{i}"), &value, None).await?;
+        }
+
+        let listed = client.kv_get_prefix(&prefix).await.map(|kvs| kvs.len());
+        let watched = initial_snapshot_len(&client, &prefix).await;
+
+        client
+            .etcd_client()
+            .kv_client()
+            .delete(prefix, Some(DeleteOptions::new().with_prefix()))
+            .await?;
+
+        assert_eq!(listed?, keys);
+        assert_eq!(watched?, keys);
+        Ok(())
+    }
+
+    async fn initial_snapshot_len(client: &Client, prefix: &str) -> Result<usize> {
+        let (_, mut rx) = client.kv_get_and_watch_prefix(prefix).await?.dissolve();
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await? {
+            Some(WatchEvent::Resync(kvs)) => Ok(kvs.len()),
+            other => anyhow::bail!("expected the initial snapshot, got {other:?}"),
+        }
     }
 
     #[test]

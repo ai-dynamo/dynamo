@@ -880,11 +880,13 @@ mod tests {
             bytes: None,
             top_logprobs: vec![
                 TopLogprobs {
+                    token_id: None,
                     token: "best_option".to_string(),
                     logprob: (0.4_f32).ln(), // Much better option: 40%
                     bytes: None,
                 },
                 TopLogprobs {
+                    token_id: None,
                     token: "second_best".to_string(),
                     logprob: (0.3_f32).ln(), // Still better than selected: 30%
                     bytes: None,
@@ -938,6 +940,7 @@ mod tests {
             top_logprobs: top_probs
                 .into_iter()
                 .map(|(t, p)| TopLogprobs {
+                    token_id: None,
                     token: t.to_string(),
                     logprob: p.ln(),
                     bytes: None,
@@ -950,6 +953,7 @@ mod tests {
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -980,6 +984,8 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1010,6 +1016,7 @@ mod tests {
             .collect();
 
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices,
@@ -1023,6 +1030,8 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1342,6 +1351,7 @@ mod tests {
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -1369,6 +1379,8 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1575,6 +1587,7 @@ mod tests {
         // In practice, this would have real logprobs data
 
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![],
@@ -1588,6 +1601,8 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 

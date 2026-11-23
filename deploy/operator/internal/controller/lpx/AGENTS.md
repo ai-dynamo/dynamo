@@ -36,7 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 # Ownership and Identity
 
 - The DynamoGraphDeployment (DGD) owns the LPXGraphDeployment (LPXGD). The LPXGD
-  owns its PodCliqueSet (PCS), runtime ConfigMaps, and Services. The PCS owns the
+  owns its PodCliqueSet (PCS) and Services. The PCS owns the
   LPUPipelineRequests (LPRs) and Grove hierarchy. Each independent workload has one
   PodCliqueScalingGroup (PCSG). A shared draft/target runtime remains one workload.
 - LPRs have a controlling PCS owner reference with `blockOwnerDeletion: true`.
@@ -61,8 +61,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Observation and Retries
 
-- Read through the cached client. Observe dependencies and validate them once
+- Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
+- Cyborg GPU resolution is a validation-only exception to dependency watches.
+  Do not add ResourceClaim, ResourceClaimTemplate, or DeviceClass watches for it:
+  the resolved count does not affect the rendered workload. Lookup failures use
+  ordinary error retries, and DGD edits use the existing watch.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
   UID/resource-version preconditions and write conflicts protect mutations.
@@ -74,6 +78,15 @@ SPDX-License-Identifier: Apache-2.0
   a deadline is active, and external download checks. The other deliberate use
   is the follow-up after recording `SchedulingFailed`, because status-only
   LPXGD updates are filtered. Ordinary errors use controller-runtime backoff.
+- Synchronize the desired PCS before any replica write, including scale-down and
+  deadline cleanup. After a PCS write, wait for its watched cache observation. Use
+  the shared scaling predicate to defer Coherent replica writes until Grove's
+  observed generation matches the current PCS generation and no rollout is active.
+  Completed progress from an older generation does not acknowledge a new spec.
+  Apply this generation wait only to Coherent: observed generation can lag
+  throughout RollingRecreate without blocking its scaling. Initial Coherent
+  configuration acknowledgement does not require scheduler requests or Ready pods.
+  Continue observing readiness and component status while scaling is deferred.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.
@@ -83,7 +96,12 @@ SPDX-License-Identifier: Apache-2.0
 - Retain matching LPRs and their status across input edits. Collect missing
   requests in the same ordered pass that constructs desired requests. An
   immutable mismatch waits for its Grove engine to roll and LPX to release the
-  old requests; incompatible layouts and OnDelete builds require PCS replacement.
+  old requests; incompatible layouts require PCS replacement.
+- Before a PCS spec update, dry-run create each missing request, so the API
+  server refuses an invalid request while the previous workload still runs.
+  Only an `Invalid` response stops the pass; any other failure of the dry run,
+  such as a full quota, does not. The dry run does not cover PCS replacement or
+  validation that the scheduler performs after creation.
 - Publish missing requests independently in workload/PCSG ordinal/model order.
   Partial publication and idempotent retries are supported; exactly-once
   batches are not required. Creation order does not guarantee scheduler order or prevent
@@ -115,8 +133,11 @@ SPDX-License-Identifier: Apache-2.0
   This also defers PCS updates and replacement until all groups are observed.
 - Render a complete valid replacement before deleting an existing workload.
   A replacement error preserves the existing workload, even if its digest differs.
-- For incompatible layouts or OnDelete build changes, foreground-delete the PCS
-  and recreate it after garbage collection. Grove rolls compatible layouts.
+- For incompatible layouts, foreground-delete the PCS and recreate it after
+  garbage collection. Grove rolls compatible layouts, including build changes.
+- Admission rejects OnDelete for LPX DGDs: Grove would leave running Pods on
+  stale templates, which the LPX scheduler treats as dependency loss. Do not
+  add OnDelete-specific rollout handling.
 - Grove makes PCS clique composition and scaling-group `CliqueNames` immutable.
   Model removal therefore requires PCS replacement. Do not trim group membership
   while retaining templates; those templates can become standalone cliques.
@@ -128,9 +149,25 @@ SPDX-License-Identifier: Apache-2.0
   For build changes, all retiring requests in an engine must release before any
   are deleted. Keep UID/resource-version delete preconditions. Deadline cancellation
   remains separate.
-- Never directly delete Pods or PodCliques from graph reconciliation or LPR
-  lifecycle helpers. Grove scaling and owner garbage collection own workload
-  cleanup; scheduler Pod references and release journals do not authorize it.
+- Ordinary retirement leaves Pod and PodClique cleanup to Grove and owner GC.
+  The Dynamo operator's LPX controller may directly delete Pods only for an observed,
+  owned, non-deleting NodeLocal LPR in `Releasing` for `requestChanged`,
+  `dependencyChanged`, or `bindingFailed`: remove its journaled current and target
+  Agent Pod UIDs, including plan-replacement predecessors, after verifying their
+  PodClique -> PCSG -> PCS owner chain, including terminating PodCliques. Keep namespace
+  checks and UID/resource-version delete preconditions. Retry missing observations
+  without blocking cleanup of the remaining journaled Pods. Preserve Grove capacity
+  and LPUPipelineRequest status, finalizers, and annotations.
+- Attempt release cleanup after DGD identity and input-handoff checks and owned
+  Grove-resource observations, including every configured PCSG. It bypasses model
+  downloads and desired workload resolution, not these earlier gates. Use observed
+  LPRs even when they no longer match desired intent. Accepted tradeoff: before the
+  desired PCS template is synchronized, Grove may recreate deleted Agents from the
+  old template, requiring another release cycle.
+- Cleanup errors do not stop downloads or workload reconciliation. Combine them
+  with the final error before status persistence,
+  retain the previous ObservedGeneration, and retry. Cap any later scheduled wakeup
+  at the existing bounded error-retry interval; otherwise use ordinary error backoff.
 - A terminating LPR is pending cleanup, not a reason to delete its PCS or Pods.
   Wait for scheduler finalization through watches, including when external
   capacity is unchanged.
@@ -216,10 +253,8 @@ SPDX-License-Identifier: Apache-2.0
   Reuse fresh successful observations by build URL across revisions, without
   renewing `LastCheckedAt`. Check new or expired builds. Only a Ready deployment
   whose generation has been observed may ignore a failed periodic refresh.
-- Runtime ConfigMaps are immutable, content-addressed, LPXGD-owned, and labeled
-  with its UID. Find obsolete maps by label, verify ownership before deletion,
-  and retain desired names. Delete obsolete maps only after readiness, not during
-  PCS replacement, so existing pods keep their configuration.
+- Each build supplies nonempty `lpuUnits`. Runtimes read placement from the
+  build, so the operator does not create runtime ConfigMaps.
 
 # Tests
 

@@ -4,12 +4,24 @@
 use std::cell::Cell;
 use std::io;
 use std::num::NonZeroUsize;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::GrpcTransportConfig;
 use crate::transport::connect_pool_with;
+use crate::{GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig};
 use dynamo_backend_common::{BackendError, ErrorType};
-use tokio::time::{Instant, sleep};
+use tokio::net::UnixListener;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep, timeout};
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::codegen::http;
+use tonic::transport::Channel;
+use tonic_health::pb::HealthCheckRequest;
+use tonic_health::pb::health_check_response::ServingStatus;
+use tonic_health::pb::health_client::HealthClient;
+use tower::util::MapRequestLayer;
 
 fn config() -> GrpcTransportConfig {
     GrpcTransportConfig {
@@ -101,4 +113,127 @@ async fn retry_wait_is_capped_and_last_failure_is_preserved() {
     assert!(error.to_string().contains("latest connection failure"));
     assert!(!error.to_string().contains("initial connection failure"));
     assert!(error.to_string().contains("after 2 attempts"));
+}
+
+/// A gRPC server on a Unix socket, as an engine in the sidecar's pod serves
+/// one. It reports its health as `SERVING`.
+struct UnixServer {
+    /// The `:authority` of every request it has served.
+    authorities: Arc<Mutex<Vec<String>>>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl UnixServer {
+    fn serve(path: &Path) -> Self {
+        let incoming = UnixListenerStream::new(UnixListener::bind(path).expect("bind socket"));
+        let (_, health) = tonic_health::server::health_reporter();
+        let authorities = Arc::new(Mutex::new(Vec::new()));
+        let seen = authorities.clone();
+        let record_authority = move |request: http::Request<tonic::body::Body>| {
+            let authority = request.uri().authority().map(ToString::to_string);
+            seen.lock().unwrap().extend(authority);
+            request
+        };
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .layer(MapRequestLayer::new(record_authority))
+                .add_service(health)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve on the Unix socket");
+        });
+        Self {
+            authorities,
+            shutdown: Some(shutdown),
+            task,
+        }
+    }
+
+    /// Stops serving and closes every connection, as an exiting engine does.
+    /// The socket file stays behind, as it does when a process exits.
+    async fn stop(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        timeout(Duration::from_secs(5), &mut self.task)
+            .await
+            .expect("the server stops")
+            .expect("the server task");
+    }
+}
+
+async fn health(channel: Channel) -> Result<i32, String> {
+    HealthClient::new(channel)
+        .check(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .map(|response| response.into_inner().status)
+        .map_err(|status| status.to_string())
+}
+
+/// The engine creates its socket only once it has started, so the sidecar
+/// keeps retrying until the socket exists, talks gRPC over every pooled
+/// connection, and reconnects on the existing channel after a restart.
+#[tokio::test]
+async fn a_unix_socket_endpoint_waits_for_its_socket_then_serves_rpcs() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let path = dir.path().join("engine.sock");
+    let endpoint = GrpcEndpoint::parse(&format!("unix://{}", path.display()), "--test-endpoint")
+        .expect("valid Unix socket endpoint");
+    let transport = GrpcTransportConfig {
+        connections: NonZeroUsize::new(2).unwrap(),
+        connect_attempt_timeout: Duration::from_millis(500),
+        retry_interval: Duration::from_millis(10),
+        startup_deadline: Duration::from_secs(5),
+    };
+    let server_path = path.clone();
+    let server = tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        UnixServer::serve(&server_path)
+    });
+
+    assert!(
+        !path.exists(),
+        "the socket must not exist before connecting"
+    );
+    let pool = GrpcChannelPool::connect("test", &endpoint, transport, false)
+        .await
+        .expect("connect once the socket exists");
+    assert_eq!(pool.len(), 2);
+    for _ in 0..pool.len() {
+        assert_eq!(
+            health(pool.next_channel())
+                .await
+                .expect("health over the socket"),
+            ServingStatus::Serving as i32
+        );
+    }
+    let server = server.await.expect("server");
+    assert_eq!(
+        *server.authorities.lock().unwrap(),
+        ["localhost", "localhost"],
+        "a Unix socket has no host, so requests name `localhost` as gRPC does"
+    );
+    server.stop().await;
+
+    let channel = pool.next_channel();
+    assert!(
+        health(channel.clone()).await.is_err(),
+        "an engine that has exited does not answer"
+    );
+    std::fs::remove_file(&path).expect("remove the stale socket");
+    let server = UnixServer::serve(&path);
+    timeout(Duration::from_secs(5), async {
+        while health(channel.clone()).await.is_err() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the channel reconnects to the restarted engine");
+    server.stop().await;
 }

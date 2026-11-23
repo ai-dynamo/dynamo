@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/nemotron-3-super-fp8/sglang/agg/deploy.yaml
+requirements:
+  h200-sxm-4gpu:
+    gpus: 4

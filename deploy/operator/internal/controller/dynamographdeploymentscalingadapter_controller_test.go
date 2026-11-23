@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -54,10 +53,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 		{
 			name: "updates DGD replicas when DGDSA spec differs",
 			adapter: &v1beta1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-frontend",
-					Namespace: "default",
-				},
+				Name:      "test-dgd-frontend",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 5,
 					DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -67,15 +64,13 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				},
 			},
 			dgd: &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
+				Name:      "test-dgd",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
 							ComponentName:  "Frontend",
-							Replicas:       ptr.To(int32(2)),
+							Replicas:       new(int32(2)),
 							ScalingAdapter: &v1beta1.ScalingAdapter{},
 						},
 					},
@@ -88,10 +83,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 		{
 			name: "no update when replicas already match",
 			adapter: &v1beta1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-frontend",
-					Namespace: "default",
-				},
+				Name:      "test-dgd-frontend",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 3,
 					DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -101,15 +94,13 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				},
 			},
 			dgd: &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
+				Name:      "test-dgd",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
 							ComponentName:  "Frontend",
-							Replicas:       ptr.To(int32(3)),
+							Replicas:       new(int32(3)),
 							ScalingAdapter: &v1beta1.ScalingAdapter{},
 						},
 					},
@@ -122,10 +113,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 		{
 			name: "uses default replicas (1) when DGD component has no replicas set",
 			adapter: &v1beta1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-worker",
-					Namespace: "default",
-				},
+				Name:      "test-dgd-worker",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 4,
 					DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -135,10 +124,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				},
 			},
 			dgd: &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
+				Name:      "test-dgd",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
@@ -155,10 +142,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 		{
 			name: "returns without retry when component not found in DGD",
 			adapter: &v1beta1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-missing",
-					Namespace: "default",
-				},
+				Name:      "test-dgd-missing",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 2,
 					DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -168,15 +153,13 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				},
 			},
 			dgd: &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
+				Name:      "test-dgd",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
 							ComponentName: "Frontend",
-							Replicas:      ptr.To(int32(1)),
+							Replicas:      new(int32(1)),
 						},
 					},
 				},
@@ -187,10 +170,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 		{
 			name: "does not propagate replicas after component opts out",
 			adapter: &v1beta1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-frontend",
-					Namespace: "default",
-				},
+				Name:      "test-dgd-frontend",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 5,
 					DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -200,15 +181,13 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 				},
 			},
 			dgd: &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
+				Name:      "test-dgd",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 						{
 							ComponentName: "Frontend",
-							Replicas:      ptr.To(int32(2)),
+							Replicas:      new(int32(2)),
 						},
 					},
 				},
@@ -241,10 +220,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			// Run Reconcile
 			ctx := context.Background()
 			req := ctrl.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      tt.adapter.Name,
-					Namespace: tt.adapter.Namespace,
-				},
+				Name:      tt.adapter.Name,
+				Namespace: tt.adapter.Namespace,
 			}
 
 			result, err := r.Reconcile(ctx, req)
@@ -346,10 +323,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *tes
 
 	ctx := context.Background()
 	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "nonexistent",
-			Namespace: "default",
-		},
+		Name:      "nonexistent",
+		Namespace: "default",
 	}
 
 	// Should return no error when adapter not found (client.IgnoreNotFound)
@@ -369,10 +344,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_DGDNotFound(t *
 	}
 
 	adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-frontend",
-			Namespace: "default",
-		},
+		Name:      "test-dgd-frontend",
+		Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			Replicas: 5,
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -395,10 +368,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_DGDNotFound(t *
 
 	ctx := context.Background()
 	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      adapter.Name,
-			Namespace: adapter.Namespace,
-		},
+		Name:      adapter.Name,
+		Namespace: adapter.Namespace,
 	}
 
 	// Should return error when DGD not found
@@ -432,15 +403,13 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 	}
 
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
+		Name:      "test-dgd",
+		Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "Frontend",
-					Replicas:      ptr.To(int32(2)),
+					Replicas:      new(int32(2)),
 				},
 			},
 		},
@@ -459,10 +428,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 
 	ctx := context.Background()
 	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      adapter.Name,
-			Namespace: adapter.Namespace,
-		},
+		Name:      adapter.Name,
+		Namespace: adapter.Namespace,
 	}
 
 	// Should return no error and skip reconciliation
@@ -496,20 +463,16 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_findAdaptersForDGD(t *tes
 	}
 
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
+		Name:      "test-dgd",
+		Namespace: "default",
 	}
 
 	// Adapters belonging to test-dgd
 	adapter1 := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-frontend",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			},
+		Name:      "test-dgd-frontend",
+		Namespace: "default",
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -520,12 +483,10 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_findAdaptersForDGD(t *tes
 	}
 
 	adapter2 := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			},
+		Name:      "test-dgd-decode",
+		Namespace: "default",
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -537,10 +498,8 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_findAdaptersForDGD(t *tes
 
 	// Adapter belonging to test-dgd without the optional lookup label
 	adapterUnlabeled := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker",
-			Namespace: "default",
-		},
+		Name:      "test-dgd-worker",
+		Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
 				Name:          "test-dgd",
@@ -551,12 +510,10 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_findAdaptersForDGD(t *tes
 
 	// Adapter belonging to different DGD
 	adapterOther := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "other-dgd-frontend",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "other-dgd",
-			},
+		Name:      "other-dgd-frontend",
+		Namespace: "default",
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: "other-dgd",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -568,12 +525,10 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_findAdaptersForDGD(t *tes
 
 	// Adapter with a stale/mismatched label should follow spec.dgdRef.name.
 	adapterMislabeled := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mislabeled-dgd-frontend",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			},
+		Name:      "mislabeled-dgd-frontend",
+		Namespace: "default",
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{

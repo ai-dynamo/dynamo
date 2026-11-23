@@ -39,8 +39,9 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
+use crate::http::service::error::{Protocol, public_message_for};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use dynamo_error::http::{ClientErrorAction, SanitizedError, http_action_for_error};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -152,6 +153,7 @@ impl StreamErrorSignal {
             ErrorType::Cancelled => return,
             ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
         crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
@@ -357,12 +359,20 @@ async fn connection_monitor(
     }
 }
 
-type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
-
-#[derive(Default)]
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
+    emit_done_sentinel: bool,
+}
+
+impl Default for StreamMonitorOptions {
+    fn default() -> Self {
+        Self {
+            activity_rx: None,
+            error_signal: None,
+            emit_done_sentinel: true,
+        }
+    }
 }
 
 fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
@@ -389,8 +399,9 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
             "Request cancelled",
         ),
     };
-    let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
+    let message =
+        public_message_for(error, Protocol::OpenAi).unwrap_or_else(|| message.to_string());
+    let error_type = if status == dynamo_error::http::overload_status_code() {
         "service_unavailable"
     } else {
         match status {
@@ -457,7 +468,7 @@ pub(crate) fn monitor_for_disconnects_with_error(
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -491,6 +502,30 @@ pub(super) fn monitor_for_disconnects_with_error_signal(
     )
 }
 
+/// Responses streams terminate with typed events rather than a [DONE] sentinel.
+/// Preserve error accounting and disconnect monitoring for this route.
+pub(super) fn monitor_for_responses_disconnects(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            error_signal: Some(error_signal),
+            emit_done_sentinel: false,
+            ..Default::default()
+        },
+    )
+}
+
 pub fn monitor_for_disconnects_with_activity(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -519,6 +554,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
     stream_handle: ConnectionHandle,
     activity_rx: mpsc::UnboundedReceiver<()>,
     error_signal: StreamErrorSignal,
+    emit_done_sentinel: bool,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -530,6 +566,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
             error_signal: Some(error_signal),
+            emit_done_sentinel,
         },
     )
 }
@@ -559,7 +596,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
     options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
@@ -567,6 +604,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     let StreamMonitorOptions {
         mut activity_rx,
         error_signal,
+        emit_done_sentinel,
     } = options;
 
     // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
@@ -620,9 +658,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                 error_signal.set(error_type.clone());
                             }
                             // We're terminating the stream intentionally here with a
-                            // structured error + [DONE]; disarm so the stream handle
-                            // doesn't later record this as ClosedUnexpectedly (which
-                            // would mis-attribute the fault as a client disconnect).
+                            // structured error and optional sentinel. Disarm the handle
+                            // to avoid recording this as a client disconnect.
                             stream_handle.disarm();
                             if let Some(error_signal) = &inflight_guard.error_signal {
                                 error_signal.mark_terminal_event_emitted();
@@ -653,7 +690,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                 tracing::error!(%error_type, %err, "Streaming failure");
                             }
                             yield Event::default().data(error_body);
-                            yield Event::default().data("[DONE]");
+                            if emit_done_sentinel {
+                                yield Event::default().data("[DONE]");
+                            }
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
@@ -667,7 +706,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
                             // async-openai client will chomp it.
-                            yield Event::default().data("[DONE]");
+                            if emit_done_sentinel {
+                                yield Event::default().data("[DONE]");
+                            }
                             break;
                         }
                     }
@@ -829,6 +870,132 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn test_responses_terminal_events_have_no_done_sentinel() {
+        for terminal in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            let model = "responses-terminal";
+            let (metrics, _, context, handle) = setup_test(model, terminal);
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Responses, true, terminal);
+            let signal = StreamErrorSignal::default();
+            if terminal == "response.failed" {
+                signal.set(ErrorType::Internal);
+                signal.mark_terminal_event_emitted();
+            }
+            let data = serde_json::json!({"type": terminal}).to_string();
+            let expected = format!("event: {terminal}\ndata: {data}\n\n");
+            let stream = futures::stream::iter([Ok(Event::default().event(terminal).data(data))]);
+            let body = collect_sse_body(monitor_for_responses_disconnects(
+                stream, context, guard, handle, signal,
+            ))
+            .await;
+            assert_eq!(body, expected, "unexpected trailer after {terminal}");
+            assert_eq!(metrics.get_inflight_count(model), 0);
+            let (status, error) = if terminal == "response.failed" {
+                (Status::Error, ErrorType::Internal)
+            } else {
+                (Status::Success, ErrorType::None)
+            };
+            assert_eq!(
+                metrics.get_request_counter(
+                    model,
+                    &Endpoint::Responses,
+                    &RequestType::Stream,
+                    &status,
+                    &error,
+                ),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn test_responses_stream_error_has_no_done_sentinel() {
+        let model = "responses-stream-error";
+        let (metrics, _, context, handle) = setup_test(model, "req-stream-error");
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::Responses,
+            true,
+            "req-stream-error",
+        );
+        let stream = futures::stream::iter([Err(axum::Error::new(std::io::Error::other(
+            "private backend diagnostic",
+        )))]);
+        let body = collect_sse_body(monitor_for_responses_disconnects(
+            stream,
+            context,
+            guard,
+            handle,
+            StreamErrorSignal::default(),
+        ))
+        .await;
+        let frames: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(frames.len(), 1, "unexpected frame after error: {body}");
+        let error: serde_json::Value = serde_json::from_str(frames[0]).unwrap();
+        assert!(error.get("error").is_some());
+        assert!(!body.contains("private backend diagnostic"));
+        assert_eq!(metrics.get_inflight_count(model), 0);
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_and_completions_preserve_done_sentinel() {
+        for endpoint in [Endpoint::ChatCompletions, Endpoint::Completions] {
+            let model = "sentinel-compatibility";
+            let (metrics, _, context, handle) = setup_test(model, "req-sentinel");
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, endpoint, true, "req-sentinel");
+            let stream = futures::stream::iter([Ok(Event::default().data(r#"{"choices":[]}"#))]);
+            let body = if matches!(endpoint, Endpoint::ChatCompletions) {
+                let (_tx, rx) = mpsc::unbounded_channel();
+                collect_sse_body(monitor_for_disconnects_with_activity_and_error_signal(
+                    stream,
+                    context,
+                    guard,
+                    handle,
+                    rx,
+                    StreamErrorSignal::default(),
+                    true,
+                ))
+                .await
+            } else {
+                collect_sse_body(monitor_for_disconnects_with_error_signal(
+                    stream,
+                    context,
+                    guard,
+                    handle,
+                    StreamErrorSignal::default(),
+                ))
+                .await
+            };
+            assert_eq!(body, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n");
+            assert_eq!(metrics.get_inflight_count(model), 0);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1041,17 +1208,12 @@ mod tests {
         })
         .chain(futures::stream::pending());
 
-        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        let mut monitored = Box::pin(monitor_for_responses_disconnects(
             stream,
             engine_context,
             guard,
             stream_handle,
-            None,
-            openai_stream_error,
-            StreamMonitorOptions {
-                error_signal: Some(error_signal),
-                ..Default::default()
-            },
+            error_signal,
         ));
         assert!(monitored.next().await.is_some());
         drop(monitored);
@@ -1171,10 +1333,113 @@ mod tests {
         assert_eq!(body["error"]["type"], "service_unavailable");
         assert_eq!(
             body["error"]["code"],
-            crate::http::service::error::overload_status_code().as_u16()
+            dynamo_error::http::overload_status_code().as_u16()
         );
     }
 
+    #[test]
+    fn semantic_stream_error_renders_context_length_details() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: Some(4000),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            body["error"]["message"],
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
+        );
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("maximum context length is 8192 tokens"));
+        assert!(message.contains("4000 prompt tokens"));
+        assert!(message.contains("5000 requested output tokens"));
+        assert!(message.contains("9000 tokens total"));
+        assert!(
+            !message.contains("prompt is too long"),
+            "combined-budget errors must not blame the prompt alone, got: {message}"
+        );
+    }
+
+    #[test]
+    fn semantic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+                prompt_tokens: Some(8192),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert_eq!(
+            message,
+            "This model's maximum context length is 8192 tokens. However, your messages \
+             resulted in 8192 tokens, which leaves no room for output. Please reduce the length \
+             of the messages."
+        );
+        assert!(!message.contains("prompt is too long"));
+    }
+
+    #[test]
+    fn semantic_stream_error_keeps_class_message_for_other_invalid_requests() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Invalid request");
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_sse_body() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported video media");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text_in_sse() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported media type");
+        assert_eq!(body["error"]["code"], 415);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
+        );
+    }
     #[tokio::test]
     async fn signaled_error_before_terminal_event_keeps_disconnect_handle_armed() {
         let error_signal = StreamErrorSignal::default();

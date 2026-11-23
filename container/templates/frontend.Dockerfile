@@ -16,7 +16,7 @@ FROM ${EPP_IMAGE} AS epp
 # only thing that puts its crates into the frontend's NOTICES and OSRB bundle.
 
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
-# reaches the final frontend image. aiperf 0.10.0 depends on crick==0.0.8,
+# reaches the final frontend image. aiperf depends on crick==0.0.8,
 # which publishes no manylinux aarch64 wheel — without this, arm64 builds
 # fall back to sdist and fail in the final stage where gcc is intentionally
 # absent. amd64 has a prebuilt manylinux_x86_64 wheel on PyPI, so the build
@@ -37,7 +37,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
         && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*; \
+        && rm -rf /var/lib/apt/lists/* \
+        && {% include "templates/verify_ca_certificates.Dockerfile" %}; \
     fi
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         python${PYTHON_VERSION} -m venv /tmp/buildenv \
@@ -49,6 +50,7 @@ FROM ${FRONTEND_IMAGE} AS pre_frontend
 
 ARG PYTHON_VERSION
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends \
@@ -56,7 +58,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         libstdc++6 \
         # required by EPP's embedded ZMQ KV-event/replica-sync subscriber
-        # (dynamo-kv-router's standalone-selection feature); matches the
+        # (dynamo-kv-router's ingest-zmq and replica-sync-zmq features); matches the
         # runtime dep installed in deploy/inference-gateway/ext-proc/Dockerfile
         libzmq5 \
         # required for verification of GPG keys
@@ -65,13 +67,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git \
         # compliance audit bootstraps syft over HTTPS
         curl \
-        # lets Dynamo processes opt into jemalloc via
-        # LD_PRELOAD or DYN_FRONTEND_JEMALLOC; not preloaded by default
+        # lets CPython and C code opt into jemalloc via
+        # LD_PRELOAD; not preloaded by default
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && {% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
@@ -80,6 +85,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -90,8 +97,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
+        libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
         openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -145,12 +165,15 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving,
 # plus AIC core for the experimental router-side prefill-load model.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
+# --only-binary python-rapidjson (from tritonclient): this stage has no C++ compiler on
+# purpose, so take the newest release that has a wheel rather than building an sdist.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --only-binary python-rapidjson \
         --overrides /tmp/overrides.frontend.txt \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt

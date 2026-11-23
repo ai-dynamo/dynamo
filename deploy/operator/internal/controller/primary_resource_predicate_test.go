@@ -31,7 +31,7 @@ import (
 
 func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.T) {
 	t.Log("The primary predicate combines metadata and generation/deletion changes, not status")
-	old := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	old := &v1beta1.DynamoGraphDeployment{Generation: 1}
 	filter := dgdPrimaryPredicate()
 	for _, test := range []struct {
 		name   string
@@ -62,7 +62,7 @@ func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.
 
 func TestGenerationOrDeletionChangedPredicate(t *testing.T) {
 	pred := commoncontroller.GenerationOrDeletionChangedPredicate()
-	oldObject := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	oldObject := &corev1.ConfigMap{Generation: 1}
 
 	t.Run("preserves non-update event handling", func(t *testing.T) {
 		assert.True(t, pred.Create(event.CreateEvent{Object: oldObject}))

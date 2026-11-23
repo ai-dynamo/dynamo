@@ -113,7 +113,7 @@ func TestDynamoGraphDeploymentMarshalNormalizesExtraPodSpecContainers(t *testing
 							},
 							InitContainers: []corev1.Container{{Name: "init"}},
 							EphemeralContainers: []corev1.EphemeralContainer{{
-								EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debug"},
+								Name: "debug",
 							}},
 						},
 						MainContainer: &corev1.Container{Image: "busybox"},

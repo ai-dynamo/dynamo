@@ -2,4 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Published AISimulate wheel staged into planner and framework runtime wheelhouses.
-aisimulate==0.13.0.dev202610040000000065
+# Keep in sync with the aisim-core pins in Cargo.toml and lib/bindings/python/Cargo.toml.
+aisim==0.15.0.dev202611130000000104

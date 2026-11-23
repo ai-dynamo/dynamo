@@ -46,6 +46,8 @@ import math
 import os
 import threading
 
+from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
+
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
@@ -190,8 +192,12 @@ def stop_gc_policy() -> None:
     )
 
 
-class FpmGcWorkerExtension:
-    """vLLM worker extension exposing GC control inside worker processes."""
+class FpmGcWorkerExtension(FpmBenchmarkWorkerExtension):
+    """vLLM worker extension exposing GC control inside worker processes.
+
+    vLLM takes one extension class and this one replaces the benchmark
+    extension when ``DYN_FPM_GC_POLICY`` is set, so it inherits its methods.
+    """
 
     def fpm_gc_start(self) -> bool:
         return start_gc_policy()

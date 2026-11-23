@@ -70,6 +70,8 @@ class SnapshotConfig:
             # Stay paused so backends can refresh restore env, create the
             # runtime, then call elect_and_wake().
             logger.info("Restore sentinel detected; returning application-paused")
+            # Drop the capture override. The subsequent restore-context refresh
+            # applies the destination policy, if supplied, before registration.
             os.environ.pop("HF_HUB_OFFLINE", None)
             return True
 
@@ -103,24 +105,6 @@ class SnapshotConfig:
 
 
 def configure_snapshot_capture_env() -> None:
-    nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
-    if nccl_cumem_enable and nccl_cumem_enable != "0":
-        logger.warning(
-            "Overriding NCCL_CUMEM_ENABLE=%r with '0' for snapshot mode "
-            "because cuda-checkpoint does not support cuMem-backed NCCL allocations",
-            nccl_cumem_enable,
-        )
-    os.environ["NCCL_CUMEM_ENABLE"] = "0"
-
-    nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
-    if nccl_nvls_enable and nccl_nvls_enable != "0":
-        logger.warning(
-            "Overriding NCCL_NVLS_ENABLE=%r with '0' for snapshot mode "
-            "to avoid NVLS and keep NCCL on the legacy P2P path",
-            nccl_nvls_enable,
-        )
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-
     nccl_ib_disable = os.environ.get("NCCL_IB_DISABLE")
     if nccl_ib_disable and nccl_ib_disable != "1":
         logger.warning(

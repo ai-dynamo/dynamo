@@ -9,6 +9,165 @@ Run these commands from `dynamo/gyms/planner-gym` after following the
 [getting started guide](getting-started.md). For scoring definitions and
 limitations, see the [Planner Gym README](../README.md).
 
+## Reproducible suites and bounded execution
+
+A suite references independent Match Configs, so each case can select its own
+topology, engines, policy roster, workload and SLO. Paths resolve from the suite
+file; case IDs must be unique and safe as directory names.
+
+```yaml
+schema_version: 1
+name: controlled-comparison
+cases:
+  - id: combined
+    config: match.controlled.example.yaml
+    labels: {layout: aggregated}
+  - id: split
+    config: match.controlled-disagg.example.yaml
+    labels: {layout: disaggregated}
+```
+
+```bash
+python scripts/run_suite_config.py configs/suite.controlled.example.yaml --dry-run
+python scripts/run_suite_config.py configs/suite.controlled.example.yaml --output-dir runs/controlled-suite
+python scripts/run_suite_config.py configs/suite.controlled.example.yaml --output-dir runs/controlled-suite --resume
+```
+
+The examples use synthetic workloads and fixed engine timing; no model weights
+are loaded. Select cases with repeatable `--case-id` arguments. Within each
+case, optional `run_ids` select exact cells printed by `run_match_config.py
+--print-matrix`. Suites run cases sequentially and delegate cell parallelism to
+the Match Config, avoiding nested worker pools. External job arrays can shard
+case IDs into separate output directories.
+
+The suite writes `suite.json`, `comparison.csv`, and `index.html`, linking each
+case's normalized JSON/HTML report. Referenced configs' publication destinations
+are not invoked. A session lock rejects simultaneous writers.
+
+Add execution controls to a Match Config:
+
+```yaml
+execution:
+  max_parallel_runs: 2
+  timeout_s: 900
+  max_memory_mb: 4096
+  fail_fast: false
+```
+
+These controls activate spawned workers. The timeout covers the guarded worker
+lifetime; the memory limit uses sampled RSS across its process tree, in MiB.
+It is not a hard OS memory reservation and can overshoot between samples.
+Choose concurrency and per-worker limits together. A timeout, memory violation,
+or worker crash produces a failed cell with a log. `fail_fast` stops launching
+new cells while allowing already-running cells to finish. Interruption terminates
+in-flight worker groups. Process supervision and session locking require POSIX.
+
+Each result records setup/replay wall time, total guarded wall time and sampled
+peak RSS for isolated workers. Replay wall time includes Planner preparation
+inside the replay call. Default single-process execution retains wall timing
+but has no isolated per-cell RSS measurement.
+
+Single-match sessions also support explicit locations and resume:
+
+```bash
+python scripts/run_match_config.py configs/match.controlled.example.yaml --session-dir runs/one-session
+python scripts/run_match_config.py configs/match.controlled.example.yaml --resume runs/one-session --overwrite
+```
+
+Successful cells have atomic checkpoints. Resume verifies replay settings,
+input fingerprints, software identity and saved evidence; failed or incomplete
+cells run again, with prior attempts archived. Timeout, memory and parallelism
+budgets may change on retry. Changing the replay semantics or inputs requires
+a new session. Resume uses the original session directory; copied or moved
+sessions are rejected to avoid stale artifact references. Keep input files and
+software immutable while execution is active.
+
+## Scoring and request capture
+
+Selected TTFT and ITL SLO bounds also become the Planner's control targets.
+Omit duplicate targets from `planner_config`; explicit conflicting values are
+rejected. E2E-only constraints remain scoring constraints because Planner's
+control interface uses TTFT and ITL. Fixed/polynomial timing overrides are
+available through `extra_args.timing_model`; external AIS identity remains
+owned by the first-class model/engine settings. Planner with custom timing
+requires `ais_bootstrap: false`.
+
+```yaml
+backend:
+  replay:
+    request_capture: jsonl
+metrics:
+  short_output_itl: skip
+evaluations:
+  defaults:
+    measurement_window: {start_s: 0, end_s: 60}
+```
+
+Capture modes are `memory` (default), `jsonl`, and `summary`. JSONL mode keeps
+terminal rows in a separate file and scores them in one streaming pass. It
+avoids the Python request list; native replay still buffers rows before writing.
+Summary mode omits request capture and uses native aggregates. With an ITL
+constraint it requires `short_output_itl: skip`; explicit windows require
+memory or JSONL. Truncated request capture fails scoring.
+
+`fail` preserves the default AIPerf-style treatment of undefined ITL for a
+one-token output; `skip` matches native replay for that case. Failed requests
+still fail, and zero-token outputs cannot satisfy token-latency constraints.
+
+The optional measurement window selects arrivals in `[start_s, end_s)` on the
+replay clock after trace preparation and arrival speedup. Their eventual
+outcomes include drain completions. Goodput and provisioned GPU-hours use the
+same interval; starting and draining workers count until removed. Static fleets
+may extend through a final idle tail. Dynamic windows cannot extend past replay
+termination, because subsequent controller actions have not been simulated.
+Original replay totals and full-replay latency context remain in the report.
+
+## Preserve trace time while changing request count
+
+An external Mooncake trace can declare `prepare` independently of arrival
+speedup. Preparation is available for offline simulation and uses bounded-memory
+disk sorting. Default settings preserve the input bytes exactly.
+
+```yaml
+evaluations:
+  traces:
+    - name: recorded-input
+      path: input.jsonl
+      format: mooncake
+      block_size: 16
+      presorted: true
+      prepare:
+        start_ms: 60000
+        end_ms: 120000
+        rebase: true
+        request_scale: 2.5
+        seed: 7
+        jitter_ms: 1000
+      warmup:
+        path: input.jsonl
+        prepare:
+          start_ms: 0
+          end_ms: 60000
+          rebase: true
+          request_scale: 2.5
+          seed: 7
+          jitter_ms: 1000
+```
+
+Bounds refer to original timestamps and use a half-open interval. Rebasing
+subtracts the selected start. Scaling creates whole copies plus deterministic
+fractional thinning, preserving input/output lengths and the time span. Added
+copies receive independent hash namespaces. Optional copy-phase jitter is
+bounded and tapers at interval edges; `session_id_field` shares that phase
+within a session, without changing fractional selection to session sampling.
+
+Preparation records source/output SHA-256, resolved window, counts and controls
+in a sidecar manifest. It never overwrites the source or an existing output.
+Namespaces are local to one prepared output: prepare a combined interval before
+splitting if cross-window KV reuse is required. The `warmup` field feeds only
+the builtin Planner's load predictor; it does not warm engine KV caches and is
+not applied to rival policies. Warmup paths resolve from the Match Config.
+
 ## Build a Golden Set from an external base trace
 
 [`configs/golden-set.example.yaml`](../configs/golden-set.example.yaml) is a
@@ -188,7 +347,7 @@ backend:
       moe_ep_size: 1
       attention_dp_size: 1
       runtime:
-        cold_start_delay_s: 30
+        cold_start_delay_s: 60
       extra_args: {}
     # Optional partial overrides inherited from common.
     prefill:
@@ -220,7 +379,9 @@ counts by their independently resolved engine costs. An engine's `backend`
 selects DynoSim's scheduler semantics. AISimulate performance lookup defaults to that
 backend/version but can be decoupled explicitly with `ais_backend` and
 `ais_backend_version`; identity and accounting fields cannot be overridden
-through `extra_args`. `cold_start_delay_s` models worker startup. KV handoff
+through `extra_args`. `cold_start_delay_s` models worker startup and defaults to
+60 seconds for each engine role, including substrate presets. Set it to `0`
+explicitly to model immediate startup, or set a measured delay. KV handoff
 delay requires `kv_transfer_bandwidth_gbps` (GB/s) and `kv_bytes_per_token` together;
 for a disaggregated deployment they normally belong on the prefill engine.
 Replace the example bytes/token value with the model and KV-cache dtype being

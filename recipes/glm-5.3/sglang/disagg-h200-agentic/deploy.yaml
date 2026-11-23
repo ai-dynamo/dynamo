@@ -1,0 +1,368 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm53-disagg-h200-agentic-sglang-config
+  labels:
+    app.kubernetes.io/name: glm53-disagg-h200-agentic
+    app.kubernetes.io/part-of: dynamo
+data:
+  prefill.yaml: |-
+    model-path: zai-org/GLM-5.3
+    served-model-name: zai-org/GLM-5.3
+    host: 0.0.0.0
+    trust-remote-code: true
+    tensor-parallel-size: 8
+    data-parallel-size: 1
+    ep-size: 8
+    moe-a2a-backend: none
+    kv-cache-dtype: fp8_e4m3
+    fp8-gemm-backend: flashinfer_deepgemm
+    mem-fraction-static: 0.92
+    max-running-requests: 64
+    attention-backend: dsa
+    enable-prefill-cp: true
+    cp-strategy: interleave
+    disable-overlap-schedule: true
+    cuda-graph-backend-decode: disabled
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    context-length: 250000
+    watchdog-timeout: 3600
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 12345
+    enable-metrics: true
+    kv-events-config:
+      publisher: zmq
+      topic: kv-events
+      endpoint: tcp://*:5557
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 32
+
+  decode.yaml: |-
+    model-path: zai-org/GLM-5.3
+    served-model-name: zai-org/GLM-5.3
+    host: 0.0.0.0
+    trust-remote-code: true
+    tensor-parallel-size: 8
+    data-parallel-size: 8
+    enable-dp-attention: true
+    ep-size: 1
+    moe-a2a-backend: none
+    fp8-gemm-backend: deep_gemm
+    enforce-shared-experts-fusion: true
+    kv-cache-dtype: fp8_e4m3
+    context-length: 250000
+    mem-fraction-static: 0.95
+    max-running-requests: 64
+    cuda-graph-max-bs: 64
+    cuda-graph-bs:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 20
+      - 24
+      - 28
+      - 32
+      - 36
+      - 40
+      - 44
+      - 48
+      - 52
+      - 56
+      - 60
+      - 64
+    attention-backend: dsa
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    watchdog-timeout: 3600
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 12345
+    enable-metrics: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm53-disagg-h200-agentic
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1@sha256:37badffd83eb334aee9d06fb442e36fc3c963314336c92622c78ac5c037d514d
+              imagePullPolicy: IfNotPresent
+              resources: {}
+      replicas: 1
+
+    - name: prefill
+      type: prefill
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H200
+          containers:
+            - name: main
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -euo pipefail
+                  ulimit -l unlimited || true
+                  ulimit -n 1048576 || true
+                  exec python3 -m dynamo.sglang \
+                    --config /etc/sglang/prefill.yaml \
+                    --dsa-prefill-backend flashmla_kv \
+                    --cuda-graph-backend-prefill disabled \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
+                # Forward-pass metrics are disabled: the SGLang 0.5.18 metrics reporter in
+                # sglang-runtime:1.5.1 crashes the scheduler on the first EAGLE decode batch.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: MC_FORCE_HCA
+                  value: "1"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1@sha256:37badffd83eb334aee9d06fb442e36fc3c963314336c92622c78ac5c037d514d
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 1Ti
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 1Ti
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              # Replaces the operator default liveness (5 s / 4 s / 3 failures) and readiness
+              # (10 s / 4 s / 3 failures) probes: serve-time kernel compiles and long EAGLE
+              # batches can stall /live beyond the default budget and restart a healthy worker.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+                - mountPath: /etc/sglang
+                  name: sglang-config
+                  readOnly: true
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm53-disagg-h200-agentic-sglang-config
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1
+
+    - name: decode
+      type: decode
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H200
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        nvidia.com/dynamo-component-type: prefill
+                        nvidia.com/dynamo-graph-deployment-name: glm53-disagg-h200-agentic
+                    topologyKey: topology.kubernetes.io/zone
+          containers:
+            - name: main
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -euo pipefail
+                  ulimit -l unlimited || true
+                  ulimit -n 1048576 || true
+                  exec python3 -m dynamo.sglang \
+                    --config /etc/sglang/decode.yaml \
+                    --dsa-prefill-backend flashmla_kv \
+                    --dsa-decode-backend flashmla_kv \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
+                # Forward-pass metrics are disabled: the SGLang 0.5.18 metrics reporter in
+                # sglang-runtime:1.5.1 crashes the scheduler on the first EAGLE decode batch.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                # Synthetic MTP acceptance length for performance benchmarking only.
+                # Uncomment for throughput runs; keep commented for accuracy evaluation.
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "2.69"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+                # - name: SGLANG_SIMULATE_ACC_TOKEN_MODE
+                #   value: real-draft-token
+                - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
+                  value: "3600"
+                - name: MC_FORCE_HCA
+                  value: "1"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1@sha256:37badffd83eb334aee9d06fb442e36fc3c963314336c92622c78ac5c037d514d
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 200Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 200Gi
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              # Replaces the operator default liveness (5 s / 4 s / 3 failures) and readiness
+              # (10 s / 4 s / 3 failures) probes: serve-time kernel compiles and long EAGLE
+              # batches can stall /live beyond the default budget and restart a healthy worker.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+                - mountPath: /etc/sglang
+                  name: sglang-config
+                  readOnly: true
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm53-disagg-h200-agentic-sglang-config
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1

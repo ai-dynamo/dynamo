@@ -132,7 +132,7 @@ spec:
               value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
 
             - name: CONCURRENCY
-              value: "54"
+              value: "36"
 
             - name: MAX_ISL
               value: "1048576"

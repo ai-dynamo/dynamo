@@ -1,0 +1,22 @@
+{
+  "input": "Hello from Dynamo.",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "voice": "vivian",
+  "data_source": "url",
+  "response_format": "mp3",
+  "speed": 1.25,
+  "task_type": "CustomVoice",
+  "language": "English",
+  "instructions": "Warm and calm.",
+  "ref_audio": "https://example.com/ref.wav",
+  "ref_text": "The reference transcript.",
+  "max_new_tokens": 2048,
+  "user": "user-1",
+  "nvext": {
+    "annotations": [
+      "request_id"
+    ],
+    "frontend_accepts_audio_chunks": true,
+    "cfg_scale": 1.5
+  }
+}

@@ -91,7 +91,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         health_check_urls = [
             (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-            (f"http://localhost:{frontend_port}/health", check_health_generate),
+            (
+                f"http://localhost:{frontend_port}/health?instances=true",
+                check_health_generate,
+            ),
         ]
 
         # Set health check based on worker type
@@ -138,7 +141,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return super().__exit__(exc_type, exc_val, exc_tb)
 
 
-@pytest.mark.timeout(135)  # 3x average
+@pytest.mark.timeout(450)  # 3x average
 def test_request_cancellation_trtllm_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):

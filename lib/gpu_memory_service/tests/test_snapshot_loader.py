@@ -87,14 +87,13 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         def __init__(self, **kwargs):
             calls.append(("init", kwargs))
 
-        def load_to_gms(self, input_dir, *, max_workers, clear_existing):
+        def load_to_gms(self, input_dir, *, max_workers):
             calls.append(
                 (
                     "load_to_gms",
                     {
                         "input_dir": input_dir,
                         "max_workers": max_workers,
-                        "clear_existing": clear_existing,
                     },
                 )
             )
@@ -121,9 +120,16 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         {
             "input_dir": "/checkpoints/run/versions/1/device-3",
             "max_workers": 16,
-            "clear_existing": True,
         },
     )
+
+
+class _KeepaliveReached(Exception):
+    pass
+
+
+def _stop_at_keepalive(seconds):
+    raise _KeepaliveReached
 
 
 def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
@@ -140,8 +146,10 @@ def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
+    monkeypatch.setattr(loader.time, "sleep", _stop_at_keepalive)
 
-    loader.main()
+    with pytest.raises(_KeepaliveReached):
+        loader.main()
 
     # These base arguments are forwarded to each per-device child, so an empty
     # list here would make each child fail on a missing --checkpoint-dir.
@@ -163,9 +171,22 @@ def test_main_forwards_explicit_argv_unchanged(monkeypatch):
         "run_per_device",
         lambda module, argv: forwarded.append((module, argv)),
     )
+    monkeypatch.setattr(loader.time, "sleep", _stop_at_keepalive)
 
-    loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
+    with pytest.raises(_KeepaliveReached):
+        loader.main(argv=["--checkpoint-dir", "/tmp/cp"])
 
     assert forwarded == [
         ("gpu_memory_service.v1.snapshot.loader", ["--checkpoint-dir", "/tmp/cp"])
     ]
+
+
+def test_v0_rejects_the_mx_backend(monkeypatch, capsys):
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+
+    with pytest.raises(SystemExit):
+        loader.main(["--checkpoint-dir", "/tmp/cp", "--transfer-backend", "mx"])
+
+    assert (
+        "--transfer-backend=mx requires DYN_GMS_USE_V1=true" in capsys.readouterr().err
+    )

@@ -187,7 +187,6 @@ html.dark,
 /* Sidebar styling */
 #fern-sidebar {
     border-right: 1px solid var(--border, var(--grayscale-a5)) !important;
-    height: 100vh !important;
 }
 .fern-sidebar-link:not(:hover) {
     background-color: transparent !important;
@@ -1287,19 +1286,6 @@ a.fern-card:hover{
 .dark .mermaid-container-expanded svg :is(.marker, marker path, marker polygon) {
   fill: #76b900 !important;
   stroke: #76b900 !important;
-}
-
-
-/* ===================== Community page ===================== */
-
-:root {
-  --dynamo-community-green: #76b900;
-  --dynamo-community-green-bright: #8ed600;
-  --dynamo-community-ink: var(--grayscale-a12);
-  --dynamo-community-muted: var(--grayscale-a10);
-  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
-  --dynamo-community-soft: #f3f4f3;
-  --dynamo-community-titlebar-text: #555755;
 }
 `;
 // sync-site-css:end

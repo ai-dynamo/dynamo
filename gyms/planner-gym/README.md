@@ -53,6 +53,7 @@ telemetry are under `runs/quickstart/artifacts/`.
 | First offline comparison | [Getting started](docs/getting-started.md) | Linux and a native Dynamo build |
 | Generate seven synthetic workloads | `python scripts/gen_traces.py --seed 0` | Python standard library |
 | Configure a comparison matrix | [Match Config guide](docs/usage.md#user-guide-run-a-match-config) | Gym; Dynamo for sim, AIPerf for real |
+| Run independent configurations with checkpoints | [Reproducible suites](docs/usage.md#reproducible-suites-and-bounded-execution) | Gym; native runtime for simulation |
 | Build six schedule-shaped workloads from your data | [Golden Set builder](docs/usage.md#build-a-golden-set-from-an-external-base-trace) | Gym and a source trace |
 | Replay recorded requests | [Recorded trace guide](docs/usage.md#bring-your-own-recorded-trace) | User-supplied Mooncake or Dynamo request traces |
 | Compare running deployments | [Endpoint benchmarking](docs/usage.md#user-guide-benchmark-live-endpoints) | AIPerf and existing endpoints |
@@ -73,7 +74,7 @@ python scripts/gen_traces.py --seed 0
 python scripts/run_match_config.py configs/match.quickstart.yaml --validate-only
 ```
 
-The base dependencies are PyYAML and Plotly. The `test` and `jev` extras add
+The base dependencies are PyYAML, Plotly, and psutil. The `test` and `jev` extras add
 pytest and the optional HTTP client; `sim` adds the Planner's Python dependencies.
 Dynamo's native runtime and AIPerf are installed separately.
 
@@ -81,6 +82,10 @@ Dynamo's native runtime and AIPerf are installed separately.
 
 A request meets an SLO only when it satisfies every configured threshold.
 Dropped or failed requests count against the good-request rate.
+For simulation, `metrics.short_output_itl` explicitly selects whether one-token
+outputs fail an ITL constraint (`fail`, the default) or skip that check (`skip`,
+matching native replay). Incompatible summary-only scoring fails explicitly.
+Scorecard schema 3 records the policy, measurement interval, and GPU cost basis.
 
 | Metric | Definition |
 | --- | --- |
@@ -95,6 +100,9 @@ Read efficiency together with good-request rate and latency. A policy can rank
 well on efficiency while missing many SLOs. Simulated allocation includes
 starting and draining workers, weighted by GPUs per worker. Live endpoint
 comparisons lack deployment telemetry and therefore cannot rank by GPU cost.
+An optional arrival measurement window includes eventual outcomes during drain
+while integrating GPU allocation over the selected interval. Full-replay latency
+percentiles remain context metrics; they are not relabeled as window percentiles.
 
 | Built-in SLO | Time to First Token (TTFT) | Inter-token Latency (ITL) | End-to-end latency |
 | --- | --- | --- | --- |
@@ -132,6 +140,10 @@ the quickstart to verify actual native replay.
   `--max-source-requests` and `--max-source-hashes`, or narrow the input first.
 - The legacy leaderboard scripts overwrite fixed diagnostic filenames. Use
   Match Configs for isolated session and run artifacts.
+- JSONL request capture avoids a Python request list, but the native runtime
+  still buffers terminal rows before writing them. Summary capture uses less
+  memory; explicit windows require memory or JSONL capture. RSS limits apply
+  to the isolated worker and its descendants.
 - Hosted Jev call latency is measured separately and does not advance simulated
   time. See its guide before interpreting results.
 

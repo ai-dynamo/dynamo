@@ -28,7 +28,7 @@ backend:
       attention_dp_size: 1
       runtime:
         # Delay before a newly created worker can serve requests.
-        cold_start_delay_s: 30
+        cold_start_delay_s: 60
       extra_args: {}
     prefill:
       runtime:
@@ -42,7 +42,7 @@ backend:
     mode: round_robin
 
   # Resolved relative to this Match Config. An inline mapping is also accepted.
-  # The Planner's scaling target is distinct from the evaluation SLAs below.
+  # Per-run TTFT/ITL targets follow the selected evaluation SLO below.
   planner_config: planner.sim.example.yaml
 
   replay:

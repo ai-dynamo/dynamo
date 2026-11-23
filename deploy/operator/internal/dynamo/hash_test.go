@@ -26,20 +26,20 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 func baseDGD(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) *v1alpha1.DynamoGraphDeployment {
 	return &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-		Spec:       v1alpha1.DynamoGraphDeploymentSpec{Services: services},
+		Name: "test", Namespace: "default",
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{Services: services},
 	}
 }
 
@@ -85,8 +85,8 @@ func betaDGDWithRuntimeVersion(t testing.TB, image, override string) *v1beta1.Dy
 
 func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
-		"decode":  {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(3))},
+		"prefill": {ComponentType: commonconsts.ComponentTypePrefill, Replicas: new(int32(2))},
+		"decode":  {ComponentType: commonconsts.ComponentTypeDecode, Replicas: new(int32(3))},
 	})
 	h1 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
@@ -112,7 +112,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	}{
 		{"empty_experimental", &v1beta1.ExperimentalSpec{}},
 		{"empty_grove", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{}}},
-		{"explicit_false", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}}},
+		{"explicit_false", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(false)}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,7 +136,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	t.Log("Verify the effective true opt-in still changes the worker generation")
 	explicitTrue := base.DeepCopy()
 	explicitTrue.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
-		Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)},
 	}
 	assert.NotEqual(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitTrue))
 }
@@ -156,7 +156,7 @@ func TestWorkerHashSpec_PreservesOtherExperimentalFeatures(t *testing.T) {
 			t.Log("Add explicit false alongside another experimental feature")
 			dcd := &v1beta1.DynamoComponentDeployment{}
 			dcd.Spec.Experimental = tc.experimental.DeepCopy()
-			dcd.Spec.Experimental.Grove = &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}
+			dcd.Spec.Experimental.Grove = &v1beta1.GroveSpec{ForceScalingGroup: new(false)}
 			original := dcd.DeepCopy()
 
 			t.Log("Hash normalization removes only Grove and leaves the original input intact")
@@ -219,8 +219,8 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 
 	t.Log("Make the same cardinality assertions explicit")
 	explicitReplicas := dgd.DeepCopy()
-	explicitReplicas.Spec.Components[0].Roles[0].Replicas = ptr.To(int32(1))
-	explicitReplicas.Spec.Components[0].Roles[1].Replicas = ptr.To(int32(3))
+	explicitReplicas.Spec.Components[0].Roles[0].Replicas = new(int32(1))
+	explicitReplicas.Spec.Components[0].Roles[1].Replicas = new(int32(3))
 
 	t.Log("Verify optional role cardinality assertions do not create a worker generation")
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, explicitReplicas))
@@ -372,9 +372,7 @@ func TestComputeBetaDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T)
 	// Native v1beta1 podTemplate metadata is also pod-affecting.
 	dgd6 := betaDGD(t, base())
 	dgd6.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{"rollout": "required"},
-		},
+		Annotations: map[string]string{"rollout": "required"},
 	}
 	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, dgd6), "podTemplate metadata change should change hash")
 }
@@ -401,10 +399,8 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresOverriddenDGDObjectAnnotations(t *
 		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
 	}
 	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "component",
-			},
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "component",
 		},
 	}
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
@@ -436,12 +432,12 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
 
 	replicas := base()
-	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
+	replicas.Spec.Services["worker"].Replicas = new(int32(99))
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
 
 	scaleToZero := betaDGD(t, base())
-	scaleToZero.Spec.Components[0].Replicas = ptr.To(int32(0))
-	scaleToZero.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+	scaleToZero.Spec.Components[0].Replicas = new(int32(0))
+	scaleToZero.Spec.Components[0].MinAvailable = new(int32(1))
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scaleToZero))
 
 	scalingAdapter := betaDGD(t, base())
@@ -519,17 +515,18 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 
 func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
 	tests := []struct {
-		name string
-		gate runtimefeatures.Gate
+		name                  string
+		minimumRuntimeVersion runtimeversion.Version
 	}{
-		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
-		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
+		{name: "canary health checks", minimumRuntimeVersion: runtimefeatures.CanaryHealthChecks.MinRuntimeVersion},
+		{name: "frontend startup probe", minimumRuntimeVersion: compatibility.FrontendStartupProbe.MinRuntimeVersion},
+		{name: "increased worker failure threshold", minimumRuntimeVersion: runtimefeatures.IncreasedWorkerFailureThreshold.MinRuntimeVersion},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
-			assert.GreaterOrEqual(t, tt.gate.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
+			assert.GreaterOrEqual(t, tt.minimumRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
 		})
 	}
 }
@@ -613,12 +610,12 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testin
 	}{
 		{name: "disabled", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false}},
 		{name: "disabled_with_options", checkpoint: &v1beta1.ComponentCheckpointConfig{
-			Enabled: false, CheckpointRef: ptr.To("existing-snapshot"),
+			Enabled: false, CheckpointRef: new("existing-snapshot"),
 			StartupPolicy:  v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 			DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
 		}},
 		{name: "disabled_with_grove", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false},
-			grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}},
+			grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -694,4 +691,50 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t 
 	}
 	normalized := workerHashSpec(dcd)
 	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, normalized.CompilationCache.MountPath)
+}
+
+// TestComputeBetaDGDWorkersSpecHash_NativeEngineKeepsLegacyHash pins the worker
+// hashes that release/1.6.0 (240b7d359f) computed for a native-sidecar worker
+// launching vllm-rs directly. Detecting that command would move the hash and roll
+// the workload on an operator-only upgrade (#17543).
+func TestComputeBetaDGDWorkersSpecHash_NativeEngineKeepsLegacyHash(t *testing.T) {
+	nativeEngine := func(withCache bool, explicitBackend string) *v1beta1.DynamoGraphDeployment {
+		always := corev1.ContainerRestartPolicyAlways
+		component := v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "worker",
+			ComponentType: v1beta1.ComponentTypeWorker,
+			Replicas:      new(int32(1)),
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{
+					Name:          commonconsts.RuntimeContainerName,
+					Image:         "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0",
+					RestartPolicy: &always,
+				}},
+				Containers: []corev1.Container{{
+					Name:    commonconsts.MainContainerName,
+					Image:   "vllm/vllm-rs:0.3.0",
+					Command: []string{"/usr/local/bin/vllm-rs"},
+					Args:    []string{"--model", "Qwen/Qwen3-0.6B", "--port", "8000"},
+				}},
+			}},
+		}
+		if withCache {
+			component.CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: "/root/.cache/vllm"}
+		}
+		return &v1beta1.DynamoGraphDeployment{
+			Name: "qwen", Namespace: "demo",
+			Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: explicitBackend,
+				Components:       []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+			},
+		}
+	}
+
+	t.Log("Match the hashes release/1.6.0 computed without and with a compilation cache")
+	assert.Equal(t, "8312f8aa", mustComputeBetaDGDWorkersSpecHash(t, nativeEngine(false, "")))
+	assert.Equal(t, "66eaf1eb", mustComputeBetaDGDWorkersSpecHash(t, nativeEngine(true, "")))
+
+	t.Log("Match the hash release/1.6.0 computed with an explicit vLLM backend")
+	assert.Equal(t, "4a915483", mustComputeBetaDGDWorkersSpecHash(t, nativeEngine(true, "vllm")))
 }

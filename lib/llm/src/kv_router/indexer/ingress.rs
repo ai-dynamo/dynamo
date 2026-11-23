@@ -9,12 +9,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_kv_indexer::host::SessionPrefixIndexer;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::identity::RoutingPartitionId;
-use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
-use dynamo_kv_router::services::selection::KvEventIngress;
-use dynamo_kv_router::{SessionPrefixIndexer, WorkerInputs, WorkerType};
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::worker_type::WorkerType;
 use dynamo_runtime::component::Endpoint;
+use dynamo_scheduler::host::{IndexRegistry, KvEventIngress};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -61,8 +62,8 @@ impl RuntimeIngress {
             session_prefix_index,
         } = args;
         let component = endpoint.component();
-        let cache_required = worker_inputs.contains(WorkerInputs::CACHE);
-        let indexer = if cache_required {
+        let index_required = worker_inputs.reads_kv_index();
+        let indexer = if index_required {
             super::build(
                 component,
                 kv_router_config,
@@ -76,7 +77,7 @@ impl RuntimeIngress {
             Indexer::None
         };
 
-        let subscription = if cache_required && kv_event_source_requirement.should_subscribe() {
+        let subscription = if index_required && kv_event_source_requirement.should_subscribe() {
             let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
                     "KV source membership watch is required when local KV event subscription is enabled"
@@ -99,7 +100,7 @@ impl RuntimeIngress {
         } else {
             tracing::info!(
                 requirement = %kv_event_source_requirement,
-                cache_required = cache_required,
+                index_required = index_required,
                 use_kv_events = kv_router_config.use_kv_events,
                 use_remote_indexer = kv_router_config.use_remote_indexer,
                 "Skipping KV event subscription"
@@ -149,12 +150,7 @@ impl RuntimeIngress {
 
 #[async_trait::async_trait]
 impl KvEventIngress for RuntimeIngress {
-    fn open(
-        &self,
-        _registry: &WorkerRegistry,
-        _key: &RoutingPartitionId,
-        _block_size: u32,
-    ) -> Indexer {
+    fn open(&self, _index: &IndexRegistry, _key: &RoutingPartitionId, _block_size: u32) -> Indexer {
         self.indexer.clone()
     }
 }

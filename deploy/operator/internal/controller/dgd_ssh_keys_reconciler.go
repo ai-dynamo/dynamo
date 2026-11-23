@@ -40,7 +40,7 @@ func (r *dgdSSHKeysReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	if r.manager == nil || (!dgd.HasAnyMultinodeComponent() && !dgd.HasLPXComponent()) {
+	if r.manager == nil || !dgd.HasAnyMultinodeComponent() {
 		return nil
 	}
 	if err := r.manager.EnsureAndReplicate(ctx, dgd.Namespace); err != nil {

@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
+from actuator import NvmlActuator
 from power_agent import (
     POWER_ANNOTATION_KEY,
     PowerAgent,
@@ -256,6 +257,73 @@ class TestApplyCap(unittest.TestCase):
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
             handle, 100_000
         )
+
+
+class TestApplyCapReportsWriteOutcome(unittest.TestCase):
+    """`_apply_cap` reports whether the Set landed, and `NvmlActuator.apply_cap`
+    carries that outcome to the reconcile loop (DEP #14767).
+
+    Before this, the failure was swallowed here and `apply_cap` returned the
+    intended post-clamp value regardless, so the loop could never learn the
+    outcome of its own writes. The regression this pins: **a clean return is
+    not success.**
+    """
+
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def test_successful_write_reports_true(self):
+        mock_nvml = _make_nvml()
+        with patch.object(power_agent, "pynvml", mock_nvml):
+            with patch("power_agent._persist_managed_gpus"):
+                self.assertIs(_apply_cap(MagicMock(), 0, 300, MagicMock()), True)
+
+    def test_failed_write_reports_false_without_raising(self):
+        mock_nvml = _make_nvml()
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.side_effect = Exception("nvml fail")
+        with patch.object(power_agent, "pynvml", mock_nvml):
+            self.assertIs(_apply_cap(MagicMock(), 0, 300, MagicMock()), False)
+
+    def test_actuator_reports_not_ok_with_a_plausible_wattage(self):
+        """The whole point: the caller still gets the wattage it INTENDED to
+        apply, plus the fact that it never landed."""
+        mock_nvml = MagicMock()
+        mock_nvml.NVMLError = Exception
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle_0"
+        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.return_value = (
+            100_000,
+            700_000,
+        )
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.side_effect = Exception("nvml fail")
+        actuator = NvmlActuator(metrics=MagicMock())
+
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with patch.object(power_agent, "pynvml", mock_nvml):
+                result = actuator.apply_cap(0, 300)
+
+        self.assertIs(result.ok, False)
+        self.assertEqual(result.effective_w, 300)
+
+    def test_constraints_read_failure_does_not_mask_a_successful_write(self):
+        """The constraints re-read is a failure of the VALUE re-derivation, not
+        of the write: `ok` must still report what `_apply_cap` observed."""
+        mock_nvml = MagicMock()
+        mock_nvml.NVMLError = Exception
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle_0"
+        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.side_effect = Exception(
+            "constraints read failed"
+        )
+        mock_nvml.nvmlDeviceGetUUID.return_value = b"GPU-test-0"
+        actuator = NvmlActuator(metrics=MagicMock())
+
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with patch.object(power_agent, "pynvml", mock_nvml):
+                with patch("power_agent._persist_managed_gpus"):
+                    result = actuator.apply_cap(0, 300)
+
+        self.assertIs(result.ok, True)
+        self.assertEqual(result.effective_w, 300)
 
 
 # ---------------------------------------------------------------------------

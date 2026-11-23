@@ -5,7 +5,9 @@ import gc
 import logging
 import os
 from collections.abc import Callable
+from typing import Any
 
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
     SnapshotConfig,
@@ -18,6 +20,33 @@ from .publisher import StatLoggerFactory
 from .worker_factory import EngineSetupResult, SnapshotEngineSetupResult
 
 logger = logging.getLogger(__name__)
+
+
+class _ReleaseOnlyKvCache:
+    """Engine client whose sleep discards only the KV cache.
+
+    Snapshot captures the weights on the GPU, so they need no host copy.
+    """
+
+    def __init__(self, engine_client: Any):
+        self._engine_client = engine_client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine_client, name)
+
+    async def sleep(self, *_args: object) -> None:
+        await self._engine_client.release_kv_cache_memory()
+
+
+def apply_restore_served_model_name(config: Config) -> None:
+    """Serve the names the restore Pod sets in ``DYN_SERVED_MODEL_NAME``.
+
+    Like ``--served-model-name``, the first name is primary and the rest are
+    aliases. Unset keeps the names the snapshot was captured with.
+    """
+    served_names = split_served_model_names(os.environ.get("DYN_SERVED_MODEL_NAME"))
+    if served_names:
+        config.served_model_name, *config.served_model_aliases = served_names
 
 
 async def prepare_snapshot_engine(
@@ -56,12 +85,21 @@ async def prepare_snapshot_engine(
             "snapshotting without communicator checkpointing. "
             "Requires vLLM 0.27.0 or newer."
         )
+    # GMS restores weights outside the checkpoint, so they must be released,
+    # and vLLM before 0.31.0 can release them only by sleeping.
+    engine_client = engine[0]
+    if (
+        getattr(config.engine_args, "load_format", None) != "gms"
+        and os.environ.get("DYN_GMS_USE_V1") != "true"
+        and hasattr(engine_client, "release_kv_cache_memory")
+    ):
+        engine_client = _ReleaseOnlyKvCache(engine_client)
 
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=(engine, stat_logger_factory),
         pause_controller=VllmEnginePauseController(
-            engine[0],
+            engine_client,
             prepare_for_process_checkpoint=checkpoint_hooks,
         ),
         snapshot_config=snapshot_config,

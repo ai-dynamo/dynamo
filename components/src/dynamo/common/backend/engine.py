@@ -16,7 +16,7 @@ from dynamo.common.constants import DisaggregationMode
 from .publisher import KvEventSource
 
 if TYPE_CHECKING:
-    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+    from dynamo._core import backend as _backend
     from dynamo.logits_processing import BaseLogitsProcessor
 
     from .worker import WorkerConfig
@@ -262,7 +262,7 @@ class BaseEngine(ABC):
         """
         ...
 
-    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+    async def register_prometheus(self, metrics: _backend.EngineMetrics) -> None:
         """Bridge a vendor-prefixed Prometheus registry into the runtime's
         ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
         no-op. See :mod:`dynamo.common.backend.metrics` for helpers. Do not

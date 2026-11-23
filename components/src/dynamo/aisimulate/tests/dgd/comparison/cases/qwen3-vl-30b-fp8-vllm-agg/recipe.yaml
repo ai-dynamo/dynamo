@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml
+requirements:
+  gb200-sxm-1gpu:
+    gpus: 1

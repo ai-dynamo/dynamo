@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+requirements:
+  gb200-sxm-20gpu:
+    gpus: 20

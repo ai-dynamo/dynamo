@@ -50,33 +50,27 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
 				},
 				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/live",
-							Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-						},
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/live",
+						Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 					},
 					PeriodSeconds:    5,
 					TimeoutSeconds:   4,
 					FailureThreshold: 1,
 				},
 				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/health",
-							Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-						},
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 					},
 					PeriodSeconds:    10,
 					TimeoutSeconds:   4,
 					FailureThreshold: 3,
 				},
 				StartupProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/live",
-							Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-						},
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/live",
+						Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 					},
 					PeriodSeconds:    10,
 					TimeoutSeconds:   5,

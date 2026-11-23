@@ -21,17 +21,18 @@ import (
 	"context"
 	"fmt"
 
+	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,7 +84,7 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	managedComponents := req.ManagedComponents()
 	for i := range managedComponents {
 		component := &managedComponents[i]
-		if isK8sDiscoveryEnabled || string(component.ComponentType) == commonconsts.ComponentTypeFrontend {
+		if componentdeployment.ServiceEnabled(string(component.ComponentType), isK8sDiscoveryEnabled) {
 			serviceResource, err := r.reconcileComponentService(
 				ctx,
 				req.DGD,
@@ -106,7 +107,6 @@ func (r *groveStableResourcesReconciler) Reconcile(
 			req.DGD,
 			component,
 			podCliqueSet,
-			!isSinglePodElasticEPLeader(component),
 		)
 		if err != nil {
 			return nil, err
@@ -139,7 +139,7 @@ func groveComponentServiceParams(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
-) dynamo.ComponentServiceParams {
+) componentdeployment.ServiceParams {
 	componentName := component.ComponentName
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
@@ -157,7 +157,7 @@ func groveComponentServiceParams(
 			labels[commonconsts.KubeLabelDynamoWorkerHash] = value
 		}
 	}
-	return dynamo.ComponentServiceParams{
+	return componentdeployment.ServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
 		ComponentType:   componentType,
@@ -179,12 +179,11 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	params.IsK8sDiscovery = isK8sDiscoveryEnabled
-	service, err := dynamo.GenerateComponentService(params)
+	service, err := componentdeployment.RenderService(params)
 	if err != nil {
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
-
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -258,48 +257,26 @@ func (r *groveStableResourcesReconciler) syncServiceAnnotations(
 	return nil
 }
 
-// isSinglePodElasticEPLeader reports whether the component is the single-pod elastic-EP
-// leader the headless Service is meant to address.
-//
-// The Service selector matches every pod carrying the component labels, so it resolves
-// to the Ray head alone only while the component renders as one pod. Two shapes break
-// that:
-//
-//   - replicas > 1: every replica runs its own Ray head, so one DNS name would
-//     round-robin across unrelated clusters.
-//   - numberOfNodes > 1: worker pods share the component labels, so the Service would
-//     publish them as heads. That topology reaches its leader through the Grove leader
-//     hostname and does not need this Service.
-func isSinglePodElasticEPLeader(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	container := dynamo.GetMainContainer(component)
-	if container == nil || !dynamo.IsElasticEPRayLaunch(container) {
-		return false
-	}
-	if component.GetNumberOfNodes() > 1 {
-		return false
-	}
-	return component.Replicas == nil || *component.Replicas == 1
-}
-
 // reconcileElasticEPLeaderService creates the headless Service a single-pod elastic-EP
 // leader is reachable at, or deletes it when toDelete says the component no longer
-// qualifies. See dynamo.GenerateElasticEPHeadlessService and isSinglePodElasticEPLeader.
+// qualifies. See grove.RenderElasticEPLeaderService.
 func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
-	toDelete bool,
 ) (Resource, error) {
 	// Use the same rendered identity as discovery Services so followers find the leader.
 	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
-	service := dynamo.GenerateElasticEPHeadlessService(params)
+	container := dynamo.GetMainContainer(component)
+	elasticRayLaunch := container != nil && dynamo.IsElasticEPRayLaunch(container)
+	service := grove.RenderElasticEPLeaderService(component, params, elasticRayLaunch)
 
 	// Handle removal here rather than through SyncResource, which resolves the live object
 	// by name alone and would delete a Service this DGD never created.
-	if toDelete {
-		return nil, r.deleteOwnedService(ctx, dgd, service.Name)
+	if service == nil {
+		return nil, r.deleteOwnedService(ctx, dgd, grove.ElasticEPLeaderServiceName(params.ServiceName))
 	}
 
 	_, syncedService, err := commoncontroller.SyncResource(
@@ -329,35 +306,13 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	return resource, nil
 }
 
-// deleteOwnedService removes the named Service, but only the exact object it verified
-// this DGD controls.
-//
-// The UID precondition is what makes the check and the delete one decision: if the
-// Service is replaced by an unowned object of the same name in between, the delete fails
-// with a conflict and the reconcile retries against the replacement instead of removing
-// a Service this DGD does not own. An already-absent Service is success, not an error.
 func (r *groveStableResourcesReconciler) deleteOwnedService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	name string,
 ) error {
-	existing := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get service %s: %w", name, err)
-	}
-	if !metav1.IsControlledBy(existing, dgd) {
-		return nil
-	}
-
-	err = r.Delete(ctx, existing, client.Preconditions{UID: &existing.UID})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete service %s: %w", name, err)
-	}
-	return nil
+	key := types.NamespacedName{Name: name, Namespace: dgd.Namespace}
+	return r.deleteIfControlledBy(ctx, dgd, key, &corev1.Service{}, "service")
 }
 
 func (r *groveStableResourcesReconciler) reconcileFrontendIngress(

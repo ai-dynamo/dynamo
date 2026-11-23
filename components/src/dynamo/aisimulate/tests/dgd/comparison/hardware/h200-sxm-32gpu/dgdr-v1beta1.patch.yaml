@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+hardware:
+  gpuSku: h200_sxm
+  vramMb: 141120
+  totalGpus: 32
+  numGpusPerNode: 8
+  interconnect: nvlink
+  rdma: true

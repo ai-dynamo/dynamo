@@ -10,16 +10,12 @@ import os
 import re
 import sys
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 import huggingface_hub
 from vllm.transformers_utils.repo_utils import get_model_path
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni.engine.arg_utils import OmniEngineArgs
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.groups.runtime_args import (
@@ -48,7 +44,7 @@ class OmniDiffusionKwargs:
     """
 
     enable_layerwise_offload: Optional[bool] = None
-    layerwise_num_gpu_layers: int = 1
+    layerwise_num_gpu_layers: Optional[int] = None
     vae_use_slicing: Optional[bool] = None
     vae_use_tiling: Optional[bool] = None
     boundary_ratio: Optional[float] = None
@@ -58,6 +54,7 @@ class OmniDiffusionKwargs:
     enable_cache_dit_summary: Optional[bool] = None
     enable_cpu_offload: Optional[bool] = None
     task_type: Optional[str] = None
+    model_config: Optional[dict[str, Any]] = None
     lora_path: Optional[list[str]] = None
     diffusion_attention_backend: Optional[str] = None
     fastvideo_vsa_topk: Optional[int] = None
@@ -113,6 +110,18 @@ class OmniArgGroup(ArgGroup):
             arg_type=int,
             help="Default frames per second for generated videos.",
         )
+        add_argument(
+            g,
+            flag_name="--image-png-compression-level",
+            env_var="DYN_OMNI_IMAGE_PNG_COMPRESSION_LEVEL",
+            default=6,
+            arg_type=int,
+            help=(
+                "Lossless PNG compression level for generated images (0-9). "
+                "0 disables compression for faster encoding and larger responses; "
+                "6 preserves Pillow's default. Set on the router in disaggregated mode."
+            ),
+        )
 
         # OmniDiffusionKwargs fields
         add_negatable_bool_argument(
@@ -127,9 +136,12 @@ class OmniArgGroup(ArgGroup):
             g,
             flag_name="--layerwise-num-gpu-layers",
             env_var="DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS",
-            default=1,
+            default=None,
             arg_type=int,
-            help="Number of ready layers (blocks) to keep on GPU during generation.",
+            help=(
+                "Unsupported legacy option. Remove it and use "
+                "--enable-layerwise-offload without a layer-count override."
+            ),
         )
         add_negatable_bool_argument(
             g,
@@ -201,6 +213,19 @@ class OmniArgGroup(ArgGroup):
             default=None,
             env_value_type=parse_bool,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_argument(
+            g,
+            flag_name="--no-guardrails",
+            env_var="DYN_OMNI_NO_GUARDRAILS",
+            default=False,
+            arg_type=None,
+            env_value_type=parse_bool,
+            action="store_true",
+            help=(
+                "Disable model guardrails (e.g. Cosmos3) in aggregated Omni workers. "
+                "Omit to preserve the native model's guardrail configuration."
+            ),
         )
         add_argument(
             g,
@@ -440,6 +465,8 @@ class OmniConfig(DynamoRuntimeConfig):
 
     stage_configs_path: Optional[str] = None
     default_video_fps: int = 16
+    no_guardrails: bool = False
+    image_png_compression_level: int = 6
 
     # Nested structs — each group of fields has a clear destination
     diffusion: OmniDiffusionKwargs = dataclasses.field(
@@ -478,6 +505,11 @@ class OmniConfig(DynamoRuntimeConfig):
                 if hasattr(args, f.name)
             },
         )
+        if config.no_guardrails:
+            config.diffusion.model_config = {
+                **(config.diffusion.model_config or {}),
+                "guardrails": False,
+            }
         config.parallel = dataclasses.replace(
             OmniParallelKwargs(),
             **{
@@ -490,8 +522,16 @@ class OmniConfig(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        if self.diffusion.layerwise_num_gpu_layers is not None:
+            raise ValueError(
+                "--layerwise-num-gpu-layers is no longer supported by vLLM-Omni. "
+                "Remove it or unset DYN_OMNI_LAYERWISE_NUM_GPU_LAYERS; use "
+                "--enable-layerwise-offload without a layer-count override."
+            )
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
+        if not 0 <= self.image_png_compression_level <= 9:
+            raise ValueError("--image-png-compression-level must be between 0 and 9")
         if self.parallel.ulysses_degree <= 0:
             raise ValueError("--ulysses-degree must be > 0")
         if self.parallel.ring_degree <= 0:
@@ -521,6 +561,12 @@ class OmniConfig(DynamoRuntimeConfig):
         if self.realtime and (self.stage_id is not None or self.omni_router):
             raise ValueError(
                 "--realtime cannot be combined with --stage-id or --omni-router"
+            )
+        if self.no_guardrails and (
+            self.stage_id is not None or self.omni_router or self.realtime
+        ):
+            raise ValueError(
+                "--no-guardrails is only supported by aggregated Omni workers"
             )
 
 

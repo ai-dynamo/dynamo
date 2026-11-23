@@ -41,10 +41,6 @@ from pathlib import Path
 # inference-gateway ext-proc) that are not library crates consumers pull from the
 # registry, and whose build scripts (envoy/protoc codegen) aren't wired up here.
 EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/", "/deploy/")
-# Workspace members never published from the on-demand flow: internal
-# service/tool crates that no published crate depends on (leaves — excluding
-# them is closure-safe) and that registry consumers never pull.
-EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
 # Artifactory < 7.148 rejects the `Content-Type: application/octet-stream` header
 # cargo >= 1.96 sends on publish with a 415 (rust-lang/cargo#17086),
 # so the upload runs on the last pre-header toolchain. Remove once the
@@ -78,8 +74,6 @@ def publishable(meta: dict) -> dict[str, dict]:
         if p["id"] not in members:
             continue
         if any(s in p["manifest_path"] for s in EXCLUDE_PATH_SUBSTRINGS):
-            continue
-        if p["name"] in EXCLUDE_NAMES:
             continue
         if p.get("publish") == []:  # `publish = false` serializes to []
             continue
@@ -195,13 +189,25 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
     publish rejects deps without a registry version, and a git dep — including a
     versioned dep redirected by [patch.crates-io] — can't resolve faithfully for
     a registry consumer. Only optional deps are dropped (non-optional is a hard
-    error); the feature KEY is kept (emptied) so `<crate>/<feature>` refs resolve."""
-    git_names = set(
-        re.findall(
-            r"(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=",
-            (root / "Cargo.toml").read_text(),
-        )
-    )
+    error); the feature KEY is kept (emptied) so `<crate>/<feature>` refs resolve.
+    A non-optional `workspace = true` dep that is only [patch]-overridden (not
+    declared as a git dep) keeps its registry requirement: dropping it would
+    leave the crate uncompilable."""
+    git_names: set[str] = set()
+    patched_only: set[str] = set()
+    section = ""
+    for line in (root / "Cargo.toml").read_text().splitlines():
+        h = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+        if h:
+            section = h.group(1).strip()
+            continue
+        g = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=", line)
+        if g:
+            (patched_only if section.startswith("patch.") else git_names).add(
+                g.group(1)
+            )
+    patched_only -= git_names
+    git_names |= patched_only
     if not git_names:
         return
     for mp in manifests:
@@ -214,6 +220,10 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
                 or (
                     m.group(1) in git_names
                     and re.search(r"\bworkspace\s*=\s*true", m.group(2))
+                    and not (
+                        m.group(1) in patched_only
+                        and not re.search(r"\boptional\s*=\s*true", m.group(2))
+                    )
                 )
             ):
                 removed.add(m.group(1))

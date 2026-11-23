@@ -3,4 +3,4 @@
 
 //! Compatibility export for the runtime-neutral Engine utility.
 
-pub use aisimulate_core::engine::RunningMean;
+pub use aisim_core::engine::RunningMean;

@@ -2,19 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import zmq
 
+import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
+from dynamo.sglang.nixl_telemetry import _share_scheduler_metrics_ipc_name
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_ids,
+    cancel_metrics_task,
+    finish_worker_teardown,
     get_local_dp_rank_range,
     handle_non_leader_node,
+    run_to_completion,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -100,6 +107,14 @@ class FakeNetworkAddress:
 
     def to_tcp(self):
         return f"tcp://{self.host}:{self.port}"
+
+
+class FakeRuntime:
+    def __init__(self):
+        self.health_calls = []
+
+    def set_health_status(self, ready):
+        self.health_calls.append(ready)
 
 
 def test_sglang_worker_group_id_matches_across_node_ranks(monkeypatch):
@@ -311,10 +326,10 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
             return FakeClient()
 
     server_args = SimpleNamespace(
-        dp_size=2,
-        enable_dp_attention=True,
         nnodes=2,
         node_rank=1,
+        dp_size=8,
+        enable_dp_attention=True,
         dist_timeout=5,
         kv_events_config='{"endpoint": "tcp://*:5557"}',
     )
@@ -341,6 +356,7 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
         handle_non_leader_node(
+            FakeRuntime(),
             SimpleNamespace(server_args=server_args),
             FakePublisher(),
             metrics_task,
@@ -373,6 +389,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
         nnodes=2,
         node_rank=1,
     )
+    runtime = FakeRuntime()
     cleanup = Mock()
     publisher = SimpleNamespace(
         server_args=server_args,
@@ -386,6 +403,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
         handle_non_leader_node(
+            runtime,
             SimpleNamespace(server_args=server_args),
             publisher,
             metrics_task,
@@ -396,6 +414,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
 
     resolve_leader.assert_not_awaited()
     kv_event_publisher.assert_not_called()
+    assert runtime.health_calls == [True]
     assert not task.done()
 
     task.cancel()
@@ -403,6 +422,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
         await task
     cleanup.assert_called_once_with()
     assert metrics_task.cancelled()
+    assert runtime.health_calls == [True, False]
 
 
 @pytest.mark.asyncio
@@ -419,7 +439,13 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
 
     class FakePublisher:
         generate_endpoint = object()
-        server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        server_args = SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=8,
+            enable_dp_attention=True,
+            kv_events_config='{"endpoint": "tcp://*:5557"}',
+        )
         dynamo_args = SimpleNamespace(use_kv_events=True)
         kv_worker_id = None
 
@@ -437,6 +463,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
         handle_non_leader_node(
+            FakeRuntime(),
             SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
             FakePublisher(),
             metrics_task,
@@ -465,7 +492,13 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     class FakePublisher:
         generate_endpoint = object()
-        server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        server_args = SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=8,
+            enable_dp_attention=True,
+            kv_events_config='{"endpoint": "tcp://*:5557"}',
+        )
         dynamo_args = SimpleNamespace(use_kv_events=True)
 
         def cleanup(self):
@@ -480,6 +513,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     with pytest.raises(RuntimeError, match="resolution failed"):
         await handle_non_leader_node(
+            FakeRuntime(),
             SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
             FakePublisher(),
             metrics_task,
@@ -504,6 +538,134 @@ def test_kv_event_connect_ip_uses_loopback_for_wildcard_binds(
     monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "2001:db8::7")
 
     assert publisher_mod.kv_event_connect_ip(endpoint) == expected
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_marks_ready_until_cancel(
+    monkeypatch,
+):
+    entered = asyncio.Event()
+    runtime = FakeRuntime()
+
+    async def wait_forever(generate_endpoint, server_args, expected):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        publisher_mod, "_resolve_multinode_leader_worker_ids", wait_forever
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            SimpleNamespace(
+                generate_endpoint=object(),
+                server_args=SimpleNamespace(
+                    nnodes=2,
+                    node_rank=1,
+                    dp_size=8,
+                    enable_dp_attention=True,
+                    kv_events_config=None,
+                ),
+                dynamo_args=SimpleNamespace(use_kv_events=True),
+                cleanup=lambda: None,
+            ),
+            metrics_task,
+        )
+    )
+
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert runtime.health_calls == [True]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.health_calls == [True, False]
+    metrics_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_clears_ready_on_error(
+    monkeypatch,
+):
+    runtime = FakeRuntime()
+
+    async def fail(generate_endpoint, server_args, expected):
+        raise RuntimeError("non-leader failed")
+
+    monkeypatch.setattr(publisher_mod, "_resolve_multinode_leader_worker_ids", fail)
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+
+    with pytest.raises(RuntimeError, match="non-leader failed"):
+        await handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            SimpleNamespace(
+                generate_endpoint=object(),
+                server_args=SimpleNamespace(
+                    nnodes=2,
+                    node_rank=1,
+                    dp_size=8,
+                    enable_dp_attention=True,
+                    kv_events_config=None,
+                ),
+                dynamo_args=SimpleNamespace(use_kv_events=True),
+                cleanup=lambda: None,
+            ),
+            metrics_task,
+        )
+
+    assert runtime.health_calls == [True, False]
+    metrics_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_preserves_cancel_when_metrics_task_fails():
+    runtime = FakeRuntime()
+    cleanup_called = asyncio.Event()
+
+    async def fail_on_cancel():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("metrics failed during shutdown") from exc
+
+    publisher = SimpleNamespace(
+        generate_endpoint=object(),
+        server_args=SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=1,
+            enable_dp_attention=False,
+            kv_events_config=None,
+        ),
+        dynamo_args=SimpleNamespace(use_kv_events=True),
+        cleanup=cleanup_called.set,
+    )
+    metrics_task = asyncio.create_task(fail_on_cancel())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            publisher,
+            metrics_task,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert runtime.health_calls == [True]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_called.is_set()
+    assert runtime.health_calls == [True, False]
 
 
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
@@ -563,6 +725,67 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert {call["kv_block_size"] for call in calls} == {32}
 
 
+@pytest.mark.parametrize("engine_owned", [False, True])
+def test_init_kv_event_publish_passes_engine_owned_mm_identity(
+    monkeypatch, engine_owned
+):
+    calls = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(
+        publisher_mod, "sglang_has_wide_mm_pad_values", lambda: engine_owned
+    )
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        publisher_mod,
+        "ZmqEventPublisher",
+        SimpleNamespace(
+            offset_endpoint_port=staticmethod(
+                lambda base_ep, dp_rank: f"tcp://*:{5557 + dp_rank}"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "format_zmq_endpoint",
+        lambda endpoint, ip_address: endpoint.replace("*", ip_address),
+    )
+    # A non-leader node skips the scheduler metrics sockets.
+    server_args = SimpleNamespace(
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+        page_size=16,
+        dp_size=4,
+        enable_dp_attention=True,
+        nnodes=2,
+        node_rank=1,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+        kv_worker_id=1234,
+    )
+
+    publisher.init_kv_event_publish()
+
+    assert len(calls) == 2
+    assert [call["engine_owned_mm_identity"] for call in calls] == [engine_owned] * 2
+    assert [call["idempotent_stores"] for call in calls] == [True] * 2
+
+
 def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     calls = []
 
@@ -609,7 +832,7 @@ def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=config,
         generate_endpoint=SimpleNamespace(),
@@ -627,6 +850,56 @@ def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
         "tcp://127.0.0.1:5560",
     ]
     publisher.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected_ranks"),
+    [
+        ({"dp_size": 4}, [0, 1, 2, 3]),
+        ({"attn_dp_size": 8, "nnodes": 2, "node_rank": 1}, [4, 5, 6, 7]),
+        # A scale joiner's one-rank group must still relay its own rank.
+        ({"ep_join_mode": "scale", "nnodes": 2, "node_rank": 1}, [0]),
+    ],
+    ids=["pure-dp", "attn-dp-multinode", "elastic-ep-scale-joiner"],
+)
+def test_init_fpm_relay_follows_local_dp_rank_bounds(
+    monkeypatch, layout, expected_ranks
+):
+    relayed = []
+
+    class FakeFpmEventRelay:
+        def __init__(self, *, endpoint, zmq_endpoint):
+            relayed.append(zmq_endpoint)
+
+    monkeypatch.setattr("dynamo.llm.FpmEventRelay", FakeFpmEventRelay, raising=False)
+    server_args = SimpleNamespace(
+        forward_pass_metrics_ipc_name="ipc:///tmp/fpm",
+        dp_size=1,
+        nnodes=1,
+        node_rank=0,
+    )
+    for key, value in layout.items():
+        setattr(server_args, key, value)
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
+        ),
+        config=SimpleNamespace(
+            server_args=server_args,
+            dynamo_args=SimpleNamespace(
+                enable_local_indexer=False,
+                kv_state_endpoint=None,
+                use_kv_events=False,
+            ),
+        ),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    relays = publisher.init_fpm_relay()
+
+    assert len(relays) == len(expected_ranks)
+    assert relayed == [f"ipc:///tmp/fpm.{rank}" for rank in expected_ranks]
 
 
 def test_init_kv_event_publish_uses_effective_kv_event_setting():
@@ -696,7 +969,7 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=config,
         generate_endpoint=SimpleNamespace(),
@@ -708,6 +981,61 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
 
     assert calls[0]["worker_id"] == 0
     publisher.cleanup()
+
+
+def _scheduler_entry(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank):
+    """Stands in for SGLang's ``run_scheduler_process`` signature."""
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_every_pure_dp_scheduler_reaches_the_metrics_socket(
+    monkeypatch, tmp_path
+):
+    """SGLang gives each pure-DP scheduler a fresh ``metrics_ipc_name`` and keeps
+    only ``instance_id``; the scheduler wrapper must make every rank's metrics
+    reach the PULL socket the publisher binds from the parent ``port_args``."""
+    monkeypatch.setattr(sglang_compat, "sglang_resolved_view", None)
+    instance_id = uuid.uuid4().hex[:12]
+    server_args = SimpleNamespace(
+        dp_size=2, enable_dp_attention=False, nnodes=1, node_rank=0, page_size=16
+    )
+    parent = SimpleNamespace(
+        metrics_ipc_name=f"ipc://{tmp_path}/parent", instance_id=instance_id
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(port_args=parent),
+        config=SimpleNamespace(server_args=server_args, dynamo_args=SimpleNamespace()),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+    ctx = zmq.Context()
+    pushes = []
+    try:
+        for dp_rank in (0, 1):
+            port_args = SimpleNamespace(
+                metrics_ipc_name=f"ipc://{tmp_path}/rank-{dp_rank}",
+                instance_id=instance_id,
+            )
+            _share_scheduler_metrics_ipc_name(
+                _scheduler_entry, (server_args, port_args, 0, 0, 0, dp_rank), {}
+            )
+            push = ctx.socket(zmq.PUSH)
+            push.setsockopt(zmq.LINGER, 0)
+            push.connect(port_args.metrics_ipc_name)
+            push.send_pyobj(SimpleNamespace(data_parallel_rank=dp_rank))
+            pushes.append(push)
+
+        received = [
+            await asyncio.wait_for(publisher._sock.recv_pyobj(), timeout=2)
+            for _ in range(2)
+        ]
+        assert sorted(m.data_parallel_rank for m in received) == [0, 1]
+    finally:
+        for push in pushes:
+            push.close()
+        ctx.term()
+        publisher.cleanup()
 
 
 # ---- per-worker metric gating (embedding vs chat) ----
@@ -954,3 +1282,187 @@ async def test_metrics_fanout_reaches_sibling_gateways(tmp_path, monkeypatch):
             if s is not None:
                 s.close(linger=0)
         ctx.term()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_waits_for_a_real_shaped_task():
+    """The real metrics tasks (publisher.run, _idle) park on a single await and
+    unwind with no further awaits after cancel(). Cancelling one must leave it
+    done and cancelled, and must not raise at the caller."""
+
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        await asyncio.Event().wait()
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    await cancel_metrics_task(metrics_task)
+
+    assert metrics_task.done()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_real_failure():
+    """A non-cancellation failure inside the metrics task still surfaces."""
+
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await cancel_metrics_task(metrics_task)
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_caller_cancellation():
+    """A cancellation aimed at the caller while it is suspended inside
+    cancel_metrics_task must reach the caller."""
+
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_unwind = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_unwind.wait()
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    outer = asyncio.create_task(cancel_metrics_task(metrics_task))
+    await unwinding.wait()
+    outer.cancel()
+    release_unwind.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_finishes_the_body_when_the_caller_is_cancelled():
+    """The whole point: a cancellation aimed at the caller must not truncate
+    the teardown body, and must be reported rather than raised."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    steps = []
+
+    async def body():
+        steps.append("first")
+        started.set()
+        await release.wait()
+        steps.append("second")
+
+    result = {}
+
+    async def caller():
+        result["cancelled"] = await run_to_completion(body())
+        steps.append("caller.observed")
+
+    outer = asyncio.create_task(caller())
+    await started.wait()
+    outer.cancel()
+    release.set()
+
+    await outer
+
+    assert result["cancelled"] is True
+    assert steps == ["first", "second", "caller.observed"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_propagates_a_body_failure():
+    """A teardown step blowing up is a real error and must not be swallowed."""
+
+    async def body():
+        raise RuntimeError("cleanup blew up")
+
+    with pytest.raises(RuntimeError, match="cleanup blew up"):
+        await run_to_completion(body())
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch, caplog):
+    """A caller cancelling faster than the warn interval must still get the
+    "teardown is taking a while" warning."""
+    release = asyncio.Event()
+    ticked = asyncio.Event()
+    now = [0.0]
+
+    def fake_monotonic():
+        ticked.set()
+        return now[0]
+
+    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 10.0)
+    monkeypatch.setattr(publisher_mod, "monotonic", fake_monotonic)
+
+    outer = asyncio.create_task(run_to_completion(release.wait()))
+    # Each cancel lands under the 10s interval; only the elapsed total crosses it.
+    for t in (6.0, 12.0):
+        await ticked.wait()
+        ticked.clear()
+        now[0] = t
+        outer.cancel()
+    await ticked.wait()
+    release.set()
+
+    assert await outer is True
+    assert "Worker teardown still running" in caplog.text
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_finish_worker_teardown_continues_after_metrics_task_failure():
+    """A metrics task that fails (not just cancels) during teardown -- e.g. a
+    real ZMQ error -- must not skip cleanup() and run_deferred_handlers(), and
+    must still surface once they have run."""
+
+    started = asyncio.Event()
+
+    async def failing_metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(failing_metrics_loop())
+    await started.wait()
+
+    steps = []
+
+    def cleanup():
+        steps.append("cleanup")
+
+    async def run_deferred_handlers():
+        steps.append("run_deferred_handlers")
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+
+    assert steps == ["cleanup", "run_deferred_handlers"]

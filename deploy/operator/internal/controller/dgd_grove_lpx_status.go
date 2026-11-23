@@ -34,7 +34,7 @@ func mergeLPXChildStatus(
 			}
 		}
 		kind := v1beta1.ComponentKindPodCliqueScalingGroup
-		if component.ComponentRole(v1beta1.ComponentRoleLPXConductor) == nil {
+		if !lpx.ServesEndpoint(component) {
 			kind = v1beta1.ComponentKindPodClique
 		}
 		ordinary.ComponentStatus[component.ComponentName] = v1beta1.ComponentReplicaStatus{ComponentKind: kind}

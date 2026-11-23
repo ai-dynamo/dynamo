@@ -1,18 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
+from vllm import SamplingParams
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.media.image import ImageMediaIO
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    VisionChunkProcessorItems,
+    parse_mm_uuids,
+)
+from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.renderers.base import BaseRenderer
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.handlers import _translate_vllm_client_errors
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -32,12 +50,28 @@ def _processor(
     unified_vision_chunk: bool = False,
     video_loader=None,
     frontend_decoding: bool = False,
+    media_limits: dict[str, int] | None = None,
+    real_image_loader: bool = False,
 ) -> mod.VllmMultimodalRequestProcessor:
+    engine_client = None
+    if media_limits is not None:
+        from vllm.config.multimodal import MultiModalConfig
+
+        engine_client = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    multimodal_config=MultiModalConfig(limit_per_prompt=media_limits)
+                )
+            )
+        )
     return mod.VllmMultimodalRequestProcessor(
         model=model,
+        engine_client=engine_client,
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
-        image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
+        image_loader=None
+        if real_image_loader
+        else SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
         video_loader=video_loader
         or SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
         audio_loader=SimpleNamespace(
@@ -56,6 +90,7 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         prepared.request,
         prepared.multi_modal_data,
         prepared.mm_processor_kwargs,
+        custom_data=prepared.custom_data,
     )
     return SimpleNamespace(
         prompt=prompt,
@@ -63,6 +98,103 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         multi_modal_data=prepared.multi_modal_data,
         mm_processor_kwargs=prepared.mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_custom_data_reaches_the_registered_processor():
+    processor = _processor()  # Qwen3-VL: the geometry gate is P/D-only
+    descriptor = {
+        "dtype": "float32-le",
+        "shape": [2, 4],
+        "data_base64": "AAAAAA==",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"custom_input": [{"Json": descriptor}]},
+    }
+
+    prepared = await _prepare_prompt(
+        processor,
+        request,
+        "request-1",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert "multi_modal_data" not in prepared.request
+    assert prepared.prompt["multi_modal_data"] == {"custom_input": descriptor}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model", ["Qwen/Qwen3-VL-2B-Instruct", "meta-llama/Llama-3.2-1B"]
+)
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.DECODE]
+)
+async def test_custom_json_disaggregation_is_rejected(model, mode):
+    processor = _processor(model=model)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"custom_input": [{"Json": {"payload": "x"}}]},
+    }
+    with pytest.raises(mod.InvalidArgument, match="supported only in aggregated"):
+        await processor.prepare_input(request, "request-1", None, mode)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "vision_chunk"])
+@pytest.mark.parametrize("mode", [DisaggregationMode.AGGREGATED])
+async def test_custom_data_passes_engine_modality_names_through(modality, mode):
+    """Modality names belong to the engine's processor, not to Dynamo.
+
+    A custom payload never reaches frontend media handling, so a name the
+    frontend also uses for its own media must survive untouched rather than be
+    interpreted by UUID inference or structural pad expansion.
+    """
+    # A generic family, so the P/D leg is not refused for mRoPE geometry.
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    payload = {
+        modality: {
+            "values": [None, False, 0],
+            "data_base64": "AA==",
+            "$dynamo_tensor": {"plugin_owned": True},
+        }
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {key: [{"Json": value}] for key, value in payload.items()},
+    }
+
+    prepared = await _prepare_prompt(processor, request, "request-1", None, mode)
+
+    assert prepared.prompt["multi_modal_data"] == payload
+    assert "multi_modal_uuids" not in prepared.prompt
+    assert prepared.prompt["prompt_token_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_custom_data_merges_with_frontend_media():
+    processor = _processor()
+    image = Image.new("RGB", (2, 2))
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "chemistry": [{"Json": {"payload": [1, 2]}}],
+        },
+    }
+    processor.extract_multimodal_data = AsyncMock(return_value={"image": [image]})
+    prepared = await _prepare_prompt(
+        processor, request, "request-1", None, DisaggregationMode.AGGREGATED
+    )
+    assert prepared.prompt["multi_modal_data"] == {
+        "image": [image],
+        "chemistry": {"payload": [1, 2]},
+    }
+    assert processor.extract_multimodal_data.call_args.args[0]["multi_modal_data"] == {
+        "image_url": [{"Url": "https://image"}]
+    }
 
 
 @pytest.mark.asyncio
@@ -142,6 +274,116 @@ async def test_image_cache_has_no_scope_for_malformed_scope():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, cache_scope=None, preserve_uuid_slots=True
     )
+
+
+def _encode_image(image: Image.Image, fmt: str = "PNG", **save_kwargs) -> bytes:
+    buf = BytesIO()
+    image.save(buf, format=fmt, **save_kwargs)
+    return buf.getvalue()
+
+
+def _ink_on_transparent(mode: str) -> Image.Image:
+    """4x2 image: black ink in the top-left pixel, every other pixel fully transparent."""
+    image = Image.new(mode, (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255) if mode == "RGBA" else (0, 255))
+    return image
+
+
+def _palette_with_transparent_entry() -> bytes:
+    image = Image.new("P", (4, 2))
+    image.putpalette([0, 0, 0, 255, 0, 0, 0, 0, 0])  # 0 black, 1 red, 2 black
+    image.putdata([0, 1, 2, 0, 0, 1, 2, 0])
+    return _encode_image(image, transparency=0)
+
+
+def _exif_rotate_90() -> bytes:
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+    return exif.tobytes()
+
+
+def _rgba_ink_png() -> bytes:
+    return _encode_image(_ink_on_transparent("RGBA"))
+
+
+def _image_request(content: bytes) -> dict:
+    # The loader reads the format from the bytes, so one media type serves every kind.
+    url = "data:image/png;base64," + base64.b64encode(content).decode()
+    return {"multi_modal_data": {"image_url": [{"Url": url}]}}
+
+
+def _pixels(image: Image.Image) -> tuple[str, tuple[int, int], bytes]:
+    return image.mode, image.size, image.tobytes()
+
+
+def _vllm_pixels(content: bytes) -> tuple[str, tuple[int, int], bytes]:
+    return _pixels(ImageMediaIO(image_mode="RGB").load_bytes(content).media)
+
+
+@pytest.mark.asyncio
+async def test_worker_transparent_pixels_become_white():
+    """Black ink on a transparent canvas stays readable: the canvas is white, as in vLLM."""
+    processor = _processor(real_image_loader=True)
+
+    result = await processor.extract_multimodal_data(
+        _image_request(_rgba_ink_png()), "request-1", None
+    )
+
+    image = result["image"]
+    assert [image.getpixel((0, 0)), image.getpixel((1, 0))] == [
+        (0, 0, 0),
+        (255, 255, 255),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build_image",
+    [
+        pytest.param(_rgba_ink_png, id="rgba"),
+        pytest.param(lambda: _encode_image(_ink_on_transparent("LA")), id="grey_alpha"),
+        pytest.param(_palette_with_transparent_entry, id="palette_transparent_entry"),
+        pytest.param(
+            lambda: _encode_image(_ink_on_transparent("RGBA"), "WEBP", lossless=True),
+            id="webp_alpha",
+        ),
+        pytest.param(
+            lambda: _encode_image(_ink_on_transparent("RGBA"), exif=_exif_rotate_90()),
+            id="rgba_with_exif_rotation",
+        ),
+    ],
+)
+async def test_worker_image_matches_vllm_loader(build_image):
+    content = build_image()
+    processor = _processor(real_image_loader=True)
+
+    result = await processor.extract_multimodal_data(
+        _image_request(content), "request-1", None
+    )
+
+    assert _pixels(result["image"]) == _vllm_pixels(content)
+
+
+@pytest.mark.asyncio
+async def test_worker_frontend_decoded_image_matches_vllm_loader():
+    """Frontend decoding on or off, a transparent image gives the same pixels."""
+    content = _rgba_ink_png()
+    # The frontend decoder sends an RGBA PNG as an (H, W, 4) uint8 array.
+    decoded = np.asarray(Image.open(BytesIO(content)))
+    processor = _processor(real_image_loader=True)
+    # Stand in for the NIXL connector that --frontend-decoding creates at start-up.
+    processor.image_loader._enable_frontend_decoding = True
+    processor.image_loader._nixl_connector = object()
+
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=decoded),
+    ):
+        result = await processor.extract_multimodal_data(
+            {"multi_modal_data": {"image_url": [{"Decoded": {}}]}}, "request-1", None
+        )
+
+    assert _pixels(result["image"]) == _vllm_pixels(content)
 
 
 @pytest.mark.asyncio
@@ -636,7 +878,7 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
     if audio_error is not None:
         processor.audio_loader.load_audio.side_effect = audio_error
 
-    with pytest.raises((ValueError, RuntimeError), match=message):
+    with pytest.raises((mod.InvalidArgument, RuntimeError), match=message):
         await processor.extract_multimodal_data(
             {"multi_modal_data": {"video_url": [video_item]}},
             "request-audio-error",
@@ -701,15 +943,6 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
 
 
 def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
-    from vllm.multimodal.parse import (
-        MultiModalDataItems,
-        VisionChunkProcessorItems,
-        parse_mm_uuids,
-    )
-    from vllm.multimodal.processing.inputs import ProcessorInputs
-    from vllm.multimodal.processing.processor import BaseMultiModalProcessor
-    from vllm.renderers.base import BaseRenderer
-
     data_items = MultiModalDataItems(
         {"vision_chunk": VisionChunkProcessorItems([None])}
     )
@@ -741,22 +974,63 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
     parse_mm_data.assert_called_once()
-    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.args[0] == {}
     assert parse_mm_data.call_args.kwargs == {"validate": False}
 
-    cache.is_cached.return_value = [False]
-    parse_mm_data.reset_mock()
-    with pytest.raises(
-        ValueError,
-        match="Cache miss for vision_chunk at index 0 but data is not provided",
-    ):
-        BaseMultiModalProcessor._get_cache_missing_items(
-            processor,
-            cache,
-            data_items,
-            mm_hashes,
+
+@pytest.mark.asyncio
+async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
+    uuid = "catalog/image:v2"
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"UuidOnly": uuid}]},
+        "multi_modal_uuids": {"image_url": [uuid]},
+    }
+    prompt = _processor(unified_vision_chunk=True).build_tokens_prompt(
+        request, {"vision_chunk": [None]}, None
+    )
+    data_items = MultiModalDataItems(
+        {
+            "vision_chunk": VisionChunkProcessorItems(
+                prompt["multi_modal_data"]["vision_chunk"]
+            )
+        }
+    )
+    mm_hashes = prompt["multi_modal_uuids"]
+
+    def parse_mm_data(data, *, validate):
+        return MultiModalDataItems(
+            {
+                modality: VisionChunkProcessorItems(items)
+                for modality, items in data.items()
+            }
         )
-    parse_mm_data.assert_not_called()
+
+    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
+    cache = MultiModalProcessorOnlyCache(
+        SimpleNamespace(
+            get_multimodal_config=lambda: SimpleNamespace(mm_processor_cache_gb=0.001)
+        )
+    )
+
+    async def add_request(*args, **kwargs):
+        return BaseMultiModalProcessor._get_cache_missing_items(
+            processor, cache, data_items, mm_hashes
+        )
+
+    # Exercise vLLM's actual wrapping of a processor failure, not a fabricated
+    # exception chain that could diverge from AsyncLLM.generate.
+    engine = SimpleNamespace(add_request=add_request, log_requests=False)
+    stream = AsyncLLM.generate(
+        engine, prompt, SamplingParams(max_tokens=1), "cache-miss"
+    )
+    with pytest.raises(InvalidArgument, match="Resend.*same UUID") as raised:
+        await asyncio.wait_for(
+            anext(_translate_vllm_client_errors(stream, request)), timeout=5
+        )
+    assert isinstance(raised.value.__cause__, EngineGenerateError)
+    assert type(raised.value.__cause__.__cause__) is ValueError
+    assert uuid not in str(raised.value)
 
 
 def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
@@ -805,7 +1079,7 @@ def test_build_tokens_prompt_rejects_malformed_user_uuids(
 ) -> None:
     processor = _processor()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(mod.InvalidArgument, match=message):
         processor.build_tokens_prompt(
             {
                 "token_ids": [1, 2, 3],
@@ -828,7 +1102,7 @@ def test_build_tokens_prompt_reports_uuid_only_cache_miss(
 ) -> None:
     processor = _processor(unified_vision_chunk="vision_chunk" in multi_modal_data)
 
-    with pytest.raises(ValueError, match="require aligned multi_modal_uuids"):
+    with pytest.raises(mod.InvalidArgument, match="require aligned multi_modal_uuids"):
         processor.build_tokens_prompt(
             {"token_ids": [1, 2, 3]},
             multi_modal_data,
@@ -1010,18 +1284,134 @@ async def test_transfer_setup_failure_falls_back_to_raw_media(monkeypatch):
     processor = _processor()
     validate = MagicMock(side_effect=ValueError("invalid metadata"))
     monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+    image = Image.new("RGB", (1, 1))
+    processor.image_loader.load_image_batch.return_value = [image]
 
-    assert (
-        await processor.try_receive_mm_kwargs(
-            {"extra_args": {"mm_kwargs_shm": {"invalid": True}}}
-        )
-        is None
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}]
+            },
+            "extra_args": {"mm_kwargs_shm": {"invalid": True}},
+        },
+        "request-shm-fallback",
+        None,
+        DisaggregationMode.AGGREGATED,
     )
+
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
     validate.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
+async def test_shm_transfer_failure_without_raw_media_fails_closed(monkeypatch):
+    processor = _processor()
+    receiver = SimpleNamespace(
+        receive=AsyncMock(side_effect=FileNotFoundError("missing SHM segment"))
+    )
+    monkeypatch.setattr(
+        mod.MmKwargsShmTransferMetadata,
+        "model_validate",
+        MagicMock(
+            return_value=SimpleNamespace(
+                modality="image", mm_hashes=["0123456789abcdef"]
+            )
+        ),
+    )
+    monkeypatch.setattr(mod, "MmKwargsShmReceiver", MagicMock(return_value=receiver))
+
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="use DYNAMO_MM_TRANSFER=nixl for separate pods or nodes",
+    ):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {
+                    "mm_kwargs_shm": {"segments": []},
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[0, 1]],
+                    "expanded_token_ids": [1, 2],
+                },
+            },
+            "request-shm-fail-closed",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
+
+    receiver.receive.assert_awaited_once()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_transfer_metadata_fails_closed(monkeypatch):
+    processor = _processor()
+    validate = MagicMock(side_effect=ValueError("invalid metadata"))
+    monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await processor.try_receive_mm_kwargs({"extra_args": {"mm_kwargs_shm": {}}})
+
+    validate.assert_called_once_with({})
+
+
+@pytest.mark.asyncio
+async def test_null_transfer_metadata_is_absent():
+    processor = _processor()
+
+    result = await processor.try_receive_mm_kwargs(
+        {
+            "extra_args": {
+                "mm_kwargs_shm": None,
+                "mm_kwargs_nixl": None,
+            }
+        }
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_null_shm_metadata_does_not_shadow_nixl(monkeypatch):
+    processor = _processor()
+    receiver = SimpleNamespace()
+    metadata = SimpleNamespace(modality="image", mm_hashes=[])
+    transferred = {"type": "multimodal", "prompt_token_ids": [1, 2]}
+    receive = AsyncMock(return_value=transferred)
+    monkeypatch.setattr(
+        mod.MmKwargsTransferMetadata,
+        "model_validate",
+        MagicMock(return_value=metadata),
+    )
+    monkeypatch.setattr(mod, "MmKwargsNixlReceiver", MagicMock(return_value=receiver))
+    monkeypatch.setattr(processor, "_receive_mm_kwargs", receive)
+
+    result = await processor.try_receive_mm_kwargs(
+        {
+            "extra_args": {
+                "mm_kwargs_shm": None,
+                "mm_kwargs_nixl": {"modality": "image"},
+            }
+        }
+    )
+
+    assert result is transferred
+    receive.assert_awaited_once_with(
+        {
+            "mm_kwargs_shm": None,
+            "mm_kwargs_nixl": {"modality": "image"},
+        },
+        "nixl",
+        receiver,
+        metadata,
+    )
+
+
+@pytest.mark.asyncio
+async def test_nixl_receiver_initialization_failure_fails_closed(monkeypatch):
     processor = _processor()
     monkeypatch.setattr(
         mod.MmKwargsTransferMetadata,
@@ -1034,12 +1424,45 @@ async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
         MagicMock(side_effect=RuntimeError("nixl unavailable")),
     )
 
-    assert (
-        await processor.try_receive_mm_kwargs(
-            {"extra_args": {"mm_kwargs_nixl": {"modality": "image"}}}
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="Verify NIXL connectivity between the frontend and worker",
+    ):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {"mm_kwargs_nixl": {"modality": "image"}},
+            },
+            "request-nixl-fail-closed",
+            None,
+            DisaggregationMode.AGGREGATED,
         )
-        is None
+
+
+@pytest.mark.asyncio
+async def test_transfer_failure_with_unusable_raw_media_fails_closed(monkeypatch):
+    processor = _processor()
+    monkeypatch.setattr(
+        mod.MmKwargsShmTransferMetadata,
+        "model_validate",
+        MagicMock(side_effect=ValueError("invalid metadata")),
     )
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}]
+                },
+                "extra_args": {"mm_kwargs_shm": {"invalid": True}},
+            },
+            "request-shm-empty-fallback",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
 
 
 @pytest.mark.asyncio
@@ -1056,6 +1479,7 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
         {
             "token_ids": [1, 2],
             "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "extra_args": {"mm_kwargs_shm": {"segments": []}},
         },
         "request-6",
         None,
@@ -1065,6 +1489,31 @@ async def test_prefill_keeps_raw_media_for_decode_handoff():
     processor.try_receive_mm_kwargs.assert_not_awaited()
     assert prepared.multi_modal_data == {"image": image}
     assert prepared.prompt["multi_modal_data"] == {"image": image}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_key", ["mm_kwargs_shm", "mm_kwargs_nixl"])
+async def test_prefill_transfer_without_raw_media_fails_closed(
+    metadata_key,
+):
+    processor = _processor()
+
+    with pytest.raises(mod.MultimodalTransferError) as excinfo:
+        await _prepare_prompt(
+            processor,
+            {
+                "token_ids": [1, 2],
+                "extra_args": {metadata_key: {"modality": "image"}},
+            },
+            "request-prefill-transfer-only",
+            None,
+            DisaggregationMode.PREFILL,
+        )
+
+    assert "DYNAMO_DISABLE_NIXL_MM=1" in str(excinfo.value)
+    assert "DYNAMO_MM_TRANSFER=nixl" not in str(excinfo.value)
+    assert "Verify NIXL connectivity" not in str(excinfo.value)
+    processor.image_loader.load_image_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1429,7 +1878,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1462,7 +1911,7 @@ async def test_receive_transferred_kwargs_marks_vllm_feature_hash(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1498,7 +1947,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
     processor = _processor(unified_vision_chunk=True)
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1538,7 +1987,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
 async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
     processor = _processor()
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1563,24 +2012,182 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
 
-    result = await processor._receive_mm_kwargs(
-        {
-            "mm_hashes": ["cached_hash", "transferred_hash"],
-            "mm_placeholders": [(1, 2), (4, 2)],
-            "expanded_token_ids": [10, 11, 12, 13, 14, 15],
-        },
-        "shm",
-        receiver,
-        SimpleNamespace(modality="image", mm_hashes=[]),
+    with pytest.raises(
+        mod.MultimodalTransferError,
+        match="item, hash, and placeholder counts differ",
+    ):
+        await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["cached_hash", "transferred_hash"],
+                "mm_placeholders": [(1, 2), (4, 2)],
+                "expanded_token_ids": [10, 11, 12, 13, 14, 15],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    input_processor.inject_into_mm_cache.assert_not_called()
+
+
+def _real_kwargs_item(key: str = "pixel_values"):
+    """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
     )
 
-    assert result is None
-    input_processor.inject_into_mm_cache.assert_not_called()
+    elem = MultiModalFieldElem(
+        data=torch.arange(8, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    return MultiModalKwargsItem({key: elem})
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_pickle_payload():
+    """A pickle-format payload must fail closed, not deserialize.
+
+    The transfer uses vLLM's typed msgpack decoder, so a payload in the old
+    pickle wire format (or any foreign bytes) fails the decode. The pre-fix
+    worker ran pickle.loads on this payload and accepted the item, so this
+    assertion fails there.
+    """
+    import pickle
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = pickle.dumps(_real_kwargs_item())
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with pytest.raises(mod.MultimodalTransferError, match="Multimodal SHM"):
+        await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+
+_LOG_SENTINEL = "zzsentinelzz"
+
+
+def _undecodable_payload(case: str) -> bytes:
+    """Return a payload that fails to decode and carries the log sentinel."""
+    import pickle
+    import struct
+
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    sentinel = _LOG_SENTINEL.encode()
+    if case == "pickle_format":
+        # The wire format of a frontend on the previous release.
+        return pickle.dumps(_real_kwargs_item(key=_LOG_SENTINEL))
+    if case == "short_frame":
+        # The declared buffer length runs past the end of the frame.
+        return struct.pack("<I", 1) + struct.pack("<Q", 999) + sentinel
+    if case == "wrong_structure":
+        # A well-formed frame whose message is not a kwargs item.
+        return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
+    # A frame that carries the serializer's pickle extension code.
+    return _pack_buffers([msgpack.encode(msgpack.Ext(CUSTOM_TYPE_PICKLE, sentinel))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
+)
+async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
+    """A payload that fails to decode fails closed without logging its bytes."""
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = _undecodable_payload(case)
+    # The sentinel is in the payload, so an echo of the bytes would show it.
+    assert _LOG_SENTINEL.encode() in payload
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with caplog.at_level("DEBUG"):
+        with pytest.raises(mod.MultimodalTransferError):
+            await processor._receive_mm_kwargs(
+                {
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[1, 2]],
+                    "expanded_token_ids": [10, 11, 12],
+                },
+                "shm",
+                receiver,
+                SimpleNamespace(modality="image", mm_hashes=[]),
+            )
+
+    # Positive control: the failure itself was logged and captured.
+    assert "multimodal transfer failed" in caplog.text
+    assert _LOG_SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
+    monkeypatch, caplog
+):
+    """With VLLM_ALLOW_INSECURE_SERIALIZATION set, the worker still refuses.
+
+    The frame carries the pickle extension code with dummy bytes, not a pickle
+    object. vLLM's own decoder would try to unpickle them when the variable is
+    set. The worker must refuse the code and fail closed instead.
+    """
+    import vllm.envs as envs
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+    receiver = SimpleNamespace(
+        receive=AsyncMock(
+            return_value={
+                "__pickled_kwargs_item__": [_pack_buffers([msgpack.encode(ext)])]
+            }
+        )
+    )
+
+    with caplog.at_level("DEBUG"):
+        with pytest.raises(mod.MultimodalTransferError):
+            await processor._receive_mm_kwargs(
+                {
+                    "mm_hashes": ["0123456789abcdef"],
+                    "mm_placeholders": [[1, 2]],
+                    "expanded_token_ids": [10, 11, 12],
+                },
+                "shm",
+                receiver,
+                SimpleNamespace(modality="image", mm_hashes=[]),
+            )
+
+    assert "multimodal transfer failed" in caplog.text
+    # The logged cause is the refusal, not an attempt to unpickle the data.
+    assert "Extension type code 1 is not supported" in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
@@ -1680,8 +2287,6 @@ def test_qwen_handoff_computes_grid_for_pil_images():
 
 
 def test_qwen_handoff_accepts_encoder_embeddings():
-    import torch
-
     processor = _processor()
     result = processor.build_prefill_handoff(
         multi_modal_data={
@@ -1738,8 +2343,9 @@ def _k3_processor(
     return processor, engine_client
 
 
-def test_k3_pad_expands_once_for_scalar_image():
-    processor, _ = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_pad_expands_once_for_scalar_image(model_type):
+    processor, _ = _k3_processor(model_type=model_type)
 
     result = processor._expand_kimi_k3_pads(
         [1, _K3_PAD_ID, 2],
@@ -1749,8 +2355,9 @@ def test_k3_pad_expands_once_for_scalar_image():
     assert result == [1, *_K3_NATIVE_IDS, 2]
 
 
-def test_k3_pad_expands_once_per_image():
-    processor, _ = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_pad_expands_once_per_image(model_type):
+    processor, _ = _k3_processor(model_type=model_type)
 
     result = processor._expand_kimi_k3_pads(
         [_K3_PAD_ID, 7, _K3_PAD_ID],
@@ -1774,7 +2381,7 @@ def test_k3_pad_expands_for_unified_vision_chunk():
 def test_k3_mismatched_pad_count_is_rejected():
     processor, _ = _k3_processor()
 
-    with pytest.raises(ValueError, match="refusing to expand"):
+    with pytest.raises(mod.InvalidArgument, match="refusing to expand"):
         processor._expand_kimi_k3_pads(
             [_K3_PAD_ID],
             {"image": [object(), object()]},
@@ -1835,13 +2442,16 @@ def test_k3_without_raw_image_media_is_untouched():
         (_K3_PAD_ID, "<|kimi_image_placeholder|>", ["bad"], "non-empty integer"),
     ],
 )
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
 def test_invalid_k3_metadata_fails_fast(
     pad_id: object,
     image_placeholder: object,
     native_ids: object,
     message: str,
+    model_type: str,
 ):
     processor, _ = _k3_processor(
+        model_type=model_type,
         pad_id=pad_id,
         image_placeholder=image_placeholder,
         native_ids=native_ids,
@@ -1898,6 +2508,85 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
 
 
+# --- Per-model image placeholder dispatch ------------------------------------
+
+_IMG, _IMG_BREAK, _IMG_END = 10, 12, 13
+
+
+def _mistral_processor(
+    tokenizer: object,
+) -> tuple[mod.VllmMultimodalRequestProcessor, SimpleNamespace]:
+    engine_client = SimpleNamespace(get_tokenizer=MagicMock(return_value=tokenizer))
+    processor = mod.VllmMultimodalRequestProcessor(
+        model="mistral",
+        engine_client=engine_client,
+        enable_multimodal=True,
+        use_unified_vision_chunk=False,
+    )
+    return processor, engine_client
+
+
+def _mistral_tokenizer() -> SimpleNamespace:
+    """A Mistral tokenizer whose image encoder spends one token per 28 pixels."""
+    encoder = SimpleNamespace(
+        special_ids=SimpleNamespace(img=_IMG, img_break=_IMG_BREAK, img_end=_IMG_END),
+        _image_to_num_tokens=lambda image: (
+            (image.size[0] - 1) // 28 + 1,
+            (image.size[1] - 1) // 28 + 1,
+        ),
+    )
+    return SimpleNamespace(instruct=SimpleNamespace(mm_encoder=encoder))
+
+
+def test_mistral_build_tokens_prompt_expands_placeholders():
+    processor, _ = _mistral_processor(_mistral_tokenizer())
+
+    prompt = processor.build_tokens_prompt(
+        {"token_ids": [1, _IMG, 2], "multi_modal_uuids": {"image_url": ["a"]}},
+        {"image": Image.new("RGB", (56, 28))},
+        None,
+    )
+
+    # A 56x28 image is a 2x1 grid.
+    assert prompt["prompt_token_ids"] == [1, _IMG, _IMG, _IMG_END, 2]
+
+
+@pytest.mark.parametrize(
+    "tokenizer",
+    [SimpleNamespace(encode=MagicMock()), None],
+    ids=["no-mm-encoder", "missing"],
+)
+def test_non_mistral_tokenizers_are_never_rewritten(tokenizer: object):
+    processor, engine_client = _mistral_processor(tokenizer)
+    tokens = [1, _IMG, 2]
+
+    assert processor._adapt_image_placeholders(tokens, {"image": object()}) is tokens
+    assert processor._adapt_image_placeholders(tokens, {"image": object()}) is tokens
+    # A known non-Mistral tokenizer is resolved once; a missing one is retried.
+    assert engine_client.get_tokenizer.call_count == (2 if tokenizer is None else 1)
+
+
+def test_text_only_requests_never_resolve_the_tokenizer():
+    processor, engine_client = _mistral_processor(_mistral_tokenizer())
+    tokens = [1, _IMG, 2]
+
+    assert processor._adapt_image_placeholders(tokens, None) is tokens
+    assert processor._adapt_image_placeholders(tokens, {}) is tokens
+    engine_client.get_tokenizer.assert_not_called()
+
+
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_placeholders_skip_the_mistral_path(model_type: str):
+    processor, engine_client = _k3_processor(model_type=model_type)
+
+    result = processor._adapt_image_placeholders(
+        [1, _K3_PAD_ID, 2], {"image": object()}
+    )
+
+    assert result == [1, *_K3_NATIVE_IDS, 2]
+    engine_client.get_tokenizer.assert_called_once_with()
+
+
 class TestLoadQwenGridParams:
     """Tests for embedding dimensions loaded from Qwen vision configs."""
 
@@ -1937,3 +2626,225 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+def test_unsupported_audio_is_rejected_before_any_media_loader(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/clip.wav"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="Model does not support audio input"):
+        processor.validate_multimodal_request(request)
+
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_not_awaited()
+
+
+def test_image_and_video_remain_allowed_when_audio_is_unsupported(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 1})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    processor.validate_multimodal_request(
+        {
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+            }
+        }
+    )
+
+
+def test_unified_vision_chunk_image_is_allowed(monkeypatch):
+    processor = _processor(unified_vision_chunk=True, media_limits={"vision_chunk": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"vision_chunk"})
+    )
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]}}
+    )
+
+
+def test_zero_video_limit_rejects_before_any_media_loader():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "video_url": [{"Url": "rejected-video"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="At most 0 video"):
+        processor.validate_multimodal_request(request)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "modality,limit,count",
+    [("image", 8, 9), ("video", 1, 2), ("audio", 2, 3)],
+)
+def test_media_item_limits_are_checked_before_loading(modality, limit, count):
+    processor = _processor(media_limits={modality: limit})
+    request = {
+        "multi_modal_data": {
+            f"{modality}_url": [{"Url": "https://example.com/media"}] * count
+        }
+    }
+    with pytest.raises(mod.InvalidArgument, match=f"At most {limit} {modality}"):
+        processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_video_at_configured_limit_is_allowed(count):
+    processor = _processor(media_limits={"video": 1})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"video_url": [{"Url": "video"}] * count}}
+    )
+
+
+def test_zero_video_limit_preserves_image_only_requests():
+    processor = _processor(media_limits={"image": 8, "video": 0})
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "image"}] * 8}}
+    )
+
+
+@pytest.mark.parametrize("unified_vision_chunk", [False, True])
+@pytest.mark.parametrize(
+    "image_limit,chunk_limit,count",
+    [(0, 2, 1), (8, 0, 1), (8, 2, 3)],
+)
+def test_image_admission_uses_model_modality_limit(
+    unified_vision_chunk, image_limit, chunk_limit, count
+):
+    processor = _processor(
+        unified_vision_chunk=unified_vision_chunk,
+        media_limits={"image": image_limit, "vision_chunk": chunk_limit},
+    )
+    request = {
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}] * count
+        }
+    }
+    limit = chunk_limit if unified_vision_chunk else image_limit
+    if count > limit:
+        with pytest.raises(mod.InvalidArgument, match=f"At most {limit} image"):
+            processor.validate_multimodal_request(request)
+    else:
+        processor.validate_multimodal_request(request)
+
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize("audio_limit,explicit_audio_count", [(0, 0), (1, 1)])
+def test_video_derived_audio_rejects_before_any_media_loader(
+    kwargs_location, audio_limit, explicit_audio_count
+):
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}]
+            * explicit_audio_count,
+        },
+    }
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": True}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+
+    with pytest.raises(mod.InvalidArgument, match=f"At most {audio_limit} audio"):
+        processor.validate_multimodal_request(request)
+
+    processor.video_loader.load_video_batch.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kwargs_location", ["top_level", "extra_args"])
+@pytest.mark.parametrize("use_audio_in_video,audio_limit", [(False, 0), (True, 1)])
+def test_video_derived_audio_respects_flag_and_limit(
+    kwargs_location, use_audio_in_video, audio_limit
+):
+    processor = _processor(media_limits={"video": 1, "audio": audio_limit})
+    request = {"multi_modal_data": {"video_url": [{"Url": "video"}]}}
+    kwargs = {"mm_processor_kwargs": {"use_audio_in_video": use_audio_in_video}}
+    if kwargs_location == "extra_args":
+        request["extra_args"] = kwargs
+    else:
+        request.update(kwargs)
+    processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("value", [None, [1, 2], {"atoms": ["C", "O"]}])
+def test_custom_payload_values_and_repeated_parts(value):
+    single, media = mod._split_multimodal_data(
+        {"multi_modal_data": {"custom": [{"Json": value}]}}
+    )
+    assert single == {"custom": value}
+    assert not media
+    repeated, _ = mod._split_multimodal_data(
+        {"multi_modal_data": {"custom": [{"Json": value}, {"Json": value}]}}
+    )
+    assert repeated == {"custom": [value, value]}
+
+
+@pytest.mark.asyncio
+async def test_custom_and_media_engine_key_collision_is_rejected():
+    processor = _processor()
+    processor.extract_multimodal_data = AsyncMock(
+        return_value={"image": [Image.new("RGB", (1, 1))]}
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "image": [{"Json": {"data": "opaque"}}],
+        },
+    }
+    with pytest.raises(mod.InvalidArgument, match="same engine modality"):
+        await _prepare_prompt(
+            processor, request, "request-1", None, DisaggregationMode.AGGREGATED
+        )
+
+
+@pytest.mark.asyncio
+async def test_custom_json_cannot_merge_with_processed_media():
+    processor = _processor()
+    processor.try_receive_mm_kwargs = AsyncMock(
+        return_value={"type": "multimodal", "prompt_token_ids": [1, 99, 2]}
+    )
+    request = {
+        "token_ids": [1, 2],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "chemistry": [{"Json": {"data": "opaque"}}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="frontend-processed multimodal"):
+        await processor.prepare_input(
+            request, "request-1", None, DisaggregationMode.AGGREGATED
+        )

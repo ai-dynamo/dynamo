@@ -35,11 +35,9 @@ func buildSharedMemoryVolumeAndMount(sizeSpec *resource.Quantity) (*corev1.Volum
 
 	volume := &corev1.Volume{
 		Name: commonconsts.KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &size,
-			},
+		EmptyDir: &corev1.EmptyDirVolumeSource{
+			Medium:    corev1.StorageMediumMemory,
+			SizeLimit: &size,
 		},
 	}
 	volumeMount := &corev1.VolumeMount{

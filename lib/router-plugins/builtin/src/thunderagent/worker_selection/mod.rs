@@ -3,14 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 use super::THUNDERAGENT_CLASSIFIER_TYPE;
 
@@ -22,7 +15,7 @@ impl WorkerScorer for ThunderAgentScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -42,7 +35,7 @@ struct ThunderAgentPicker;
 
 impl WorkerPicker for ThunderAgentPicker {
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -104,12 +97,9 @@ pub(crate) fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
-    use dynamo_kv_router::{
-        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelectionPolicy,
-        WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 
@@ -135,6 +125,7 @@ mod tests {
 
     fn request(target: WorkerWithDpRank) -> SchedulingRequest {
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("request".into()),
             },
@@ -163,7 +154,7 @@ mod tests {
 
     fn policy() -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(ThunderAgentScorer)],
             Box::new(ThunderAgentPicker),

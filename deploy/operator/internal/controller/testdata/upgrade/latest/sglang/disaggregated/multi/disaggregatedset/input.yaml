@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: workers
+  namespace: upgrade-latest-sglang-disaggregated-multi-disaggregatedset
+  annotations:
+    nvidia.com/enable-grove: 'false'
+    nvidia.com/dynamo-operator-origin-version: 0.0.0
+    nvidia.com/enable-disaggregatedset: 'true'
+spec:
+  backendFramework: sglang
+  components:
+  - name: frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+  - name: prefill
+    type: prefill
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+    multinode:
+      nodeCount: 2
+  - name: decode
+    type: decode
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+    multinode:
+      nodeCount: 2
