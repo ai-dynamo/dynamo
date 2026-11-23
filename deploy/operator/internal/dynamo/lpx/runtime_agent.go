@@ -44,7 +44,7 @@ func configureAgentScheduling(agent *corev1.PodSpec, architecture lpuArchitectur
 }
 
 // configureNodeLocalConductorRuntime consumes a fresh conductor PodSpec with a validated main container.
-func configureNodeLocalConductorRuntime(conductorPodSpec *corev1.PodSpec, allocation string, environment semanticenv.ContainerLayers) {
+func configureNodeLocalConductorRuntime(conductorPodSpec *corev1.PodSpec, allocation string, environment *semanticenv.ContainerLayers) {
 	// Bind placement data without interpreting the template's executable or arguments.
 	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
 

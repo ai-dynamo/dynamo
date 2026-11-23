@@ -18,7 +18,7 @@ func TestContainerLayersSurvivePhysicalFiltering(t *testing.T) {
 	pod := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{
 		{Name: "REMOVED", Value: "stale"}, {Name: "PATH", Value: "$(ROOT)/model"},
 	}}}}
-	layers := make(ContainerLayers)
+	layers := &ContainerLayers{}
 	layers.Capture(pod)
 	pod.Containers[0].Env[0] = pod.Containers[0].Env[1]
 	pod.Containers[0].Env = pod.Containers[0].Env[:1]
@@ -30,13 +30,41 @@ func TestContainerLayersSurvivePhysicalFiltering(t *testing.T) {
 	require.Equal(t, []corev1.EnvVar{{Name: "ROOT", Value: "/models"}, {Name: "PATH", Value: "$(ROOT)/model"}}, pod.Containers[0].Env)
 }
 
+func TestContainerLayerRegistration(t *testing.T) {
+	t.Log("Register independent source and physical snapshots without composing early")
+	defaults := []corev1.EnvVar{{Name: "ROOT", Value: "/models"}}
+	authored := []corev1.EnvVar{{Name: "PATH", Value: "$(ROOT)/weights"},
+		{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "credentials", Key: "token"}}}}
+	main := corev1.Container{Name: "main"}
+	layers := &ContainerLayers{}
+	layers.Register(&main, Layer{Source: "operator.defaults", Env: defaults}, Layer{Source: "podTemplate.env", Env: authored})
+	require.True(t, layers.Registered("main"))
+	require.Equal(t, []corev1.EnvVar{defaults[0], authored[0], authored[1]}, main.Env)
+
+	t.Log("Neither source edits nor foreign physical mutations change retained inputs")
+	defaults[0].Value = "source-mutated"
+	authored[1].ValueFrom.SecretKeyRef.Key = "source-mutated"
+	main.Env[2].ValueFrom.SecretKeyRef.Name = "physical-mutated"
+	layers.AppendDefaults(&main, []corev1.EnvVar{{Name: "BACKEND", Value: "enabled"}})
+	require.Equal(t, "BACKEND", main.Env[len(main.Env)-1].Name, "physical append order remains compatible with existing readers")
+	pod := corev1.PodSpec{Containers: []corev1.Container{main}}
+	require.NoError(t, layers.Apply(&pod))
+	require.Equal(t, []corev1.EnvVar{{Name: "ROOT", Value: "/models"}, {Name: "BACKEND", Value: "enabled"}, {Name: "PATH", Value: "$(ROOT)/weights"},
+		{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "credentials", Key: "token"}}}}, pod.Containers[0].Env)
+
+	t.Log("Replacing a container replaces its sources as well as the staged environment")
+	layers.Register(&pod.Containers[0], Layer{Source: "checkpoint.job.env", Env: []corev1.EnvVar{{Name: "JOB", Value: "replacement"}}})
+	require.NoError(t, layers.Apply(&pod))
+	require.Equal(t, []corev1.EnvVar{{Name: "JOB", Value: "replacement"}}, pod.Containers[0].Env)
+}
+
 func TestContainerLayerMutations(t *testing.T) {
 	for _, semantic := range []bool{false, true} {
 		t.Run(fmt.Sprintf("semantic=%t", semantic), func(t *testing.T) {
 			t.Log("Mutate an uncaptured container through the same boundary in both modes")
-			var layers ContainerLayers
+			var layers *ContainerLayers
 			if semantic {
-				layers = make(ContainerLayers)
+				layers = &ContainerLayers{}
 			}
 			pod := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{
 				{Name: "REMOVED", Value: "stale"}, {Name: "PATH", Value: "$(ROOT)/model"},
@@ -61,9 +89,9 @@ func TestContainerLayerPrependAndClone(t *testing.T) {
 	for _, semantic := range []bool{false, true} {
 		t.Run(fmt.Sprintf("semantic=%t", semantic), func(t *testing.T) {
 			t.Log("Replace an authored binding before cloning a failover container")
-			var layers ContainerLayers
+			var layers *ContainerLayers
 			if semantic {
-				layers = make(ContainerLayers)
+				layers = &ContainerLayers{}
 			}
 			base := corev1.Container{Name: "main", Env: []corev1.EnvVar{
 				{Name: "ROOT", Value: "stale"}, {Name: "REMOVE", Value: "stale"}, {Name: "PATH", Value: "$(ROOT)/model"},
@@ -89,7 +117,7 @@ func TestContainerLayerPodBindings(t *testing.T) {
 		Containers:     []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "PATH", Value: "$(ROOT)/main"}}}},
 		InitContainers: []corev1.Container{{Name: "prepare", Env: []corev1.EnvVar{{Name: "PATH", Value: "$(ROOT)/prepare"}}}},
 	}
-	layers := make(ContainerLayers)
+	layers := &ContainerLayers{}
 	layers.PrependPod(pod, "operator.storage", []corev1.EnvVar{{Name: "ROOT", Value: "/models"}})
 
 	t.Log("Finalization preserves both authored lists and their precise Pod field paths")
@@ -100,5 +128,5 @@ func TestContainerLayerPodBindings(t *testing.T) {
 			require.Equal(t, "PATH", container.Env[1].Name)
 		}
 	}
-	require.Equal(t, "podTemplate.spec.initContainers[name=prepare].env", layers["prepare"][0].Source)
+	require.Equal(t, "podTemplate.spec.initContainers[name=prepare].env", layers.containers["prepare"][0].Source)
 }

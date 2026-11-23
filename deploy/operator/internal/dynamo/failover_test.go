@@ -861,10 +861,10 @@ func TestBuildFailoverPod_SemanticEnvironment(t *testing.T) {
 			var collector *podEnvironment
 			if tt.ordered {
 				collector = newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}, nil)
-				collector.register(podSpec.Containers[0].Name, "container.env", defaults, nil, user)
+				collector.register(&podSpec.Containers[0], "container.env", defaults, nil, user)
 			}
 			require.NoError(t, buildColdStartFailoverPod(&podSpec, 2, BackendFrameworkVLLM, collector))
-			require.NoError(t, FinalizePodSpec(&podSpec, collector.capture(&podSpec), BackendFrameworkVLLM, IntraPodFailoverEngineContainerNames(), staticContainerGPUCount(1)))
+			require.NoError(t, collector.capture(&podSpec).Apply(&podSpec))
 
 			t.Log("Verify the selected ordering and both generated engine values")
 			for i := range 2 {

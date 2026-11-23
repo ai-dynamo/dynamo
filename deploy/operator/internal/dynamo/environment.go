@@ -21,7 +21,7 @@ import (
 // transformations. A nil collector selects the unchanged legacy render path.
 type podEnvironment struct {
 	general        []corev1.EnvVar
-	containers     semanticenv.ContainerLayers
+	containers     *semanticenv.ContainerLayers
 	overrides      []map[string]semanticenv.Layer
 	policyRuntime  string
 	policyBindings []corev1.EnvVar
@@ -45,7 +45,7 @@ func newPodEnvironment(annotations map[string]string, general []corev1.EnvVar) *
 	if !compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
 		return nil
 	}
-	return &podEnvironment{general: general, containers: make(semanticenv.ContainerLayers)}
+	return &podEnvironment{general: general, containers: &semanticenv.ContainerLayers{}}
 }
 
 // ResolveEnvironmentValue reads a staged general/container binding without
@@ -110,28 +110,29 @@ func rewriteFrontendDeploymentConfig(general, authored []corev1.EnvVar, componen
 	return general, authored, nil
 }
 
-func (p *podEnvironment) register(name, source string, defaults, general, authored []corev1.EnvVar) {
+func (p *podEnvironment) register(container *corev1.Container, source string, defaults, general, authored []corev1.EnvVar) {
 	if p == nil {
 		return
 	}
-	p.containers[name] = []semanticenv.Layer{
-		{Source: "operator.defaults." + name, Env: defaults},
+	layers := []semanticenv.Layer{
+		{Source: "operator.defaults." + container.Name, Env: defaults},
 		{Source: "spec.env", Env: general},
-		{Source: source, Env: slices.Clone(authored)},
+		{Source: source, Env: authored},
 	}
 
 	// Only the compiled policy's runtime omits graph-level policy inputs.
-	if name == p.policyRuntime {
-		p.containers[name][1] = p.containers[name][1].Without(workerKvTransferPolicyEnvNames...)
-		original := p.containers[name][2].Without(workerKvTransferPolicyEnvNames...)
-		p.containers[name] = append(p.containers[name][:2],
+	if container.Name == p.policyRuntime {
+		layers[1] = layers[1].Without(workerKvTransferPolicyEnvNames...)
+		original := layers[2].Without(workerKvTransferPolicyEnvNames...)
+		layers = append(layers[:2],
 			semanticenv.Layer{Source: "operator.kvTransferPolicy", Env: p.policyBindings}, original)
 	}
 	for _, overrides := range p.overrides {
-		if layer, exists := overrides[name]; exists {
-			p.containers[name] = append(p.containers[name], layer)
+		if layer, exists := overrides[container.Name]; exists {
+			layers = append(layers, layer)
 		}
 	}
+	p.containers.Register(container, layers...)
 }
 
 // DCDHasKVTransferPolicy recognizes a graph-compiled policy from its existing
@@ -183,24 +184,15 @@ func DCDKVTransferPolicyEnvironment(dcd *v1beta1.DynamoComponentDeployment, comp
 }
 
 func (p *podEnvironment) appendDefaults(container *corev1.Container, values []corev1.EnvVar) {
+	var layers *semanticenv.ContainerLayers
 	if p != nil {
-		p.containers[container.Name][0].Env = slices.Concat(p.containers[container.Name][0].Env, values)
+		layers = p.containers
 	}
-	container.Env = append(container.Env, values...)
-}
-
-// staged exposes raw, last-definition-wins inputs to backend readers without
-// prematurely sorting or expanding them. p must not be nil.
-func (p *podEnvironment) staged(name string) []corev1.EnvVar {
-	var result []corev1.EnvVar
-	for _, layer := range p.containers[name] {
-		result = append(result, layer.Env...)
-	}
-	return result
+	layers.AppendDefaults(container, values)
 }
 
 func (p *podEnvironment) bind(container *corev1.Container, source string, values []corev1.EnvVar) {
-	var layers semanticenv.ContainerLayers
+	var layers *semanticenv.ContainerLayers
 	if p != nil {
 		layers = p.containers
 	}
@@ -208,7 +200,7 @@ func (p *podEnvironment) bind(container *corev1.Container, source string, values
 }
 
 func (p *podEnvironment) clone(from, to *corev1.Container, omitted []string) {
-	var layers semanticenv.ContainerLayers
+	var layers *semanticenv.ContainerLayers
 	if p != nil {
 		layers = p.containers
 	}
@@ -216,7 +208,7 @@ func (p *podEnvironment) clone(from, to *corev1.Container, omitted []string) {
 }
 
 func (p *podEnvironment) omit(container *corev1.Container, omitted ...string) {
-	var layers semanticenv.ContainerLayers
+	var layers *semanticenv.ContainerLayers
 	if p != nil {
 		layers = p.containers
 	}
@@ -225,7 +217,7 @@ func (p *podEnvironment) omit(container *corev1.Container, omitted ...string) {
 
 // capture registers remaining authored containers before provider mutations.
 // pod must not be nil. A nil collector selects legacy rendering.
-func (p *podEnvironment) capture(pod *corev1.PodSpec) semanticenv.ContainerLayers {
+func (p *podEnvironment) capture(pod *corev1.PodSpec) *semanticenv.ContainerLayers {
 	if p == nil {
 		return nil
 	}
@@ -235,9 +227,8 @@ func (p *podEnvironment) capture(pod *corev1.PodSpec) semanticenv.ContainerLayer
 	}{{"containers", pod.Containers}, {"initContainers", pod.InitContainers}} {
 		for i := range group.containers {
 			container := &group.containers[i]
-			_, registered := p.containers[container.Name]
-			if !registered {
-				p.register(container.Name, "podTemplate.spec."+group.name+"[name="+container.Name+"].env", nil, nil, container.Env)
+			if !p.containers.Registered(container.Name) {
+				p.register(container, "podTemplate.spec."+group.name+"[name="+container.Name+"].env", nil, nil, container.Env)
 			}
 		}
 	}
@@ -255,34 +246,4 @@ func combinedRuntimeEngineContainerNames(component *v1beta1.DynamoComponentDeplo
 		return IntraPodFailoverEngineContainerNames()
 	}
 	return []string{commonconsts.MainContainerName}
-}
-
-// FinalizePodSpec composes env sources before consumers inspect runtime values.
-// pod must be non-nil. Nil layers retain legacy rendering and its earlier backend
-// timing. engineContainerNames explicitly selects combined Dynamo engine containers;
-// nil selects none. Missing names, such as main in a helper capture, are skipped.
-func FinalizePodSpec(pod *corev1.PodSpec, layers semanticenv.ContainerLayers, backend BackendFramework, engineContainerNames []string, containerGPUs ContainerGPUCount) error {
-	if err := layers.Apply(pod); err != nil {
-		return err
-	}
-	if layers == nil || backend != BackendFrameworkSGLang {
-		return nil
-	}
-
-	// Validate actual engines even when failover deliberately removed scrape ports.
-	for i := range pod.Containers {
-		container := &pod.Containers[i]
-		if !slices.Contains(engineContainerNames, container.Name) {
-			continue
-		}
-		resolved := semanticenv.Replay(container.Env)
-		if findContainerPort(container, commonconsts.DynamoNixlPortName) == nil {
-			if _, err := resolveNixlExporterPortRange(container.Env, containerGPUs, resolved, commonconsts.DynamoNixlPort); err != nil {
-				return err
-			}
-		} else if err := reserveNixlExporterPorts(container, containerGPUs, resolved); err != nil {
-			return err
-		}
-	}
-	return nil
 }

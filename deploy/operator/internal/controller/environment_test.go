@@ -11,6 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -223,19 +224,36 @@ func TestSnapshotFailoverOmissionPrecedesEnvironmentComposition(t *testing.T) {
 }
 
 func TestSnapshotJobSidecarDoesNotInheritDiscardedComponentEnvironment(t *testing.T) {
-	t.Log("A job-only metrics sidecar replaces rather than inherits the discarded component sidecar")
-	component, dgd := snapshotEnvironmentFixture()
-	component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, corev1.Container{
-		Name: "metrics", Image: "metrics:component", Env: []corev1.EnvVar{{Name: "X", Value: "$(Y)"}},
-		EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "component-metrics"}}},
-	})
-	component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-		Name: "metrics", Image: "metrics:job", Env: []corev1.EnvVar{{Name: "Y", Value: "$(X)"}},
-		EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "job-metrics"}}},
-	}}}}}
-	reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
-	pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkVLLM)
-	require.NoError(t, err)
-	require.Len(t, pod.Spec.Containers, 2)
-	require.Equal(t, component.Experimental.Checkpoint.Job.PodTemplate.Spec.Containers[0], pod.Spec.Containers[1])
+	for _, kind := range []string{"containers", "initContainers"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Log("A job replacement does not inherit the discarded container's sources")
+			component, dgd := snapshotEnvironmentFixture()
+			authored := corev1.Container{Name: "metrics", Image: "metrics:component", Env: []corev1.EnvVar{{Name: "X", Value: "$(Y)"}},
+				EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "component-metrics"}}}}
+			replacement := corev1.Container{Name: "metrics", Image: "metrics:job", Env: []corev1.EnvVar{{Name: "Y", Value: "$(X)"}},
+				EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "job-metrics"}}}}
+			jobTemplate := &corev1.PodTemplateSpec{}
+			if kind == "containers" {
+				component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, authored)
+				jobTemplate.Spec.Containers = []corev1.Container{replacement}
+			} else {
+				component.PodTemplate.Spec.InitContainers = []corev1.Container{authored}
+				jobTemplate.Spec.InitContainers = []corev1.Container{replacement}
+			}
+			component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{PodTemplate: jobTemplate}
+			original := component.DeepCopy()
+			reconciler := &dgdCheckpointsReconciler{config: &configv1alpha1.OperatorConfiguration{}}
+			pod, err := reconciler.buildCheckpointJobPodTemplate(dgd, component, "worker", dynamo.BackendFrameworkVLLM)
+			require.NoError(t, err)
+			containers := pod.Spec.Containers
+			if kind == "containers" {
+				require.Len(t, containers, 2)
+			} else {
+				containers = pod.Spec.InitContainers
+				require.Len(t, containers, 1)
+			}
+			require.Equal(t, &replacement, common.FindContainerByName(containers, "metrics"))
+			require.Equal(t, original, component)
+		})
+	}
 }

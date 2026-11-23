@@ -25,7 +25,6 @@ import (
 	"sort"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
@@ -188,16 +187,13 @@ func workerHashGeneralEnvironment(spec *v1beta1.DynamoComponentDeploymentSpec) [
 	// An omitted main is later supplied by rendering and can consume all defaults.
 	var consumers []*corev1.Container
 	for _, template := range templates {
-		main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: template})
+		main := GetMainContainerFromPodSpec(&template.Spec)
 		if main == nil {
 			return spec.Env
 		}
 		consumers = append(consumers, main)
-		for i := range template.Spec.InitContainers {
-			container := &template.Spec.InitContainers[i]
-			if container.Name == consts.RuntimeContainerName {
-				consumers = append(consumers, container)
-			}
+		if runtime := findRuntimeInitContainer(&template.Spec); runtime != nil {
+			consumers = append(consumers, runtime)
 		}
 	}
 

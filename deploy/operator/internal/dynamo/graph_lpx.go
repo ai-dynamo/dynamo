@@ -392,7 +392,7 @@ func renderSelectedLPXRole(
 	secretsRetriever SecretsRetriever,
 	discoveryContext DiscoveryContext,
 	defaults *podTemplateRuntimeDefaults,
-) (*corev1.PodTemplateSpec, semanticenv.ContainerLayers, error) {
+) (*corev1.PodTemplateSpec, *semanticenv.ContainerLayers, error) {
 	componentName := component.ComponentName
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)

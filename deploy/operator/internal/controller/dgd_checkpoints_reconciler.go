@@ -44,6 +44,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -1068,17 +1069,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 
 			podTemplate.Spec.Volumes = mergeNamedSlice(podTemplate.Spec.Volumes, volumes, func(v corev1.Volume) string { return v.Name })
 			podTemplate.Spec.InitContainers = mergeNamedSlice(podTemplate.Spec.InitContainers, initContainers, func(c corev1.Container) string { return c.Name })
-			if environment != nil {
-				// An init-container override replaces the entire container, not only env.
-				for _, container := range initContainers {
-					environment[container.Name] = []semanticenv.Layer{{Source: "experimental.checkpoint.job.podTemplate.spec.initContainers[name=" + container.Name + "].env", Env: container.Env}}
-				}
-			}
 			for _, override := range containers {
-				// Job-only sidecars do not inherit discarded serving containers' sources.
-				if environment != nil && override.Name != targetContainerName {
-					environment[override.Name] = []semanticenv.Layer{{Source: "experimental.checkpoint.job.podTemplate.spec.containers[name=" + override.Name + "].env", Env: override.DeepCopy().Env}}
-				}
 				if override.Name == "" {
 					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, override)
 					continue
@@ -1097,14 +1088,15 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 
 				baseEnv := existing.Env
 				user := override.DeepCopy()
+				if environment != nil {
+					// The target's job environment is already retained as its fourth source.
+					user.Env = nil
+				}
 				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
 					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
-				if compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations) {
-					// The staged environment already retains this override as a separate layer.
-					existing.Env = baseEnv
-				} else {
-					existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, user.Env)
+				if environment == nil {
+					existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, override.Env)
 				}
 				if user.LivenessProbe != nil {
 					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
@@ -1114,6 +1106,28 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				}
 				if user.StartupProbe != nil {
 					existing.StartupProbe = user.StartupProbe.DeepCopy()
+				}
+			}
+
+			// Replacement containers own only their job sources, never discarded serving inputs.
+			if environment != nil {
+				for _, group := range []struct {
+					field      string
+					overrides  []corev1.Container
+					containers []corev1.Container
+				}{{"initContainers", initContainers, podTemplate.Spec.InitContainers}, {"containers", containers, podTemplate.Spec.Containers}} {
+					for _, override := range group.overrides {
+						if group.field == "containers" && override.Name == targetContainerName {
+							continue
+						}
+						container := common.FindContainerByName(group.containers, override.Name)
+						if container == nil {
+							return corev1.PodTemplateSpec{}, fmt.Errorf("SnapshotJob override %q is missing from %s", override.Name, group.field)
+						}
+						environment.Register(container, semanticenv.Layer{
+							Source: "experimental.checkpoint.job.podTemplate.spec." + group.field + "[name=" + override.Name + "].env", Env: override.Env,
+						})
+					}
 				}
 			}
 		}
@@ -1165,8 +1179,13 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	if targetContainerName == consts.MainContainerName && dynamo.GetComponentDynamoSidecar(componentForJob) == nil {
 		engineContainers = []string{consts.MainContainerName}
 	}
-	if err := dynamo.FinalizePodSpec(&podTemplate.Spec, environment, backendFramework, engineContainers, func() (int64, error) { return 0, nil }); err != nil {
+	if err := environment.Apply(&podTemplate.Spec); err != nil {
 		return corev1.PodTemplateSpec{}, err
+	}
+	if environment != nil && backendFramework == dynamo.BackendFrameworkSGLang {
+		if err := dynamo.FinalizeSGLangExporterPorts(&podTemplate.Spec, engineContainers, func() (int64, error) { return 0, nil }); err != nil {
+			return corev1.PodTemplateSpec{}, err
+		}
 	}
 	return podTemplate, nil
 }

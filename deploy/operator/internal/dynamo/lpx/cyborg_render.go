@@ -32,7 +32,7 @@ func configureHybridCyborg(
 	workloadDigest string,
 	modelStoragePath string,
 	agentTemplateNames []string,
-	environment semanticenv.ContainerLayers,
+	environment *semanticenv.ContainerLayers,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 

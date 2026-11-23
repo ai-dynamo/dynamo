@@ -28,13 +28,13 @@ const MaxRenderedPodCliqueSetBytes = 1 << 20
 // A nil Environment explicitly retains legacy rendering.
 type PodTemplate struct {
 	Template    corev1.PodTemplateSpec
-	Environment semanticenv.ContainerLayers
+	Environment *semanticenv.ContainerLayers
 }
 
 // CliqueTemplate retains an independently rendered GPU clique and its environment sources.
 type CliqueTemplate struct {
 	Template    *grovev1alpha1.PodCliqueTemplateSpec
-	Environment semanticenv.ContainerLayers
+	Environment *semanticenv.ContainerLayers
 }
 
 // RenderInput contains the fresh stage templates and runtime settings consumed by rendering.

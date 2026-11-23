@@ -1576,9 +1576,9 @@ const (
 	roleLaunchOwnedByPodTemplate
 )
 
-// Backend applies framework-specific container and pod mutations. UpdateContainer
-// may inspect existing environment variables but must append any new variables
-// without reordering or removing existing entries.
+// Backend applies framework-specific container and pod mutations. Environment
+// mutations use the backend's podEnvironment so retained sources and staged
+// container values stay synchronized; its nil receiver retains legacy mutations.
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
 	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
@@ -1776,8 +1776,14 @@ func GenerateBasePodSpec(
 	if err != nil {
 		return nil, err
 	}
-	if err := FinalizePodSpec(pod, environment.capture(pod), backendFramework, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
+	layers := environment.capture(pod)
+	if err := layers.Apply(pod); err != nil {
 		return nil, err
+	}
+	if layers != nil && backendFramework == BackendFrameworkSGLang {
+		if err := FinalizeSGLangExporterPorts(pod, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
+			return nil, err
+		}
 	}
 	return pod, nil
 }
@@ -1798,7 +1804,7 @@ func generateBasePodSpecWithDefaults(
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecOptions,
-) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
+) (*corev1.PodSpec, *semanticenv.ContainerLayers, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
 	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
 		return nil, nil, errs.ToAggregate()
@@ -1963,8 +1969,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 				return nil, err
 			}
 		}
-		environment.register(container.Name, templateSource+".spec.containers[name=main].env", baseEnvironment, environment.general, authoredEnvironment)
-		container.Env = environment.staged(container.Name)
+		environment.register(&container, templateSource+".spec.containers[name=main].env", baseEnvironment, environment.general, authoredEnvironment)
 	}
 
 	if err := applyCompilationCache(&container, component, backendFramework); err != nil {
@@ -2066,11 +2071,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		var authored []corev1.EnvVar
 		if environment != nil {
 			authored = runtime.Env
-			base := dynamoSidecarBaseContainer(componentContext)
-			environment.register(runtime.Name, templateSource+".spec.initContainers[name=runtime].env", base.Env, environment.general, authored)
 		}
 		if err := mergeDynamoSidecarDefaults(runtime, componentContext); err != nil {
 			return nil, err
+		}
+		if environment != nil {
+			base := dynamoSidecarBaseContainer(componentContext)
+			environment.register(runtime, templateSource+".spec.initContainers[name=runtime].env", base.Env, environment.general, authored)
 		}
 		if environment == nil {
 			addLegacyMultinodeTopologyEnvVars(runtime, numberOfNodes, serviceName, multinodeDeployer, annotations)
@@ -2360,7 +2367,6 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Name = sidecarName
 		baseEnv := base.Env
 		user := podSpec.Containers[i].DeepCopy()
-		environment.register(sidecarName, "podTemplate.spec.containers[name="+sidecarName+"].env", baseEnv, nil, user.Env)
 		// An authored command owns the argv; mergo would keep default args under it.
 		if len(user.Command) > 0 {
 			base.Args = nil
@@ -2369,6 +2375,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
 		base.Env = MergeEnvsForOrigin(parentContext.Annotations, baseEnv, user.Env)
+		environment.register(&base, "podTemplate.spec.containers[name="+sidecarName+"].env", baseEnv, nil, user.Env)
 
 		// Replace complete probes so handlers cannot merge with the defaults.
 		// Workloads created before operator 1.7.0 keep the field merge above so an
@@ -2483,8 +2490,13 @@ func GeneratePodSpecForComponent(
 	if err != nil {
 		return nil, err
 	}
-	if err := FinalizePodSpec(pod, layers, backendFramework, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
+	if err := layers.Apply(pod); err != nil {
 		return nil, err
+	}
+	if layers != nil && backendFramework == BackendFrameworkSGLang {
+		if err := FinalizeSGLangExporterPorts(pod, combinedRuntimeEngineContainerNames(component, GetComponentDynamoSidecar(component) != nil), containerGPUs); err != nil {
+			return nil, err
+		}
 	}
 	return pod, nil
 }
@@ -2505,7 +2517,7 @@ func GeneratePodSpecForComponentStaged(
 	deployerOverride MultinodeDeployer,
 	containerGPUs ContainerGPUCount,
 	additionalEnvironment ...map[string]semanticenv.Layer,
-) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
+) (*corev1.PodSpec, *semanticenv.ContainerLayers, error) {
 	// Validate the complete component before selecting its authored role template.
 	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
@@ -3435,7 +3447,7 @@ func generatePodSpecForRole(
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
 		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount), environment)
-		if err := FinalizePodSpec(gmsPodSpec, environment.capture(gmsPodSpec), BackendFrameworkNoop, nil, containerGPUs); err != nil {
+		if err := environment.capture(gmsPodSpec).Apply(gmsPodSpec); err != nil {
 			return nil, err
 		}
 		return gmsPodSpec, nil
@@ -3460,8 +3472,14 @@ func generatePodSpecForRole(
 	if isInterPodGMS {
 		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), environment)
 	}
-	if err := FinalizePodSpec(podSpec, environment.capture(podSpec), backendFramework, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
+	layers := environment.capture(podSpec)
+	if err := layers.Apply(podSpec); err != nil {
 		return nil, err
+	}
+	if layers != nil && backendFramework == BackendFrameworkSGLang {
+		if err := FinalizeSGLangExporterPorts(podSpec, combinedRuntimeEngineContainerNames(component, nativeSidecar), containerGPUs); err != nil {
+			return nil, err
+		}
 	}
 
 	return podSpec, nil

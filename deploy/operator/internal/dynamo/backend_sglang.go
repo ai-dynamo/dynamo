@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -81,6 +82,27 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 
 	injectFlagsIntoContainerCommand(container, flags, needsShell, "sglang")
+	return nil
+}
+
+// FinalizeSGLangExporterPorts reads composed engine environments to validate and
+// declare NIXL exporter ports. pod must not be nil; nil engineNames selects none.
+// Engines without scrape-port declarations are validated without recreating ports.
+func FinalizeSGLangExporterPorts(pod *corev1.PodSpec, engineNames []string, containerGPUs ContainerGPUCount) error {
+	for i := range pod.Containers {
+		container := &pod.Containers[i]
+		if !slices.Contains(engineNames, container.Name) {
+			continue
+		}
+		resolved := semanticenv.Replay(container.Env)
+		if findContainerPort(container, commonconsts.DynamoNixlPortName) == nil {
+			if _, err := resolveNixlExporterPortRange(container.Env, containerGPUs, resolved, commonconsts.DynamoNixlPort); err != nil {
+				return err
+			}
+		} else if err := reserveNixlExporterPorts(container, containerGPUs, resolved); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

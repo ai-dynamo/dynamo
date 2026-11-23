@@ -80,14 +80,19 @@ func TestRenderFinalizesModelPathBindings(t *testing.T) {
 				pod.Containers[0].Env = append(pod.Containers[0].Env, template.Spec.Containers[0].Env...)
 				pods = append(pods, pod)
 			}
-			collectors := make([]semanticenv.ContainerLayers, len(pods))
+			collectors := make([]*semanticenv.ContainerLayers, len(pods))
 			for i, pod := range pods {
 				pod.Containers = append(pod.Containers, corev1.Container{Name: "observer", Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}})
 				pod.InitContainers = append(pod.InitContainers, corev1.Container{Name: "prepare", Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}})
-				layers := make(semanticenv.ContainerLayers)
-				layers.Capture(pod)
-				for name, sources := range layers {
-					layers[name] = append([]semanticenv.Layer{{Source: "spec.env", Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(LPX_MODEL_PATH)/model"}}}}, sources...)
+				layers := &semanticenv.ContainerLayers{}
+				for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+					for j := range containers {
+						container := &containers[j]
+						layers.Register(container,
+							semanticenv.Layer{Source: "spec.env", Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(LPX_MODEL_PATH)/model"}}},
+							semanticenv.Layer{Source: "container[name=" + container.Name + "].env", Env: container.Env},
+						)
+					}
 				}
 				collectors[i] = layers
 			}

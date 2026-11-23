@@ -476,7 +476,7 @@ func IntraPodFailoverEngineContainerNames() []string {
 // FPM is handled because WorkerDefaults automatically injects its port.
 // Other activation paths and runtime socket cleanup remain engine concerns.
 // Mutates container, which must not be nil.
-func PrepareSnapshotFailoverCapture(container *corev1.Container, environment semanticenv.ContainerLayers) {
+func PrepareSnapshotFailoverCapture(container *corev1.Container, environment *semanticenv.ContainerLayers) {
 	// Remove the FPM port from the capture environment.
 	environment.Omit(container, "DYN_FORWARDPASS_METRIC_PORT")
 }

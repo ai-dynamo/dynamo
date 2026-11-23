@@ -98,7 +98,7 @@ func selectRemoteUnits(
 
 // applyLocalPartitionIDs publishes the operator-owned selection. An empty value
 // clears envFrom defaults; units runtimes require it even with no local roots.
-func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection, environment semanticenv.ContainerLayers) {
+func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection, environment *semanticenv.ContainerLayers) {
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
