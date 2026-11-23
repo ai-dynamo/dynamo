@@ -3,8 +3,6 @@
 
 package semanticenv
 
-import corev1 "k8s.io/api/core/v1"
-
 // Lookup resolves one binding from its effective, transitive input definitions.
 // It does not validate unrelated bindings: later feature-owned definitions may
 // replace them before final Compose. The bool reports whether name is declared;
@@ -12,53 +10,28 @@ import corev1 "k8s.io/api/core/v1"
 // Nil layers mean no declarations. Inputs are not mutated.
 func Lookup(name string, layers ...Layer) (Value, bool) {
 	// Select source layers before following references; discarded defaults cannot reappear.
-	winners := make(map[string]int)
-	for i, layer := range layers {
-		for _, variable := range layer.Env {
-			winners[variable.Name] = i
-		}
-	}
-	type definition struct {
-		variable     corev1.EnvVar
-		layer        int
-		position     int
-		dependencies []int
-	}
-	var definitions []definition
-	last := make(map[string]int)
-	for i, layer := range layers {
-		for j, variable := range layer.Env {
-			if winners[variable.Name] != i {
-				continue
-			}
-			position := j
-			if layer.positions != nil {
-				position = layer.positions[j]
-			}
-			last[variable.Name] = len(definitions)
-			definitions = append(definitions, definition{variable: variable, layer: i, position: position})
-		}
-	}
+	definitions, last := effectiveDefinitions(layers)
 	target, exists := last[name]
 	if !exists {
 		return Value{}, false
 	}
 
 	// Same-list references read the preceding occurrence, not a later duplicate.
+	dependencies := make([][]int, len(definitions))
 	previous := make(map[string]int)
 	for i, current := range definitions {
-		if current.variable.ValueFrom == nil {
-			for _, reference := range References(current.variable.Value) {
+		if current.env.ValueFrom == nil {
+			for _, reference := range References(current.env.Value) {
 				source, found := last[reference]
 				if found && definitions[source].layer == current.layer {
 					source, found = previous[reference]
 				}
 				if found {
-					definitions[i].dependencies = append(definitions[i].dependencies, source)
+					dependencies[i] = append(dependencies[i], source)
 				}
 			}
 		}
-		previous[current.variable.Name] = i
+		previous[current.env.Name] = i
 	}
 
 	// Retain only definitions that can affect the selected final occurrence.
@@ -69,7 +42,7 @@ func Lookup(name string, layers ...Layer) (Value, bool) {
 		pending = pending[:len(pending)-1]
 		if !needed[index] {
 			needed[index] = true
-			pending = append(pending, definitions[index].dependencies...)
+			pending = append(pending, dependencies[index]...)
 		}
 	}
 	selected := make([]Layer, len(layers))
@@ -79,7 +52,7 @@ func Lookup(name string, layers ...Layer) (Value, bool) {
 	for i, current := range definitions {
 		if needed[i] {
 			layer := &selected[current.layer]
-			layer.Env = append(layer.Env, current.variable)
+			layer.Env = append(layer.Env, current.env)
 			layer.positions = append(layer.positions, current.position)
 		}
 	}

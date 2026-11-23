@@ -59,6 +59,13 @@ absent values with `Omit`, then `Apply` once all bindings and removals are known
 A nil collector leaves legacy lowerings unchanged. Dynamo enables composition
 only for resources whose stored operator origin is at least 1.8.0.
 
+Each collector belongs to one logical Pod lineage and identifies containers by
+name. After capture or registration, make all environment changes through the
+collector: `container.Env` is only a staged legacy view, and `Apply` replaces it
+from the retained sources. Register replacement containers explicitly; use
+`Clone` for renamed or derived containers so their provenance is retained.
+Independent Pod copies may share a collector only while its sources are read-only.
+
 The caller controls precedence for operator-owned bindings by supplying their
 layer after overridable defaults and authored values. Runtime providers must
 place externally injected definitions before entries that reference them.

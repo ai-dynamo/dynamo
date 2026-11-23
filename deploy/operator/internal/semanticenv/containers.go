@@ -12,9 +12,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// ContainerLayers retains the original sources through Pod transformations.
-// A nil collector retains legacy mutations without composing their sources.
-// Its zero value is ready to register containers.
+// ContainerLayers retains the authoritative sources through transformations of
+// one logical Pod lineage. After capture or registration, all environment changes
+// must use the collector: container.Env is only a staged legacy view, and Apply
+// replaces it from retained sources. Container names identify registrations;
+// register replacement containers and use Clone for renamed or derived containers.
+// Independent Pod copies may share a collector only while its sources are read-only.
+// Its zero value is ready to register containers. A nil collector retains legacy
+// mutations without composing their sources.
 type ContainerLayers struct {
 	containers map[string][]Layer
 }

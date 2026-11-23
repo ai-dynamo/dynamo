@@ -47,10 +47,45 @@ func (l Layer) Without(names ...string) Layer {
 	return result
 }
 
-type entry struct {
+type definition struct {
 	env      corev1.EnvVar
 	layer    int
 	position int
+}
+
+// effectiveDefinitions selects source layers without conflating repeated entries
+// in one list. It retains authored order and positions, and indexes each name's
+// final surviving occurrence. The returned definitions borrow their env values.
+func effectiveDefinitions(layers []Layer) ([]definition, map[string]int) {
+	// Select the winning source before retaining any of its definitions.
+	winners := make(map[string]int)
+	for i, layer := range layers {
+		for _, env := range layer.Env {
+			winners[env.Name] = i
+		}
+	}
+
+	// Keep every surviving occurrence with its original diagnostic position.
+	var definitions []definition
+	last := make(map[string]int)
+	for i, layer := range layers {
+		for j, env := range layer.Env {
+			if winners[env.Name] != i {
+				continue
+			}
+			position := j
+			if layer.positions != nil {
+				position = layer.positions[j]
+			}
+			last[env.Name] = len(definitions)
+			definitions = append(definitions, definition{env: env, layer: i, position: position})
+		}
+	}
+	return definitions, last
+}
+
+type entry struct {
+	definition
 	next     []int
 	indegree int
 }
@@ -74,41 +109,20 @@ func (r *readyEntries) Pop() any {
 // lookups, not dependency errors. Nil or empty layers produce a nil environment.
 // Inputs are not mutated, and the returned environment owns its values.
 func Compose(layers ...Layer) ([]corev1.EnvVar, error) {
-	// Select the winning source without conflating repeated entries in one list.
-	winners := make(map[string]int)
-	for i, layer := range layers {
-		for _, env := range layer.Env {
-			winners[env.Name] = i
-		}
-	}
-
 	// Preserve the order of surviving entries within each input list.
-	var entries []entry
-	definitions := make(map[string]int)
-	for i, layer := range layers {
-		previous := -1
-		for j, env := range layer.Env {
-			if winners[env.Name] != i {
-				continue
-			}
-			current := len(entries)
-			position := j
-			if layer.positions != nil {
-				position = layer.positions[j]
-			}
-			entries = append(entries, entry{env: env, layer: i, position: position})
-			definitions[env.Name] = current
-			if previous >= 0 {
-				addEdge(entries, previous, current)
-			}
-			previous = current
+	definitions, last := effectiveDefinitions(layers)
+	entries := make([]entry, len(definitions))
+	for i, current := range definitions {
+		entries[i].definition = current
+		if i > 0 && definitions[i-1].layer == current.layer {
+			addEdge(entries, i-1, i)
 		}
 	}
 
 	// Only cross-layer references add ordering beyond the authored list order.
 	for i := range entries {
 		for _, name := range References(entries[i].env.Value) {
-			if source, exists := definitions[name]; exists && entries[source].layer != entries[i].layer {
+			if source, exists := last[name]; exists && entries[source].layer != entries[i].layer {
 				addEdge(entries, source, i)
 			}
 		}
