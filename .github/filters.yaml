@@ -6,7 +6,7 @@
 #   snapshot -> standalone Snapshot integration + all-framework checkpoint deploy tests
 #   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's checkpoint suite
 #   power_agent -> power-agent image build
-#   global_discovery_mcs -> Multi-Cluster Services module and chart checks, global-discovery-mcs image build
+#   global_discovery_mcs -> Multi-Cluster Services module checks
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test

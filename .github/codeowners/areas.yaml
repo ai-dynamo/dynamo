@@ -1341,13 +1341,11 @@ shared:
   - operator
   - gms
   - planner
-  - global-router
 - glob: .github/actions/check-deploy-component/action.yml
   owners:
   - ops
   - operator
   - gms
-  - global-router
 - glob: .github/actions/setup-dynamo-operator/action.yml
   owners:
   - ops

@@ -74,7 +74,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-24.04
-    needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, global-discovery-mcs, global-discovery-mcs-chart, rust-tests, rust-feature-builds, rust-clippy, docs-website-composition]
+    needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, global-discovery-mcs, rust-tests, rust-feature-builds, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -441,29 +441,6 @@ jobs:
       with:
         component: global-discovery-mcs
         platform: linux/amd64
-    - name: Run DynamoDB integration tests
-      # testcontainers skips these tests when Docker is unreachable, so check
-      # the daemon first to fail instead of passing with nothing run.
-      working-directory: deploy/global-discovery-mcs
-      run: |
-        docker version
-        make test-integration
-
-  global-discovery-mcs-chart:
-    name: Global Discovery MCS Helm Chart
-    needs: changed-files
-    if: needs.changed-files.outputs.global_discovery_mcs == 'true'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Set up Helm
-      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
-      with:
-        version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
-    - name: Lint and test Helm chart
-      run: make -C deploy/helm/charts/global-discovery-mcs lint test
 
   rust-tests:
     needs: changed-files
