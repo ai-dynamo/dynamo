@@ -1236,6 +1236,43 @@ mod tests {
         assert!(json.get("tool_call_completion").is_none());
         assert!(json.get("model_eos").is_none());
 
+        // The second chunk attributes inter-token latency to the decode worker. Look for
+        // the series: `with_label_values` would create it, and the latency can be tiny.
+        let mut second = make_chat_stream_annotated("again");
+        second.data.as_mut().unwrap().llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 25,
+            chunk_tokens: 5,
+            ..Default::default()
+        });
+        process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(second),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .unwrap();
+        let decode_labels = [
+            ("worker_id", "7022"),
+            ("dp_rank", "2"),
+            ("worker_type", WORKER_TYPE_DECODE),
+        ];
+        assert!(
+            WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .collect()
+                .iter()
+                .flat_map(|family| family.get_metric())
+                .any(|metric| {
+                    decode_labels.iter().all(|(name, value)| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == *name && label.value() == *value)
+                    })
+                }),
+            "inter-token latency should be labelled with the decode worker"
+        );
+
         drop(collector);
 
         let metric_families = registry.gather();
