@@ -673,6 +673,16 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" --out /opt/dynamo/dist; \
     fi && \
+    # Guard: the Symphonia AAC decoder must not be in the runtime wheel's
+    # dependency graph. lib/vendor/llm-multimodal builds Symphonia without it
+    # (see lib/vendor/llm-multimodal/VENDORED.md). The first check makes sure
+    # the graph query itself works (symphonia-core is expected), so the second
+    # check cannot pass just because cargo failed.
+    cargo tree --locked --target all --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" -i symphonia-core >/dev/null && \
+    if cargo tree --locked --target all --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx" -i symphonia-codec-aac >/dev/null 2>&1; then \
+        echo "ERROR: symphonia-codec-aac is in the runtime wheel dependency graph; the AAC decoder must stay disabled" >&2; \
+        exit 1; \
+    fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Complete the root Cargo workspace after the expensive runtime build. Planner
