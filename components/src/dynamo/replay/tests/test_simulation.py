@@ -896,7 +896,7 @@ def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
     # A depth written as aic_nextn or nextn is refused with host offload by a
     # general check, before the agentic G2 check that refuses the other form.
     refusal = (
-        "requires speculative decoding disabled"
+        "requires .*speculative decoding disabled"
         if alias == "speculation"
         else "requires canonical mtp speculation"
     )
