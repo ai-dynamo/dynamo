@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 /// A type-erased `Arc<dyn StreamingDispatch<T, U>>`.
-type DirectDispatchEntry = Arc<dyn std::any::Any + Send + Sync>;
+type DirectDispatchEntry = Box<dyn std::any::Any + Send + Sync>;
 
 fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
     let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -752,7 +752,7 @@ impl DistributedRuntime {
             !dispatches.contains_key(&key),
             "a direct dispatch for these request and response types is already registered"
         );
-        dispatches.insert(key, Arc::new(dispatch));
+        dispatches.insert(key, Box::new(dispatch));
         Ok(())
     }
 
