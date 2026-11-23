@@ -930,6 +930,14 @@ impl KvRouter {
             Arc<dyn dynamo_scheduler::host::KvEventIngress>,
             Option<Arc<indexer::RuntimeIngress>>,
         ) = if direct_kv_events {
+            // Other routers find a served index through discovery, and a
+            // frontend that dials its engines keeps a process-local one:
+            // nothing could reach the index. Say so, not start without it.
+            anyhow::ensure!(
+                !kv_router_config.serve_indexer,
+                "serve_indexer is not supported when the frontend dials its engines directly: \
+                 its discovery is process-local, so no other router could find the served index"
+            );
             let indexer = indexer::build(
                 component,
                 &kv_router_config,
@@ -2824,6 +2832,42 @@ mod tests {
             matches!(router.indexer, Indexer::Single { .. }),
             threads == 1
         );
+    }
+
+    #[tokio::test]
+    async fn direct_kv_events_reject_a_served_index() {
+        let component = make_test_component("direct-kv-served").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let parent_token = component.drt().child_token();
+        let rejected = KvRouter::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7)),
+            Some(KvRouterConfig {
+                serve_indexer: true,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            }),
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            Some("served-model".to_string()),
+            false,
+            None,
+            None,
+            SchedulerLoadSender::disabled(parent_token.child_token()),
+            parent_token,
+            true,
+        )
+        .await
+        .err()
+        .expect("a served index nothing can reach must be rejected");
+        assert!(rejected.to_string().contains("serve_indexer"), "{rejected}");
     }
 
     #[rstest::rstest]
