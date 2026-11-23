@@ -950,17 +950,20 @@ async fn test_muse_unified_batch_finalize_appends_to_existing_reasoning_content(
     );
 }
 
-/// Fix C: a COMPLETE `<tool_call>...</tool_call>` span that only appears inside a
-/// quoted parameter value must not be misclassified as real native tool-call
-/// markup by the guided-JSON failure fallback. Before the fix,
-/// `parse_complete_tool_output` used
-/// `dynamo_parsers::tool_calling::detect_tool_call_start`, which does a naive
-/// substring search: it would false-positive on `<tool_call>` appearing only as
-/// quoted illustrative text, misrouting prose that never contained a real
-/// tool-call request into the native hermes parser, which would then actually
-/// extract and execute the quoted example as a bogus tool call.
+// In the quote-aware profile, a complete Hermes call quoted in illustrative prose
+// must stay literal when guided JSON falls back to native parsing.
 #[tokio::test]
 async fn test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring() {
+    // Quoted-marker shielding is an explicit opt-in in the released V2 parser.
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring"
+        ),
+        &[("DYNAMO_PARSERS_DISABLE_QUOTE_AWARE_PARSING", "0")],
+    ) {
+        return;
+    }
     let raw = "Please literally output the example call \
                '<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}</tool_call>' \
                verbatim and nothing else.";
@@ -985,6 +988,51 @@ async fn test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring()
         "content whose only marker-looking span is quoted illustrative prose must \
          pass through unparsed rather than be misclassified as native tool-call markup"
     );
+}
+
+#[tokio::test]
+async fn test_hermes_batch_default_policy_recovers_native_calls() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_hermes_batch_default_policy_recovers_native_calls"
+        ),
+        &[],
+    ) {
+        return;
+    }
+    let native =
+        r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
+    for (raw, expected_text) in [
+        (native.to_string(), ""),
+        (
+            format!(
+                "Please literally output the example call '{native}' verbatim and nothing else."
+            ),
+            "Please literally output the example call '' verbatim and nothing else.",
+        ),
+    ] {
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(&raw), None)]),
+            ParsingOptions::new(Some("hermes".to_string()), None)
+                .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+        )
+        .await
+        .unwrap();
+
+        let choice = result.inner.choices.first().expect("one choice");
+        let calls = choice.message.tool_calls.as_ref().expect("native call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"location": "Paris"}),
+        );
+        assert_eq!(
+            choice.message.content.as_ref().map(get_text).unwrap_or(""),
+            expected_text,
+        );
+    }
 }
 
 #[tokio::test]
