@@ -1180,10 +1180,11 @@ mod tests {
             output_tokens: 20,
             chunk_tokens: 5,
             cached_tokens: Some(15),
-            prefill_worker_id: Some(11),
+            // Unique to this test: the per-worker gauges it reads are process-global.
+            prefill_worker_id: Some(7011),
             prefill_dp_rank: Some(1),
             prefill_worker_type: Some(WORKER_TYPE_PREFILL.to_string()),
-            decode_worker_id: Some(22),
+            decode_worker_id: Some(7022),
             decode_dp_rank: Some(2),
             decode_worker_type: Some(WORKER_TYPE_DECODE.to_string()),
             tokenize_latency: Some(Duration::from_millis(8)),
@@ -1222,6 +1223,21 @@ mod tests {
         assert!(
             http_queue_guard.is_none(),
             "first positive chunk should release HTTP queue guard"
+        );
+        // The first chunk attributes TTFT and its input tokens to the prefill worker.
+        // With the prefill and decode fields crossed, these two series stay at 0.
+        let prefill_labels = &["7011", "1", WORKER_TYPE_PREFILL];
+        assert!(
+            WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(prefill_labels)
+                .get()
+                > 0.0
+        );
+        assert_eq!(
+            WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(prefill_labels)
+                .get(),
+            10
         );
         let event = result
             .unwrap()
