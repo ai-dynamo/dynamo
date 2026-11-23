@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -1093,11 +1095,11 @@ func TestLPXServiceReconciliation(t *testing.T) {
 
 	t.Log("Keep the ordinary model Service under the source DGD's ownership")
 	modelService := &corev1.Service{
-		Name: dynamo.GenerateServiceName("test/model"), Namespace: dgd.Namespace,
+		Name: modelservice.Name("test/model", "", false), Namespace: dgd.Namespace,
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)},
 		Labels:          map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
 		Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone,
-			Selector: map[string]string{consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("test/model")}},
+			Selector: map[string]string{consts.KubeLabelDynamoBaseModelHash: modelservice.HashModelName("test/model")}},
 	}
 	require.NoError(t, r.Create(t.Context(), modelService))
 	modelKey := client.ObjectKeyFromObject(modelService)

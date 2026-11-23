@@ -48,6 +48,20 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Model-discovery Services
+
+Set `spec.components[*].modelRef.name` to enable worker endpoint discovery for `DynamoModel`, including dynamic LoRA adapter management. This is separate from the frontend HTTP Service and does not configure the worker's model-loading arguments.
+
+For graphs created by operator 1.8.0 or later, each distinct model gets a DGD-owned headless Service named `<dgd-name>-model-<model-hash>`. The model hash is the first eight hexadecimal characters of SHA-256 of `modelRef.name`. If the readable name is not a valid DNS-1035 label of at most 63 characters, the name falls back to `dynamo-model-<model-hash>-<dgd-name-hash>`, using the same hash function for the DGD name.
+
+The Service selects worker Pods with both the model hash and `nvidia.com/dynamo-graph-deployment-name` labels, and exposes the worker system API on port 9090. Components in one graph can share one model Service; separate graphs always own separate model Services. Removing the last reference to a model retires that graph's model Service after the workload provider completes its serving transition. Old-model discovery remains available while a rollout is pending.
+
+Component Services and model-discovery Services must have distinct names. If a component's generated Service name conflicts with a desired or retiring model-discovery Service, reconciliation reports the conflict before changing either family. Rename the conflicting component to proceed.
+
+Eligibility uses the immutable `nvidia.com/dynamo-operator-origin-version` annotation recorded on the parent DGD at creation, including when a newer operator creates a replacement child DCD. Missing or invalid origin keeps legacy behavior. Upgrading the operator does not rename or change the selectors or ownership of existing model Services. Older Grove/component graphs keep model-only discovery Services; older DisaggregatedSet graphs keep their graph-hash names. Standalone DCDs keep legacy discovery.
+
+`DynamoModel.spec.baseModelName` must match the component's `modelRef.name` in the same Kubernetes namespace. The model controller finds EndpointSlices by the retained `nvidia.com/dynamo-base-model-hash` label and uses Pod IPs, so the new Service names preserve namespace-wide discovery across matching graphs. `modelRef.revision` is not part of this discovery key.
+
 ## Grove update strategy
 
 Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. DGDs with LPX components accept only `Coherent` and `RollingRecreate`. Under `OnDelete`, running LPX Pods keep their old templates after an update; the LPX scheduler treats that drift as a lost dependency and releases the pipeline, which cannot recover until Grove replaces the Pods. Admission rejects other updates to an existing LPX DGD that still uses `OnDelete`, so remove the annotation first. Removing it changes only the strategy and does not replace Pods that already run an old template; then set a new `spec.restart.id` with `restart.strategy.type: Parallel`, or delete those Pods. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.

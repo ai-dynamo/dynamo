@@ -26,7 +26,9 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	disaggregatedset "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,8 +41,9 @@ import (
 )
 
 type disaggregatedSetStableResourcesReconciler struct {
-	client   client.Client
-	renderer *dcdWorkloadRenderer
+	modelServices modelservice.Reconciler
+	client        client.Client
+	renderer      *dcdWorkloadRenderer
 }
 
 const managedServiceMetadataAnnotation = "nvidia.com/dynamo-managed-service-metadata"
@@ -55,8 +58,9 @@ func newDisaggregatedSetStableResourcesReconciler(
 	renderer *dcdWorkloadRenderer,
 ) *disaggregatedSetStableResourcesReconciler {
 	return &disaggregatedSetStableResourcesReconciler{
-		client:   k8sClient,
-		renderer: renderer,
+		modelServices: modelservice.Reconciler{Client: k8sClient},
+		client:        k8sClient,
+		renderer:      renderer,
 	}
 }
 
@@ -71,6 +75,17 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 ) (map[string]struct{}, error) {
 	desiredServiceNames := map[string]struct{}{}
+
+	// Validate family names before component Services can claim the same object.
+	if compatibility.DGDScopedModelServices.Enabled(dgd.Annotations) {
+		modelServices, err := r.modelServices.Reconcile(ctx, dgd)
+		if err != nil {
+			return nil, err
+		}
+		for name := range modelServices {
+			desiredServiceNames[name] = struct{}{}
+		}
+	}
 	componentNames := make([]string, 0, len(normalizedComponents))
 	for componentName := range normalizedComponents {
 		componentNames = append(componentNames, componentName)
@@ -115,6 +130,11 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 		desiredServiceNames[service.Name] = struct{}{}
 	}
 
+	// Existing provider readiness gates retire the complete Service inventory later.
+	if compatibility.DGDScopedModelServices.Enabled(dgd.Annotations) {
+		return desiredServiceNames, nil
+	}
+
 	modelNames := map[string]struct{}{}
 	for _, component := range normalizedComponents {
 		if component.ModelRef == nil || component.ModelRef.Name == "" {
@@ -129,7 +149,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 	sort.Strings(modelNamesSorted)
 	for _, modelName := range modelNamesSorted {
 		annotations := maps.Clone(dgd.Spec.Annotations)
-		service := dynamo.GenerateModelServiceForGraph(dgd.Namespace, modelName, dgd.Name, annotations)
+		service := modelservice.Render(modelservice.Params{Namespace: dgd.Namespace, ModelName: modelName, GraphName: dgd.Name, Annotations: annotations})
 		if err := r.syncDGDStableService(ctx, dgd, service); err != nil {
 			return nil, fmt.Errorf("failed to reconcile model service for %q: %w", modelName, err)
 		}

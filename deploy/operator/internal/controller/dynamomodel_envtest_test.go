@@ -23,9 +23,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -82,7 +83,7 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create EndpointSlice with ready Pod endpoints
 			trueVal := true
-			modelHash := dynamo.HashModelName(baseModelName)
+			modelHash := modelservice.HashModelName(baseModelName)
 			endpointSlice := &discoveryv1.EndpointSlice{
 				Name:      "test-lora-endpoints",
 				Namespace: namespace,
@@ -172,7 +173,7 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create EndpointSlice with mixed endpoints (some Pod, some not)
 			trueVal := true
-			modelHash := dynamo.HashModelName(baseModelName)
+			modelHash := modelservice.HashModelName(baseModelName)
 			endpointSlice := &discoveryv1.EndpointSlice{
 				Name:      "test-mixed-endpoints",
 				Namespace: namespace,
@@ -266,7 +267,7 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create EndpointSlice
 			trueVal := true
-			modelHash := dynamo.HashModelName(baseModelName)
+			modelHash := modelservice.HashModelName(baseModelName)
 			endpointSlice := &discoveryv1.EndpointSlice{
 				Name:      "test-base-endpoints",
 				Namespace: namespace,

@@ -26,7 +26,9 @@ import (
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +38,7 @@ import (
 )
 
 type groveProgram struct {
+	modelServices      modelservice.Reconciler
 	reader             client.Reader
 	sharedResources    *dgdSharedResourcesReconciler
 	rollout            *dgdWorkerRolloutReconciler
@@ -88,7 +91,8 @@ func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoCo
 func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &groveProgram{
-		reader: r.Client,
+		modelServices: modelservice.Reconciler{Client: r.Client},
+		reader:        r.Client,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -164,6 +168,11 @@ func (p *groveProgram) Reconcile(
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
 	}
+	if err != nil {
+		return programResult, err
+	}
+	// New model Services are graph resources, independent of provider workload revisions.
+	modelServiceNames, err := p.reconcileModelServices(ctx, req.DGD)
 	if err != nil {
 		return programResult, err
 	}
@@ -267,6 +276,10 @@ func (p *groveProgram) Reconcile(
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
 	}
+	// Preserve old-model discovery until ordinary and delegated workloads complete cutover.
+	if err := p.retireModelServices(ctx, req.DGD, modelServiceNames, result.State); err != nil {
+		return programResult, err
+	}
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 
 	// A status-only DGD update does not pass the primary predicate, so advance restart progress by requeueing.
@@ -274,4 +287,20 @@ func (p *groveProgram) Reconcile(
 		programResult.RequeueAfter = time.Nanosecond
 	}
 	return programResult, nil
+}
+
+// reconcileModelServices selects graph-owned discovery only for eligible origins.
+func (p *groveProgram) reconcileModelServices(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]struct{}, error) {
+	if !compatibility.DGDScopedModelServices.Enabled(dgd.Annotations) {
+		return nil, nil
+	}
+	return p.modelServices.Reconcile(ctx, dgd)
+}
+
+// retireModelServices keeps old-model endpoints through ordinary and LPX cutover.
+func (p *groveProgram) retireModelServices(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, desiredNames map[string]struct{}, state nvidiacomv1beta1.DGDState) error {
+	if state != nvidiacomv1beta1.DGDStateSuccessful || !compatibility.DGDScopedModelServices.Enabled(dgd.Annotations) {
+		return nil
+	}
+	return p.modelServices.DeleteStale(ctx, dgd, desiredNames)
 }

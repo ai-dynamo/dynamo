@@ -21,6 +21,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
@@ -71,32 +73,20 @@ func TestModelServiceReconciliationCharacterization(t *testing.T) {
 	service := &corev1.Service{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKey{
 		Namespace: dgd.Namespace,
-		Name:      GenerateServiceName("llama-3"),
+		Name:      modelservice.Name("llama-3", "", false),
 	}, service))
 	require.Equal(t, dgd.Namespace, service.Namespace)
 	require.Equal(t, corev1.ClusterIPNone, service.Spec.ClusterIP)
 	require.Equal(t, map[string]string{
-		commonconsts.KubeLabelDynamoBaseModelHash: HashModelName("llama-3"),
+		commonconsts.KubeLabelDynamoBaseModelHash: modelservice.HashModelName("llama-3"),
 	}, service.Spec.Selector)
 	require.Equal(t, commonconsts.DynamoSystemPortName, service.Spec.Ports[0].Name)
 	require.Equal(t, int32(commonconsts.DynamoSystemPort), service.Spec.Ports[0].Port)
-	require.Equal(t, HashModelName("llama-3"), service.Labels[commonconsts.KubeLabelDynamoBaseModelHash])
+	require.Equal(t, modelservice.HashModelName("llama-3"), service.Labels[commonconsts.KubeLabelDynamoBaseModelHash])
 	require.Equal(t, "dynamo-operator", service.Labels["nvidia.com/managed-by"])
 	require.Equal(t, "llama-3", service.Annotations[commonconsts.KubeAnnotationDynamoBaseModel])
 	require.Equal(t, "true", service.Annotations["example.com/graph"])
 	require.Len(t, service.OwnerReferences, 1)
 	require.Equal(t, dgd.UID, service.OwnerReferences[0].UID)
 	require.True(t, *service.OwnerReferences[0].Controller)
-}
-
-func TestGenerateModelServiceForGraphIsPrivateToGraph(t *testing.T) {
-	first := GenerateModelServiceForGraph("inference", "llama-3", "graph-a", nil)
-	second := GenerateModelServiceForGraph("inference", "llama-3", "graph-b", nil)
-
-	require.NotEqual(t, first.Name, second.Name)
-	require.Equal(t, "graph-a", first.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
-	require.Equal(t, "graph-a", first.Spec.Selector[commonconsts.KubeLabelDynamoGraphDeploymentName])
-	require.Equal(t, HashModelName("llama-3"), first.Labels[commonconsts.KubeLabelDynamoBaseModelHash])
-	require.LessOrEqual(t, len(first.Name), 63)
-	require.LessOrEqual(t, len(second.Name), 63)
 }

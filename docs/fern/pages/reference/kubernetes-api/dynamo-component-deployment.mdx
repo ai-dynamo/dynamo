@@ -204,7 +204,9 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">
-  References a model served by this component. When set, a headless service is created for endpoint discovery.
+  Optionally identifies a base model served by this component and enables headless Service discovery for `DynamoModel`. When present, `name` must be non-empty and match the consuming `DynamoModel.spec.baseModelName`. The worker's model-loading arguments are configured separately.
+
+  DGDs with an immutable operator origin of 1.8.0 or later own graph-scoped model-discovery Services. Older graphs and standalone DCDs retain their previous discovery behavior. See [Model-discovery Services](dynamo-graph-deployment.mdx#model-discovery-services).
 </ParamField>
 
 <Indent>

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/modelservice"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -406,11 +408,11 @@ func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *test
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
 		consts.KubeLabelDynamoComponent:           "removed",
 	})
-	staleModel := controlledService(dynamo.GenerateServiceName("removed-model"), map[string]string{
-		consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("removed-model"),
+	staleModel := controlledService(modelservice.Name("removed-model", "", false), map[string]string{
+		consts.KubeLabelDynamoBaseModelHash: modelservice.HashModelName("removed-model"),
 	})
-	foreignModel := controlledService(dynamo.GenerateServiceName("foreign-model"), map[string]string{
-		consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("foreign-model"),
+	foreignModel := controlledService(modelservice.Name("foreign-model", "", false), map[string]string{
+		consts.KubeLabelDynamoBaseModelHash: modelservice.HashModelName("foreign-model"),
 	})
 	foreignModel.OwnerReferences = nil
 	staleUnlabeled := controlledService("demo-unlabeled", nil)

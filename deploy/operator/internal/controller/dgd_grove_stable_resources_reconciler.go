@@ -29,6 +29,7 @@ import (
 	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -65,15 +66,17 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	logger := log.FromContext(ctx)
 
 	// Model discovery is owned by the DGD and spans managed and external components.
-	if err := dynamo.ReconcileModelServicesForComponents(
-		ctx,
-		r,
-		req.DGD,
-		dynamo.ComponentsByName(req.DGD),
-		req.DGD.Namespace,
-	); err != nil {
-		logger.Error(err, "failed to reconcile model services")
-		return nil, fmt.Errorf("failed to reconcile model services: %w", err)
+	if !compatibility.DGDScopedModelServices.Enabled(req.DGD.Annotations) {
+		if err := dynamo.ReconcileModelServicesForComponents(
+			ctx,
+			r,
+			req.DGD,
+			dynamo.ComponentsByName(req.DGD),
+			req.DGD.Namespace,
+		); err != nil {
+			logger.Error(err, "failed to reconcile model services")
+			return nil, fmt.Errorf("failed to reconcile model services: %w", err)
+		}
 	}
 
 	resources := []Resource{}
