@@ -50,6 +50,8 @@ members = [
     "deploy/inference-gateway/sidecar",
 ]
 resolver = "3"
+# Patched third-party crate (see [patch.crates-io] below); not a workspace member.
+exclude = ["lib/vendor/llm-multimodal"]
 
 [workspace.package]
 version = "1.7.0"
@@ -219,6 +221,13 @@ sha2 = { version = "0.10" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+
+# Keep `mm-routing` but build Symphonia without the AAC decoder. Upstream
+# llm-multimodal enables Symphonia's "all" feature; the vendored copy omits "aac".
+# See lib/vendor/llm-multimodal/VENDORED.md. lib/bindings/python is an excluded
+# workspace and carries the same patch.
+[patch.crates-io]
+llm-multimodal = { path = "lib/vendor/llm-multimodal" }
 
 [profile.dev.package]
 insta.opt-level = 3
