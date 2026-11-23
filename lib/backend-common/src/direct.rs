@@ -30,6 +30,8 @@ use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::component::{Instance, TransportType};
 use dynamo_runtime::discovery::DiscoveryInstance;
+use dynamo_runtime::pipeline::network::StreamPrologueError;
+use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
 use dynamo_runtime::pipeline::{
     AddressedRequest, AsyncEngine, Context, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
 };
@@ -105,6 +107,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
         request: SingleIn<AddressedRequest<PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
+        let establish_timeout = addressed.establish_timeout();
         let (request, _, instance) = addressed.into_parts();
         let instance_id = instance
             .ok_or_else(|| {
@@ -125,7 +128,29 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
                     format!("engine {instance_id} is not serving"),
                 )
             })?;
-        adapter.generate(Context::rejoin(request, context)).await
+        // As on the request plane: the engine has this long to open its
+        // response stream, and a failure before the stream reports the engine
+        // down, so a retry does not pick it again.
+        let setup = adapter.generate(Context::rejoin(request, context));
+        let stream = match establish_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, setup).await.map_err(|_| {
+                error(
+                    ErrorType::ResponseTimeout,
+                    format!(
+                        "engine {instance_id} did not establish its response stream within {timeout:?}"
+                    ),
+                )
+            })?,
+            None => setup.await,
+        };
+        stream.map_err(|setup_error| {
+            let engine_error: &(dyn std::error::Error + 'static) = setup_error.as_ref();
+            pre_stream_failure_error(StreamPrologueError::new(
+                setup_error.to_string(),
+                DynamoError::from(engine_error),
+            ))
+            .into()
+        })
     }
 
     async fn generate_bidirectional(
@@ -555,6 +580,7 @@ mod tests {
     use dynamo_llm::discovery::{ModelManager, ModelWatcher};
     use dynamo_llm::entrypoint::RouterConfig;
     use dynamo_llm::http::service::metrics::Metrics;
+    use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_llm::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
     };
@@ -599,6 +625,11 @@ mod tests {
         started_at: parking_lot::Mutex<Vec<tokio::time::Instant>>,
         /// Report the engine lost as soon as it registers.
         flaps: AtomicBool,
+        /// Fail every request before its response stream, as an engine that
+        /// cannot be reached does.
+        refuses: AtomicBool,
+        /// Never open a response stream.
+        stalls: AtomicBool,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -647,6 +678,15 @@ mod tests {
             _request: PreprocessedRequest,
             _ctx: GenerateContext,
         ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            if self.state.refuses.load(Ordering::SeqCst) {
+                return Err(error(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    "engine is unreachable",
+                ));
+            }
+            if self.state.stalls.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 return Ok(futures::stream::iter([Err(error(
                     ErrorType::Backend(BackendError::EngineShutdown),
@@ -1159,6 +1199,92 @@ mod tests {
         });
         assert!(completed, "the request must complete on the other engine");
         assert_eq!(frontend.served(A) + frontend.served(B), before + 1);
+    }
+
+    /// A dispatch that hosts one engine, and a request routed to that engine.
+    fn dispatch_to(state: EngineState) -> (DirectDispatch, AddressedRequest<PreprocessedRequest>) {
+        let engine = Arc::new(FakeEngine {
+            state: Arc::new(state),
+            fail_next: Arc::default(),
+            hold_next: Arc::default(),
+            held: Arc::default(),
+        });
+        let dispatch = DirectDispatch::default();
+        dispatch.adapters.write().insert(
+            instance_id_for_url(A),
+            Arc::new(EngineAdapter::new(engine, DisaggregationMode::Aggregated)),
+        );
+        let request = PreprocessedRequest::builder()
+            .model("direct-test-model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        let instance = Instance {
+            namespace: "direct-dispatch".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: instance_id_for_url(A),
+            transport: TransportType::Direct(A.to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        (dispatch, AddressedRequest::for_instance(request, instance))
+    }
+
+    #[tokio::test]
+    async fn a_failure_before_the_response_stream_reports_the_engine_down() {
+        let (dispatch, request) = dispatch_to(EngineState {
+            refuses: AtomicBool::new(true),
+            ..EngineState::default()
+        });
+        let Err(setup_error) = dispatch.generate(Context::new(request)).await else {
+            panic!("the engine refuses the request");
+        };
+        // The outer `CannotConnect` is what the router reports an instance down
+        // for; the engine's own error is its cause.
+        assert_eq!(
+            setup_error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::CannotConnect),
+            "{setup_error}"
+        );
+        assert!(
+            dynamo_runtime::error::match_error_chain(
+                setup_error.as_ref(),
+                &[ErrorType::Backend(BackendError::CannotConnect)],
+                &[],
+            ),
+            "{setup_error}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_engine_that_does_not_open_its_stream_times_out() {
+        let (dispatch, request) = dispatch_to(EngineState {
+            stalls: AtomicBool::new(true),
+            ..EngineState::default()
+        });
+        let request = request.with_establish_timeout(Some(Duration::from_secs(5)));
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            dispatch.generate(Context::new(request)),
+        )
+        .await
+        .expect("the establish timeout must end the request");
+        let Err(timeout_error) = result else {
+            panic!("the engine never opens a stream");
+        };
+        assert_eq!(
+            timeout_error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::ResponseTimeout),
+            "{timeout_error}"
+        );
     }
 
     #[tokio::test]
