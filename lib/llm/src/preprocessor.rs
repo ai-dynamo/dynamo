@@ -69,9 +69,7 @@ use crate::local_model::runtime_config::{
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
-use crate::local_model::runtime_config::{
-    SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
-};
+use crate::local_model::runtime_config::{SGLANG_GENERATE_CAPABILITY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -99,7 +97,7 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{NvExtProvider, merge_response_nvext, request_cache_salt},
+        extensions::{NvExtProvider, merge_response_nvext},
     },
     openai::{
         DeltaGeneratorExt, ParsingOptions,
@@ -116,7 +114,9 @@ use crate::tokenizers::traits::Tokenizer;
 use crate::preprocessor::prompt::{
     MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
 };
-use crate::preprocessor::request_envelope::{RequestEnvelope, RequestScope};
+use crate::preprocessor::request_envelope::{
+    RequestEnvelope, RequestScope, nvext_passthrough_args, sampling_passthrough_args,
+};
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -2087,8 +2087,6 @@ pub struct OpenAIPreprocessor {
     /// ModelRuntimeConfig; disabled for all other models.
     normalize_tool_call_args: bool,
     media_loader: Option<MediaLoader>,
-    /// Engine-published request-token admission policy.
-    token_budget: Option<TokenBudget>,
     /// Model context limit used by the embedding truncation contract.
     context_length: u32,
     /// Tracks warmups and cancels them when this preprocessor is retired.
@@ -2328,63 +2326,6 @@ impl OpenAIPreprocessor {
         Ok(exact_prompt_len)
     }
 
-    fn nvext_passthrough_args<R: NvExtProvider>(
-        request: &R,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let mut nvext_passthrough = serde_json::Map::new();
-
-        if let Some(nvext) = request.nvext() {
-            if let Some(ref fields) = nvext.extra_fields {
-                nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
-            }
-            if let Some(ref metadata_upload) = nvext.metadata_upload {
-                nvext_passthrough.insert(
-                    "metadata_upload".to_string(),
-                    serde_json::json!(metadata_upload),
-                );
-            }
-            if nvext.token_data.is_some() {
-                nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
-            }
-        }
-
-        if let Some(salt) = request_cache_salt(request) {
-            nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
-        }
-
-        if nvext_passthrough.is_empty() {
-            None
-        } else {
-            Some(nvext_passthrough)
-        }
-    }
-
-    fn sampling_passthrough_args<R: NvExtProvider>(
-        request: &R,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let mut sampling_passthrough = serde_json::Map::new();
-
-        if let Some(fields) = request.unsupported_fields() {
-            for key in [
-                "detokenize",
-                "allowed_token_ids",
-                "bad_words_token_ids",
-                "logprob_token_ids",
-                "vllm_xargs",
-            ] {
-                if let Some(value) = fields.get(key) {
-                    sampling_passthrough.insert(key.to_string(), value.clone());
-                }
-            }
-        }
-
-        if sampling_passthrough.is_empty() {
-            None
-        } else {
-            Some(sampling_passthrough)
-        }
-    }
-
     fn backend_extra_args<R: OAIChatLikeRequest + NvExtProvider>(
         request: &R,
         reasoning_parser_configured: bool,
@@ -2392,14 +2333,14 @@ impl OpenAIPreprocessor {
     ) -> Option<serde_json::Value> {
         let mut extra_args = serde_json::Map::new();
 
-        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+        if let Some(nvext_passthrough) = nvext_passthrough_args(request) {
             extra_args.insert(
                 "nvext".to_string(),
                 serde_json::Value::Object(nvext_passthrough),
             );
         }
 
-        if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
+        if let Some(sampling_passthrough) = sampling_passthrough_args(request) {
             extra_args.insert(
                 "sampling_options".to_string(),
                 serde_json::Value::Object(sampling_passthrough),
@@ -3123,19 +3064,6 @@ impl OpenAIPreprocessor {
         let runtime_config = mdc.runtime_config.clone();
         let structural_tag_reasoning_boundary =
             structural_tag::validate_runtime_config(&runtime_config)?;
-        let token_budget = match runtime_config
-            .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
-        {
-            Ok(token_budget) => token_budget,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    key = TOKEN_BUDGET_RUNTIME_KEY,
-                    "Ignoring invalid runtime metadata; token overflow handling will be delegated to the backend"
-                );
-                None
-            }
-        };
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
         let context_length = mdc.effective_context_length();
 
@@ -3442,7 +3370,6 @@ impl OpenAIPreprocessor {
             mistral_tool_call_grammar,
             normalize_tool_call_args,
             media_loader,
-            token_budget,
             context_length,
             speculative_prefill_tasks: speculative_prefill::PrefillTasks::new(
                 speculative_prefill_cancel.as_ref(),
@@ -3723,20 +3650,23 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let exact_prompt_len =
-            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
+        let exact_prompt_len = Self::validate_preprocessed_token_budget(
+            &preprocessed,
+            self.envelope.token_budget().as_ref(),
+        )?;
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = exact_prompt_len
             // Preserve omission when the prompt itself is backend-owned. In
             // particular, setting a saturating zero here would interfere with
             // SGLang's auto-truncation before the backend sees the request.
-            && !self.token_budget.is_some_and(|token_budget| {
+            && !self.envelope.token_budget().is_some_and(|token_budget| {
                 prompt_len >= token_budget.combined_limit as usize
                     && !token_budget.reject_prompt_overflow
             })
             && let Some(max_tokens) = Self::omitted_max_tokens_default(
                 prompt_len,
-                self.token_budget
+                self.envelope
+                    .token_budget()
                     .map(|token_budget| token_budget.combined_limit),
                 options,
             )
@@ -3745,7 +3675,10 @@ impl OpenAIPreprocessor {
             // A strict limit may be smaller than the raw context window because
             // the engine reserves tokens. Revalidate the derived budget so an
             // already-over-limit prompt fails before streaming begins.
-            Self::validate_preprocessed_token_budget(&preprocessed, self.token_budget.as_ref())?;
+            Self::validate_preprocessed_token_budget(
+                &preprocessed,
+                self.envelope.token_budget().as_ref(),
+            )?;
         }
 
         Ok((
@@ -9067,7 +9000,10 @@ impl
             .as_object_mut()
             .context("preprocessed extra_args must be an object")?;
         extra_args.insert("request_type".to_string(), "completions".into());
-        Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
+        Self::validate_preprocessed_token_budget(
+            &common_request,
+            self.envelope.token_budget().as_ref(),
+        )?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
@@ -10036,6 +9972,7 @@ mod extra_args_media_copy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::TOKEN_BUDGET_RUNTIME_KEY;
     use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
