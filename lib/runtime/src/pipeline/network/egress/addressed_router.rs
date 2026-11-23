@@ -1232,8 +1232,10 @@ where
 /// Transport seam beneath `PushRouter`: given an already-selected worker (typed
 /// request + resolved address), dispatch the final hop and return a typed stream.
 /// Selection, occupancy, fault detection, and migration stay in `PushRouter`
-/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
-/// (the request plane) is the default impl.
+/// above the seam; only the transport below it changes. By default a router
+/// reaches `TransportType::Direct` instances through the runtime's registered
+/// direct dispatch and all others through [`AddressedPushRouter`] (the request
+/// plane).
 ///
 /// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
 /// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
@@ -1270,6 +1272,11 @@ where
     async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
 }
 
+// A router built without a dispatch does not call `generate` or
+// `generate_bidirectional` here: to save a boxed future per request, its
+// default dispatch (`TransportDispatch` in push_router.rs) calls what they
+// forward to. Keep them forwarding only: logic added to them would not run
+// for those routers. The lifecycle hooks are the ones it calls.
 #[async_trait::async_trait]
 impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
 where

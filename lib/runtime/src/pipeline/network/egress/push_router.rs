@@ -220,7 +220,8 @@ where
     selectors: Vec<(RouterMode, Arc<dyn InstanceSelector>)>,
 
     /// The final hop: after selecting an instance, `PushRouter` hands it to this
-    /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
+    /// `StreamingDispatch` (`TransportDispatch` by default: the request plane,
+    /// or the registered direct dispatch for `Direct` instances).
     /// A trait object so an alternate transport can swap it out.
     addressed: Arc<dyn StreamingDispatch<T, U>>,
 
@@ -839,7 +840,7 @@ where
     }
 
     /// Create a new PushRouter from `client` with the given optional capabilities.
-    /// A caller-supplied `dispatch` replaces the request plane as the final hop;
+    /// A caller-supplied `dispatch` replaces the default final hop;
     /// fault detection stays on, so its `ErrorType` mapping drives report-down,
     /// overload and migration as usual.
     pub async fn from_client_with_options(
@@ -3771,7 +3772,7 @@ mod tests {
 
     /// A `StreamingDispatch` that records what the router hands the seam, so the
     /// test can assert a *caller-supplied* dispatch (not just the default
-    /// `AddressedPushRouter`) receives the selected address/instance and the
+    /// `TransportDispatch`) receives the selected address/instance and the
     /// discovery lifecycle events.
     #[derive(Default)]
     struct RecordingDispatch {
