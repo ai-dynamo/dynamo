@@ -96,6 +96,7 @@ spec:
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent" }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext | nindent 10 }}
+        resources: {{- toYaml .Values.controllerManager.crdApply.resources | nindent 10 }}
         command: ["/crd-apply"]
         args:
           - "--crds-dir=/opt/dynamo-operator/crds/"
