@@ -77,7 +77,7 @@ spec:
                         InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
                         the typed fields. It uses the upstream AISimulate JSON contract, including
                         snake_case names. Values here take precedence, and null deletes a lowered
-                        field. The exact {"$null":true} alias is valid only as an object-field value
+                        field. The exact `{"$null":true}` alias is valid only as an object-field value
                         outside arrays; all other uses of $null are rejected on every write.
                         Use the alias with client-side kubectl apply, which removes native nulls;
                         kubectl create and server-side apply preserve them. A null document supplies

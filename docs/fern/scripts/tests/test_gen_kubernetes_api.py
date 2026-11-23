@@ -554,6 +554,12 @@ def test_render_mdx_carries_no_react_component_or_data_import(native_mdx: str) -
     assert "api-reference.data" not in native_mdx
 
 
+def test_render_mdx_keeps_null_override_marker_copyable(native_mdx: str) -> None:
+    """The deletion marker must render as literal JSON inside inline code."""
+    assert '`{"$null":true}`' in native_mdx
+    assert r'\&#123;"$null":true\&#125;' not in native_mdx
+
+
 def test_render_mdx_drops_the_hand_built_llms_only_twin(native_mdx: str) -> None:
     """Fern serves any page as Markdown and builds llms.txt from MDX, so the
     hand-maintained twin is duplicated content once the page is native."""
