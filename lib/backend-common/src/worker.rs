@@ -2225,6 +2225,23 @@ pub(crate) async fn build_local_model(
     name_only: bool,
     tensor_model_config: Option<dynamo_llm::protocols::tensor::TensorModelConfig>,
 ) -> Result<LocalModel, DynamoError> {
+    let mut builder = local_model_builder(config, engine_config, name_only).await?;
+    builder.build().await.map_err(|e| {
+        err(
+            ErrorType::Backend(BackendError::Unknown),
+            format!("build local model: {e}"),
+        )
+    })
+}
+
+/// The builder of [`build_local_model`]'s model, with everything that waits
+/// done: the topology read and the model fetch. What is left, its `build`,
+/// only loads the model card from disk.
+pub(crate) async fn local_model_builder(
+    config: &WorkerConfig,
+    engine_config: &EngineConfig,
+    name_only: bool,
+) -> Result<LocalModelBuilder, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
         .filter(|s| !s.is_empty());
@@ -2309,30 +2326,30 @@ pub(crate) async fn build_local_model(
     // diffusion path's `ModelDeploymentCard::with_name_only()`).
     if !config.model_name.is_empty() && !name_only {
         let source = config.model_name.clone();
-        let local_path = if std::fs::exists(&source).map_err(|e| {
-            err(
-                ErrorType::Backend(BackendError::InvalidArgument),
-                format!("model path: {e}"),
-            )
-        })? {
-            PathBuf::from(&source)
-        } else {
-            // Skip weights: the engine loaded them in start(); the card needs only metadata.
-            LocalModel::fetch(&source, true).await.map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::CannotConnect),
-                    format!("fetch '{source}': {e}"),
-                )
-            })?
-        };
-        builder.model_path(local_path);
+        builder.model_path(fetch_model_files(&source).await?);
         builder.source_path(PathBuf::from(source));
     }
 
-    builder.build().await.map_err(|e| {
+    Ok(builder)
+}
+
+/// The local directory of the model `source` names: `source` itself when it
+/// is a path, otherwise the model's metadata files, downloaded unless they
+/// are already in the local cache.
+pub(crate) async fn fetch_model_files(source: &str) -> Result<PathBuf, DynamoError> {
+    if std::fs::exists(source).map_err(|e| {
         err(
-            ErrorType::Backend(BackendError::Unknown),
-            format!("build local model: {e}"),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!("model path: {e}"),
+        )
+    })? {
+        return Ok(PathBuf::from(source));
+    }
+    // Skip weights: the engine loaded them in start(); the card needs only metadata.
+    LocalModel::fetch(source, true).await.map_err(|e| {
+        err(
+            ErrorType::Backend(BackendError::CannotConnect),
+            format!("fetch '{source}': {e}"),
         )
     })
 }

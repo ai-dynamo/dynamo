@@ -34,6 +34,7 @@ use dynamo_runtime::pipeline::{
     AddressedRequest, AsyncEngine, Context, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
+use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
@@ -43,7 +44,8 @@ use crate::disagg::DisaggregationMode;
 use crate::engine::{EngineConfig, KvEventSource, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::worker::{
-    WorkerConfig, build_local_model, resolve_model_type, resolve_worker_type_and_needs,
+    WorkerConfig, fetch_model_files, local_model_builder, resolve_model_type,
+    resolve_worker_type_and_needs,
 };
 
 /// Delay after the first failed probe, and before the first probe of an engine
@@ -83,7 +85,8 @@ pub struct DirectDispatch {
     /// the engine, which runs elsewhere.
     supervisors: TaskTracker,
     /// Held while an engine's model files are fetched, so engines that start
-    /// together download a model once and then read the local copy.
+    /// together download a model once and then read the local copy. Not held
+    /// while the card is loaded from that copy.
     model_fetch: tokio::sync::Mutex<()>,
 }
 
@@ -431,10 +434,26 @@ impl DirectEngineHost {
             &mut engine_config.runtime_data,
             engine.kv_event_sources().await?,
         )?;
-        let local_model = {
+        if !config.model_name.is_empty() {
             let _fetching = self.dispatch.model_fetch.lock().await;
-            build_local_model(&config, &engine_config, false).await?
+            fetch_model_files(&config.model_name).await?;
+        }
+        let mut builder = local_model_builder(&config, &engine_config, false).await?;
+        // Loading the card hashes its files, on every probe: off the runtime's
+        // worker threads, which serve requests, and not one engine at a time.
+        // Only the load runs on the blocking pool. It waits for nothing, so it
+        // never needs a second blocking thread, which a full pool cannot give.
+        let build_error = |cause: String| {
+            error(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("build local model: {cause}"),
+            )
         };
+        let local_model = tokio::task::spawn_blocking(move || builder.build().now_or_never())
+            .await
+            .map_err(|join_error| build_error(join_error.to_string()))?
+            .ok_or_else(|| build_error("the card load must not wait".to_string()))?
+            .map_err(|load_error| build_error(load_error.to_string()))?;
         let mut card = local_model.card().clone();
         card.model_type = model_type;
         card.model_input = config.model_input;
