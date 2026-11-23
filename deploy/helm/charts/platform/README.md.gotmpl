@@ -913,6 +913,33 @@ rejects custom `webhook.namespaceSelector` values.
 
 {{ template "chart.valuesSection" . }}
 
+### DGDR Output-Copier Image
+
+The v1beta1 DGDR profiling Job's `output-copier` sidecar relays profiler status and writes
+results to a ConfigMap. Configure it with `dynamo-operator.dgdr.outputCopierImage`.
+Omitting the value or setting it to `""` uses this bundled default:
+
+```yaml
+dynamo-operator:
+  dgdr:
+    outputCopierImage: docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d
+```
+
+For private registries, mirror the image and use your repository and digest. With the standalone
+operator chart, use `dgdr.outputCopierImage`. Both set `OperatorConfiguration.dgdr.outputCopierImage`.
+
+Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash),
+`kubectl`, and `date`, `grep`, `awk`, `tr`, `sed`, `cat`, and `sleep`.
+Choose a kubectl version compatible with your Kubernetes API server.
+
+A per-request `spec.overrides.profilingJob.template.spec.containers` entry named `output-copier`
+takes precedence. Only `image` and `resources` are merged for that container; other fields remain
+controller-owned.
+
+New settings apply only to newly created profiling Jobs; existing Jobs retain their image.
+After profiling starts, create a new DGDR or delete and recreate the existing DGDR to change it.
+This setting does not affect v1beta2 Run publisher images.
+
 ### LPX Integration
 
 LPX is experimental and may change incompatibly. Enable it with `dynamo-operator.lpx.enabled=true`.

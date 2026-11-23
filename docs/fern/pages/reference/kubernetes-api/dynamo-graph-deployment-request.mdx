@@ -360,6 +360,10 @@ When `spec.image` is omitted, the operator defaults it on creation to
 requires `operatorVersion` to be valid semantic versioning, so the default
 image has a parseable version tag.
 
+The profiling Job's separate `output-copier` image is digest-pinned by default.
+To mirror or override it, set `dynamo-operator.dgdr.outputCopierImage`; see the
+[Helm chart configuration](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#dgdr-output-copier-image).
+
 The DGDR-level `spec.runtimeVersionOverride` supplies a default for generated
 DGD components. After the profiler materializes the DGD and applies
 `spec.overrides.dgd`, the operator copies the DGDR value only to components that
@@ -529,39 +533,6 @@ service.
     <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
   </ParamField>
 </Indent>
-
-### Output-copier image
-
-The v1beta1 profiling Job's `output-copier` sidecar relays profiler status and writes results
-to the `dgdr-output-<name>` ConfigMap. This setting does not affect v1beta2 Run publisher images.
-
-An omitted or empty image setting uses the bundled digest-pinned kubectl image:
-
-```text
-docker.io/bitnami/kubectl@sha256:8f59408f9e896fc8992a0660a56687545bd06751f26531b4a26fca6d5dc7562d
-```
-
-To use a mirrored image, configure the operator-wide image through the platform chart:
-
-```yaml
-dynamo-operator:
-  dgdr:
-    outputCopierImage: <your-registry>/kubectl@sha256:<digest>
-```
-
-The equivalent operator configuration field is `dgdr.outputCopierImage`. A per-request
-`spec.overrides.profilingJob.template.spec.containers` entry named `output-copier` takes precedence.
-See [profiling artifacts](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#accessing-profiling-artifacts)
-for a per-request override example.
-
-Custom images must provide `/bin/sh` with `set -o pipefail` support (for example bash; a dash-only
-`/bin/sh` is not sufficient), `kubectl`, and the shell utilities used by the copier (`date`, `grep`,
-`awk`, `tr`, `sed`, `cat`, and `sleep`). Choose a kubectl version compatible with your Kubernetes
-API server.
-
-New image settings apply only to newly created profiling Jobs. Existing Jobs retain their image,
-and the DGDR spec is immutable once profiling starts. Create a new DGDR, or delete and recreate
-the existing DGDR, to use a changed image after profiling has started.
 
 ## Planner
 
