@@ -762,10 +762,15 @@ impl DistributedRuntime {
     /// registered.
     ///
     /// The dispatch's `on_instance_added` and `on_instance_removed` hooks see the
-    /// instances of every endpoint that a router built without an explicit
-    /// dispatch watches: all of them, not only `Direct` ones, and whatever that
-    /// router's request and response types. So a dispatch should open
-    /// per-instance connections on its first request, not in those hooks.
+    /// instances of every endpoint whose first router was built without an
+    /// explicit dispatch: all of them, not only `Direct` ones, and whatever that
+    /// router's request and response types. An endpoint has one instance
+    /// watcher, which runs through the first router built for it, so an endpoint
+    /// whose first router has an explicit dispatch sends its events to that
+    /// dispatch only. So a dispatch should open per-instance connections on its
+    /// first request, not in those hooks, and key per-instance state on the
+    /// whole `EndpointInstanceId`: a worker's `instance_id` is the same under
+    /// each of its endpoints.
     /// Register before publishing `Direct` workers: a router still finds a
     /// dispatch registered later, but events from before then are not replayed.
     pub fn register_direct_dispatch<T, U>(
