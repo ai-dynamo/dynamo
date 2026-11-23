@@ -168,11 +168,11 @@ impl DirectDispatch {
 
     /// Where the files of the model `source` names are kept once read.
     fn model(&self, source: &str) -> Arc<tokio::sync::OnceCell<ModelFiles>> {
-        self.models
-            .lock()
-            .entry(source.to_string())
-            .or_default()
-            .clone()
+        let mut models = self.models.lock();
+        match models.get(source) {
+            Some(kept) => kept.clone(),
+            None => models.entry(source.to_string()).or_default().clone(),
+        }
     }
 
     /// Resolves once runtime shutdown has drained, withdrawn and released
