@@ -462,10 +462,10 @@ mod tests {
     use serde_json::json;
     use tokio::time::Instant;
 
-    use crate::model_card::ModelDeploymentCard;
     use crate::preprocessor::prompt::prompt_formatter_from_mdc;
     use crate::protocols::common::extensions::{AgentHints, NvExt};
     use crate::protocols::openai::responses::NvCreateResponse;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
 
     use super::*;
 

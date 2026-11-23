@@ -416,7 +416,7 @@ impl RoutingHost {
 
 #[cfg(test)]
 mod tests {
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_runtime::pipeline::RouterMode;
     use dynamo_scheduler::host::RoutingConstraints;
     use dynamo_worker_selection::host::HostedWorkerPicker;

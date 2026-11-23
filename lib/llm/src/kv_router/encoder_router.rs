@@ -458,9 +458,9 @@ mod tests {
     };
 
     use crate::discovery::CommittedWorkerSetTarget;
-    use crate::model_card::ModelDeploymentCard;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_model_card::model_card::ModelDeploymentCard;
 
     use super::*;
 

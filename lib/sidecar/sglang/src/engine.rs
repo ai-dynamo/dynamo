@@ -13,7 +13,7 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
-use dynamo_llm::local_model::runtime_config::{
+use dynamo_model_card::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
 };
 use dynamo_sidecar_common::{

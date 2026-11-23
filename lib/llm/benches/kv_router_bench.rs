@@ -35,9 +35,9 @@ use dynamo_kv_events::event::{
 };
 use dynamo_kv_hashing::routing::{compute_block_hash, compute_seq_hash_for_block};
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_mocker::loadgen::RouterSequence;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
 use dynamo_router_protocol::worker::WorkerId;
 

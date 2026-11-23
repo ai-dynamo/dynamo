@@ -16,10 +16,10 @@ use dynamo_runtime::{
 use tokio::sync::watch;
 
 use crate::{
-    model_card::ModelDeploymentCard,
     protocols::openai::images::{NvCreateImageRequest, NvImagesResponse},
     types::{Annotated, openai::images::OpenAIImagesStreamingEngine},
 };
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 pub(crate) const SNAPSHOT_KEY: &str = "image_edit_admission";
 

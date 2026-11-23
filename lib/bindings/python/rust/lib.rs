@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::admission_gate::WorkerAdmissionGate;
-use dynamo_llm::local_model::{
+use dynamo_model_card::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
 use dynamo_runtime::discovery::EventTransportKind;
@@ -39,8 +39,8 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::host::RouterPluginRegistryHostExt;
 use dynamo_kv_router::plugins::host::RouterPlugins;
-use dynamo_llm::router_config::RouterConfig;
 use dynamo_llm::{self as llm_rs};
+use dynamo_model_card::router_config::RouterConfig;
 
 use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
@@ -777,7 +777,7 @@ fn register_model<'p>(
     // `ModelType` (the OpenAI surface); the topology role is by `worker_type`.
     if matches!(worker_type_unwrapped, WorkerType::Prefill) {
         // Strip the allowed Prefill marker bit; whatever remains is a surface.
-        let surface = model_type.inner - llm_rs::model_type::ModelType::Prefill;
+        let surface = model_type.inner - dynamo_model_card::model_type::ModelType::Prefill;
         if !surface.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "register_model: worker_type={:?} must not expose an OpenAI surface \
@@ -790,9 +790,9 @@ fn register_model<'p>(
     }
 
     let model_input = match model_input {
-        ModelInput::Text => llm_rs::model_type::ModelInput::Text,
-        ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
-        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
+        ModelInput::Text => dynamo_model_card::model_type::ModelInput::Text,
+        ModelInput::Tokens => dynamo_model_card::model_type::ModelInput::Tokens,
+        ModelInput::Tensor => dynamo_model_card::model_type::ModelInput::Tensor,
     };
 
     let is_tensor_based = model_type.inner.supports_tensor();
@@ -919,7 +919,8 @@ fn register_model<'p>(
         // Ordinary audio registrations retain the builder's metadata and checksum.
         if is_tensor_based || is_images || is_videos || is_realtime || skip_model_assets {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
-            let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            let mut card =
+                dynamo_model_card::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).
             // Only set if it differs from model_name to preserve legacy MDC checksums.
             if source_path != model_name {
@@ -928,7 +929,7 @@ fn register_model<'p>(
 
             // Populate lora_info if this is a LoRA registration.
             if let Some(lora_name) = lora_identifier.clone() {
-                card.lora = Some(llm_rs::model_card::LoraInfo {
+                card.lora = Some(dynamo_model_card::model_card::LoraInfo {
                     name: lora_name,
                     max_gpu_lora_count,
                 });
@@ -980,7 +981,7 @@ fn register_model<'p>(
                 .map_err(to_pyerr)?
         };
 
-        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+        let mut builder = dynamo_model_card::local_model::LocalModelBuilder::default();
         builder
             // model path is the physical path on disk of the downloaded model
             .model_path(model_path)
@@ -1015,12 +1016,13 @@ fn register_model<'p>(
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
 
         // Convert lora_identifier (Option<String>) to Option<LoraInfo>
-        let lora_info = lora_identifier
-            .as_ref()
-            .map(|name| llm_rs::model_card::LoraInfo {
-                name: name.clone(),
-                max_gpu_lora_count,
-            });
+        let lora_info =
+            lora_identifier
+                .as_ref()
+                .map(|name| dynamo_model_card::model_card::LoraInfo {
+                    name: name.clone(),
+                    max_gpu_lora_count,
+                });
 
         local_model
             .attach(
@@ -1294,7 +1296,7 @@ impl Instance {
 #[pyclass(from_py_object)]
 #[derive(Clone, PartialEq)]
 struct ModelType {
-    inner: llm_rs::model_type::ModelType,
+    inner: dynamo_model_card::model_type::ModelType,
 }
 
 #[pymethods]
@@ -1307,24 +1309,24 @@ impl ModelType {
     /// values.)
     #[classattr]
     const Empty: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::empty(),
+        inner: dynamo_model_card::model_type::ModelType::empty(),
     };
 
     #[classattr]
     const Chat: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Chat,
+        inner: dynamo_model_card::model_type::ModelType::Chat,
     };
     #[classattr]
     const Completions: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Completions,
+        inner: dynamo_model_card::model_type::ModelType::Completions,
     };
     #[classattr]
     const Embedding: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Embedding,
+        inner: dynamo_model_card::model_type::ModelType::Embedding,
     };
     #[classattr]
     const TensorBased: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::TensorBased,
+        inner: dynamo_model_card::model_type::ModelType::TensorBased,
     };
     /// Legacy prefill marker (no OpenAI surface). The prefill role is
     /// expressed via `WorkerType::Prefill`; this bit is dual-emitted by new
@@ -1332,40 +1334,40 @@ impl ModelType {
     /// still detects them. Retained only for the cross-version compatibility window.
     #[classattr]
     const Prefill: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Prefill,
+        inner: dynamo_model_card::model_type::ModelType::Prefill,
     };
     #[classattr]
     const Images: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Images,
+        inner: dynamo_model_card::model_type::ModelType::Images,
     };
     #[classattr]
     const Audios: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Audios,
+        inner: dynamo_model_card::model_type::ModelType::Audios,
     };
     #[classattr]
     const Transcriptions: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Transcriptions,
+        inner: dynamo_model_card::model_type::ModelType::Transcriptions,
     };
     #[classattr]
     const Videos: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Videos,
+        inner: dynamo_model_card::model_type::ModelType::Videos,
     };
     #[classattr]
     const Realtime: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Realtime,
+        inner: dynamo_model_card::model_type::ModelType::Realtime,
     };
     #[classattr]
     const Classify: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Classify,
+        inner: dynamo_model_card::model_type::ModelType::Classify,
     };
     #[classattr]
     const Pooling: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Pooling,
+        inner: dynamo_model_card::model_type::ModelType::Pooling,
     };
 
     #[classattr]
     const Rerank: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Rerank,
+        inner: dynamo_model_card::model_type::ModelType::Rerank,
     };
 
     fn supports_chat(&self) -> bool {

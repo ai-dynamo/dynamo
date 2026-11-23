@@ -33,7 +33,7 @@ pub mod worker;
 
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
-pub use dynamo_llm::model_type::ModelInput;
+pub use dynamo_model_card::model_type::ModelInput;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
     FinishReason, FirstTokenNotifier, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY,

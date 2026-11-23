@@ -28,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::metrics::RoutingOverheadMetrics,
-    local_model::runtime_config::ModelRuntimeConfig,
     utils::zmq::{connect_sub_socket, multipart_message},
 };
 use dynamo_kv_events::residency::StorageTier;
@@ -36,6 +35,7 @@ use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_indexer::host::{
     KvRouterError, SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend,
 };
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::SharedKvCache;
 use dynamo_worker_selection::host::SharedCacheHits;

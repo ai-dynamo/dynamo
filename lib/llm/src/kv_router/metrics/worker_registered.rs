@@ -119,7 +119,7 @@ impl Collector for RouterWorkerRegistered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
     use prometheus::{Registry, TextEncoder};
     use std::collections::HashMap;
     use tokio::sync::watch;

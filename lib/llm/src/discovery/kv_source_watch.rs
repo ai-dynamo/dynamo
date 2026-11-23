@@ -329,7 +329,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::{KvSourceAmbiguity, KvSourceStatus};
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
     fn endpoint(name: &str) -> EndpointId {
         EndpointId {

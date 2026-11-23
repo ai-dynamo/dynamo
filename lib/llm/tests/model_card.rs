@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::checked_file::CheckedFile;
-use dynamo_llm::local_model::runtime_config::TokenizerBackend;
-use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use dynamo_llm::tokenizers::{
     BasetenTokenizer, EncodeSegment, HuggingFaceTokenizer, TikTokenTokenizer, traits::Encoder,
 };
+use dynamo_model_card::checked_file::CheckedFile;
+use dynamo_model_card::local_model::runtime_config::TokenizerBackend;
+use dynamo_model_card::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
 use tokenizers::models::bpe::{BPE, Vocab};

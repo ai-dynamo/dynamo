@@ -4,7 +4,9 @@
 use super::*;
 use std::time::Duration;
 
-use llm_rs::media_config::{MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher};
+use dynamo_model_card::media_config::{
+    MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher,
+};
 
 #[pyclass(from_py_object)]
 #[derive(Clone)]

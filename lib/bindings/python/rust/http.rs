@@ -8,8 +8,8 @@ use pyo3::prelude::*;
 
 use crate::{CancellationToken, DistributedRuntime, engine::*, to_pyerr};
 
-pub use dynamo_llm::endpoint_type::EndpointType;
 pub use dynamo_llm::http::service::service_v2;
+pub use dynamo_model_card::endpoint_type::EndpointType;
 pub use dynamo_runtime::{
     pipeline::{AsyncEngine, Data, ManyOut, SingleIn, async_trait},
     protocols::annotated::Annotated,

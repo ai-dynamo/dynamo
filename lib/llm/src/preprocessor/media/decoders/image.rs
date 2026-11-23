@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use super::super::common::EncodedMediaData;
 use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
-use crate::media_config::{ImageDecoder, ImageDecoderLimits};
 use backends::{
     BackendAvailability, BackendDecline, DecodedImage, ImageDecodeBackend, ImageDecodeOutcome,
     ImageDecodeRequest, PixelFormat, image_reader_backend, turbojpeg_backend,
 };
+use dynamo_model_card::media_config::{ImageDecoder, ImageDecoderLimits};
 
 mod backends;
 
@@ -225,8 +225,8 @@ pub(crate) fn warn_if_libjpeg_unavailable(decoder: &ImageDecoder) {
 mod tests {
     use super::super::super::rdma::DataType;
     use super::*;
-    use crate::media_config::DEFAULT_IMAGE_MAX_ALLOC as DEFAULT_MAX_ALLOC;
     use crate::preprocessor::media::jpeg_turbo;
+    use dynamo_model_card::media_config::DEFAULT_IMAGE_MAX_ALLOC as DEFAULT_MAX_ALLOC;
     use image::{DynamicImage, ImageBuffer};
     use rstest::rstest;
     use std::io::Cursor;

@@ -15,13 +15,13 @@ use std::time::Duration;
 
 use dynamo_llm::admission_gate::{AdmissionEngine, WorkerAdmissionGate};
 use dynamo_llm::first_token::FirstTokenSource;
-use dynamo_llm::local_model::runtime_config::{
+use dynamo_llm::worker_type::WorkerType;
+use dynamo_model_card::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
 };
-use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
-use dynamo_llm::media_config::{MediaDecoder, MediaFetcher};
-use dynamo_llm::model_type::{ModelInput, ModelType};
-use dynamo_llm::worker_type::WorkerType;
+use dynamo_model_card::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
+use dynamo_model_card::media_config::{MediaDecoder, MediaFetcher};
+use dynamo_model_card::model_type::{ModelInput, ModelType};
 use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
@@ -361,7 +361,7 @@ impl EngineKind {
         }
     }
 
-    fn tensor_model_config(&self) -> Option<dynamo_llm::tensor_model::TensorModelConfig> {
+    fn tensor_model_config(&self) -> Option<dynamo_model_card::tensor_model::TensorModelConfig> {
         match self {
             EngineKind::Llm(_) => None,
             EngineKind::Raw(engine) => engine.tensor_model_config(),
@@ -2225,7 +2225,7 @@ pub(crate) async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
-    tensor_model_config: Option<dynamo_llm::tensor_model::TensorModelConfig>,
+    tensor_model_config: Option<dynamo_model_card::tensor_model::TensorModelConfig>,
 ) -> Result<LocalModel, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
@@ -2714,7 +2714,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_model_carries_tensor_model_config() {
-        let tensor_model_config = dynamo_llm::tensor_model::TensorModelConfig {
+        let tensor_model_config = dynamo_model_card::tensor_model::TensorModelConfig {
             name: "identity".to_string(),
             triton_model_config: Some(vec![1, 2, 3]),
             ..Default::default()

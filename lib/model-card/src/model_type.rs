@@ -21,7 +21,7 @@ bitflags! {
     /// expressed as:
     ///
     /// ```rust
-    /// use dynamo_llm::model_type::ModelType;
+    /// use dynamo_model_card::model_type::ModelType;
     /// let mt = ModelType::Chat | ModelType::Completions;
     /// assert!(mt.supports_chat());
     /// assert!(mt.supports_completions());

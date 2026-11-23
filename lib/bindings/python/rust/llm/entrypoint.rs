@@ -22,19 +22,19 @@ use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
-use dynamo_llm::frontend_config::{
-    ChatTemplateDefaults, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
-};
-use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
-use dynamo_llm::local_model::runtime_config::TokenizerBackend;
-use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
-use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
-use dynamo_llm::reasoning_field::ReasoningField;
-use dynamo_llm::router_config::LoadThresholdConfig as RsLoadThresholdConfig;
-use dynamo_llm::router_config::RouterConfig as RsRouterConfig;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_model_card::frontend_config::{
+    ChatTemplateDefaults, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
+};
+use dynamo_model_card::local_model::DEFAULT_HTTP_PORT;
+use dynamo_model_card::local_model::runtime_config::TokenizerBackend;
+use dynamo_model_card::local_model::{LocalModel, LocalModelBuilder};
+use dynamo_model_card::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_model_card::reasoning_field::ReasoningField;
+use dynamo_model_card::router_config::LoadThresholdConfig as RsLoadThresholdConfig;
+use dynamo_model_card::router_config::RouterConfig as RsRouterConfig;
 use dynamo_scheduler::host::{
     RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     TrackingHashAlgorithm as RsTrackingHashAlgorithm,

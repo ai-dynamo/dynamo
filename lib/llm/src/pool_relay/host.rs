@@ -83,8 +83,8 @@ use crate::kv_router::indexer::{
     start_target_subscriber,
 };
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::utils::retry::{Backoff, FailureStreak};
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
@@ -2965,7 +2965,7 @@ mod tests {
         aliases: Vec<String>,
         context_length: Option<u32>,
     ) -> EndpointMembership {
-        let mut card = crate::model_card::ModelDeploymentCard::with_name_only(model);
+        let mut card = dynamo_model_card::model_card::ModelDeploymentCard::with_name_only(model);
         card.source_path = Some(artifact.to_string());
         card.kv_cache_block_size = 64;
         card.worker_type = worker_type;

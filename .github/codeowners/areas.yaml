@@ -41,6 +41,8 @@ areas:
   - lib/llm/src/protocols/common/
   - lib/llm/src/protocols/openai.rs
   - lib/llm/src/protocols/openai/
+  - lib/model-card/src/parser_family.rs
+  - lib/model-card/src/tensor_model.rs
   - lib/llm/tests/test_reasoning_parser.rs
   - lib/llm/tests/test_streaming_tool_parsers.rs
   - tests/frontend/
@@ -174,6 +176,7 @@ areas:
   - components/src/dynamo/vllm/omni/
   - lib/llm/src/preprocessor/media.rs
   - lib/llm/src/preprocessor/media/
+  - lib/model-card/src/media_config.rs
   - tests/benchmarks/multimodal/
   - tests/mm_router/
 - label: diffusion
@@ -234,11 +237,11 @@ areas:
   - lib/llm/src/bin/
   - lib/llm/src/common/
   - lib/llm/src/discovery/
-  - lib/llm/src/local_model/
+  - lib/model-card/src/local_model/
   - lib/lora/src/huggingface.rs
   - lib/lora/src/routing/
   - lib/lora/tests/
-  - lib/llm/src/model_card.rs
+  - lib/model-card/
   - lib/llm/src/perf/
   - lib/llm/src/utils/
   - lib/llm/tests/
@@ -1071,6 +1074,10 @@ shared:
   owners:
   - frontend
   - epp
+- glob: lib/model-card/src/router_config.rs
+  owners:
+  - runtime
+  - frontend
 - glob: lib/llm/src/http/service/busy_threshold.rs
   owners:
   - frontend

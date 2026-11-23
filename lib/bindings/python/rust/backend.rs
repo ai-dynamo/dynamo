@@ -28,8 +28,8 @@ use dynamo_backend_common::{
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::admission_gate::WorkerAdmissionGate;
-use dynamo_llm::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
-use dynamo_llm::model_type::ModelInput as RsModelInput;
+use dynamo_model_card::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
+use dynamo_model_card::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 use dynamo_sidecar_common::SidecarStartupError;

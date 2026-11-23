@@ -523,12 +523,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        local_model::runtime_config::ModelRuntimeConfig,
         lora::{
             filter::LoraFilter, routing::table::LoraRoutingTable, state_tracker::LoraStateTracker,
         },
         protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
     };
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
     fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
         let mut config = ModelRuntimeConfig::default();

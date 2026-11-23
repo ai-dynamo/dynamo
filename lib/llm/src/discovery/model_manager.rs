@@ -9,14 +9,14 @@ use std::{
     },
 };
 
-#[cfg(test)]
-use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_http_server::load::ModelLoadView;
 use dynamo_kv_hints::KvTransferEnforcement;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+#[cfg(test)]
+use dynamo_model_card::model_card::LoraInfo;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
@@ -26,7 +26,7 @@ use super::{
     SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
-use crate::router_config::LoadThresholdConfig;
+use dynamo_model_card::router_config::LoadThresholdConfig;
 
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -40,17 +40,11 @@ use crate::{
         KvEventSourceRequirement, KvRouter, SelectionPolicySource,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::{
-        DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        topology_taint,
-    },
     lora::state_tracker::{LoraWorkerObservation, LoraWorkerProjection},
     lora::{
         LoadEstimatorSubscription, LoraFilter, LoraRoutingTable, LoraStateTracker,
         load_estimator::LoadEstimator,
     },
-    model_card::ModelDeploymentCard,
-    model_type::ModelType,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -66,6 +60,14 @@ use crate::{
         },
     },
     worker_type::WorkerType,
+};
+use dynamo_model_card::{
+    local_model::runtime_config::{
+        DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        topology_taint,
+    },
+    model_card::ModelDeploymentCard,
+    model_type::ModelType,
 };
 
 struct LoraEndpointDomain {
@@ -3042,15 +3044,15 @@ mod tests {
         transports::event_plane::EventScope,
     };
 
-    use crate::model_card::ModelDeploymentCard;
+    use crate::discovery::{KvEventSource, KvSourceStatus};
     use crate::protocols::{
         Annotated,
         common::{llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest},
     };
-    use crate::{
-        discovery::{KvEventSource, KvSourceStatus},
-        local_model::runtime_config::{DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig},
+    use dynamo_model_card::local_model::runtime_config::{
+        DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig,
     };
+    use dynamo_model_card::model_card::ModelDeploymentCard;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -3172,11 +3174,11 @@ mod tests {
         card.set_name(name);
         card.worker_type = Some(WorkerType::Aggregated);
         card.runtime_config.runtime_data.insert(
-            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            dynamo_model_card::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
         card.runtime_config.runtime_data.insert(
-            crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1.to_string(),
+            dynamo_model_card::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1.to_string(),
             true.into(),
         );
         card.runtime_config.max_num_seqs = Some(1);
@@ -3498,7 +3500,7 @@ mod tests {
 
     #[test]
     fn lora_state_and_load_are_isolated_by_endpoint() {
-        use crate::model_card::LoraInfo;
+        use dynamo_model_card::model_card::LoraInfo;
         use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         let manager = ModelManager::new();
@@ -4252,8 +4254,8 @@ mod tests {
         let mut card = ModelDeploymentCard::with_name_only("alias-topology-model");
         card.worker_type = Some(role);
         card.model_type = match role {
-            WorkerType::Prefill => crate::model_type::ModelType::empty(),
-            _ => crate::model_type::ModelType::Chat,
+            WorkerType::Prefill => dynamo_model_card::model_type::ModelType::empty(),
+            _ => dynamo_model_card::model_type::ModelType::Chat,
         };
         card.needs = match role {
             WorkerType::Prefill => vec![vec![WorkerType::Decode]],
@@ -4323,7 +4325,7 @@ mod tests {
         let mut base = ModelDeploymentCard::with_name_only("base");
         base.runtime_config.max_gpu_lora_count = Some(6);
         let mut adapter = ModelDeploymentCard::with_name_only("adapter");
-        adapter.lora = Some(crate::model_card::LoraInfo {
+        adapter.lora = Some(dynamo_model_card::model_card::LoraInfo {
             name: "adapter".to_string(),
             max_gpu_lora_count: None,
         });
@@ -4518,8 +4520,8 @@ mod tests {
         let mut card = ModelDeploymentCard::with_name_only("topology-model");
         card.worker_type = Some(role);
         card.model_type = match role {
-            WorkerType::Decode => crate::model_type::ModelType::Chat,
-            _ => crate::model_type::ModelType::empty(),
+            WorkerType::Decode => dynamo_model_card::model_type::ModelType::Chat,
+            _ => dynamo_model_card::model_type::ModelType::empty(),
         };
         card.needs = match role {
             WorkerType::Prefill => vec![vec![WorkerType::Decode, WorkerType::Encode]],

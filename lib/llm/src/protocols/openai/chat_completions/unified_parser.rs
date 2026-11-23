@@ -54,17 +54,17 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
-use crate::parser_family::{
+use crate::protocols::openai::GuidedToolConstraint;
+use dynamo_model_card::parser_family::{
     BEAM_UNIFIED_FAMILY, DEEPSEEK_V41_UNIFIED_FAMILY, GLM47_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY,
     MISTRAL_UNIFIED_FAMILY, MUSE_SPARK_UNIFIED_FAMILY, MUSE_UNIFIED_FAMILY,
     NEMOTRON_V3_UNIFIED_FAMILY, QWEN3_UNIFIED_FAMILY, configured_family,
 };
 #[cfg(test)]
-use crate::parser_family::{
+use dynamo_model_card::parser_family::{
     DEEPSEEK_V4_UNIFIED_FAMILY, FAMILY_NAMES, GEMMA4_UNIFIED_FAMILY, KIMI_K2_UNIFIED_FAMILY,
     canonical_family,
 };
-use crate::protocols::openai::GuidedToolConstraint;
 use dynamo_tokenizers::traits::Tokenizer;
 
 use super::NvCreateChatCompletionStreamResponse;

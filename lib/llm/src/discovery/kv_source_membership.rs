@@ -8,7 +8,7 @@ use dynamo_runtime::{component::Instance, protocols::EndpointId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 pub type PublisherId = u64;
 

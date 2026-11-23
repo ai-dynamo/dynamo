@@ -216,7 +216,7 @@ impl PythonAsyncEngine {
 impl PythonAsyncEngine {
     pub(crate) fn chat_engine(
         &self,
-        runtime_config: dynamo_llm::local_model::runtime_config::ModelRuntimeConfig,
+        runtime_config: dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig,
     ) -> PythonChatEngine {
         PythonChatEngine {
             engine: self.0.clone(),
@@ -241,7 +241,7 @@ impl PythonAsyncEngine {
 /// their normal serialization contract, including the N-2 worker wire.
 pub(crate) struct PythonChatEngine {
     engine: PythonServerStreamingEngine,
-    runtime_config: Arc<dynamo_llm::local_model::runtime_config::ModelRuntimeConfig>,
+    runtime_config: Arc<dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig>,
 }
 
 #[async_trait::async_trait]

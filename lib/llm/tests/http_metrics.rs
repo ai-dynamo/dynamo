@@ -7,7 +7,6 @@ use dynamo_http_server::metrics::Endpoint;
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
     http::service::service_v2::HttpService,
-    model_card::ModelDeploymentCard,
     preprocessor::LLMMetricAnnotation,
     protocols::{
         Annotated,
@@ -17,6 +16,7 @@ use dynamo_llm::{
         openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
 use dynamo_runtime::{
     CancellationToken,
@@ -1193,8 +1193,9 @@ mod integration_tests {
     use super::*;
     use dynamo_llm::{
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
-        local_model::LocalModelBuilder, namespace::NamespaceFilter,
+        namespace::NamespaceFilter,
     };
+    use dynamo_model_card::local_model::LocalModelBuilder;
     use dynamo_runtime::DistributedRuntime;
     use dynamo_runtime::discovery::DiscoveryQuery;
     use std::sync::Arc;
@@ -1236,7 +1237,7 @@ mod integration_tests {
         let model_watcher = ModelWatcher::new(
             distributed_runtime.clone(),
             service.state().manager_clone(),
-            dynamo_llm::router_config::RouterConfig::default(),
+            dynamo_model_card::router_config::RouterConfig::default(),
             0,    // migration_limit
             None, // migration_max_seq_len
             None,
@@ -1281,8 +1282,8 @@ mod integration_tests {
         local_model
             .attach(
                 &test_endpoint,
-                dynamo_llm::model_type::ModelType::Chat,
-                dynamo_llm::model_type::ModelInput::Text,
+                dynamo_model_card::model_type::ModelType::Chat,
+                dynamo_model_card::model_type::ModelInput::Text,
                 None,
                 Some(dynamo_llm::worker_type::WorkerType::Aggregated),
                 Vec::new(),
@@ -1415,7 +1416,7 @@ mod integration_tests {
             let watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
-                dynamo_llm::router_config::RouterConfig::default(),
+                dynamo_model_card::router_config::RouterConfig::default(),
                 0, // migration_limit
                 None,
                 service.state().metrics_clone(),

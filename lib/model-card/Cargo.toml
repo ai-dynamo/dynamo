@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-model-card"
+description = "Model deployment card, runtime config, local model and the configuration they carry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+# Adds the video decoder settings to MediaDecoder. dynamo-llm forwards its own
+# media-ffmpeg feature here so the card and the decoders agree on the field.
+media-ffmpeg = []
+
+[dependencies]
+# repo
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
+dynamo-kv-router = { workspace = true }
+dynamo-lora = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-runtime = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+
+# published
+dynamo-parsers = { workspace = true }
+dynamo-parsers-v2 = { workspace = true }
+dynamo-renderer = { workspace = true }
+dynamo-tokenizers = { workspace = true }
+
+# workspace
+anyhow = { workspace = true }
+blake3 = { workspace = true, features = ["mmap", "rayon"] }
+derive_builder = { workspace = true }
+either = { workspace = true }
+futures = { workspace = true }
+hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
+modelexpress-client = { workspace = true }
+modelexpress-common = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+validator = { workspace = true }
+
+bitflags = { version = "2.4", features = ["serde"] }
+half = { version = "2", features = ["serde", "num-traits"] }
+json-five = { version = "0.3" }
+tokenizers = { version = "0.23.2", default-features = false, features = [
+  "onig",
+  "esaxx_fast",
+  "rustls-tls",
+] }
+utoipa = { version = "5.3" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+sysinfo = { workspace = true }
+
+[dev-dependencies]
+mockito = "1.7.0"
+serial_test = "3"
+temp-env = { version = "0.3.6", features = ["async_closure"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

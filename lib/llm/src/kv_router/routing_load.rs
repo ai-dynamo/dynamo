@@ -437,7 +437,7 @@ impl ManagedKvRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::router_config::LoadThresholdConfig;
+    use dynamo_model_card::router_config::LoadThresholdConfig;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     fn snapshot(worker_id: u64, active_decode_blocks: u64) -> SchedulerLoadSnapshot {

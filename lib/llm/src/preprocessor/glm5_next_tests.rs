@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::checked_file::CheckedFile;
-use crate::model_card::ModelInfoType;
 use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+use dynamo_model_card::checked_file::CheckedFile;
+use dynamo_model_card::model_card::ModelInfoType;
 use dynamo_multimodal::processor::MediaMetadata;
 use dynamo_multimodal::{registry, token_layout};
 

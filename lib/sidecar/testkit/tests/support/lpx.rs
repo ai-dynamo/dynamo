@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_lpx_sidecar::LpxSidecarEngine;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, struct_to_json, struct_to_json_v14};
 use dynamo_sidecar_testkit::control::{Controller, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;

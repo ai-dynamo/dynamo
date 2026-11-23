@@ -3,9 +3,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-use dynamo_llm::{self as llm_rs};
-use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
-use llm_rs::model_type::{ModelInput, ModelType};
+use dynamo_model_card::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_model_card::model_type::{ModelInput, ModelType};
 use pyo3::prelude::*;
 
 use crate::{

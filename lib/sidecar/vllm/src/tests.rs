@@ -15,7 +15,7 @@ use dynamo_backend_common::{
     BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine,
     MultimodalData, PrefillResult, PreprocessedRequest, RlAdminBaseUrl, RlWorkerMetadata,
 };
-use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -1193,7 +1193,7 @@ async fn excludes_reasoning_policy_follows_engine_gating() {
         let config = engine.start(0).await.expect("start");
         assert_eq!(
             config.runtime_data.get(
-                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY
+                dynamo_model_card::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY
             ),
             published.then_some(&json!(true))
         );

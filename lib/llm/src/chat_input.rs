@@ -3,10 +3,10 @@
 
 //! Model input adaptation, separate from output parsing and API conversion.
 
-use crate::model_card::{ModelDeploymentCard, TokenizerKind};
 use crate::protocols::anthropic::types::{
     AnthropicCreateMessageRequest, AnthropicRole, SystemContent, system_message_content,
 };
+use dynamo_model_card::model_card::{ModelDeploymentCard, TokenizerKind};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ChatInputPolicy {
@@ -109,8 +109,8 @@ mod tests {
         )
         .unwrap();
         for input in [
-            crate::model_type::ModelInput::Tokens,
-            crate::model_type::ModelInput::Text,
+            dynamo_model_card::model_type::ModelInput::Tokens,
+            dynamo_model_card::model_type::ModelInput::Text,
         ] {
             card.model_input = input;
             assert_eq!(ChatInputPolicy::from_card(&card), ChatInputPolicy::Mistral);

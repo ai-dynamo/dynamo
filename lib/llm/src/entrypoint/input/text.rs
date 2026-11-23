@@ -3,10 +3,10 @@
 
 use crate::entrypoint::EngineConfig;
 use crate::entrypoint::input::common;
-use crate::request_template::RequestTemplate;
 use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
+use dynamo_model_card::request_template::RequestTemplate;
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::Context;

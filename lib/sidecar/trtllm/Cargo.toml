@@ -32,6 +32,7 @@ dynamo-backend-common = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 dynamo-kv-events = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-model-card = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }

@@ -17,9 +17,9 @@ use dynamo_scheduler::host::PrefillLoadEstimator;
 
 use crate::{
     admission_gate::WorkerAdmissionGate, backend::ExecutionContext, engines::StreamingEngine,
-    local_model::LocalModel, model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
+use dynamo_model_card::{local_model::LocalModel, model_card::ModelDeploymentCard};
 
 /// Callback type for chat engine factory (async)
 pub type PrefillRoutedEngine = dynamo_runtime::pipeline::ServiceEngine<

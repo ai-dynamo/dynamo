@@ -7,10 +7,10 @@ use std::{
     time::Duration,
 };
 
-use crate::model_card::ScoringBackend;
 use async_trait::async_trait;
 use axum::{body::to_bytes, http::StatusCode, response::Response};
 use base64::Engine as _;
+use dynamo_model_card::model_card::ScoringBackend;
 use dynamo_runtime::{
     engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider},
     pipeline::{Context, Error, ManyOut, ResponseStream, SingleIn},
@@ -187,7 +187,6 @@ use super::{
 };
 use crate::{
     discovery::SystemOneExecutionSelection,
-    model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::{
         Annotated,
@@ -199,6 +198,7 @@ use crate::{
         systemone::build_native_score_request,
     },
 };
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 #[test]
 fn cumulative_input_limit_is_checked_without_overflow() {

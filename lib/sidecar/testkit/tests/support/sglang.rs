@@ -11,12 +11,12 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
-use dynamo_llm::local_model::runtime_config::{
-    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
-};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_model_card::local_model::runtime_config::{
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+};
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::SglangSidecarEngine;
 use dynamo_sglang_sidecar::proto::{

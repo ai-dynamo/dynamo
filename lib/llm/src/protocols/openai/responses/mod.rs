@@ -53,8 +53,8 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 #[cfg(test)]
 use super::tools::custom_input;
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
-use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
+use dynamo_model_card::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 
 /// Request body for `POST /v1/responses`.
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]

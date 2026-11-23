@@ -29,7 +29,6 @@ use super::protocol as proto;
 use super::protocol::wire::images::{self, FilterFormat, ImagesFrame, SnapshotAssembly};
 use super::server::GrpcTransport;
 use crate::kv_router::ActiveLoad;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::pool_relay::actor::PoolRelayHandle;
 use crate::pool_relay::discovery::{
     DcMembershipView, DomainWorkerTopology, EndpointMembership, KvCacheDomainKey,
@@ -44,6 +43,7 @@ use crate::pool_relay::pool_registry::{
 use crate::pool_relay::publication::RegistryPublicationSource;
 use crate::pool_relay::serving_load::ServingLoadSnapshot;
 use crate::pool_relay::topology::TopologyPublisher;
+use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_ID: u64 = 7;
@@ -399,7 +399,7 @@ fn membership_view(endpoint: EndpointId, indexer_domain: IndexerDomainId) -> DcM
             WORKER_ID,
             DomainWorkerTopology {
                 worker_type: None,
-                model_type: crate::model_type::ModelType::Chat,
+                model_type: dynamo_model_card::model_type::ModelType::Chat,
                 needs: Vec::new(),
             },
         )]),

@@ -22,8 +22,10 @@ use serde_json::Value;
 
 pub(crate) use dynamo_parsers_v2::unified::mistral::CallMode;
 
-use crate::local_model::runtime_config::{LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, ModelRuntimeConfig};
 use crate::tokenizers::traits::Tokenizer;
+use dynamo_model_card::local_model::runtime_config::{
+    LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY, ModelRuntimeConfig,
+};
 
 /// The tool-call grammar for one model, resolved at setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

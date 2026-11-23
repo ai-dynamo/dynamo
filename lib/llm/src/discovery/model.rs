@@ -15,11 +15,11 @@ use serde::Serialize;
 
 use super::ModelManagerError;
 use super::worker_set::WorkerSet;
-use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
-use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
-use crate::router_config::LoadThresholdConfig;
+use dynamo_model_card::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use dynamo_model_card::model_card::ModelDeploymentCard;
+use dynamo_model_card::router_config::LoadThresholdConfig;
 
 use crate::types::{
     RealtimeBidirectionalEngine,
@@ -96,7 +96,7 @@ pub(crate) struct GenerateEngineSelection {
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
 pub(crate) struct SystemOneExecutionSelection {
-    pub(crate) backend: crate::model_card::ScoringBackend,
+    pub(crate) backend: dynamo_model_card::model_card::ScoringBackend,
     pub(crate) canonical_model: String,
     pub(crate) engine: GenerateStreamingEngine,
     pub(crate) card: ModelDeploymentCard,
@@ -1094,13 +1094,13 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_model::runtime_config::{
-        VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-    };
-    use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::protocols::common::preprocessor::PreprocessedRequest;
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
     use async_trait::async_trait;
+    use dynamo_model_card::local_model::runtime_config::{
+        VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
+    use dynamo_model_card::model_card::{LoraInfo, ModelDeploymentCard};
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
     use tokio::sync::watch;
@@ -1489,7 +1489,7 @@ mod tests {
 
     #[test]
     fn chat_capability_selection_skips_worker_sets_without_the_flag() {
-        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        use dynamo_model_card::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
         let chat_set = |namespace: &str, flagged: bool| {
             let mut card = ModelDeploymentCard::default();
             card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
@@ -1553,7 +1553,7 @@ mod tests {
         .unwrap();
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.runtime_config.runtime_data.insert(
-            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            dynamo_model_card::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
         card.runtime_config
@@ -1619,7 +1619,10 @@ mod tests {
         });
         model.add_worker_set("ns".into(), workers);
         let selected = model.get_systemone_execution_selection(2).unwrap();
-        assert_eq!(selected.backend, crate::model_card::ScoringBackend::Sglang);
+        assert_eq!(
+            selected.backend,
+            dynamo_model_card::model_card::ScoringBackend::Sglang
+        );
     }
 
     #[test]
@@ -1637,9 +1640,9 @@ mod tests {
                 card.runtime_config.max_num_seqs = Some(2);
             },
             |card| {
-                card.runtime_config
-                    .runtime_data
-                    .remove(crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY);
+                card.runtime_config.runtime_data.remove(
+                    dynamo_model_card::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY,
+                );
             },
             |card| {
                 card.worker_type = None;
@@ -1942,7 +1945,7 @@ mod tests {
         let mut ws = WorkerSet::new(
             namespace.to_string(),
             "abc".to_string(),
-            crate::model_card::ModelDeploymentCard::default(),
+            dynamo_model_card::model_card::ModelDeploymentCard::default(),
         );
         let pr = PrefillRouter::disabled(
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
@@ -2598,7 +2601,7 @@ mod tests {
         let mut ws = WorkerSet::new(
             "ns1".to_string(),
             "abc".to_string(),
-            crate::model_card::ModelDeploymentCard::default(),
+            dynamo_model_card::model_card::ModelDeploymentCard::default(),
         );
         // Keep the sender bound for the duration of the test so the watcher
         // doesn't close.
@@ -2621,7 +2624,7 @@ mod tests {
         let mut ws = WorkerSet::new(
             "ns1".to_string(),
             "abc".to_string(),
-            crate::model_card::ModelDeploymentCard::default(),
+            dynamo_model_card::model_card::ModelDeploymentCard::default(),
         );
         ws.chat_engine = Some(make_test_chat_engine());
         model.add_worker_set("ns1".to_string(), Arc::new(ws));

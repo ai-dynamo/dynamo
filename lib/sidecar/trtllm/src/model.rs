@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{EngineConfig, LlmRegistration};
-use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
+use dynamo_model_card::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 
 /// Model identity and registration metadata for the TensorRT-LLM sidecar.
 #[derive(Clone, Debug, Default)]

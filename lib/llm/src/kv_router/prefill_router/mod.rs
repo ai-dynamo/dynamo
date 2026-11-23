@@ -26,7 +26,6 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
-    local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -38,6 +37,7 @@ use crate::{
     },
     session_affinity::{AffinityTarget, SessionAffinityMode},
 };
+use dynamo_model_card::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
 
 mod activation;
 mod admission;
@@ -1345,7 +1345,8 @@ mod tests {
 
     #[tokio::test]
     async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
-        use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
+        use crate::kv_router::KvRouter;
+        use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
         use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
@@ -1506,8 +1507,9 @@ mod tests {
 
     #[tokio::test]
     async fn generate_forwards_bypass_marker_only_to_opted_in_clients() {
+        use crate::kv_router::KvRouter;
         use crate::kv_router::LlmDispatch;
-        use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
+        use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
         use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();

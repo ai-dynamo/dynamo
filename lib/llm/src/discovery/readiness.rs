@@ -10,8 +10,8 @@
 
 use std::collections::HashSet;
 
-use crate::model_card::ModelDeploymentCard;
 use crate::worker_type::WorkerType;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 /// The readiness-relevant projection of one WorkerSet: one distinct worker card shape
 /// with the number of live workers behind it.
@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn normalization_projects_legacy_prefill_cards() {
-        use crate::model_card::ModelDeploymentCard;
-        use crate::model_type::ModelType;
+        use dynamo_model_card::model_card::ModelDeploymentCard;
+        use dynamo_model_card::model_type::ModelType;
 
         let mut legacy_prefill = ModelDeploymentCard::with_name_only("m");
         legacy_prefill.model_type = ModelType::Prefill;

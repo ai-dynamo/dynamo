@@ -20,7 +20,7 @@ pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
-        let family = crate::parser_family::canonical_family(parser_name)?;
+        let family = dynamo_model_card::parser_family::canonical_family(parser_name)?;
         dynamo_parsers_v2::structural_tag_builder_for_family(family).map(Self)
     }
 

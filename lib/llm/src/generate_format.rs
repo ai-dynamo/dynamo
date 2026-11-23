@@ -272,11 +272,11 @@ pub fn named(name: &str) -> anyhow::Result<SharedFormat> {
 #[cfg(test)]
 pub(crate) mod test_formats {
     use super::*;
-    use crate::local_model::runtime_config::{
-        SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-    };
     use crate::protocols::common::preprocessor::RoutingHints;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_model_card::local_model::runtime_config::{
+        SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
     /// SGLang-shaped: the body minus `input_ids` is the worker envelope, and
     /// each worker response is a client chunk.
     struct Passthrough;

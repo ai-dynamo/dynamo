@@ -20,8 +20,8 @@ use dynamo_llm::{
         chat_completions::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse},
         completions::NvCreateCompletionResponse,
     },
-    reasoning_field::{ReasoningField, RoutedReasoning},
 };
+use dynamo_model_card::reasoning_field::{ReasoningField, RoutedReasoning};
 use serde_json::{Value, json};
 
 /// Export the native test routes with the chosen client-facing reasoning spelling.

@@ -12,7 +12,6 @@ use anyhow::{Error, Result};
 use futures::{Stream, stream::StreamExt};
 
 use crate::{
-    model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
         common::{
@@ -25,6 +24,7 @@ use crate::{
     session_affinity::explicit_target,
 };
 use dynamo_http_server::metrics::Metrics;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 
 use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;

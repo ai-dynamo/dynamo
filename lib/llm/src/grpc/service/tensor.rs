@@ -31,7 +31,7 @@ use crate::protocols::tensor;
 use crate::protocols::tensor::{
     NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor,
 };
-use crate::tensor_model::{self, TensorMetadata};
+use dynamo_model_card::tensor_model::{self, TensorMetadata};
 
 use crate::grpc::service::kserve::inference;
 use crate::grpc::service::kserve::inference::DataType;

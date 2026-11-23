@@ -17,10 +17,10 @@ use crate::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptio
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
-use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessed_mm_identifier;
 use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
+use dynamo_model_card::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 mod errors;
 

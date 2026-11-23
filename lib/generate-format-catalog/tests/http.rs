@@ -57,7 +57,7 @@ async fn respond(
     body: Value,
     mut headers: HeaderMap,
 ) -> Response {
-    let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
+    let mut card = dynamo_model_card::model_card::ModelDeploymentCard::with_name_only("test-model");
     card.runtime_config
         .runtime_data
         .insert(format.capability().into(), Value::Bool(true));
@@ -388,7 +388,7 @@ async fn overlapping_public_ids_have_independent_cancellation_contexts() {
     let state = state();
     let format = sglang();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
+    let mut card = dynamo_model_card::model_card::ModelDeploymentCard::with_name_only("test-model");
     card.runtime_config
         .runtime_data
         .insert(format.capability().into(), Value::Bool(true));
@@ -536,7 +536,8 @@ async fn concurrent_requests_sharing_a_client_id_get_their_own_output() {
             .link_terminal(frontend)
             .unwrap();
         let state = state();
-        let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
+        let mut card =
+            dynamo_model_card::model_card::ModelDeploymentCard::with_name_only("test-model");
         card.runtime_config
             .runtime_data
             .insert(format.capability().into(), Value::Bool(true));

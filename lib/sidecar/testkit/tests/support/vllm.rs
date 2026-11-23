@@ -9,8 +9,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_mocker::common::protocols::EngineType;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;

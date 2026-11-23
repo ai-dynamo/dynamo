@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use pyo3::exceptions::PyValueError;
 
 #[pyclass]

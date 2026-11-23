@@ -6,7 +6,7 @@ use std::ops::Range;
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
-use dynamo_llm::local_model::runtime_config::{
+use dynamo_model_card::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TokenBudget, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
 };
 use pep440_rs::Version;

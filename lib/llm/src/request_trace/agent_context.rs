@@ -13,7 +13,6 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 use parking_lot::Mutex;
 
-use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
 use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
@@ -25,6 +24,7 @@ use crate::request_trace::{
     DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics, RequestTraceMetrics,
     RequestTraceWorkerInfo, ToolCallMetadata, tool_relay::ToolEventRelay,
 };
+use dynamo_model_card::local_model::LocalModel;
 
 #[derive(Clone, Debug, Default)]
 pub struct SharedFinishReasonMetadata {

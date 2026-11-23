@@ -138,9 +138,9 @@ mod tests {
         time::Duration,
     };
 
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use async_trait::async_trait;
     use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,

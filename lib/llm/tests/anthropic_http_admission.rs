@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 use dynamo_runtime::config::environment_names::llm::{
     DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_BODY_LIMIT_MB, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,

@@ -15,11 +15,9 @@ use crate::{
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
-    model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
-    request_template::RequestTemplate,
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
@@ -33,6 +31,7 @@ use crate::{
     },
 };
 use dynamo_http_server::metrics::Metrics;
+use dynamo_model_card::{model_card::ModelDeploymentCard, request_template::RequestTemplate};
 
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_lora::policy::validate_router_mode_for_lora;

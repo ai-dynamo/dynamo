@@ -4,10 +4,10 @@
 use anyhow::{Ok, Result};
 use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_renderer::PromptContextMixin;
 use dynamo_renderer::PromptFormatter;
 use serde::{Deserialize, Serialize};
@@ -680,9 +680,9 @@ mod cached_multimodal_uuid {
     use std::sync::Arc;
 
     use super::Request;
-    use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::protocols::common::preprocessor::MultimodalData;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_runtime::error::{DynamoError, ErrorType};
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
@@ -894,9 +894,9 @@ mod media_io_kwargs_forwarding {
     use std::sync::Arc;
 
     use super::Request;
-    use dynamo_llm::media_config::MediaDecoder;
-    use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_model_card::media_config::MediaDecoder;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
     use rstest::rstest;
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
@@ -977,10 +977,10 @@ mod media_io_kwargs_forwarding {
 }
 
 mod context_length_validation {
-    use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
-    use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_model_card::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
+    use dynamo_model_card::model_card::ModelDeploymentCard;
     use dynamo_runtime::error::{DynamoError, ErrorType};
 
     // mock-llama has a chat_template in tokenizer_config.json (required for preprocessing)
@@ -1320,14 +1320,14 @@ mod context_length_validation {
 }
 
 mod embedding_without_chat_template {
-    use dynamo_llm::local_model::runtime_config::TokenizerBackend;
-    use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_llm::model_type::ModelType;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
     use dynamo_llm::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+    use dynamo_model_card::local_model::runtime_config::TokenizerBackend;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
+    use dynamo_model_card::model_type::ModelType;
     use dynamo_renderer::PromptFormatter;
     use serde::Deserialize;
     use serde_json::json;

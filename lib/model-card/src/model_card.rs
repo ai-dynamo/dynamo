@@ -3094,7 +3094,7 @@ mod tests {
     #[test]
     fn other_tokenizers_keep_their_wire_form() {
         let card = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            "../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
         )
         .unwrap();
@@ -3266,7 +3266,7 @@ mod tests {
     #[test]
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
+            .join("../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), Some(128000));
         // eos_token_ids can be in any order as long as the set is correct
@@ -3278,7 +3278,7 @@ mod tests {
     #[test]
     pub fn test_config_json_llama4() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
+            .join("../llm/tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), Some(200000));
         Ok(())
@@ -3290,7 +3290,7 @@ mod tests {
     #[test]
     fn test_invalid_json_but_py_accepts_it() {
         dynamo_runtime::logging::init();
-        let path = "tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
+        let path = "../llm/tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
         let _ = HFConfig::from_json_file(path).unwrap();
     }
 
@@ -3300,7 +3300,7 @@ mod tests {
     #[test]
     fn test_config_json_qwen35_eos_from_tokenizer() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-qwen3.5-0.8B/config.json");
+            .join("../llm/tests/data/sample-models/mock-qwen3.5-0.8B/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
         // Must include both: 248044 (<|endoftext|>) from text_config and
@@ -3323,7 +3323,7 @@ mod tests {
     #[test]
     fn test_config_json_eos_bos_from_tokenizer_config_only() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-tokenizer-config-only/config.json");
+            .join("../llm/tests/data/sample-models/mock-tokenizer-config-only/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), Some(101));
         let eos: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
@@ -3342,7 +3342,7 @@ mod tests {
     #[test]
     fn test_config_json_eos_bos_from_special_tokens_map() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-special-tokens-only/config.json");
+            .join("../llm/tests/data/sample-models/mock-special-tokens-only/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), Some(201));
         let eos: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
@@ -3368,7 +3368,7 @@ mod tests {
     #[test]
     fn test_config_json_eos_bos_from_tokenizer_json_fallback() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-tokenizer-json-fallback/config.json");
+            .join("../llm/tests/data/sample-models/mock-tokenizer-json-fallback/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
         let eos: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
         assert!(
@@ -3509,8 +3509,8 @@ mod tests {
         let blobs = workspace.join("blobs");
         std::fs::create_dir_all(&snapshot)?;
         std::fs::create_dir_all(&blobs)?;
-        let src =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../llm/tests/data/sample-models/TinyLlama_v1.1");
         for entry in std::fs::read_dir(&src)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -3649,8 +3649,8 @@ mod tests {
     /// reused for another worker that needs a differently-named sibling.
     #[test]
     fn mdcsum_extras_distinguish_basename_at_equal_checksum() {
-        let src =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../llm/tests/data/sample-models/TinyLlama_v1.1");
         let mut a = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
         let mut b = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
         a.extra_files.push(cf_for("/m/preprocessor_config.json"));
@@ -3662,8 +3662,8 @@ mod tests {
     /// hash the same (sort_unstable on (basename, checksum) pairs).
     #[test]
     fn mdcsum_extras_stable_across_read_order() {
-        let src =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../llm/tests/data/sample-models/TinyLlama_v1.1");
         let mut a = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
         let mut b = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
         let cf1 = cf_for("/m/a.json");

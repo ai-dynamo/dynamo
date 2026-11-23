@@ -503,10 +503,10 @@ pub struct ParsingOptions {
     /// tool-call-gate reconstruction consults the same configuration as the
     /// request preprocessor. Presence enables operator-controlled tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structural_tag: Option<crate::local_model::runtime_config::StructuralTagConfig>,
+    pub structural_tag: Option<dynamo_model_card::local_model::runtime_config::StructuralTagConfig>,
 
     #[serde(
-        default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
+        default = "dynamo_model_card::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
     )]
     pub exclude_tools_when_tool_choice_none: bool,
 
@@ -543,7 +543,7 @@ impl ParsingOptions {
             move_reasoning_to_content_when_empty: false,
             structural_tag: None,
             exclude_tools_when_tool_choice_none:
-                crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
+                dynamo_model_card::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
         }
     }

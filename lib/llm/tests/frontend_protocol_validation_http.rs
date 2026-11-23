@@ -644,7 +644,7 @@ async fn beam_request_normalization_precedes_generic_validation() {
         svc.shutdown().await;
 
         let script = load_agent_fixture("text.sse").await.unwrap();
-        let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only(MODEL);
+        let mut card = dynamo_model_card::model_card::ModelDeploymentCard::with_name_only(MODEL);
         card.runtime_config.tool_call_parser = Some("beam".to_string());
         card.runtime_config.reasoning_parser = Some("beam".to_string());
         let engine = Arc::new(ScriptedChatEngine::new(

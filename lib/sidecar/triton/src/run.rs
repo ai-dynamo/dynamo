@@ -8,7 +8,7 @@ use anyhow::{Context, ensure};
 use clap::{CommandFactory, FromArgMatches};
 use dynamo_backend_common::{DisaggregationMode, ModelInput, RawEngine, Worker, WorkerConfig};
 use dynamo_llm::grpc::service::kserve::inference;
-use dynamo_llm::tensor_model::TensorModelConfig;
+use dynamo_model_card::tensor_model::TensorModelConfig;
 use dynamo_runtime::DistributedRuntime;
 use prost::Message;
 use sha2::{Digest, Sha256};

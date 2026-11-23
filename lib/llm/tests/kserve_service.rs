@@ -25,10 +25,10 @@ pub mod kserve_test {
     pub mod inference {
         tonic::include_proto!("inference");
     }
-    use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_llm::model_type::{ModelInput, ModelType};
     use dynamo_llm::protocols::tensor;
-    use dynamo_llm::tensor_model;
+    use dynamo_model_card::model_card::ModelDeploymentCard;
+    use dynamo_model_card::model_type::{ModelInput, ModelType};
+    use dynamo_model_card::tensor_model;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
         DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,

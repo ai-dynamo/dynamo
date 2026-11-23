@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use dynamo_llm::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+use dynamo_model_card::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
 use dynamo_runtime::config::parse_bool_opt;
 
 use crate::disagg::DisaggregationMode;

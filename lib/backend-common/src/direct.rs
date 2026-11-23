@@ -23,12 +23,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dynamo_llm::local_model::model_card_instance;
-use dynamo_llm::local_model::runtime_config::{
-    DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY, DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY,
-};
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_model_card::local_model::model_card_instance;
+use dynamo_model_card::local_model::runtime_config::{
+    DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY, DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY,
+};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::component::{Instance, TransportType};
 use dynamo_runtime::discovery::DiscoveryInstance;
@@ -636,10 +636,10 @@ mod tests {
     use dynamo_http_server::metrics::Metrics;
     use dynamo_llm::discovery::{ModelManager, ModelWatcher};
     use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_llm::router_config::RouterConfig;
     use dynamo_llm::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
     };
+    use dynamo_model_card::router_config::RouterConfig;
     use dynamo_runtime::Runtime;
     use dynamo_runtime::discovery::DiscoveryQuery;
     use dynamo_runtime::distributed::DistributedConfig;
@@ -1569,7 +1569,7 @@ mod tests {
         // A text model would be advertised as ready, and its requests would
         // find no direct dispatch.
         let text = WorkerConfig {
-            model_input: dynamo_llm::model_type::ModelInput::Text,
+            model_input: dynamo_model_card::model_type::ModelInput::Text,
             ..WorkerConfig::default()
         };
         assert_eq!(

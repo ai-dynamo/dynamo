@@ -111,7 +111,7 @@ array instead of silently using only its first image.
 
 Backend authors, including authors of custom in-process engines, register this
 capability in the image engine's
-[`ModelDeploymentCard.user_data`](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/model_card.rs).
+[`ModelDeploymentCard.user_data`](https://github.com/ai-dynamo/dynamo/blob/main/lib/model-card/src/model_card.rs).
 It is deployment metadata, not a field in an HTTP image request. The following
 example is the value of `user_data`:
 

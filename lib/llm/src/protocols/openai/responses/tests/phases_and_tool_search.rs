@@ -544,7 +544,7 @@ fn python_chat_processor_preserves_history_phases_without_changing_worker_wire()
     let mut response = request(json!([]), input);
     response.inner.instructions = Some("Follow instructions.".into());
     let chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
-    let config = crate::local_model::runtime_config::ModelRuntimeConfig {
+    let config = dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig {
         tool_call_parser: Some("muse_spark_open".into()),
         ..Default::default()
     };

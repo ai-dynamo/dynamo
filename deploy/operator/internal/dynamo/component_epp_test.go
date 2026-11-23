@@ -49,7 +49,7 @@ func envValueNamed(container corev1.Container, name string) (string, bool) {
 }
 
 // The Rust EPP resolves its model-config cache root from $HOME
-// (lib/llm/src/model_card.rs), so the hf-cache emptyDir has to be mounted under
+// (lib/model-card/src/model_card.rs), so the hf-cache emptyDir has to be mounted under
 // the HOME the container actually runs with. A mismatch is silently inert: the
 // blobs go to the ephemeral writable layer instead of the volume.
 func TestEPPCacheMountTracksHome(t *testing.T) {
