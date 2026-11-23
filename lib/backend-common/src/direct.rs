@@ -149,8 +149,8 @@ impl DirectDispatch {
         // missing path instead. When the check itself fails, as on a mount
         // that is briefly unreachable, the files are kept and `build` fails
         // in a way the next probe retries.
-        let fetched = files.directory != Path::new(source);
-        if !fetched || !matches!(files.directory.try_exists(), Ok(false)) {
+        let is_fetched = files.directory != Path::new(source);
+        if !is_fetched || !matches!(files.directory.try_exists(), Ok(false)) {
             return Ok(files.clone());
         }
         {
