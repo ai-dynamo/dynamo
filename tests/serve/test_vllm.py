@@ -56,12 +56,6 @@ from tests.utils.payloads import (
 logger = logging.getLogger(__name__)
 
 
-def _is_cuda12() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    # handles "12", "12.9", "12.9.1", etc.
-    return v.startswith("12")
-
-
 def _is_aarch64() -> bool:
     arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
     return arch in ("aarch64", "arm64")
@@ -69,10 +63,9 @@ def _is_aarch64() -> bool:
 
 def _xfail_lmcache_upstream_container():
     return pytest.mark.xfail(
-        _is_cuda12() or _is_aarch64(),
+        _is_aarch64(),
         reason=(
-            "LMCache is provided by the upstream vLLM image. The CUDA 12 image "
-            "ships LMCache c_ops linked against libcudart.so.13, and LMCache "
+            "LMCache is provided by the upstream vLLM image, and LMCache "
             "does not publish aarch64 wheels yet."
         ),
         strict=False,

@@ -242,7 +242,7 @@ container/render.py --framework=vllm --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # Build TensorRT-LLM runtime image called dynamo:latest-trtllm-runtime
-container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.4
 docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Build SGLang runtime image for Intel XPU (instead of the default CUDA device)

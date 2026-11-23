@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.glm47_moe_reasoning_parser import Glm47MoeParserReasoningAdapter
@@ -797,7 +798,13 @@ def _prepare_request(
     )
 
     if tool_dicts and isinstance(request, dict):
-        tool_dicts = request.get("responses_template_tools", tool_dicts)
+        if catalog := request.get("chat_template_tools"):
+            tool_dicts = [
+                ChatCompletionToolsParam.model_validate(tool).model_dump()
+                for tool in catalog
+            ]
+        else:
+            tool_dicts = request.get("responses_template_tools", tool_dicts)
 
     chat_template = responses_history_template(
         resolved_responses_template or request_for_sampling.chat_template,
@@ -1051,6 +1058,7 @@ class StreamingPostProcessor:
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
+        tool_catalog_names: frozenset[str] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
@@ -1059,6 +1067,7 @@ class StreamingPostProcessor:
         self.stream_response = stream_response
         self.reasoning_is_done = bool(response_reasoning_ended)
         self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
+        self._tool_catalog_names = tool_catalog_names
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
         # the reasoning open/close tags live in the prompt and the generated
@@ -1172,9 +1181,13 @@ class StreamingPostProcessor:
                 "Dynamo JSON tool-call fallback was not valid JSON"
             ) from exc
 
-        available_tool_names = {
-            tool.function.name for tool in self.request_for_sampling.tools or []
-        }
+        # Keep catalogued calls visible to the HTTP allowlist, even when
+        # the generation constraint only permits a subset.
+        known_tool_names = self._tool_catalog_names
+        if known_tool_names is None:
+            known_tool_names = frozenset(
+                tool.function.name for tool in self.request_for_sampling.tools or []
+            )
         tool_choice = self.request_for_sampling.tool_choice
         required_tool_name = None
         if _is_named_tool_choice(tool_choice):
@@ -1214,7 +1227,7 @@ class StreamingPostProcessor:
                     "Dynamo JSON tool-call fallback entries must include parameters"
                 )
             parameters = tool_call["parameters"]
-            if not isinstance(name, str) or name not in available_tool_names:
+            if not isinstance(name, str) or name not in known_tool_names:
                 raise ValueError(
                     "Dynamo JSON tool-call fallback named an unavailable tool"
                 )

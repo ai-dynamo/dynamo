@@ -264,9 +264,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         echo "       removal; the globs no longer match the base layout:" >&2; \
         echo "$left" >&2; \
         exit 1; \
-    fi
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    fi; \
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 

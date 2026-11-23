@@ -49,10 +49,7 @@ RUN apt clean && apt-get update -y && \
     libgl1 \
     libaio-dev \
     linux-libc-dev && \
-    . /etc/os-release && \
-    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "20260816ubuntu0.${VERSION_ID}.1"
-
-{% include "templates/verify_ca_certificates.Dockerfile" %}
+    {% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}

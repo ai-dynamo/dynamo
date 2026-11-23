@@ -17,7 +17,6 @@ import zmq
 pytest.importorskip("vllm.usage.usage_lib")
 
 from vllm.usage.usage_lib import UsageContext  # noqa: E402
-from vllm.v1.engine import utils as engine_utils  # noqa: E402
 
 from dynamo.vllm import embedding_worker_processes as processes  # noqa: E402
 
@@ -56,11 +55,13 @@ def test_child_environment_offsets_system_port_by_index(monkeypatch):
         process_index=2,
         addresses_json='{"process_count": 4}',
         parent_pid=123,
+        listener_fds=(3, 4),
     )
 
     assert env[processes._ROLE_ENV] == processes._CHILD_ROLE
     assert env[processes._INDEX_ENV] == "2"
     assert env[processes._PARENT_PID_ENV] == "123"
+    assert env[processes._LISTENER_FDS_ENV] == "[3, 4]"
     # The parent keeps 19401 as index 0, so children start one above it.
     assert env["DYN_SYSTEM_PORT"] == "19403"
     assert env["PYTHONUNBUFFERED"] == "1"
@@ -79,6 +80,7 @@ def test_child_environment_preserves_non_positive_system_port(monkeypatch, raw):
         process_index=1,
         addresses_json='{"process_count": 2}',
         parent_pid=123,
+        listener_fds=(3, 4),
     )
 
     assert env["DYN_SYSTEM_PORT"] == raw
@@ -91,6 +93,7 @@ def test_child_environment_omits_system_port_when_parent_has_none(monkeypatch):
         process_index=1,
         addresses_json='{"process_count": 2}',
         parent_pid=123,
+        listener_fds=(3, 4),
     )
 
     assert "DYN_SYSTEM_PORT" not in env
@@ -175,6 +178,7 @@ def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
         engine_manager=engine_manager,
         rpc_directory=rpc_directory,
         previous_rpc_base_path="/tmp/original-rpc",
+        zmq_listeners=Mock(),
     )
     group.cleanup(timeout=2.0)
     group.cleanup(timeout=2.0)
@@ -196,6 +200,7 @@ def test_process_group_reports_unexpected_child_exit():
         engine_manager=Mock(),
         rpc_directory=rpc_directory,
         previous_rpc_base_path=None,
+        zmq_listeners=Mock(),
         parent_failure_callback=callback,
     )
 
@@ -259,7 +264,7 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
         cleanup=Mock(),
     )
     monkeypatch.setattr(
-        engine_utils, "bind_engine_zmq_listeners", lambda *_: zmq_listeners
+        processes, "bind_engine_zmq_listeners", lambda *_: zmq_listeners
     )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
@@ -292,6 +297,10 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
 
 
 def test_child_attaches_without_launching_engine(monkeypatch):
+    monkeypatch.setenv(processes._LISTENER_FDS_ENV, "[5, 6]")
+    monkeypatch.setattr(
+        processes, "socket", SimpleNamespace(socket=lambda fileno: fileno)
+    )
     monkeypatch.setenv(processes._ROLE_ENV, processes._CHILD_ROLE)
     monkeypatch.setenv(processes._INDEX_ENV, "1")
     monkeypatch.setenv(
@@ -324,6 +333,7 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["process_index"] == 1
     assert attach.call_args.kwargs["input_address"] == "in1"
     assert attach.call_args.kwargs["output_address"] == "out1"
+    assert attach.call_args.kwargs["listeners"] == (5, 6)
 
 
 def _run_listener_child():
@@ -366,9 +376,6 @@ def _run_listener_child():
 
 @pytest.mark.timeout(180)
 def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
-    if not hasattr(engine_utils, "bind_engine_zmq_listeners"):
-        pytest.skip("requires the inherited-listener API")
-
     config = _vllm_config()
     config.parallel_config = SimpleNamespace(
         data_parallel_size_local=1,
