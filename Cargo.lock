@@ -3641,6 +3641,7 @@ dependencies = [
  "dashmap",
  "dynamo-backend-common",
  "dynamo-mocker",
+ "dynamo-runtime",
  "dynamo-trtllm-sidecar",
  "futures",
  "prost-types 0.13.5",

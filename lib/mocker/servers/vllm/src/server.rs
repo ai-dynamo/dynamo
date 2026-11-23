@@ -48,6 +48,9 @@ impl fmt::Display for ServerMode {
     }
 }
 
+/// vLLM release this mocker matches, checked by `tests/sidecar.rs::parity_with_live_engine`.
+pub const ENGINE_VERSION: &str = "0.33.0";
+
 #[derive(Clone, Debug)]
 pub struct MockerServerConfig {
     pub model: String,
@@ -116,7 +119,7 @@ impl VllmMockerService {
         };
         let server_info = pb::ServerInfo {
             max_loras: 0,
-            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            engine_version: ENGINE_VERSION.to_string(),
             api_version: "vllm".to_string(),
             instance_id: format!("dynamo-vllm-mocker-{}", config.mode),
             parallelism: Some(pb::ParallelismInfo {
@@ -284,13 +287,20 @@ impl pb::inference_server::Inference for VllmMockerService {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let (prepared, mut live, _permit) = self.start_generation(request).await?;
         let mut output_ids = Vec::with_capacity(prepared.max_output_tokens);
+        let mut cached_tokens = None;
         while let Some(signal) = live.recv().await {
             let token_id = checked_token(&signal).map_err(|status| *status)?;
+            cached_tokens = cached_tokens.or(signal.cached_tokens);
             output_ids.push(token_id);
             if signal.completed {
                 return Ok(Response::new(pb::GenerateResponse {
                     prompt_info: Some(prepared.prompt_info()),
-                    outputs: Some(prepared.sequence_output(&output_ids, output_ids.len(), true)),
+                    outputs: Some(prepared.sequence_output(
+                        &output_ids,
+                        output_ids.len(),
+                        true,
+                        cached_tokens,
+                    )),
                 }));
             }
         }
@@ -318,12 +328,19 @@ impl pb::inference_server::Inference for VllmMockerService {
             };
 
             let mut generated = 0usize;
+            let mut cached_tokens = None;
             while let Some(signal) = live.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
+                cached_tokens = cached_tokens.or(signal.cached_tokens);
                 generated += 1;
                 yield pb::GenerateResponse {
                     prompt_info: None,
-                    outputs: Some(prepared.sequence_output(&[token_id], generated, signal.completed)),
+                    outputs: Some(prepared.sequence_output(
+                        &[token_id],
+                        generated,
+                        signal.completed,
+                        cached_tokens,
+                    )),
                 };
                 if signal.completed {
                     return;

@@ -277,3 +277,58 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
     engine.start(0).await.unwrap();
     common::check_kv_events(&engine, block_size).await;
 }
+
+#[path = "../../tests/common/parity.rs"]
+mod parity;
+
+#[tokio::test]
+#[ignore = "needs a live vLLM engine; run lib/mocker/servers/parity/run.py"]
+async fn parity_with_live_engine() {
+    let live = parity::LiveEngine::from_env();
+    live.assert_version(dynamo_vllm_mocker::ENGINE_VERSION);
+    let engine = sidecar(&live.endpoint, DisaggregationMode::Aggregated).await;
+    let config = engine.start(0).await.unwrap();
+    let args = MockerConfig::from_value(parity::mocker_engine_args("vllm", &config)).unwrap();
+    let llm = config.llm.clone().unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args.clone(), false).await;
+    let mocker = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    let mocker_config = mocker.start(0).await.unwrap();
+
+    assert_eq!(
+        parity::registration(&mocker_config),
+        parity::registration(&config)
+    );
+    parity::assert_same(
+        &parity::aggregated(
+            &parity::served(&config),
+            &engine,
+            llm.context_length.unwrap(),
+        )
+        .await,
+        &parity::aggregated(
+            &parity::served(&mocker_config),
+            &mocker,
+            llm.context_length.unwrap(),
+        )
+        .await,
+    );
+    for backend in [&engine, &mocker] {
+        let mut relay = common::KvRelay::start(backend, llm.kv_cache_block_size.unwrap()).await;
+        relay.store_prompt(backend).await;
+        relay.shutdown();
+    }
+
+    // The engine runs a KV connector, so the same process serves a prefill leg.
+    let prefill_server = RunningServer::start(ServerMode::Prefill, args, false).await;
+    let engine_prefill = sidecar(&live.endpoint, DisaggregationMode::Prefill).await;
+    let mocker_prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
+    let engine_prefill_config = engine_prefill.start(1).await.unwrap();
+    let mocker_prefill_config = mocker_prefill.start(1).await.unwrap();
+    assert_eq!(
+        parity::prefill(&parity::served(&mocker_prefill_config), &mocker_prefill).await,
+        parity::prefill(&parity::served(&engine_prefill_config), &engine_prefill).await,
+    );
+    for backend in [&engine, &mocker, &engine_prefill, &mocker_prefill] {
+        backend.cleanup().await.unwrap();
+    }
+}

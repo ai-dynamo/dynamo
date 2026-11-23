@@ -46,6 +46,7 @@ pub(super) struct PreparedRequest {
     /// *strings* are accepted and never match: this server has no tokenizer, so
     /// it has no text to match them against.
     stop_token_ids: BTreeSet<u32>,
+    include_stop_in_output: bool,
     min_output_tokens: usize,
     return_output_logprobs: bool,
     return_prompt_logprobs: bool,
@@ -108,6 +109,14 @@ impl PreparedRequest {
 
         let stopping = request.stopping.unwrap_or_default();
         let max_output_tokens = max_output_tokens(&stopping, config.mode)?;
+        if prompt_tokens.len() > config.context_length as usize {
+            // TensorRT-LLM reports an overlong prompt as INTERNAL, not INVALID_ARGUMENT.
+            return Err(Box::new(Status::internal(format!(
+                "The prompt length ({}) should not exceed the context length ({})",
+                prompt_tokens.len(),
+                config.context_length
+            ))));
+        }
         let remaining_tokens = (config.context_length as usize).saturating_sub(prompt_tokens.len());
         if remaining_tokens == 0 {
             return Err(Box::new(Status::invalid_argument(format!(
@@ -145,6 +154,7 @@ impl PreparedRequest {
                     _ => None,
                 })
                 .collect(),
+            include_stop_in_output: stopping.include_stop_in_output == Some(true),
             min_output_tokens: stopping.min_tokens.unwrap_or(0) as usize,
             return_output_logprobs: response.return_output_logprobs == Some(true),
             return_prompt_logprobs: response.return_prompt_logprobs == Some(true),
@@ -179,9 +189,13 @@ impl PreparedRequest {
         generated >= self.min_output_tokens && self.stop_token_ids.contains(&token_id)
     }
 
-    /// The terminal a stop condition produces. The matched token is reported
-    /// but not streamed, which is what the engine does unless the client asks
-    /// for it back with `include_stop_in_output`.
+    /// Whether a matched stop token is streamed before the terminal.
+    pub(super) fn streams_stop_token(&self) -> bool {
+        self.include_stop_in_output
+    }
+
+    /// The terminal a stop condition produces. The matched token is reported;
+    /// it is streamed only with `include_stop_in_output`.
     pub(super) fn stopped(
         &self,
         token_id: u32,

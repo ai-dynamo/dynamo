@@ -288,7 +288,7 @@ async fn context_limit_finishes_by_length_before_a_planned_stop() {
     req.stopping.as_mut().unwrap().stop_token_ids = vec![tokens[4]];
 
     let prepared = PreparedRequest::new(req.clone(), &config, 4, None).unwrap();
-    let shortened = prepared.sequence_output(&tokens[..4], 4, true);
+    let shortened = prepared.sequence_output(&tokens[..4], 4, true, None);
     let finish = shortened.finish_info.unwrap();
     assert_eq!(
         finish.finish_reason,
@@ -628,7 +628,7 @@ fn decode_rejects_incomplete_or_flat_handoffs() {
         "remote_request_id",
         "remote_block_ids",
     ] {
-        let mut handoff = prepared.handoff();
+        let mut handoff = prepared.handoff(None);
         if field == "remote_block_ids" {
             handoff.fields.insert(
                 field.to_string(),

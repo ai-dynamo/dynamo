@@ -25,14 +25,18 @@ struct RunningServer {
 
 impl RunningServer {
     async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
-        let service = SglangMockerService::new(
+        Self::start_with(
             MockerServerConfig {
                 mode,
                 ..Default::default()
             },
             engine_args,
         )
-        .unwrap();
+        .await
+    }
+
+    async fn start_with(config: MockerServerConfig, engine_args: MockerConfig) -> Self {
+        let service = SglangMockerService::new(config, engine_args).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -346,4 +350,73 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
     common::check_kv_events(&engine, block_size).await;
+}
+
+#[path = "../../tests/common/parity.rs"]
+mod parity;
+
+/// The `GetServerInfo` fields the sidecar reads that registration does not show.
+async fn server_info(endpoint: &str) -> serde_json::Value {
+    let info = dynamo_sglang_sidecar::proto::sglang_service_client::SglangServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+    .unwrap()
+    .get_server_info(dynamo_sglang_sidecar::proto::GetServerInfoRequest {})
+    .await
+    .unwrap()
+    .into_inner();
+    serde_json::json!({
+        "version": info.version,
+        "num_reserved_tokens": info.num_reserved_tokens,
+        "incremental_streaming_output": info.incremental_streaming_output,
+        "disaggregation_mode": info.disaggregation_mode,
+        "allow_auto_truncate": info.allow_auto_truncate,
+        "skip_tokenizer_init": info.skip_tokenizer_init,
+    })
+}
+
+#[tokio::test]
+#[ignore = "needs a live SGLang engine; run lib/mocker/servers/parity/run.py"]
+async fn parity_with_live_engine() {
+    let live = parity::LiveEngine::from_env();
+    live.assert_version(dynamo_sglang_mocker::ENGINE_VERSION);
+    let engine = sidecar(&live.endpoint, DisaggregationMode::Aggregated).await;
+    let config = engine.start(0).await.unwrap();
+    let args = MockerConfig::from_value(parity::mocker_engine_args("sglang", &config)).unwrap();
+    let llm = config.llm.clone().unwrap();
+    let context_length = llm.context_length.unwrap();
+    let server = RunningServer::start_with(
+        MockerServerConfig {
+            context_length,
+            ..Default::default()
+        },
+        args,
+    )
+    .await;
+    let mocker = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    let mocker_config = mocker.start(0).await.unwrap();
+
+    assert_eq!(
+        server_info(&server.endpoint).await,
+        server_info(&live.endpoint).await
+    );
+    // The mocker serves gRPC only; real SGLang also offers native HTTP generation.
+    let mut engine_registration = parity::registration(&config);
+    engine_registration["runtime_data"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|key| key != "sglang_generate");
+    assert_eq!(parity::registration(&mocker_config), engine_registration);
+    parity::assert_same(
+        &parity::aggregated(&parity::served(&config), &engine, context_length).await,
+        &parity::aggregated(&parity::served(&mocker_config), &mocker, context_length).await,
+    );
+    for backend in [&engine, &mocker] {
+        let mut relay = common::KvRelay::start(backend, llm.kv_cache_block_size.unwrap()).await;
+        relay.store_prompt(backend).await;
+        relay.shutdown();
+    }
+    engine.cleanup().await.unwrap();
+    mocker.cleanup().await.unwrap();
 }
