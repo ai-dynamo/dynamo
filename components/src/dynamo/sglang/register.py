@@ -69,6 +69,10 @@ from dynamo.sglang.gateway import (
     gateway_engine_id,
 )
 from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
+from dynamo.sglang.recurrent_kv import (
+    recurrent_kv_events_enabled,
+    sglang_recurrent_kv_layout,
+)
 from dynamo.sglang.state_agent import inventory_sources
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
@@ -693,6 +697,15 @@ async def get_runtime_config(
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
     runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
+    recurrent_layout = sglang_recurrent_kv_layout(
+        server_args,
+        enabled=recurrent_kv_events_enabled() and dynamo_args.use_kv_events,
+    )
+    if recurrent_layout is not None:
+        runtime_config.set_engine_specific(
+            "kv_cache_group_layout_v1",
+            json.dumps(recurrent_layout.runtime_metadata()),
+        )
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

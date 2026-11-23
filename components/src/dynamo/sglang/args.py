@@ -37,6 +37,7 @@ from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     add_sglang_cli_compat,
     kv_events_config_with_dynamo_format,
+    kv_events_config_with_recurrent_checkpoints,
     resolved_server_args,
     sglang_default_mla_attention_backend,
     sglang_dsa_supports_decode_context_parallel,
@@ -46,6 +47,7 @@ from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 from dynamo.sglang.gateway import effective_gateway_workers
+from dynamo.sglang.recurrent_kv import recurrent_kv_events_enabled
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -918,6 +920,10 @@ async def parse_args(args: list[str]) -> Config:
             parsed_args.tokenizer_worker_num = gateway_count
         parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
             parsed_args.kv_events_config
+        )
+        parsed_args.kv_events_config = kv_events_config_with_recurrent_checkpoints(
+            parsed_args.kv_events_config,
+            enabled=recurrent_kv_events_enabled(),
         )
         server_args = ServerArgs.from_cli_args(parsed_args)
         _default_cuda_coredump_wait(server_args)
