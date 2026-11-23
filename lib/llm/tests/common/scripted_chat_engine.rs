@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 
 use anyhow::{Error, Result, anyhow};
-use dynamo_llm::protocols::{
+use dynamo_frontend_protocols::{
     Annotated,
     openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,

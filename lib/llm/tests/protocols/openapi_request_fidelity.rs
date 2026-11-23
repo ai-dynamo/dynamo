@@ -15,7 +15,7 @@
 //!
 //! Run: `cargo test -p dynamo-llm --no-default-features --test protocols openapi_request_fidelity::`.
 
-use dynamo_llm::protocols::openai::{
+use dynamo_frontend_protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
 use serde::Deserialize;

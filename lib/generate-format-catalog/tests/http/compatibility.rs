@@ -164,7 +164,7 @@ async fn formats_preserve_typed_validation_error_policy_before_and_after_dispatc
                     } else {
                         Arc::new(dynamo_vllm_generate::VllmFormat)
                     };
-                    let engine: dynamo_llm::types::openai::generate::GenerateStreamingEngine =
+                    let engine: dynamo_frontend_protocols::types::openai::generate::GenerateStreamingEngine =
                         if after_dispatch {
                             let error = DynamoError::builder()
                                 .error_type(kind)

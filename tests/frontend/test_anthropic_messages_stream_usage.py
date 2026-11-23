@@ -9,7 +9,7 @@
 # into a hermetic mocker-backed pytest.
 #
 # Goal (regression guard for the /v1/messages per-chunk usage fix in
-# lib/llm/src/protocols/anthropic/stream_converter.rs): in stream mode, 100% of
+# lib/frontend-protocols/src/anthropic/stream_converter.rs): in stream mode, 100% of
 # the token-bearing chunks must carry a token-usage triple — input, output and
 # total tokens — not only the final chunk.
 #

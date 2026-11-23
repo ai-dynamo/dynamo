@@ -17,8 +17,8 @@ use dynamo_runtime::pipeline::WorkerLoadMonitor;
 
 use crate::discovery::{KvWorkerMonitor, LoadThresholdHandle, RoutableThresholds};
 use crate::kv_router::KvRouter;
-use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use crate::worker_type::WorkerType;
+use dynamo_frontend_protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 
 /// Endpoint role whose scheduler and remote metrics feed one load context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

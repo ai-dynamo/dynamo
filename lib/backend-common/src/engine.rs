@@ -21,19 +21,19 @@ use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
-pub use dynamo_llm::first_token::FirstTokenNotifier;
-pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
-pub use dynamo_llm::protocols::common::llm_backend::{
+pub use dynamo_frontend_protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
-pub use dynamo_llm::protocols::common::preprocessor::{
+pub use dynamo_frontend_protocols::common::preprocessor::{
     BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
     MultimodalData, MultimodalDataMap, MultimodalItemRef, PrefillResult, PreprocessedRequest,
     RoutingHints,
 };
-pub use dynamo_llm::protocols::common::{
+pub use dynamo_frontend_protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
+pub use dynamo_llm::first_token::FirstTokenNotifier;
+pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 

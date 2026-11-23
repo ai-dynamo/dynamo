@@ -370,9 +370,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::request_trace::RequestTraceEventSource;
     use crate::request_trace::RequestTracePayload;
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
     fn sample_payload_record() -> RequestTraceRecord {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({

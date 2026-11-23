@@ -14,13 +14,11 @@ use super::{
     AffinityCoordinator, AffinityTarget, Hold, affinity_id, coordinator::ReplicaApplyOutcome,
     explicit_target, subagent_group_affinity_id, to_table,
 };
-use crate::{
-    protocols::common::preprocessor::PreprocessedRequest,
-    protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-        preprocessor::RoutingHints,
-        timing::RequestPhase,
-    },
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::{
+    extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    preprocessor::RoutingHints,
+    timing::RequestPhase,
 };
 use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
 

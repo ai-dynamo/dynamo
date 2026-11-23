@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::openai::{completions::NvCreateCompletionRequest, validate};
+use dynamo_frontend_protocols::openai::{completions::NvCreateCompletionRequest, validate};
 use dynamo_protocols::types::CreateCompletionRequestArgs;
 use serde::{Deserialize, Serialize};
 
@@ -127,7 +127,7 @@ fn build_samples() -> Result<Vec<CompletionSample>, String> {
 
 #[test]
 fn test_batch_prompt_utilities() {
-    use dynamo_llm::protocols::openai::completions::{
+    use dynamo_frontend_protocols::openai::completions::{
         extract_single_prompt, get_prompt_batch_size,
     };
     use dynamo_protocols::types::Prompt;
@@ -187,7 +187,7 @@ fn test_batch_prompt_utilities() {
 
 #[test]
 fn test_total_choices_validation() {
-    use dynamo_llm::protocols::openai::validate::validate_total_choices;
+    use dynamo_frontend_protocols::openai::validate::validate_total_choices;
 
     // Valid cases
     assert!(validate_total_choices(1, 1).is_ok());
@@ -218,7 +218,7 @@ fn test_total_choices_validation() {
 
 #[test]
 fn test_batch_prompt_with_n_parameter() {
-    use dynamo_llm::protocols::openai::completions::get_prompt_batch_size;
+    use dynamo_frontend_protocols::openai::completions::get_prompt_batch_size;
     use dynamo_protocols::types::Prompt;
 
     // Test batch size calculation
@@ -248,7 +248,7 @@ fn test_batch_prompt_with_n_parameter() {
 
 #[test]
 fn test_single_prompt_in_array() {
-    use dynamo_llm::protocols::openai::completions::{
+    use dynamo_frontend_protocols::openai::completions::{
         extract_single_prompt, get_prompt_batch_size,
     };
     use dynamo_protocols::types::Prompt;

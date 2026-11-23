@@ -164,7 +164,7 @@ impl RoutingHost {
                         state.store_request_lifecycle(lifecycle);
                     } else {
                         lifecycle.abort(Some(
-                            crate::protocols::common::preprocessor::owned_abort_error(
+                            dynamo_frontend_protocols::common::preprocessor::owned_abort_error(
                                 error.as_ref(),
                             ),
                         ));

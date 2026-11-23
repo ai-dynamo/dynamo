@@ -542,7 +542,7 @@ mod tests {
         let dynamo = crate::convert::from_triton_response(response).unwrap();
         assert_eq!(
             dynamo.tensors[0].data,
-            dynamo_llm::protocols::tensor::FlattenTensor::Int32(vec![3, 4])
+            dynamo_frontend_protocols::tensor::FlattenTensor::Int32(vec![3, 4])
         );
     }
 

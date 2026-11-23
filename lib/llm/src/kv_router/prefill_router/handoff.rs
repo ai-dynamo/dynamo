@@ -16,7 +16,7 @@ use tracing::Instrument;
 
 use super::PrefillError;
 use crate::kv_router::UnknownPolicyClassRefusal;
-use crate::protocols::{
+use dynamo_frontend_protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
     response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
 };

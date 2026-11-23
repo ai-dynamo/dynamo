@@ -16,15 +16,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
+use dynamo_frontend_protocols::common::extensions::{
+    NvExt, NvExtProvider, routing_constraints_to_kv,
+};
+use dynamo_frontend_protocols::common::timing::WORKER_TYPE_DECODE;
+use dynamo_frontend_protocols::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
-use dynamo_llm::protocols::common::timing::WORKER_TYPE_DECODE;
 use dynamo_llm::tokenizers::Encoding;
-use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::Prompt;
@@ -69,7 +71,7 @@ struct TokenizeResult {
 
 /// A request body parsed into its typed request.
 enum ParsedRequest {
-    Chat(Box<dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest>),
+    Chat(Box<dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest>),
     Completion(Box<NvCreateCompletionRequest>),
 }
 
@@ -115,7 +117,7 @@ fn into_token_ids(encoding: Encoding) -> Vec<u32> {
 /// later lets the work finish and drops the result.
 async fn render_and_tokenize(
     preprocessor: Arc<OpenAIPreprocessor>,
-    request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+    request: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest,
 ) -> Result<(Vec<u32>, TokenizeTimings)> {
     let queued = Instant::now();
     let slot = Arc::clone(&TOKENIZE_SLOTS)
@@ -456,7 +458,7 @@ impl Router {
     /// blocking pool (see [`render_and_tokenize`]).
     async fn tokenize_chat(
         &self,
-        request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+        request: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest,
         headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
@@ -2032,7 +2034,7 @@ mod tests {
     /// regresses, the GAIE ext-proc path is back to ignoring priority.
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let with_priority: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -2043,7 +2045,7 @@ mod tests {
             .unwrap();
         assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let without_nvext: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -2056,7 +2058,7 @@ mod tests {
 
     #[test]
     fn strict_priority_lifted_from_agent_hints() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let with_priority: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -2067,7 +2069,7 @@ mod tests {
             .unwrap();
         assert_eq!(extract_strict_priority(with_priority.nvext.as_ref()), 9);
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let without_nvext: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -2101,7 +2103,7 @@ mod tests {
     /// hard placement requirement.
     #[test]
     fn routing_constraints_lifted_from_nvext() {
-        let with_constraints: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let with_constraints: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -2114,7 +2116,7 @@ mod tests {
         assert!(constraints.has_hard_constraints());
         assert!(constraints.required_taints.contains("gpu=h100"));
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let without_nvext: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -2201,7 +2203,7 @@ mod tests {
 
         // The old, buggy path wrapped the prompt as a chat user message and ran
         // it through the chat template — assert that no longer happens.
-        let chat_wrapped: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let chat_wrapped: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
                 &serde_json::json!({
                     "model": "default",
@@ -3096,7 +3098,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn chat_tokens_from_the_blocking_pool_match_inline_tokenization() {
         let preprocessor = tinyllama_preprocessor();
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let request: dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "The capital of France is"}],

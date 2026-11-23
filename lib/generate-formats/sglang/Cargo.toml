@@ -15,6 +15,7 @@ description = "SGLang client format for Dynamo /generate"
 tracing = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-llm = { workspace = true }
+dynamo-frontend-protocols = { workspace = true }
 dynamo-model-card = { workspace = true }
 dynamo-http-server = { workspace = true }
 dynamo-runtime = { workspace = true }

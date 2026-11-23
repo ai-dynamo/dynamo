@@ -26,9 +26,9 @@ across backends.
 
 */
 
+use dynamo_frontend_protocols::common::metrics::LLMMetricAnnotation;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionToolChoiceOption,
     CompletionUsage, FinishReason,
@@ -1971,7 +1971,7 @@ mod tests {
             ..Default::default()
         });
         chunk.event =
-            Some(dynamo_llm::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE.to_string());
+            Some(dynamo_frontend_protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE.to_string());
         chunk
     }
 

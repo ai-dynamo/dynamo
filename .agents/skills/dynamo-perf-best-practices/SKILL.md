@@ -32,7 +32,7 @@ Trace each changed function's callers and work out how often it runs across the 
 
 | Rate | Where it usually lives (starting points, not a boundary) |
 |---|---|
-| Per output token or stream chunk: millions/s per frontend | `lib/llm/src/http/service`, `lib/llm/src/protocols/openai`, `lib/llm/src/backend.rs`, `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
+| Per output token or stream chunk: millions/s per frontend | `lib/llm/src/http/service`, `lib/frontend-protocols/src/openai`, `lib/llm/src/backend.rs`, `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
 | Per KV block: blocks per request × workers; millions of entries held | `lib/router/kv-indexer/src`, `lib/router/slot-tracker/src`, `lib/mocker` |
 | Per KV event: every engine step on every worker | event ingest, `lib/runtime/src/transports` |
 | Per request: thousands/s | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/router/scheduler/src`, `lib/router/worker-selection/src`, request parsing, `lib/bindings/python/rust` |

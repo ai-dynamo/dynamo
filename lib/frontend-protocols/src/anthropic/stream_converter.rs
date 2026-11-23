@@ -1,0 +1,3470 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Converts a stream of chat completion SSE chunks into Anthropic Messages API SSE events.
+//!
+//! The event sequence follows the Anthropic streaming spec:
+//! `message_start` -> `content_block_start` -> N x `content_block_delta` ->
+//! `content_block_stop` -> `message_delta` -> `message_stop`
+
+use axum::response::sse::Event;
+use dynamo_protocols::types::{
+    ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, CompletionUsage,
+};
+use uuid::Uuid;
+
+use super::types::{
+    AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
+    AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
+    anthropic_stop_fields, backend_id_occurrence, completion_usage_to_anthropic, tool_use_id,
+};
+use crate::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::unified::AnthropicContext;
+
+/// State machine that converts a chat completion stream into Anthropic SSE events.
+pub struct AnthropicStreamConverter {
+    model: String,
+    message_id: String,
+    /// Preserved Anthropic-specific request context for faithful response reconstruction.
+    api_context: Option<AnthropicContext>,
+    // Thinking/reasoning tracking
+    thinking_block_started: bool,
+    thinking_block_closed: bool,
+    thinking_block_index: u32,
+    // Text tracking
+    text_block_started: bool,
+    text_block_closed: bool,
+    text_block_index: u32,
+    // Starts with a frontend estimate and is replaced atomically when the
+    // engine reports authoritative usage.
+    usage: AnthropicUsage,
+    // True once the backend has reported authoritative usage at least once
+    // (via `include_usage`/`continuous_usage_stats`). Until then the converter
+    // falls back to counting output deltas so that every `content_block_delta`
+    // still carries a non-zero output-token estimate.
+    saw_backend_usage: bool,
+    // Highest usage stamped on the wire; no later event carries less.
+    published: AnthropicUsage,
+    // Tool call tracking
+    tool_call_states: Vec<ToolCallState>,
+    // The chat completion id, from the first chunk; `tool_use` ids derive from it.
+    chat_id: String,
+    // Text that arrived after a tool call. Tool blocks stream only once their
+    // call is complete, so this text waits and streams in arrival order.
+    pending_text: Vec<PendingText>,
+    tool_blocks_flushed: bool,
+    tool_flush_requested: bool,
+    // Block index counter
+    next_block_index: u32,
+    // Stop reason
+    stop_reason: Option<AnthropicStopReason>,
+    stop_sequence: Option<String>,
+    backend_stop_reason: Option<serde_json::Value>,
+}
+
+/// Text that arrived after `after_calls` tool calls had started.
+struct PendingText {
+    after_calls: usize,
+    /// Each fragment with the cumulative usage when its chunk was processed.
+    fragments: Vec<(String, AnthropicUsage)>,
+}
+
+struct ToolCallState {
+    /// The backend's original tool call ID (e.g. `call_abc123`). Never emitted
+    /// to the client; used only to determine that a real call has arrived.
+    backend_id: String,
+    name: String,
+    /// Each buffered argument fragment paired with the cumulative usage snapshot
+    /// taken when its backend chunk was processed. Tool-call blocks are flushed
+    /// lazily (at parser completion, the finish reason or EOF), after their chunks were seen,
+    /// so serializing them against the converter's *current* usage would stamp
+    /// every `input_json_delta` with the final token count. Snapshotting per
+    /// fragment preserves the per-chunk cumulative count instead.
+    argument_fragments: Vec<(String, AnthropicUsage)>,
+    has_emitted: bool,
+    needs_flush: bool,
+    is_complete: bool,
+    has_warned_late_arguments: bool,
+}
+
+impl ToolCallState {
+    /// A tool block is ready to flush once both required identity fields are
+    /// present. Arguments are optional: a tool call with no parameters still
+    /// emits, so `argument_fragments` is deliberately not part of this check.
+    fn is_emit_ready(&self) -> bool {
+        !self.backend_id.is_empty() && !self.name.is_empty()
+    }
+}
+
+impl AnthropicStreamConverter {
+    pub fn new(model: String, estimated_input_tokens: u32) -> Self {
+        Self {
+            model,
+            message_id: format!("msg_{}", Uuid::new_v4().simple()),
+            api_context: None,
+            thinking_block_started: false,
+            thinking_block_closed: false,
+            thinking_block_index: 0,
+            text_block_started: false,
+            text_block_closed: false,
+            text_block_index: 0,
+            usage: AnthropicUsage {
+                input_tokens: estimated_input_tokens,
+                // Keep the field present when the backend does not report usage.
+                cache_creation_input_tokens: Some(0),
+                ..Default::default()
+            },
+            saw_backend_usage: false,
+            published: AnthropicUsage::default(),
+            tool_call_states: Vec::new(),
+            chat_id: String::new(),
+            pending_text: Vec::new(),
+            tool_blocks_flushed: false,
+            tool_flush_requested: false,
+            next_block_index: 0,
+            stop_reason: None,
+            stop_sequence: None,
+            backend_stop_reason: None,
+        }
+    }
+
+    /// Create a converter seeded with the original Anthropic request context.
+    /// This allows the response stream to carry forward metadata that was lost
+    /// during the Anthropic-to-OpenAI request conversion.
+    pub fn with_context(
+        model: String,
+        estimated_input_tokens: u32,
+        context: AnthropicContext,
+    ) -> Self {
+        let mut converter = Self::new(model, estimated_input_tokens);
+        converter.api_context = Some(context);
+        converter
+    }
+
+    /// Accumulate one streamed tool-call chunk into per-index state.
+    ///
+    /// Two distinct orderings matter here, and only the first is something a
+    /// current backend actually produces:
+    ///
+    /// - Within a single call, the `backend_id`/`name` and the argument
+    ///   fragments may arrive in either order — arguments can begin before the
+    ///   chunk carrying the backend id and name. We therefore record whichever
+    ///   fields are present on each chunk and defer emitting the block until the
+    ///   identity is complete (see `is_emit_ready`). This is the case the
+    ///   fixtures exercise.
+    /// - Across parallel calls, the in-tree `dynamo-parsers-v2` parsers emit one
+    ///   call at a time with a monotonically increasing `index` (call 0's chunks
+    ///   all precede call 1's), so indices are never interleaved today. Indexing
+    ///   `tool_call_states` by `tool_call.index` keeps each call's state separate
+    ///   regardless, so interleaved indices would also be handled — but no current
+    ///   parser emits them, so that path is defensive rather than exercised.
+    fn record_tool_call(
+        &mut self,
+        tool_call: &ChatCompletionMessageToolCallChunk,
+        usage_snapshot: &AnthropicUsage,
+    ) -> bool {
+        let tool_call_index = tool_call.index as usize;
+        while self.tool_call_states.len() <= tool_call_index {
+            self.tool_call_states.push(ToolCallState {
+                backend_id: String::new(),
+                name: String::new(),
+                argument_fragments: Vec::new(),
+                has_emitted: false,
+                needs_flush: false,
+                is_complete: false,
+                has_warned_late_arguments: false,
+            });
+        }
+
+        let state = &mut self.tool_call_states[tool_call_index];
+        if state.has_emitted || self.tool_blocks_flushed {
+            if !state.has_warned_late_arguments
+                && let Some(arguments) = tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.arguments.as_deref())
+                && !arguments.is_empty()
+            {
+                state.has_warned_late_arguments = true;
+                tracing::warn!(
+                    tool_call_index,
+                    argument_bytes = arguments.len(),
+                    "ignoring tool arguments after the tool block was emitted or finalized"
+                );
+            }
+            return false;
+        }
+        state.needs_flush = true;
+        if let Some(id) = &tool_call.id {
+            state.backend_id = id.clone();
+        }
+        if let Some(function) = &tool_call.function {
+            if let Some(name) = &function.name {
+                state.name = name.clone();
+            }
+            if let Some(arguments) = &function.arguments {
+                state
+                    .argument_fragments
+                    .push((arguments.clone(), usage_snapshot.clone()));
+            }
+        }
+        state.is_complete
+    }
+
+    fn buffer_text(&mut self, text: &str, usage_snapshot: &AnthropicUsage) {
+        let after_calls = self.tool_call_states.len();
+        let fragment = (text.to_owned(), usage_snapshot.clone());
+        match self.pending_text.last_mut() {
+            Some(pending) if pending.after_calls == after_calls => pending.fragments.push(fragment),
+            _ => self.pending_text.push(PendingText {
+                after_calls,
+                fragments: vec![fragment],
+            }),
+        }
+    }
+
+    /// Drain buffered tool blocks into taggable events. Each event carries an
+    /// optional usage override: `Some` for `input_json_delta` fragments (the
+    /// per-fragment snapshot taken at record time), `None` for the surrounding
+    /// `content_block_start`/`content_block_stop` (which stamp the current usage
+    /// like any other non-fragment event).
+    #[allow(clippy::type_complexity)]
+    fn drain_buffered_tool_events(
+        &mut self,
+        is_final: bool,
+    ) -> Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)> {
+        if self.tool_blocks_flushed {
+            return Vec::new();
+        }
+        self.tool_blocks_flushed = is_final;
+        let only_completed = !is_final && !self.tool_flush_requested;
+
+        let mut events = Vec::new();
+        let mut block_index = self.next_block_index;
+
+        // Only the token limit cuts a call short, and it does so once, in the last
+        // call. This mirrors `chat_completion_to_anthropic_response`.
+        let truncated = self.stop_reason == Some(AnthropicStopReason::MaxTokens);
+        // Use the highest observed call index before filtering out calls whose identity
+        // never completed. An argument-only later call is still the terminal observed
+        // call and must not make an earlier ready call look like the truncation target.
+        let last_call = self.tool_call_states.len().checked_sub(1);
+
+        let mut has_emitted = self.tool_call_states.iter().any(|call| call.has_emitted);
+        let single_tool = self
+            .api_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use);
+        // Each call's `tool_use` id counts every earlier call with the same backend
+        // id, emitted or not, as the request trace does.
+        let occurrences: Vec<u32> = (0..self.tool_call_states.len())
+            .map(|index| {
+                backend_id_occurrence(
+                    self.tool_call_states[..index]
+                        .iter()
+                        .map(|call| call.backend_id.as_str()),
+                    &self.tool_call_states[index].backend_id,
+                )
+            })
+            .collect();
+
+        for (call_index, tool_call) in self.tool_call_states.iter_mut().enumerate() {
+            if tool_call.has_emitted {
+                continue;
+            }
+            // Before the turn finishes, preserve call order and require parser evidence.
+            if only_completed
+                && (!tool_call.is_complete || !tool_call.is_emit_ready() || !tool_call.needs_flush)
+            {
+                break;
+            }
+            if !tool_call.is_emit_ready() || (!is_final && !tool_call.needs_flush) {
+                continue;
+            }
+            if single_tool && has_emitted {
+                break;
+            }
+            let raw: String = tool_call
+                .argument_fragments
+                .iter()
+                .map(|(arguments, _)| arguments.as_str())
+                .collect();
+            // While the stream is live, a call whose arguments have not started yet is
+            // indistinguishable from a parameterless call. Emitting it now would close
+            // the block and discard the fragments that follow, so leave it pending and
+            // let the final drain decide.
+            if !is_final && raw.is_empty() {
+                if single_tool || only_completed {
+                    break;
+                }
+                continue;
+            }
+            let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
+            // Keep an earlier incomplete call pending; it may still become valid.
+            if single_tool
+                && !is_final
+                && !raw.is_empty()
+                && parsed.as_ref().is_err_and(|error| error.is_eof())
+            {
+                break;
+            }
+            tool_call.needs_flush = false;
+            let arguments_are_valid = if raw.is_empty() {
+                // An empty argument string is valid for a completed call, but at a
+                // token-limit finish it means generation stopped immediately after
+                // the name. Keep the terminal rule aligned with the unary converter.
+                !(truncated && Some(call_index) == last_call)
+            } else {
+                parsed.is_ok()
+            };
+            let repair =
+                is_final && truncated && Some(call_index) == last_call && !arguments_are_valid;
+            let repaired_input = repair
+                .then(|| super::types::tool_use_input(&tool_call.name, &raw, true))
+                .flatten();
+            if !arguments_are_valid && repaired_input.is_none() {
+                if only_completed {
+                    break;
+                }
+                continue;
+            }
+            drain_pending_text(
+                &mut self.pending_text,
+                Some(call_index),
+                &mut block_index,
+                &mut events,
+            );
+            let emitted_id = tool_use_id(
+                &self.chat_id,
+                &tool_call.backend_id,
+                occurrences[call_index],
+            );
+            tracing::debug!(
+                backend_id = %tool_call.backend_id,
+                emitted_id = %emitted_id,
+                "minting Anthropic tool_use id"
+            );
+            events.push((
+                "content_block_start",
+                AnthropicStreamEvent::ContentBlockStart {
+                    index: block_index,
+                    content_block: AnthropicResponseContentBlock::ToolUse {
+                        id: emitted_id,
+                        name: tool_call.name.clone(),
+                        input: serde_json::json!({}),
+                    },
+                },
+                None,
+            ));
+
+            if let Some(input) = repaired_input {
+                events.push((
+                    "content_block_delta",
+                    AnthropicStreamEvent::ContentBlockDelta {
+                        index: block_index,
+                        delta: AnthropicDelta::InputJsonDelta {
+                            partial_json: input.to_string(),
+                        },
+                    },
+                    tool_call
+                        .argument_fragments
+                        .last()
+                        .map(|(_, usage)| usage.clone()),
+                ));
+            } else {
+                for (arguments, usage_snapshot) in &tool_call.argument_fragments {
+                    events.push((
+                        "content_block_delta",
+                        AnthropicStreamEvent::ContentBlockDelta {
+                            index: block_index,
+                            delta: AnthropicDelta::InputJsonDelta {
+                                partial_json: arguments.clone(),
+                            },
+                        },
+                        Some(usage_snapshot.clone()),
+                    ));
+                }
+            }
+
+            events.push((
+                "content_block_stop",
+                AnthropicStreamEvent::ContentBlockStop { index: block_index },
+                None,
+            ));
+            block_index += 1;
+            tool_call.has_emitted = true;
+            has_emitted = true;
+        }
+
+        // Mirrors `chat_completion_to_anthropic_response`: telling the client to run a
+        // tool while emitting no `tool_use` block leaves a turn it cannot send back.
+        if is_final && !has_emitted && self.stop_reason == Some(AnthropicStopReason::ToolUse) {
+            tracing::warn!(
+                "every tool_use block was suppressed; reporting end_turn instead of tool_use"
+            );
+            self.stop_reason = Some(AnthropicStopReason::EndTurn);
+        }
+
+        if is_final {
+            drain_pending_text(&mut self.pending_text, None, &mut block_index, &mut events);
+        }
+        self.next_block_index = block_index;
+        events
+    }
+
+    fn append_buffered_tool_events(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        is_final: bool,
+    ) {
+        for (event_type, event, usage_override) in self.drain_buffered_tool_events(is_final) {
+            // Route through serialize_event so tool-argument `content_block_delta`
+            // chunks also carry the per-chunk usage triple. Fragments carry the
+            // snapshot taken when their chunk was processed, raised to the usage
+            // already on the wire; everything else uses the current usage.
+            let usage = usage_override.unwrap_or_else(|| self.usage.clone());
+            events.push(self.serialize_event_with_usage(event_type, &event, &usage));
+        }
+    }
+
+    fn record_usage(&mut self, usage: &CompletionUsage) {
+        // Preserve the running output-token estimate if the backend reports a
+        // lower value than we have already emitted. Backends that only send a
+        // final usage chunk (`include_usage` without `continuous_usage_stats`)
+        // would otherwise regress `output_tokens` on the terminal chunk.
+        let running = self.usage.output_tokens;
+        self.usage = completion_usage_to_anthropic(usage);
+        self.usage.output_tokens = self.usage.output_tokens.max(running);
+        self.saw_backend_usage = true;
+    }
+
+    /// Keep the latest backend stop metadata across chunks. A tool parser can
+    /// release it on an earlier chunk than the finish reason.
+    fn record_backend_stop_reason(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        if let Some(stop_reason) = chunk.nvext.as_ref().and_then(|ext| ext.get("stop_reason")) {
+            self.backend_stop_reason = Some(stop_reason.clone());
+        }
+    }
+
+    /// Serialize an event to SSE, stamping the current cumulative `usage` onto
+    /// every `content_block_delta` and `ping`.
+    ///
+    /// Anthropic's native protocol only reports usage on `message_start` and the
+    /// terminal `message_delta`, so a proxy that reads the stream for live
+    /// per-token accounting gets nothing until the stream ends — and nothing at
+    /// all if the client aborts mid-stream. Mirroring OpenAI's
+    /// `continuous_usage_stats`, we attach a `usage` triple to each token chunk.
+    /// This is a Dynamo extension to the wire format (the field is additive;
+    /// spec-compliant clients ignore unknown fields).
+    fn serialize_event(
+        &mut self,
+        event_type: &'static str,
+        event: &AnthropicStreamEvent,
+    ) -> Result<Event, anyhow::Error> {
+        let usage = self.usage.clone();
+        self.serialize_event_with_usage(event_type, event, &usage)
+    }
+
+    /// Like `serialize_event` but stamps an explicit `usage` onto the
+    /// `content_block_delta`. Used to replay buffered tool-argument fragments
+    /// with the usage snapshot from their own chunk (see `record_tool_call`).
+    fn serialize_event_with_usage(
+        &mut self,
+        event_type: &'static str,
+        event: &AnthropicStreamEvent,
+        usage: &AnthropicUsage,
+    ) -> Result<Event, anyhow::Error> {
+        // Never lower the usage already on the wire: a buffered fragment
+        // carries the older snapshot of its own chunk.
+        if carries_usage(event) && usage.output_tokens > self.published.output_tokens {
+            self.published = usage.clone();
+        }
+        let usage = if usage.output_tokens < self.published.output_tokens {
+            &self.published
+        } else {
+            usage
+        };
+        let value = event_json_with_usage(event, usage)?;
+        Ok(Event::default()
+            .event(event_type)
+            .data(serde_json::to_string(&value)?))
+    }
+
+    /// Emit the initial `message_start` event.
+    pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::with_capacity(1);
+        self.append_start_events(&mut events);
+        events
+    }
+
+    /// Append the initial `message_start` event.
+    pub fn append_start_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        // TODO: When AnthropicMessageResponse gains a `service_tier` field,
+        // populate it from `self.api_context` (if the original request specified one).
+        let message = AnthropicMessageResponse {
+            id: self.message_id.clone(),
+            object_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: self.model.clone(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: self.usage.clone(),
+        };
+
+        let event = AnthropicStreamEvent::MessageStart { message };
+        events.push(make_sse_event("message_start", &event));
+    }
+
+    /// Process a single chat completion stream chunk and return zero or more SSE events.
+    pub fn process_chunk(
+        &mut self,
+        chunk: &NvCreateChatCompletionStreamResponse,
+    ) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::new();
+        self.append_chunk_events(chunk, &mut events);
+        events
+    }
+
+    /// Process a single chat completion stream chunk and append zero or more SSE events.
+    pub fn append_chunk_events(
+        &mut self,
+        chunk: &NvCreateChatCompletionStreamResponse,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        let mut has_completed_tool = false;
+        if self.chat_id.is_empty() {
+            self.chat_id.clone_from(&chunk.inner.id);
+        }
+        // Replace the initial estimate when the engine reports authoritative
+        // usage (typically on the final chunk). This also applies Anthropic's
+        // non-overlapping cached-token accounting.
+        if let Some(usage) = &chunk.inner.usage {
+            self.record_usage(usage);
+        }
+
+        // Fallback output-token accounting for backends that never populate
+        // per-chunk `usage` (e.g. the `ModelInput::Text` / PushRouter path).
+        // Once the backend reports authoritative usage, `record_usage` owns the
+        // count and this estimate is dropped. One token per content-bearing
+        // chunk is the standard approximation for token-by-token streaming.
+        //
+        // This must run *before* the content_block_delta events below are
+        // serialized so every token chunk carries a non-zero output-token count
+        // (the acceptance requirement: usage present on 100% of token chunks).
+        if !self.saw_backend_usage {
+            let produced_output = chunk.inner.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|r| !r.is_empty())
+                    || matches!(
+                        &choice.delta.content,
+                        Some(ChatCompletionMessageContent::Text(t)) if !t.is_empty()
+                    )
+                    || choice.delta.refusal.as_ref().is_some_and(|r| !r.is_empty())
+                    || choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|tool_calls| !tool_calls.is_empty())
+            });
+            if produced_output {
+                self.usage.output_tokens += 1;
+            }
+        }
+
+        // Snapshot the cumulative usage for this chunk so buffered tool-argument
+        // fragments recorded below are stamped with the count as of *this* chunk,
+        // not the final count at flush time. `self.usage` is stable for the rest
+        // of this call (record_usage / the fallback above already ran).
+        let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
+
+        for choice in &chunk.inner.choices {
+            let delta = &choice.delta;
+
+            // Track finish reason
+            if let Some(ref fr) = choice.finish_reason {
+                self.tool_flush_requested |= matches!(
+                    fr,
+                    dynamo_protocols::types::FinishReason::ToolCalls
+                        | dynamo_protocols::types::FinishReason::FunctionCall
+                );
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
+                self.stop_reason = Some(stop_reason);
+                self.stop_sequence = stop_sequence;
+            }
+
+            // Handle reasoning/thinking content deltas
+            if let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                // Emit content_block_start on first thinking token
+                if !self.thinking_block_started {
+                    self.thinking_block_started = true;
+                    self.thinking_block_index = self.next_block_index;
+                    self.next_block_index += 1;
+
+                    let block_start = AnthropicStreamEvent::ContentBlockStart {
+                        index: self.thinking_block_index,
+                        content_block: AnthropicResponseContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
+                        },
+                    };
+                    events.push(make_sse_event("content_block_start", &block_start));
+                }
+
+                // Emit thinking delta
+                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.thinking_block_index,
+                    delta: AnthropicDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                };
+                events.push(self.serialize_event("content_block_delta", &block_delta));
+            }
+
+            // Handle text content deltas
+            let content_text = match &delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            };
+
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
+            {
+                // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    // Emit signature delta to close the thinking block.
+                    // The engine doesn't produce Anthropic-style cryptographic signatures,
+                    // so we use "erased" (the standard placeholder per the Anthropic spec).
+                    // When `api_context` is available and the original request had
+                    // `thinking.thinking_type == "enabled"`, this is expected — the backend
+                    // simply doesn't generate real signatures. If/when the backend starts
+                    // returning real signatures, we can use the context to validate or
+                    // pass them through instead of hardcoding "erased".
+                    let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(self.serialize_event("content_block_delta", &sig_delta));
+
+                    let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_sse_event("content_block_stop", &block_stop));
+                }
+
+                if self.text_block_closed || !self.tool_call_states.is_empty() {
+                    // Text after a tool call streams after that call's block.
+                    self.buffer_text(text, &usage_snapshot);
+                } else {
+                    // Emit content_block_start on first text
+                    if !self.text_block_started {
+                        self.text_block_started = true;
+                        self.text_block_index = self.next_block_index;
+                        self.next_block_index += 1;
+
+                        let block_start = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.text_block_index,
+                            content_block: AnthropicResponseContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                        };
+                        events.push(make_sse_event("content_block_start", &block_start));
+                    }
+
+                    // Emit text delta
+                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.text_block_index,
+                        delta: AnthropicDelta::TextDelta {
+                            text: text.to_string(),
+                        },
+                    };
+                    events.push(self.serialize_event("content_block_delta", &block_delta));
+                }
+            }
+
+            // Handle tool call deltas
+            if let Some(tool_calls) = &delta.tool_calls {
+                // Close thinking block before tool blocks (if text never appeared)
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(self.serialize_event("content_block_delta", &sig_delta));
+                    let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_sse_event("content_block_stop", &block_stop));
+                }
+
+                // Close the text block before opening any tool blocks.
+                // Anthropic streaming spec requires each block to be closed
+                // (content_block_stop) before the next block starts.
+                if self.text_block_started && !self.text_block_closed {
+                    self.text_block_closed = true;
+                    let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.text_block_index,
+                    };
+                    events.push(make_sse_event("content_block_stop", &block_stop));
+                }
+
+                for tool_call in tool_calls {
+                    has_completed_tool |= self.record_tool_call(tool_call, &usage_snapshot);
+                }
+            }
+        }
+
+        // Completion-only chunks need not carry another argument or choice delta.
+        for completion in &chunk.tool_call_completion {
+            if completion.choice_index == 0
+                && completion.complete
+                && let Some(call) = self
+                    .tool_call_states
+                    .get_mut(completion.tool_index as usize)
+                && !call.has_emitted
+            {
+                call.is_complete = true;
+                call.needs_flush = true;
+                has_completed_tool = true;
+            }
+        }
+        if has_completed_tool
+            || (self.tool_flush_requested && self.stop_reason == Some(AnthropicStopReason::ToolUse))
+        {
+            self.append_buffered_tool_events(events, false);
+        }
+        // A held tool call, and text after it, emits no delta until the call
+        // completes, so publish its usage on a `ping` instead.
+        self.append_usage_ping(events, 1);
+    }
+
+    /// Publish usage on a `ping` when the wire lags the generated tokens by more
+    /// than `tolerance`. While streaming, one token is the detokenizer's usual
+    /// hold-back, which the next delta publishes.
+    fn append_usage_ping(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        tolerance: u32,
+    ) {
+        if self.usage.output_tokens > self.published.output_tokens + tolerance {
+            let ping = self.serialize_event("ping", &AnthropicStreamEvent::Ping {});
+            events.push(ping);
+        }
+    }
+
+    /// Emit the final events when the stream ends.
+    pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::new();
+        self.append_end_events(&mut events);
+        events
+    }
+
+    /// Append the final events when the stream ends.
+    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        // Close thinking block if started and not already closed mid-stream
+        if self.thinking_block_started && !self.thinking_block_closed {
+            self.thinking_block_closed = true;
+            let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                index: self.thinking_block_index,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "erased".to_string(),
+                },
+            };
+            events.push(self.serialize_event("content_block_delta", &sig_delta));
+            let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                index: self.thinking_block_index,
+            };
+            events.push(make_sse_event("content_block_stop", &block_stop));
+        }
+
+        // Close text block if started and not already closed mid-stream
+        if self.text_block_started && !self.text_block_closed {
+            let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                index: self.text_block_index,
+            };
+            events.push(make_sse_event("content_block_stop", &block_stop));
+        }
+
+        // EOF remains a fallback for backends that omit a terminal finish reason.
+        // If a finish chunk already flushed these blocks, this is a no-op.
+        self.append_buffered_tool_events(events, true);
+
+        // Emit message_delta with stop_reason and real token usage from engine
+        let message_delta = AnthropicStreamEvent::MessageDelta {
+            delta: AnthropicMessageDeltaBody {
+                stop_reason: self.stop_reason.clone(),
+                stop_sequence: self.stop_sequence.clone(),
+            },
+            usage: self.usage.clone(),
+        };
+        events.push(make_sse_event("message_delta", &message_delta));
+
+        // Emit message_stop
+        let message_stop = AnthropicStreamEvent::MessageStop {};
+        events.push(make_sse_event("message_stop", &message_stop));
+    }
+
+    /// Emit error events when the stream ends due to a backend error.
+    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::with_capacity(1);
+        self.append_error_events(&mut events);
+        events
+    }
+
+    /// Append error events when the stream ends due to a backend error.
+    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        self.append_error_events_with_body(
+            events,
+            AnthropicErrorBody {
+                error_type: "api_error".to_string(),
+                message: "An internal error occurred during generation.".to_string(),
+            },
+        );
+    }
+
+    /// Append a terminal error event whose body was selected by the HTTP protocol boundary.
+    pub fn append_error_events_with_body(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        error: AnthropicErrorBody,
+    ) {
+        // `error` carries no usage and no delta follows it, so publish the
+        // tokens the one-token tolerance held back.
+        self.append_usage_ping(events, 0);
+        let error_event = AnthropicStreamEvent::Error { error };
+        events.push(make_sse_event("error", &error_event));
+    }
+}
+
+/// Moves held text into `events` as text blocks: the text that arrived before
+/// tool call `before_call`, or all of it when `None`.
+#[allow(clippy::type_complexity)]
+fn drain_pending_text(
+    pending_text: &mut Vec<PendingText>,
+    before_call: Option<usize>,
+    block_index: &mut u32,
+    events: &mut Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)>,
+) {
+    let count = match before_call {
+        Some(call_index) => pending_text
+            .iter()
+            .take_while(|text| text.after_calls <= call_index)
+            .count(),
+        None => pending_text.len(),
+    };
+    for text in pending_text.drain(..count) {
+        events.push((
+            "content_block_start",
+            AnthropicStreamEvent::ContentBlockStart {
+                index: *block_index,
+                content_block: AnthropicResponseContentBlock::Text {
+                    text: String::new(),
+                    citations: None,
+                },
+            },
+            None,
+        ));
+        for (fragment, usage) in text.fragments {
+            events.push((
+                "content_block_delta",
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *block_index,
+                    delta: AnthropicDelta::TextDelta { text: fragment },
+                },
+                Some(usage),
+            ));
+        }
+        events.push((
+            "content_block_stop",
+            AnthropicStreamEvent::ContentBlockStop {
+                index: *block_index,
+            },
+            None,
+        ));
+        *block_index += 1;
+    }
+}
+
+fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
+    let data = serde_json::to_string(event)?;
+    Ok(Event::default().event(event_type).data(data))
+}
+
+/// Whether `event_json_with_usage` stamps a `usage` triple onto `event`.
+fn carries_usage(event: &AnthropicStreamEvent) -> bool {
+    matches!(
+        event,
+        AnthropicStreamEvent::ContentBlockDelta { .. } | AnthropicStreamEvent::Ping {}
+    )
+}
+
+/// Serialize an Anthropic stream event to JSON, injecting a `usage` triple onto
+/// `content_block_delta` and `ping` events (and leaving every other event
+/// untouched).
+///
+/// `dynamo-protocols`'s `AnthropicStreamEvent::ContentBlockDelta` has no `usage`
+/// field — the type is an external crate we don't own — so the field is added at
+/// the JSON layer. The triple is `{input_tokens, output_tokens, total_tokens}`
+/// (plus any Anthropic cache fields).
+///
+/// `total_tokens` counts the *complete* prompt plus the output, i.e.
+/// `input_tokens + cache_read_input_tokens + cache_creation_input_tokens +
+/// output_tokens`. Anthropic reports the cached prefix separately from
+/// `input_tokens` (`completion_usage_to_anthropic` subtracts it out), so the
+/// cache fields must be added back here; otherwise a cache-hit request would
+/// under-report and disagree with the `total_tokens` a proxy sees on the
+/// equivalent `/v1/chat/completions` request (`prompt_tokens + completion_tokens`,
+/// cached tokens included). Saturating arithmetic guards against overflow.
+fn event_json_with_usage(
+    event: &AnthropicStreamEvent,
+    usage: &AnthropicUsage,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let mut value = serde_json::to_value(event)?;
+    if carries_usage(event)
+        && let serde_json::Value::Object(map) = &mut value
+    {
+        let mut usage_value = serde_json::to_value(usage)?;
+        if let serde_json::Value::Object(usage_map) = &mut usage_value {
+            let total = usage
+                .input_tokens
+                .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
+                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
+                .saturating_add(usage.output_tokens);
+            usage_map.insert("total_tokens".to_string(), serde_json::json!(total));
+        }
+        map.insert("usage".to_string(), usage_value);
+    }
+    Ok(value)
+}
+
+/// A tagged event for testing: the event type string paired with the
+/// serialized stream event. This avoids needing to parse `axum::sse::Event`
+/// (which doesn't implement `Display`).
+#[cfg(test)]
+#[derive(Debug)]
+struct TaggedEvent {
+    event_type: String,
+    data: AnthropicStreamEvent,
+}
+
+#[cfg(test)]
+fn make_tagged_event(event_type: &str, event: &AnthropicStreamEvent) -> TaggedEvent {
+    TaggedEvent {
+        event_type: event_type.to_string(),
+        data: event.clone(),
+    }
+}
+
+#[cfg(test)]
+impl AnthropicStreamConverter {
+    /// Like `process_chunk` but returns tagged events for test assertions.
+    fn process_chunk_tagged(
+        &mut self,
+        chunk: &NvCreateChatCompletionStreamResponse,
+    ) -> Vec<TaggedEvent> {
+        if self.chat_id.is_empty() {
+            self.chat_id.clone_from(&chunk.inner.id);
+        }
+        let mut events = Vec::new();
+
+        if let Some(usage) = &chunk.inner.usage {
+            self.record_usage(usage);
+        }
+
+        let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
+
+        for choice in &chunk.inner.choices {
+            let delta = &choice.delta;
+
+            if let Some(ref fr) = choice.finish_reason {
+                self.tool_flush_requested |= matches!(
+                    fr,
+                    dynamo_protocols::types::FinishReason::ToolCalls
+                        | dynamo_protocols::types::FinishReason::FunctionCall
+                );
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
+                self.stop_reason = Some(stop_reason);
+                self.stop_sequence = stop_sequence;
+            }
+
+            // Handle reasoning/thinking content deltas
+            if let Some(ref reasoning) = delta.reasoning_content
+                && !reasoning.is_empty()
+            {
+                if !self.thinking_block_started {
+                    self.thinking_block_started = true;
+                    self.thinking_block_index = self.next_block_index;
+                    self.next_block_index += 1;
+
+                    let ev = AnthropicStreamEvent::ContentBlockStart {
+                        index: self.thinking_block_index,
+                        content_block: AnthropicResponseContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_start", &ev));
+                }
+
+                let ev = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.thinking_block_index,
+                    delta: AnthropicDelta::ThinkingDelta {
+                        thinking: reasoning.clone(),
+                    },
+                };
+                events.push(make_tagged_event("content_block_delta", &ev));
+            }
+
+            let content_text = match &delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            };
+
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
+            {
+                // Close thinking block before text starts
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_delta", &ev));
+                    let ev = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_tagged_event("content_block_stop", &ev));
+                }
+
+                self.usage.output_tokens += 1;
+                if self.text_block_closed || !self.tool_call_states.is_empty() {
+                    self.buffer_text(text, &usage_snapshot);
+                } else {
+                    if !self.text_block_started {
+                        self.text_block_started = true;
+                        self.text_block_index = self.next_block_index;
+                        self.next_block_index += 1;
+
+                        let ev = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.text_block_index,
+                            content_block: AnthropicResponseContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                        };
+                        events.push(make_tagged_event("content_block_start", &ev));
+                    }
+
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.text_block_index,
+                        delta: AnthropicDelta::TextDelta {
+                            text: text.to_string(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_delta", &ev));
+                }
+            }
+
+            if let Some(tool_calls) = &delta.tool_calls {
+                // Close thinking block before tool blocks
+                if self.thinking_block_started && !self.thinking_block_closed {
+                    self.thinking_block_closed = true;
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: "erased".to_string(),
+                        },
+                    };
+                    events.push(make_tagged_event("content_block_delta", &ev));
+                    let ev = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.thinking_block_index,
+                    };
+                    events.push(make_tagged_event("content_block_stop", &ev));
+                }
+
+                if self.text_block_started && !self.text_block_closed {
+                    self.text_block_closed = true;
+                    let ev = AnthropicStreamEvent::ContentBlockStop {
+                        index: self.text_block_index,
+                    };
+                    events.push(make_tagged_event("content_block_stop", &ev));
+                }
+
+                for tool_call in tool_calls {
+                    self.record_tool_call(tool_call, &usage_snapshot);
+                }
+            }
+        }
+
+        // Keep this test path aligned with `process_chunk`: normal tool-call
+        // streams carry a tool-call finish reason, while interrupted streams use
+        // the EOF fallback in `emit_end_events_tagged`.
+        if self.tool_flush_requested && self.stop_reason == Some(AnthropicStopReason::ToolUse) {
+            for (event_type, event, _usage) in self.drain_buffered_tool_events(false) {
+                events.push(make_tagged_event(event_type, &event));
+            }
+        }
+
+        events
+    }
+
+    /// Like `emit_end_events` but returns tagged events for test assertions.
+    fn emit_end_events_tagged(&mut self) -> Vec<TaggedEvent> {
+        let mut events = Vec::new();
+
+        // Close thinking block if not already closed
+        if self.thinking_block_started && !self.thinking_block_closed {
+            self.thinking_block_closed = true;
+            let ev = AnthropicStreamEvent::ContentBlockDelta {
+                index: self.thinking_block_index,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "erased".to_string(),
+                },
+            };
+            events.push(make_tagged_event("content_block_delta", &ev));
+            let ev = AnthropicStreamEvent::ContentBlockStop {
+                index: self.thinking_block_index,
+            };
+            events.push(make_tagged_event("content_block_stop", &ev));
+        }
+
+        if self.text_block_started && !self.text_block_closed {
+            let ev = AnthropicStreamEvent::ContentBlockStop {
+                index: self.text_block_index,
+            };
+            events.push(make_tagged_event("content_block_stop", &ev));
+        }
+
+        // EOF fallback; a finish-triggered drain leaves no events here.
+        for (event_type, event, _usage) in self.drain_buffered_tool_events(true) {
+            events.push(make_tagged_event(event_type, &event));
+        }
+
+        let ev = AnthropicStreamEvent::MessageDelta {
+            delta: AnthropicMessageDeltaBody {
+                stop_reason: self.stop_reason.clone(),
+                stop_sequence: self.stop_sequence.clone(),
+            },
+            usage: self.usage.clone(),
+        };
+        events.push(make_tagged_event("message_delta", &ev));
+
+        let ev = AnthropicStreamEvent::MessageStop {};
+        events.push(make_tagged_event("message_stop", &ev));
+
+        events
+    }
+}
+
+/// Fixtures the tests below share with the preprocessor's tests.
+#[cfg(any(test, feature = "testing"))]
+pub mod test_fixtures {
+    use axum::response::sse::Event;
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+    };
+
+    use crate::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+
+    pub fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
+        #[allow(deprecated)]
+        NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: Some(ChatCompletionMessageContent::Text(text.into())),
+                        function_call: None,
+                        tool_calls: None,
+                        role: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
+            nvext: None,
+            prompt_logprobs: None,
+            llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
+        }
+    }
+
+    pub async fn sse_values(events: Vec<Result<Event, anyhow::Error>>) -> Vec<serde_json::Value> {
+        use axum::response::{IntoResponse, Sse};
+
+        let body = Sse::new(futures::stream::iter(events))
+            .into_response()
+            .into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::{sse_values, text_chunk};
+    use super::*;
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        FinishReason, FunctionCallStream, FunctionType,
+    };
+
+    fn tool_call_chunk(
+        tc_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        args: Option<&str>,
+    ) -> NvCreateChatCompletionStreamResponse {
+        #[allow(deprecated)]
+        NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        function_call: None,
+                        tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                            custom: None,
+                            index: tc_index,
+                            id: id.map(String::from),
+                            r#type: Some(FunctionType::Function),
+                            function: Some(FunctionCallStream {
+                                name: name.map(String::from),
+                                arguments: args.map(String::from),
+                            }),
+                        }]),
+                        role: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
+            nvext: None,
+            prompt_logprobs: None,
+            llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
+        }
+    }
+
+    fn finish_chunk(finish_reason: FinishReason) -> NvCreateChatCompletionStreamResponse {
+        let mut chunk = tool_call_chunk(0, None, None, None);
+        chunk.inner.choices[0].delta.tool_calls = None;
+        chunk.inner.choices[0].finish_reason = Some(finish_reason);
+        chunk
+    }
+
+    fn event_types(events: &[TaggedEvent]) -> Vec<&str> {
+        events.iter().map(|e| e.event_type.as_str()).collect()
+    }
+
+    fn streamed_tool_input(events: &[TaggedEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    delta: AnthropicDelta::InputJsonDelta { partial_json },
+                    ..
+                } => Some(partial_json.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Like `sse_values`, without the usage `ping`s that a held call publishes;
+    /// they carry no content.
+    async fn content_values(events: Vec<Result<Event, anyhow::Error>>) -> Vec<serde_json::Value> {
+        sse_values(events)
+            .await
+            .into_iter()
+            .filter(|value| value["type"] != "ping")
+            .collect()
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn parser_completion_waits_for_ordered_valid_calls_and_late_identity(
+        #[case] late_identity: bool,
+    ) {
+        use crate::openai::chat_completions::ToolCallCompletion;
+
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        assert!(
+            content_values(conv.process_chunk(&tool_call_chunk(
+                0,
+                (!late_identity).then_some("call_a"),
+                (!late_identity).then_some("read_a"),
+                Some("{\"path\":")
+            )))
+            .await
+            .is_empty()
+        );
+        let mut second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
+        second.tool_call_completion.push(ToolCallCompletion {
+            choice_index: 0,
+            tool_index: 1,
+            complete: true,
+        });
+        assert!(content_values(conv.process_chunk(&second)).await.is_empty());
+
+        let mut completion = text_chunk("");
+        completion.inner.choices.clear();
+        completion.tool_call_completion.push(ToolCallCompletion {
+            choice_index: 0,
+            tool_index: 0,
+            complete: true,
+        });
+        assert!(
+            content_values(conv.process_chunk(&completion))
+                .await
+                .is_empty()
+        );
+        let mut repeated_second = completion.clone();
+        repeated_second.tool_call_completion[0].tool_index = 1;
+        assert!(
+            content_values(conv.process_chunk(&repeated_second))
+                .await
+                .is_empty()
+        );
+        let mut events = conv.process_chunk(&tool_call_chunk(0, None, None, Some("\"/a\"}")));
+        if late_identity {
+            assert!(content_values(events).await.is_empty());
+            events = conv.process_chunk(&tool_call_chunk(0, Some("call_a"), Some("read_a"), None));
+        }
+        let values = sse_values(events).await;
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|v| v["content_block"]["name"].as_str())
+                .collect::<Vec<_>>(),
+            ["read_a", "read_b"]
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter(|v| v["type"] == "content_block_stop")
+                .count(),
+            2
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|v| v["delta"]["partial_json"].as_str())
+                .collect::<String>(),
+            "{\"path\":\"/a\"}{}"
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|v| v["usage"]["output_tokens"].as_u64())
+                .collect::<Vec<_>>(),
+            // A ping published 2 while the calls were held, so no fragment
+            // carries less.
+            [2, 3, 3]
+        );
+        assert!(
+            content_values(conv.process_chunk(&completion))
+                .await
+                .is_empty()
+        );
+        assert!(
+            content_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_parser_arguments_survive_anthropic_conversion_at_every_split() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+        use dynamo_parsers_v2::UnifiedParserStartingState;
+        use futures::StreamExt;
+
+        use crate::openai::chat_completions::unified_parser;
+        use dynamo_runtime::protocols::annotated::Annotated;
+
+        let expected = serde_json::json!({"count": 2, "content": "hello"});
+        let tools = vec![ToolDefinition {
+            name: "write_file".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"count": {"type": "integer"}, "content": {"type": "string"}},
+                "required": ["count", "content"]
+            })),
+            strict: None,
+        }];
+        let mut cases = unified_parser::test_fixtures::eight_family_calls("hello");
+        let qwen = cases
+            .iter()
+            .find(|(family, _)| *family == "qwen3")
+            .unwrap()
+            .1
+            .clone();
+        let muse = cases
+            .iter()
+            .find(|(family, _)| *family == "muse_glimmer")
+            .unwrap()
+            .1
+            .clone();
+        cases.extend([
+            ("nemotron_v3", format!("</think>{qwen}")),
+            ("muse_spark", muse),
+            ("gpt_oss", format!(" to=functions.write_file<|channel|>analysis<|message|>{expected}<|call|>")),
+            ("beam", "<|start|>assistant to=write_file<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"count\">2</rfl:parameter><rfl:parameter name=\"content\">hello</rfl:parameter><|call|>".into()),
+        ]);
+        for (family, native) in cases {
+            for guided in [false, true] {
+                let input = if guided {
+                    expected.to_string()
+                } else {
+                    native.clone()
+                };
+                for split in input
+                    .char_indices()
+                    .map(|(offset, _)| offset)
+                    .chain(std::iter::once(input.len()))
+                {
+                    let tool_choice = guided.then(|| {
+                        serde_json::from_value(serde_json::json!({
+                            "type": "function", "function": {"name": "write_file"}
+                        }))
+                        .unwrap()
+                    });
+                    let source = futures::stream::iter([
+                        Annotated::from_data(text_chunk(&input[..split])),
+                        Annotated::from_data(text_chunk(&input[split..])),
+                        Annotated::from_data(finish_chunk(FinishReason::Stop)),
+                    ]);
+                    let output = unified_parser::apply_stream(
+                        source,
+                        Some(tools.clone()),
+                        tool_choice,
+                        false,
+                        if guided {
+                            UnifiedParserStartingState::Response
+                        } else {
+                            UnifiedParserStartingState::None
+                        },
+                        family,
+                    );
+                    futures::pin_mut!(output);
+                    let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+                    let mut events = Vec::new();
+                    while let Some(response) = output.next().await {
+                        assert!(
+                            !response.is_error(),
+                            "{family}, guided={guided}, split={split}"
+                        );
+                        if let Some(data) = response.data {
+                            events.extend(conv.process_chunk(&data));
+                        }
+                    }
+                    events.extend(conv.emit_end_events());
+                    let values = sse_values(events).await;
+                    let names: Vec<_> = values
+                        .iter()
+                        .filter_map(|v| v["content_block"]["name"].as_str())
+                        .collect();
+                    assert_eq!(
+                        names,
+                        ["write_file"],
+                        "{family}, guided={guided}, split={split}"
+                    );
+                    let arguments: String = values
+                        .iter()
+                        .filter_map(|v| v["delta"]["partial_json"].as_str())
+                        .collect();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap_or_else(|error| {
+                            panic!("{family}, guided={guided}, split={split}: {error}; arguments={arguments:?}")
+                        }),
+                        expected,
+                        "{family}, guided={guided}, split={split}"
+                    );
+                    assert_eq!(
+                        values
+                            .iter()
+                            .filter(|v| v["type"] == "content_block_stop")
+                            .count(),
+                        1,
+                        "{family}, guided={guided}, split={split}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parser_completion_keeps_legacy_fallback_and_single_tool_limit() {
+        use crate::openai::chat_completions::ToolCallCompletion;
+
+        for single in [false, true] {
+            let mut conv = AnthropicStreamConverter::with_context(
+                "test-model".into(),
+                5,
+                AnthropicContext {
+                    disable_parallel_tool_use: single,
+                    ..Default::default()
+                },
+            );
+            let first =
+                tool_call_chunk(0, Some("call_a"), Some("read_a"), (!single).then_some("{}"));
+            assert!(content_values(conv.process_chunk(&first)).await.is_empty());
+            let mut completion = text_chunk("");
+            completion.inner.choices.clear();
+            completion.tool_call_completion.push(ToolCallCompletion {
+                choice_index: 1,
+                tool_index: 0,
+                complete: true,
+            });
+            assert!(
+                content_values(conv.process_chunk(&completion))
+                    .await
+                    .is_empty()
+            );
+            completion.tool_call_completion[0].choice_index = 0;
+            let values = content_values(conv.process_chunk(&completion)).await;
+            assert_eq!(values.len(), if single { 0 } else { 3 });
+            if !single {
+                assert_eq!(values[0]["content_block"]["name"], "read_a");
+            }
+
+            let second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
+            assert!(content_values(conv.process_chunk(&second)).await.is_empty());
+            let values =
+                content_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))).await;
+            assert_eq!(values.len(), if single { 0 } else { 3 });
+            let final_values = sse_values(conv.emit_end_events()).await;
+            assert_eq!(
+                final_values
+                    .iter()
+                    .filter(|v| v["type"] == "content_block_start")
+                    .count(),
+                usize::from(single)
+            );
+            if single {
+                assert_eq!(final_values[0]["content_block"]["name"], "read_a");
+            }
+            assert!(
+                final_values
+                    .iter()
+                    .any(|v| v["delta"]["stop_reason"] == "tool_use")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_stop_sequence_metadata() {
+        // `matched` is the backend's `nvext.stop_reason`; `None` sends no nvext.
+        for (finish, matched, expected_reason, expected_sequence) in [
+            (
+                FinishReason::Stop,
+                Some(serde_json::json!("</answer>")),
+                "stop_sequence",
+                Some("</answer>"),
+            ),
+            (
+                FinishReason::Stop,
+                Some(serde_json::json!("\n\nHuman:")),
+                "stop_sequence",
+                Some("\n\nHuman:"),
+            ),
+            (FinishReason::Stop, None, "end_turn", None),
+            (
+                FinishReason::Stop,
+                Some(serde_json::json!(42)),
+                "end_turn",
+                None,
+            ),
+            (
+                FinishReason::Length,
+                Some(serde_json::json!("</answer>")),
+                "max_tokens",
+                None,
+            ),
+            (
+                FinishReason::ContentFilter,
+                Some(serde_json::json!("</answer>")),
+                "refusal",
+                None,
+            ),
+            (
+                FinishReason::ToolCalls,
+                Some(serde_json::json!("</answer>")),
+                "tool_use",
+                None,
+            ),
+            (
+                FinishReason::FunctionCall,
+                Some(serde_json::json!("</answer>")),
+                "tool_use",
+                None,
+            ),
+        ] {
+            let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+            let mut events = converter.emit_start_events();
+            let content = if expected_reason == "tool_use" {
+                tool_call_chunk(0, Some("call-1"), Some("calculate"), Some("{}"))
+            } else {
+                text_chunk("<answer>2 plus 3 is 5")
+            };
+            converter.append_chunk_events(&content, &mut events);
+            let mut terminal = finish_chunk(finish);
+            terminal.nvext = matched
+                .clone()
+                .map(|matched| serde_json::json!({"stop_reason": matched}));
+            converter.append_chunk_events(&terminal, &mut events);
+            converter.append_end_events(&mut events);
+            let values = sse_values(events).await;
+            let terminal = values
+                .iter()
+                .find(|event| event["type"] == "message_delta")
+                .unwrap();
+            assert_eq!(
+                terminal["delta"]["stop_reason"], expected_reason,
+                "{finish:?}: {matched:?}"
+            );
+            // `.get()` tells a missing key from an explicit `null`; the
+            // Anthropic contract always sends the key.
+            assert_eq!(
+                terminal["delta"].get("stop_sequence"),
+                Some(&serde_json::json!(expected_sequence)),
+                "{finish:?}: {matched:?}"
+            );
+            for event_type in ["message_delta", "message_stop"] {
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|event| event["type"] == event_type)
+                        .count(),
+                    1,
+                    "{finish:?}: {matched:?}: {event_type}"
+                );
+            }
+            assert_eq!(values.last().unwrap()["type"], "message_stop");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(FinishReason::ToolCalls)]
+    #[case(FinishReason::FunctionCall)]
+    #[tokio::test]
+    async fn test_early_finish_waits_for_complete_arguments(#[case] reason: FinishReason) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+        for chunk in [
+            tool_call_chunk(0, Some("call_1"), Some("read_file"), Some("")),
+            tool_call_chunk(0, None, None, Some("{\"path\":")),
+            finish_chunk(reason),
+            tool_call_chunk(0, None, None, Some("\"/tmp/example")),
+            finish_chunk(reason),
+        ] {
+            conv.append_chunk_events(&chunk, &mut events);
+            assert!(content_values(std::mem::take(&mut events)).await.is_empty());
+        }
+
+        conv.append_chunk_events(
+            &tool_call_chunk(0, None, None, Some(".txt\"}")),
+            &mut events,
+        );
+        let values = sse_values(events).await;
+        assert_eq!(
+            values
+                .iter()
+                .map(|v| v["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop"
+            ]
+        );
+        assert!(values.iter().all(|v| v["index"] == 0));
+        assert_eq!(values[0]["content_block"]["name"], "read_file");
+        assert!(
+            values[0]["content_block"]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("toolu_")
+        );
+        let arguments: String = values
+            .iter()
+            .filter_map(|v| v["delta"]["partial_json"].as_str())
+            .collect();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+            serde_json::json!({"path": "/tmp/example.txt"})
+        );
+        assert_eq!(
+            values[1..5]
+                .iter()
+                .map(|v| v["usage"]["output_tokens"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            // A ping published 2 while the call was held.
+            [2, 2, 3, 4]
+        );
+
+        let mut events = Vec::new();
+        conv.append_chunk_events(&finish_chunk(reason), &mut events);
+        conv.append_chunk_events(&usage_chunk(5, None, 9), &mut events);
+        let ping = sse_values(std::mem::take(&mut events)).await;
+        assert_eq!(ping.len(), 1);
+        assert_eq!(ping[0]["type"], "ping");
+        assert_eq!(ping[0]["usage"]["output_tokens"], 9);
+        conv.append_end_events(&mut events);
+        let values = sse_values(events).await;
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["type"], "message_delta");
+        assert_eq!(values[0]["delta"]["stop_reason"], "tool_use");
+        assert_eq!(values[0]["usage"]["output_tokens"], 9);
+        assert_eq!(values[1]["type"], "message_stop");
+    }
+
+    #[test]
+    fn test_single_valid_tool_limit_survives_multiple_flushes() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use: true,
+                ..Default::default()
+            },
+        );
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call_0"),
+            Some("invalid"),
+            Some("[]"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call_1"),
+            Some("valid"),
+            Some("{}"),
+        ));
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { name, .. },
+                    ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["valid"]);
+        let later = conv.process_chunk_tagged(&tool_call_chunk(
+            2,
+            Some("call_2"),
+            Some("later"),
+            Some("{}"),
+        ));
+        assert!(later.is_empty());
+        events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(events.is_empty());
+        events.extend(conv.emit_end_events_tagged());
+        assert!(
+            events.iter().all(|event| !matches!(
+                &event.data,
+                AnthropicStreamEvent::ContentBlockStart { .. }
+            ))
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(false, false)]
+    #[case(false, true)]
+    #[case(true, false)]
+    #[case(true, true)]
+    #[tokio::test]
+    async fn test_pending_call_survives_partial_flush(
+        #[case] disable_parallel_tool_use: bool,
+        #[case] delayed_identity: bool,
+    ) {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use,
+                ..Default::default()
+            },
+        );
+        let mut events = Vec::new();
+        let pending = if delayed_identity {
+            tool_call_chunk(0, None, None, Some("{}"))
+        } else {
+            tool_call_chunk(0, Some("call_0"), Some("first"), Some("{\"path\":"))
+        };
+        conv.append_chunk_events(&pending, &mut events);
+        conv.append_chunk_events(
+            &tool_call_chunk(1, Some("call_1"), Some("second"), Some("{}")),
+            &mut events,
+        );
+        assert!(content_values(std::mem::take(&mut events)).await.is_empty());
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        let first_flush = content_values(events).await;
+        let second_emits = !disable_parallel_tool_use || delayed_identity;
+        if second_emits {
+            assert_eq!(first_flush.len(), 3);
+            assert_eq!(first_flush[0]["content_block"]["name"], "second");
+            assert_eq!(first_flush[0]["index"], 0);
+            assert_eq!(first_flush[2]["type"], "content_block_stop");
+        } else {
+            assert!(first_flush.is_empty());
+        }
+
+        let mut events = Vec::new();
+        let completion = if delayed_identity {
+            tool_call_chunk(0, Some("call_0"), Some("first"), None)
+        } else {
+            tool_call_chunk(0, None, None, Some("\"/tmp/example.txt\"}"))
+        };
+        conv.append_chunk_events(&completion, &mut events);
+        let late_flush = content_values(events).await;
+        if disable_parallel_tool_use && second_emits {
+            assert!(late_flush.is_empty());
+        } else {
+            assert_eq!(late_flush.len(), if delayed_identity { 3 } else { 4 });
+            assert_eq!(late_flush[0]["content_block"]["name"], "first");
+            assert!(
+                late_flush
+                    .iter()
+                    .all(|v| v["index"] == u32::from(second_emits))
+            );
+            assert_eq!(late_flush.last().unwrap()["type"], "content_block_stop");
+        }
+
+        let mut events = Vec::new();
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        assert!(events.is_empty());
+        conv.append_end_events(&mut events);
+        let terminal = sse_values(events).await;
+        assert_eq!(terminal.len(), 2);
+        assert_eq!(terminal[0]["delta"]["stop_reason"], "tool_use");
+    }
+
+    #[rstest::rstest]
+    #[case(false, false)]
+    #[case(true, false)]
+    #[case(false, true)]
+    #[tokio::test]
+    async fn test_pending_call_finalization(
+        #[case] has_complete_call: bool,
+        #[case] backend_error: bool,
+    ) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        if has_complete_call {
+            conv.append_chunk_events(
+                &tool_call_chunk(0, Some("call_0"), Some("complete"), Some("{}")),
+                &mut events,
+            );
+        }
+        conv.append_chunk_events(
+            &tool_call_chunk(1, Some("call_1"), Some("pending"), Some("{\"path\":")),
+            &mut events,
+        );
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        assert_eq!(
+            content_values(std::mem::take(&mut events)).await.len(),
+            if has_complete_call { 3 } else { 0 }
+        );
+        if backend_error {
+            conv.append_error_events(&mut events);
+            let terminal = sse_values(events).await;
+            assert_eq!(terminal.len(), 2);
+            // The held call's estimated token reaches the wire before `error`.
+            assert_eq!(terminal[0]["type"], "ping");
+            assert_eq!(terminal[0]["usage"]["output_tokens"], 1);
+            assert_eq!(terminal[1]["type"], "error");
+        } else {
+            conv.append_end_events(&mut events);
+            let terminal = sse_values(events).await;
+            assert_eq!(terminal.len(), 2);
+            assert_eq!(terminal[0]["type"], "message_delta");
+            assert_eq!(
+                terminal[0]["delta"]["stop_reason"],
+                if has_complete_call {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                }
+            );
+            assert_eq!(terminal[1]["type"], "message_stop");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(None)]
+    #[case(Some(""))]
+    #[case(Some("{}"))]
+    #[tokio::test]
+    async fn test_parameterless_call_completes_on_finish(#[case] arguments: Option<&str>) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        conv.append_chunk_events(
+            &tool_call_chunk(0, Some("call_0"), Some("no_parameters"), arguments),
+            &mut events,
+        );
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        let values = sse_values(events).await;
+        // Only arguments that already parse can close mid-stream. A call whose
+        // arguments are still absent or empty waits for the final drain, where
+        // late fragments can no longer arrive.
+        let closes_on_finish = arguments.is_some_and(|arguments| !arguments.is_empty());
+        if closes_on_finish {
+            assert_eq!(
+                values
+                    .iter()
+                    .map(|v| v["type"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "content_block_start",
+                    "content_block_delta",
+                    "content_block_stop"
+                ]
+            );
+        } else {
+            assert!(values.is_empty());
+        }
+
+        let terminal = sse_values(conv.emit_end_events()).await;
+        let mut expected = Vec::new();
+        if !closes_on_finish {
+            expected.push("content_block_start");
+            if arguments.is_some() {
+                expected.push("content_block_delta");
+            }
+            expected.push("content_block_stop");
+        }
+        expected.extend(["message_delta", "message_stop"]);
+        assert_eq!(
+            terminal
+                .iter()
+                .map(|v| v["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let block_start = if closes_on_finish {
+            &values[0]
+        } else {
+            &terminal[0]
+        };
+        assert_eq!(block_start["content_block"]["name"], "no_parameters");
+        assert_eq!(block_start["content_block"]["input"], serde_json::json!({}));
+        assert_eq!(
+            terminal[expected.len() - 2]["delta"]["stop_reason"],
+            "tool_use"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_only_call_keeps_late_arguments() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        conv.append_chunk_events(
+            &tool_call_chunk(0, Some("call_0"), Some("read_file"), None),
+            &mut events,
+        );
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        assert!(
+            events.is_empty(),
+            "a call with no arguments yet must not close while the stream is live"
+        );
+
+        conv.append_chunk_events(
+            &tool_call_chunk(0, None, None, Some("{\"path\":\"/tmp/example.txt\"}")),
+            &mut events,
+        );
+        let values = sse_values(events).await;
+        assert_eq!(
+            values
+                .iter()
+                .map(|v| v["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ]
+        );
+        assert_eq!(values[0]["content_block"]["name"], "read_file");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                values[1]["delta"]["partial_json"].as_str().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({"path": "/tmp/example.txt"})
+        );
+
+        let terminal = sse_values(conv.emit_end_events()).await;
+        assert_eq!(terminal.len(), 2);
+        assert_eq!(terminal[0]["delta"]["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn test_append_events_reuse_caller_storage() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::with_capacity(8);
+
+        conv.append_start_events(&mut events);
+        assert_eq!(events.len(), 1);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        let capacity = events.capacity();
+        conv.append_chunk_events(&text_chunk("I'll edit the file."), &mut events);
+        // content_block_start + content_block_delta. The content_block_delta now
+        // carries an injected per-chunk usage triple (see
+        // test_content_block_delta_carries_usage_triple) rather than a separate
+        // interim message_delta event.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_chunk_events(
+            &tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("Edit"),
+                Some("{\"file_path\":\"/tmp/test.txt\"}"),
+            ),
+            &mut events,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_end_events(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_error_events(&mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+    }
+
+    /// A chunk carrying engine usage (typically the final chunk).
+    fn usage_chunk(
+        prompt_tokens: u32,
+        cached_tokens: Option<u32>,
+        completion_tokens: u32,
+    ) -> NvCreateChatCompletionStreamResponse {
+        #[allow(deprecated)]
+        NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens: prompt_tokens + completion_tokens,
+                    prompt_tokens_details: cached_tokens.map(|c| {
+                        dynamo_protocols::types::PromptTokensDetails {
+                            audio_tokens: None,
+                            cached_tokens: Some(c),
+                            ..Default::default()
+                        }
+                    }),
+                    completion_tokens_details: None,
+                }),
+            },
+            nvext: None,
+            prompt_logprobs: None,
+            llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
+        }
+    }
+
+    /// Streaming usage starts with the frontend estimate, then reconciles to
+    /// the engine's total prompt tokens minus its cached-token count.
+    #[test]
+    fn test_streaming_input_tokens_reconciled_from_engine_usage() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
+
+        // `message_start` is emitted before backend usage is available.
+        assert_eq!(conv.usage.input_tokens, 19);
+
+        // Exercise the production chunk path rather than its tagged test mirror.
+        let mut events = Vec::new();
+        conv.append_chunk_events(&usage_chunk(12, Some(11), 5), &mut events);
+        // A usage-only chunk carries no content deltas, so its tokens go out on
+        // a `ping`; the reconciled usage is also stamped onto subsequent token
+        // chunks and the terminal message_delta.
+        assert_eq!(events.len(), 1, "usage-only chunk emits only a usage ping");
+        assert_eq!(conv.usage.input_tokens, 1);
+        assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
+        assert_eq!(conv.usage.output_tokens, 5);
+
+        let delta = conv.emit_end_events_tagged();
+        let message_delta = delta
+            .iter()
+            .find(|e| e.event_type == "message_delta")
+            .expect("message_delta present");
+        match &message_delta.data {
+            AnthropicStreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.input_tokens, 1);
+                assert_eq!(usage.cache_read_input_tokens, Some(11));
+                assert_eq!(usage.cache_creation_input_tokens, Some(0));
+                assert_eq!(usage.output_tokens, 5);
+            }
+            other => panic!("expected MessageDelta, got {other:?}"),
+        }
+    }
+
+    /// Streaming usage reports cache writes as `cache_creation_input_tokens` (zero when
+    /// absent), excluded from `input_tokens`; `total_tokens` stays prompt plus completion.
+    #[tokio::test]
+    async fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::PromptTokensDetails;
+
+        // (details, input_tokens, cache_read_input_tokens, cache_creation_input_tokens)
+        for (prompt_tokens_details, expected_input, expected_read, expected_write) in [
+            (None, 13, None, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                10,
+                Some(3),
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                Some(3),
+                7,
+            ),
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
+            let mut chunk = text_chunk("hi");
+            chunk.inner.usage = usage_chunk(13, None, 2).inner.usage;
+            chunk
+                .inner
+                .usage
+                .as_mut()
+                .expect("usage_chunk sets usage")
+                .prompt_tokens_details = prompt_tokens_details;
+            let mut events = Vec::new();
+            conv.append_chunk_events(&chunk, &mut events);
+
+            let values = sse_values(events).await;
+            let delta = values
+                .iter()
+                .find(|v| v["type"] == "content_block_delta")
+                .expect("content_block_delta present");
+            assert_eq!(delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(delta["usage"]["total_tokens"], 13 + 2);
+
+            let end = sse_values(conv.emit_end_events()).await;
+            let message_delta = end
+                .iter()
+                .find(|v| v["type"] == "message_delta")
+                .expect("message_delta present");
+            assert_eq!(message_delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                message_delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                message_delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(message_delta["usage"]["output_tokens"], 2);
+        }
+    }
+
+    /// Backends that never populate per-chunk `usage` (the `ModelInput::Text`
+    /// path) still get a running output-token estimate that advances *before*
+    /// each token chunk is serialized, so every `content_block_delta` carries a
+    /// non-zero usage triple even for a client that aborts mid-stream.
+    #[test]
+    fn test_fallback_counter_advances_before_each_token_chunk() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 7);
+        let mut events = Vec::new();
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
+
+        // First content chunk: content_block_start + content_block_delta. The
+        // fallback advances output_tokens to 1 before the delta is serialized.
+        conv.append_chunk_events(&text_chunk("Hello"), &mut events);
+        assert_eq!(conv.usage.output_tokens, 1);
+        assert_eq!(events.len(), 2);
+
+        // Second content chunk on the open block: content_block_delta only
+        // (output_tokens advanced to 2).
+        events.clear();
+        conv.append_chunk_events(&text_chunk(" world"), &mut events);
+        assert_eq!(conv.usage.output_tokens, 2);
+        assert_eq!(events.len(), 1);
+
+        // The frontend input estimate is preserved until the backend reports.
+        assert_eq!(conv.usage.input_tokens, 7);
+        assert!(!conv.saw_backend_usage);
+    }
+
+    /// The root fix: `content_block_delta` events carry an injected `usage`
+    /// triple (input/output/total) — mirroring OpenAI `continuous_usage_stats`
+    /// — while non-delta events are left untouched.
+    #[test]
+    fn test_content_block_delta_carries_usage_triple() {
+        let usage = AnthropicUsage {
+            input_tokens: 7,
+            output_tokens: 3,
+            ..Default::default()
+        };
+
+        let delta = AnthropicStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: AnthropicDelta::TextDelta {
+                text: "hi".to_string(),
+            },
+        };
+        let value = event_json_with_usage(&delta, &usage).expect("serialize");
+        let usage_obj = value
+            .get("usage")
+            .expect("content_block_delta must carry usage");
+        assert_eq!(
+            usage_obj.get("input_tokens").and_then(|v| v.as_u64()),
+            Some(7)
+        );
+        assert_eq!(
+            usage_obj.get("output_tokens").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            usage_obj.get("total_tokens").and_then(|v| v.as_u64()),
+            Some(10),
+            "total_tokens must equal input + output"
+        );
+
+        // Cache-hit case: `total_tokens` must count the complete prompt
+        // (visible input + cached prefix + cache writes) plus output, matching
+        // the `prompt_tokens + completion_tokens` total a proxy sees on
+        // `/v1/chat/completions`. Anthropic reports the cached prefix outside
+        // `input_tokens`, so it must be added back into the total.
+        let cached_usage = AnthropicUsage {
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_input_tokens: Some(9),
+            cache_creation_input_tokens: Some(1),
+        };
+        let cached_value = event_json_with_usage(&delta, &cached_usage).expect("serialize");
+        let cached_usage_obj = cached_value
+            .get("usage")
+            .expect("content_block_delta must carry usage");
+        assert_eq!(
+            cached_usage_obj
+                .get("input_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(2),
+            "input_tokens stays the visible (non-cached) prompt count"
+        );
+        assert_eq!(
+            cached_usage_obj
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(9)
+        );
+        assert_eq!(
+            cached_usage_obj
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cached_usage_obj
+                .get("total_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(15),
+            "total_tokens must equal input + cache_read + cache_creation + output"
+        );
+
+        // A non-delta event carries no injected usage.
+        let stop = AnthropicStreamEvent::ContentBlockStop { index: 0 };
+        let stop_value = event_json_with_usage(&stop, &usage).expect("serialize");
+        assert!(
+            stop_value.get("usage").is_none(),
+            "only content_block_delta gets injected usage"
+        );
+    }
+
+    /// Regression test: text block must be closed (content_block_stop)
+    /// before the tool_use block starts (content_block_start).
+    ///
+    /// Without this fix, the text block stop was batched at the end,
+    /// causing Claude Code's streaming parser to receive out-of-order
+    /// events and fail to execute tool calls ("Error editing file").
+    #[test]
+    fn test_text_block_stops_before_tool_block_starts() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        // Stream some text
+        let text_events = conv.process_chunk_tagged(&text_chunk("I'll edit the file."));
+        assert_eq!(
+            event_types(&text_events),
+            vec!["content_block_start", "content_block_delta"]
+        );
+
+        // Stream a tool call — text block must close first
+        let tool_events = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Edit"),
+            Some("{\"file_path\":\"/tmp/test.txt\"}"),
+        ));
+
+        assert_eq!(
+            event_types(&tool_events),
+            vec!["content_block_stop"],
+            "text block must close before buffered tool output"
+        );
+
+        // Verify index 0 closes before buffered tool index 1 is emitted.
+        match &tool_events[0].data {
+            AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 0),
+            other => panic!("expected ContentBlockStop, got {other:?}"),
+        }
+
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&finish_events),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ]
+        );
+        match &finish_events[0].data {
+            AnthropicStreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                assert_eq!(*index, 1);
+                match content_block {
+                    AnthropicResponseContentBlock::ToolUse { name, .. } => {
+                        assert_eq!(name, "Edit");
+                    }
+                    other => panic!("expected ToolUse, got {other:?}"),
+                }
+            }
+            other => panic!("expected ContentBlockStart, got {other:?}"),
+        }
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    /// EOF remains a fallback when the backend omits a finish reason.
+    #[test]
+    fn test_tool_only_response_flushes_at_eof_without_finish_reason() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let tool_events = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/test.txt\"}"),
+        ));
+        assert!(tool_events.is_empty());
+
+        let end_events = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end_events),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fragmented_tool_arguments_flush_on_tool_calls_finish() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let first =
+            conv.process_chunk_tagged(&tool_call_chunk(0, Some("call-1"), Some("Read"), Some("")));
+        assert!(first.is_empty());
+
+        let middle =
+            conv.process_chunk_tagged(&tool_call_chunk(0, None, None, Some("{\"path\":\"/tmp")));
+        assert!(middle.is_empty());
+
+        let last = conv.process_chunk_tagged(&tool_call_chunk(0, None, None, Some("\"}")));
+        assert!(last.is_empty());
+
+        let finish = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&finish),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"],
+            "EOF must not repeat finish-triggered tool events"
+        );
+    }
+
+    #[test]
+    fn test_id_and_name_only_tool_call_is_emitted() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut chunk = tool_call_chunk(0, Some("call-1"), Some("Read"), None);
+        chunk.inner.choices[0].finish_reason = Some(FinishReason::FunctionCall);
+
+        // The call carries no argument fragment, so it stays pending while the
+        // stream is live and is emitted once EOF rules out later fragments.
+        assert!(conv.process_chunk_tagged(&chunk).is_empty());
+
+        let terminal = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&terminal),
+            vec![
+                "content_block_start",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
+        assert!(matches!(
+            &terminal[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { id, name, input },
+                ..
+            } if id.starts_with("toolu_")
+                && id.len() > "toolu_".len()
+                && name == "Read"
+                && input == &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn test_length_drops_tool_call_with_empty_arguments() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some(""),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
+    }
+
+    #[test]
+    fn test_terminal_chunk_records_arguments_before_flushing() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut chunk = tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{}"));
+        chunk.inner.choices[0].finish_reason = Some(FinishReason::ToolCalls);
+
+        let finish = conv.process_chunk_tagged(&chunk);
+        assert_eq!(
+            event_types(&finish),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ]
+        );
+        assert!(matches!(
+            &finish[1].data,
+            AnthropicStreamEvent::ContentBlockDelta {
+                delta: AnthropicDelta::InputJsonDelta { partial_json },
+                ..
+            } if partial_json == "{}"
+        ));
+    }
+
+    #[test]
+    fn test_truncated_tool_arguments_repair_at_stream_terminal() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "customer-eof", "literal_text": "cust"#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+        let input = streamed_tool_input(&events);
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&input).unwrap(),
+            serde_json::json!({"label": "customer-eof"})
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
+    }
+
+    #[test]
+    fn test_stream_repairs_only_the_final_truncated_tool_call() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("first"),
+            Some(r#"{"done": "yes"}"#),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("second"),
+            Some(r#"{"done": "no", "tail": "cut"#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+        let inputs: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index,
+                    delta: AnthropicDelta::InputJsonDelta { partial_json },
+                } => Some((*index, partial_json.clone())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].1, r#"{"done": "yes"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inputs[1].1).unwrap(),
+            serde_json::json!({"done": "no"})
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_later_incomplete_identity_does_not_emit_an_earlier_malformed_call(
+        #[case] disable_parallel_tool_use: bool,
+    ) {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use,
+                ..Default::default()
+            },
+        );
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("first"),
+            Some(r#"{"done": "cut""#),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(1, None, None, Some(r#"{"later": "args""#)));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_stream_suppresses_malformed_non_length_tool_calls() {
+        for reason in [
+            FinishReason::Stop,
+            FinishReason::ToolCalls,
+            FinishReason::FunctionCall,
+            FinishReason::ContentFilter,
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+            conv.process_chunk_tagged(&tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("record_literal"),
+                Some(r#"{"label": "cut""#),
+            ));
+            let mut events = conv.process_chunk_tagged(&finish_chunk(reason));
+            events.extend(conv.emit_end_events_tagged());
+
+            assert!(
+                events.iter().all(|event| !matches!(
+                    &event.data,
+                    AnthropicStreamEvent::ContentBlockStart {
+                        content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                        ..
+                    }
+                )),
+                "malformed {reason:?} arguments must not create an executable tool block"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stream_suppresses_non_object_inputs() {
+        for arguments in ["[]", "null", "42", "true", r#""hello""#] {
+            for reason in [FinishReason::ToolCalls, FinishReason::Length] {
+                let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = conv.process_chunk_tagged(&tool_call_chunk(
+                    0,
+                    Some("call-1"),
+                    Some("record_literal"),
+                    Some(arguments),
+                ));
+                events.extend(conv.process_chunk_tagged(&finish_chunk(reason)));
+                events.extend(conv.emit_end_events_tagged());
+                assert!(
+                    events.iter().all(|event| !matches!(
+                        &event.data,
+                        AnthropicStreamEvent::ContentBlockStart {
+                            content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                            ..
+                        } | AnthropicStreamEvent::ContentBlockDelta {
+                            delta: AnthropicDelta::InputJsonDelta { .. },
+                            ..
+                        }
+                    )),
+                    "{arguments} with {reason:?}"
+                );
+                let expected = if reason == FinishReason::Length {
+                    AnthropicStopReason::MaxTokens
+                } else {
+                    AnthropicStopReason::EndTurn
+                };
+                assert!(events.iter().any(|event| matches!(
+                    &event.data,
+                    AnthropicStreamEvent::MessageDelta { delta, .. }
+                        if delta.stop_reason.as_ref() == Some(&expected)
+                )));
+            }
+        }
+    }
+
+    /// `tool_use` is an instruction to run a tool. With every call suppressed the
+    /// client has nothing to run, and Anthropic rejects the turn when it is sent back.
+    #[test]
+    fn test_stream_reports_end_turn_when_every_tool_block_is_suppressed() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "cut""#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.data,
+                AnthropicStreamEvent::MessageDelta { delta, .. }
+                    if delta.stop_reason == Some(AnthropicStopReason::EndTurn)
+            )),
+            "a turn with no tool_use block must not report tool_use"
+        );
+    }
+
+    #[test]
+    fn test_stream_suppresses_length_tool_call_without_recoverable_input() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "cut"#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
+    }
+
+    /// Buffered tool-argument fragments must carry the usage snapshot from their
+    /// own chunk, not the cumulative count at flush time. With no backend usage
+    /// the fallback advances `output_tokens` by one per tool-call chunk, so two
+    /// argument fragments serialize with `output_tokens` 1 and 2 respectively.
+    #[test]
+    fn test_buffered_tool_fragments_snapshot_per_chunk_usage() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut sink = Vec::new();
+
+        conv.append_chunk_events(
+            &tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{\"path\":\"/a")),
+            &mut sink,
+        );
+        conv.append_chunk_events(&tool_call_chunk(0, None, None, Some(".txt\"}")), &mut sink);
+        // Tool blocks are buffered until a finish/EOF flush, so only a usage
+        // `ping` is emitted once the wire lags by more than one token.
+        assert_eq!(
+            sink.len(),
+            1,
+            "tool blocks are buffered, not emitted per chunk"
+        );
+        // Fallback counted one token per tool-call chunk.
+        assert_eq!(conv.usage.output_tokens, 2);
+
+        let fragment_outputs: Vec<u32> = conv
+            .drain_buffered_tool_events(true)
+            .iter()
+            .filter_map(|(event_type, event, usage)| match (event_type, event) {
+                (
+                    &"content_block_delta",
+                    AnthropicStreamEvent::ContentBlockDelta {
+                        delta: AnthropicDelta::InputJsonDelta { .. },
+                        ..
+                    },
+                ) => Some(
+                    usage
+                        .as_ref()
+                        .expect("tool-argument fragment carries a usage snapshot")
+                        .output_tokens,
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fragment_outputs,
+            vec![1, 2],
+            "each fragment stamps the cumulative output count as of its own chunk"
+        );
+    }
+
+    /// A held tool call emits no delta, so its usage goes out on a `ping` once
+    /// the wire lags by more than one token. After the block flushes with its
+    /// per-fragment snapshots, a `ping` restores the latest usage on the wire.
+    #[tokio::test]
+    async fn test_usage_ping_publishes_held_tool_call_usage() {
+        let with_usage = |mut chunk: NvCreateChatCompletionStreamResponse, output| {
+            chunk.inner.usage = usage_chunk(10, None, output).inner.usage;
+            chunk
+        };
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+
+        let first = tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{\"path\":"));
+        conv.append_chunk_events(&with_usage(first, 1), &mut events);
+        assert!(
+            events.is_empty(),
+            "the call is held and one token of lag is tolerated"
+        );
+        let second = tool_call_chunk(0, None, None, Some("\"/a\"}"));
+        conv.append_chunk_events(&with_usage(second, 2), &mut events);
+        // A usage-only chunk that adds no tokens must not ping again.
+        conv.append_chunk_events(&usage_chunk(10, None, 2), &mut events);
+        assert_eq!(
+            sse_values(std::mem::take(&mut events)).await,
+            vec![
+                serde_json::json!({"type": "ping", "usage": {"input_tokens": 10,
+                "output_tokens": 2, "cache_creation_input_tokens": 0, "total_tokens": 12}})
+            ],
+            "one ping, not repeated while usage is unchanged"
+        );
+
+        let finish = with_usage(finish_chunk(FinishReason::ToolCalls), 5);
+        conv.append_chunk_events(&finish, &mut events);
+        let outputs: Vec<_> = sse_values(events)
+            .await
+            .iter()
+            .filter_map(|value| Some((value["type"].as_str()?.to_owned(), value.get("usage")?)))
+            .map(|(kind, usage)| (kind, usage["output_tokens"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            outputs,
+            [
+                ("content_block_delta".to_owned(), 2),
+                ("content_block_delta".to_owned(), 2),
+                ("ping".to_owned(), 5),
+            ],
+            "fragments older than the ping never lower the usage on the wire"
+        );
+    }
+
+    /// `error` carries no usage, so a backend error first publishes on a `ping`
+    /// the tokens generated since the wire's last usage, even within the
+    /// one-token tolerance that a later delta would otherwise cover.
+    #[tokio::test]
+    async fn test_error_publishes_usage_within_ping_tolerance() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+        for (output, arguments) in [(1, "{\"path\":"), (2, "\"/a\""), (3, "}")] {
+            let first = output == 1;
+            let mut chunk = tool_call_chunk(
+                0,
+                first.then_some("call-1"),
+                first.then_some("Read"),
+                Some(arguments),
+            );
+            chunk.inner.usage = usage_chunk(10, None, output).inner.usage;
+            conv.append_chunk_events(&chunk, &mut events);
+        }
+        conv.append_error_events(&mut events);
+        let wire: Vec<_> = sse_values(events)
+            .await
+            .iter()
+            .map(|value| {
+                (
+                    value["type"].as_str().unwrap().to_owned(),
+                    value["usage"]["output_tokens"].as_u64(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            wire,
+            [
+                ("ping".to_owned(), Some(2)),
+                ("ping".to_owned(), Some(3)),
+                ("error".to_owned(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_incomplete_tool_call_identity_is_not_emitted() {
+        for chunk in [
+            tool_call_chunk(0, Some("call-1"), None, None),
+            tool_call_chunk(0, None, Some("Read"), None),
+            tool_call_chunk(0, None, None, Some("{}")),
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+            assert!(conv.process_chunk_tagged(&chunk).is_empty());
+            assert!(
+                conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls))
+                    .is_empty()
+            );
+            assert_eq!(
+                event_types(&conv.emit_end_events_tagged()),
+                vec!["message_delta", "message_stop"]
+            );
+        }
+    }
+
+    #[test]
+    fn test_incomplete_tool_call_does_not_create_block_index_gap() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        conv.process_chunk_tagged(&tool_call_chunk(0, Some("incomplete"), None, None));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-1"),
+            Some("Read"),
+            Some("{}"),
+        ));
+
+        let finish = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(matches!(
+            &finish[0].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            &finish[1].data,
+            AnthropicStreamEvent::ContentBlockDelta { index: 0, .. }
+        ));
+        assert!(matches!(
+            &finish[2].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    /// Text-only response: stop emitted in end events (no early close).
+    #[test]
+    fn test_text_only_response_stop_in_end_events() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        conv.process_chunk_tagged(&text_chunk("Hello world"));
+
+        let end_events = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end_events),
+            vec!["content_block_stop", "message_delta", "message_stop"]
+        );
+        match &end_events[0].data {
+            AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 0),
+            other => panic!("expected text stop at index 0, got {other:?}"),
+        }
+    }
+
+    /// Dedicated `refusal` fragments stream as `text_delta` events on the text
+    /// block, after the same chunk's content; empty refusals emit nothing.
+    #[tokio::test]
+    async fn test_refusal_streams_as_text_deltas() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut mixed = text_chunk("Pong.");
+        mixed.inner.choices[0].delta.refusal = Some("I cannot ".into());
+        let mut refusal_only = text_chunk("");
+        refusal_only.inner.choices[0].delta.content = None;
+        refusal_only.inner.choices[0].delta.refusal = Some("help with that.".into());
+        let mut empty_refusal = text_chunk("");
+        empty_refusal.inner.choices[0].delta.content = None;
+        empty_refusal.inner.choices[0].delta.refusal = Some(String::new());
+
+        let mut events = conv.process_chunk(&mixed);
+        events.extend(conv.process_chunk(&refusal_only));
+        let before_empty = events.len();
+        events.extend(conv.process_chunk(&empty_refusal));
+        assert_eq!(
+            events.len(),
+            before_empty,
+            "empty refusal must emit nothing"
+        );
+        assert_eq!(conv.usage.output_tokens, 2);
+
+        let values = sse_values(events).await;
+        assert_eq!(values[0]["type"], "content_block_start");
+        assert_eq!(values[0]["index"], 0);
+        assert_eq!(values[0]["content_block"]["type"], "text");
+        let deltas: Vec<(&serde_json::Value, &str)> = values[1..]
+            .iter()
+            .map(|value| {
+                assert_eq!(value["type"], "content_block_delta");
+                assert_eq!(value["delta"]["type"], "text_delta");
+                (&value["index"], value["delta"]["text"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                (&serde_json::json!(0), "Pong."),
+                (&serde_json::json!(0), "I cannot "),
+                (&serde_json::json!(0), "help with that."),
+            ]
+        );
+    }
+
+    fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
+        #[allow(deprecated)]
+        NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        function_call: None,
+                        tool_calls: None,
+                        role: None,
+                        refusal: None,
+                        reasoning_content: Some(text.into()),
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
+            nvext: None,
+            prompt_logprobs: None,
+            llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
+        }
+    }
+
+    /// Asserts the Anthropic block protocol: blocks start one at a time at
+    /// consecutive indices, and deltas and stops target the open block.
+    /// Returns each block's type in order.
+    fn block_types(values: &[serde_json::Value]) -> Vec<String> {
+        let mut open = None;
+        let mut types = Vec::new();
+        for value in values {
+            let index = value["index"].as_u64();
+            match value["type"].as_str().unwrap() {
+                "content_block_start" => {
+                    assert_eq!(open, None, "block started while another is open: {value}");
+                    assert_eq!(index, Some(types.len() as u64), "non-consecutive: {value}");
+                    open = index;
+                    types.push(value["content_block"]["type"].as_str().unwrap().to_owned());
+                }
+                "content_block_delta" => {
+                    assert_eq!(index, open, "delta outside its block: {value}")
+                }
+                "content_block_stop" => {
+                    assert_eq!(index, open, "stop outside its block: {value}");
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(open, None, "a block was left open");
+        types
+    }
+
+    /// Text after a tool call keeps its place among the tool blocks, in a text
+    /// block of its own. The first case is Qwen3.8 output from SGLang, which
+    /// writes text between parallel calls.
+    #[rstest::rstest]
+    #[case::between_calls(
+        vec![
+            reasoning_chunk("Run both."),
+            text_chunk("\n\n"),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["thinking", "text", "tool_use", "text", "tool_use"],
+        "\n\n\n"
+    )]
+    #[case::after_last_call(
+        vec![
+            text_chunk("Checking."),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["text", "tool_use", "text"],
+        "Checking.\n"
+    )]
+    #[case::no_text_before_calls(
+        vec![
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("Now the sandbox."),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["tool_use", "text", "tool_use"],
+        "Now the sandbox."
+    )]
+    #[tokio::test]
+    async fn test_text_after_tool_call_keeps_its_place(
+        #[case] chunks: Vec<NvCreateChatCompletionStreamResponse>,
+        #[case] expected: &[&str],
+        #[case] text: &str,
+    ) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        for chunk in &chunks {
+            conv.append_chunk_events(chunk, &mut events);
+        }
+        conv.append_end_events(&mut events);
+        let values = sse_values(events).await;
+        assert_eq!(block_types(&values), expected);
+        let streamed: String = values
+            .iter()
+            .filter_map(|value| value["delta"]["text"].as_str())
+            .collect();
+        assert_eq!(streamed, text);
+    }
+
+    /// Full reasoning flow: thinking → text → tool_use.
+    /// Verifies block ordering (thinking=0, text=1, tool=2) and that each
+    /// block is properly closed before the next one starts.
+    #[test]
+    fn test_thinking_text_then_tool_call() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        // 1. Reasoning tokens → thinking block starts
+        let ev = conv.process_chunk_tagged(&reasoning_chunk("Let me think..."));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: AnthropicResponseContentBlock::Thinking { .. }
+            }
+        ));
+
+        // 2. Text arrives → thinking block closes (signature + stop), text block opens
+        let ev = conv.process_chunk_tagged(&text_chunk("Hello!"));
+        assert_eq!(
+            event_types(&ev),
+            vec![
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
+        );
+        assert!(matches!(
+            &ev[1].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert!(matches!(
+            &ev[2].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
+        ));
+
+        // 3. Tool call → text block closes; tool output is buffered.
+        let ev = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/test.txt\"}"),
+        ));
+        assert_eq!(event_types(&ev), vec!["content_block_stop"]);
+        assert!(matches!(
+            &ev[0].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 1 }
+        ));
+        let end = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
+        assert!(matches!(
+            &end[0].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 2, .. }
+        ));
+    }
+
+    /// Thinking-only response (no text/tool follows): thinking block closed in end events.
+    #[test]
+    fn test_thinking_only_closed_in_end_events() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&reasoning_chunk("Deep thought..."));
+
+        let ev = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&ev),
+            vec![
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
+        );
+    }
+
+    /// Parallel tool calls flush as non-overlapping blocks at the finish signal.
+    #[test]
+    fn test_parallel_tool_calls_flush_sequentially_on_finish() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let events1 = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/a.txt\"}"),
+        ));
+        assert!(events1.is_empty());
+
+        let events2 = conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("Write"),
+            Some("{\"path\":\"/tmp/b.txt\"}"),
+        ));
+        assert!(events2.is_empty());
+
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&finish_events),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+        assert!(matches!(
+            &finish_events[0].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            &finish_events[2].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert!(matches!(
+            &finish_events[3].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
+        ));
+        assert!(matches!(
+            &finish_events[5].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 1 }
+        ));
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    /// Two tool calls that share a backend ID (different indices) must both be
+    /// emitted. The old dedup keyed on backend ID, which was safe when the
+    /// emitted ID also came from the backend — both blocks would have been
+    /// identical and unroutable. Now that each block gets a freshly minted
+    /// `toolu_` ID, collapsing them discards a distinct, routable call.
+    #[test]
+    fn test_shared_backend_id_emits_both_calls() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/a.txt\"}"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":\"/tmp/a.txt\"}"),
+        ));
+
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&finish_events),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+        // Both emitted IDs must be Anthropic-native and distinct.
+        let starts: Vec<_> = finish_events
+            .iter()
+            .filter(|e| e.event_type == "content_block_start")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        let ids: Vec<_> = starts
+            .iter()
+            .filter_map(|e| {
+                if let AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+                    ..
+                } = &e.data
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in &ids {
+            assert!(
+                id.starts_with("toolu_") && id.len() > "toolu_".len(),
+                "emitted id must be Anthropic-native, got {id:?}"
+            );
+        }
+        assert_ne!(ids[0], ids[1], "parallel calls must receive distinct ids");
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    /// A suppressed earlier call with the same backend id still counts toward
+    /// the emitted id, so it matches what the request trace derives for the
+    /// valid call's index.
+    #[test]
+    fn test_suppressed_repeat_keeps_trace_id_alignment() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        // Non-object arguments: suppressed at the final drain.
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call_1"),
+            Some("Read"),
+            Some("[]"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call_1"),
+            Some("Read"),
+            Some("{}"),
+        ));
+
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        let ids: Vec<_> = finish_events
+            .iter()
+            .filter_map(|e| match &e.data {
+                AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![tool_use_id("chat-1", "call_1", 1)]);
+    }
+
+    /// Verify that `with_context` stores the context and produces the same
+    /// event structure as `new` — the context is carried for future enrichment.
+    #[test]
+    fn test_with_context_preserves_context() {
+        use crate::unified::AnthropicContext;
+
+        let ctx = AnthropicContext {
+            service_tier: Some("priority".to_string()),
+            ..Default::default()
+        };
+        let mut conv = AnthropicStreamConverter::with_context("test-model".into(), 0, ctx);
+        assert!(conv.api_context.is_some());
+        assert_eq!(
+            conv.api_context.as_ref().unwrap().service_tier.as_deref(),
+            Some("priority")
+        );
+
+        // Should produce the same events as a regular converter
+        let ev = conv.process_chunk_tagged(&text_chunk("Hello"));
+        assert_eq!(
+            event_types(&ev),
+            vec!["content_block_start", "content_block_delta"]
+        );
+
+        let end = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end),
+            vec!["content_block_stop", "message_delta", "message_stop"]
+        );
+    }
+}

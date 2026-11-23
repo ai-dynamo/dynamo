@@ -11,17 +11,15 @@ use std::time::Instant;
 use anyhow::{Error, Result};
 use futures::{Stream, stream::StreamExt};
 
-use crate::{
-    protocols::{
-        TokenIdType,
-        common::{
-            extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-            llm_backend::{BackendOutput, DecoderCheckpoint, LLMEngineOutput, PreprocessedRequest},
-            preprocessor::{MigrationState, MultimodalData},
-            timing::RequestPhase,
-        },
+use crate::session_affinity::explicit_target;
+use dynamo_frontend_protocols::{
+    TokenIdType,
+    common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        llm_backend::{BackendOutput, DecoderCheckpoint, LLMEngineOutput, PreprocessedRequest},
+        preprocessor::{MigrationState, MultimodalData},
+        timing::RequestPhase,
     },
-    session_affinity::explicit_target,
 };
 use dynamo_http_server::metrics::Metrics;
 use dynamo_model_card::model_card::ModelDeploymentCard;
@@ -49,7 +47,9 @@ pub(crate) mod realtime;
 /// attempt's reported prompt.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
-    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
+    fn worker_trace_link(
+        &self,
+    ) -> Option<&dynamo_frontend_protocols::common::preprocessor::TraceLink>;
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint>;
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage>;
 }
@@ -58,7 +58,9 @@ impl HasTokenIds for BackendOutput {
     fn token_ids(&self) -> &[TokenIdType] {
         &self.token_ids
     }
-    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
+    fn worker_trace_link(
+        &self,
+    ) -> Option<&dynamo_frontend_protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
@@ -73,7 +75,9 @@ impl HasTokenIds for LLMEngineOutput {
     fn token_ids(&self) -> &[TokenIdType] {
         &self.token_ids
     }
-    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
+    fn worker_trace_link(
+        &self,
+    ) -> Option<&dynamo_frontend_protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
@@ -465,7 +469,7 @@ where
     metrics: Arc<Metrics>,
     /// Latest worker span pointer seen on the active stream; stamped as
     /// `migration_link` on the next retry. Populated by `track_response`.
-    last_worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    last_worker_link: Option<dynamo_frontend_protocols::common::preprocessor::TraceLink>,
     /// Router-owned metadata for the active attempt. The router fills in its
     /// selected worker ID so a later migration can identify the failed worker.
     active_route_trace: Option<Arc<RouteTraceContext>>,
@@ -1052,7 +1056,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::{
+    use dynamo_frontend_protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
@@ -3862,7 +3866,7 @@ mod tests {
     /// original.
     #[tokio::test]
     async fn test_retry_manager_propagates_migration_link_over_two_hops() {
-        use crate::protocols::common::preprocessor::TraceLink;
+        use dynamo_frontend_protocols::common::preprocessor::TraceLink;
         use dynamo_runtime::pipeline::network::egress::route_span::get_route_trace_context;
         use std::sync::Mutex;
 

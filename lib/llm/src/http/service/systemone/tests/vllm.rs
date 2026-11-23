@@ -44,8 +44,10 @@ pub(super) fn terminal(
         Outcome::Cancelled | Outcome::Error => {
             output = LLMEngineOutput {
                 finish_reason: Some(match outcome {
-                    Outcome::Cancelled => crate::protocols::common::FinishReason::Cancelled,
-                    _ => crate::protocols::common::FinishReason::Error(
+                    Outcome::Cancelled => {
+                        dynamo_frontend_protocols::common::FinishReason::Cancelled
+                    }
+                    _ => dynamo_frontend_protocols::common::FinishReason::Error(
                         "private worker detail".into(),
                     ),
                 }),

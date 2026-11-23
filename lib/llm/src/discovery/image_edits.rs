@@ -15,10 +15,8 @@ use dynamo_runtime::{
 };
 use tokio::sync::watch;
 
-use crate::{
-    protocols::openai::images::{NvCreateImageRequest, NvImagesResponse},
-    types::{Annotated, openai::images::OpenAIImagesStreamingEngine},
-};
+use dynamo_frontend_protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+use dynamo_frontend_protocols::types::{Annotated, openai::images::OpenAIImagesStreamingEngine};
 use dynamo_model_card::model_card::ModelDeploymentCard;
 
 pub(crate) const SNAPSHOT_KEY: &str = "image_edit_admission";

@@ -203,7 +203,7 @@ class TierTransport:
         if hasattr(encoded, "input_ids"):
             encoded = encoded.input_ids
         token_ids = [int(t) for t in encoded]
-        # Schema mirrors lib/llm/src/protocols/common/preprocessor.rs.
+        # Schema mirrors lib/frontend-protocols/src/common/preprocessor.rs.
         request = {
             "model": self._tier.model,
             "token_ids": token_ids,

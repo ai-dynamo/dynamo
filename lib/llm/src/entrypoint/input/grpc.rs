@@ -10,9 +10,9 @@ use crate::{
     entrypoint::{EngineConfig, input::common},
     grpc::service::kserve,
     namespace::NamespaceFilter,
-    types::openai::chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-    },
+};
+use dynamo_frontend_protocols::types::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
 use dynamo_http_server::metrics::Metrics;
 use dynamo_model_card::{

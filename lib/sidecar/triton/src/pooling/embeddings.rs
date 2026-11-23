@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use base64::Engine as _;
 use dynamo_backend_common::DynamoError;
-use dynamo_llm::protocols::openai::embeddings::{
+use dynamo_frontend_protocols::openai::embeddings::{
     NvCreateEmbeddingRequest, NvCreateEmbeddingResponse,
 };
 use dynamo_protocols::types::{

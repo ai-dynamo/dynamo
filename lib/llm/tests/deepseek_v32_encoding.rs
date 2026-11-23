@@ -6,7 +6,7 @@
 //! These tests use the official test files from:
 //! https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding
 
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_renderer::deepseek::v32::{ThinkingMode, encode_messages};
 use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 use serde_json::Value as JsonValue;

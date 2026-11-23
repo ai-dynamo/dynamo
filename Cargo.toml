@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/frontend-protocols",
     "lib/model-card",
     "lib/lora",
     "lib/rl",
@@ -94,6 +95,7 @@ dynamo-renderer = { version = "=10.4.1" }
 dynamo-tokens = { path = "lib/tokens", version = "1.8.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.8.0" }
 dynamo-error = { path = "lib/error", version = "1.8.0" }
+dynamo-frontend-protocols = { path = "lib/frontend-protocols", version = "1.8.0" }
 dynamo-model-card = { path = "lib/model-card", version = "1.8.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.8.0" }
 dynamo-admission = { path = "lib/router/admission", version = "1.8.0" }

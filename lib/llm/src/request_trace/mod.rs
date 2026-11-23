@@ -21,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::DistributedRuntime;
 
-use crate::protocols::openai::responses::ToolNameMap;
 use crate::telemetry::bus::TelemetryBus;
+use dynamo_frontend_protocols::openai::responses::ToolNameMap;
 use dynamo_model_card::local_model::LocalModel;
 
 pub use agent_context::SharedFinishReasonMetadata;

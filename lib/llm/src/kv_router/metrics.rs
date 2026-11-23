@@ -63,11 +63,11 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::protocols::common::timing::RequestPhase;
+use dynamo_frontend_protocols::common::timing::RequestPhase;
 use dynamo_http_server::metrics::generate_log_buckets;
 
 mod worker_registered;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use dynamo_frontend_protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_indexer::host::ApproximateLruStats;
 use dynamo_slot_tracker::host::LocalWorkerLoad;
 use worker_registered::RouterWorkerRegistered;

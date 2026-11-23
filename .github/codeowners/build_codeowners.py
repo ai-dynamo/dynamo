@@ -147,7 +147,7 @@ def shared_additivity_violations(
     last-match answer over exactly the rows this one sits after. That sidesteps
     the question of which ancestor counts as the parent: a shared row under
     ``/lib/llm/`` (runtime) whose path is already overridden by
-    ``/lib/llm/src/protocols/`` (frontend) is measured against frontend, the
+    ``/lib/frontend-protocols/src/`` (frontend) is measured against frontend, the
     owner actually in force, not against runtime several levels up.
 
     Rows a later rule overrides for a given path are skipped: the shared row is

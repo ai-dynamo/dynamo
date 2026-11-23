@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::{
+use dynamo_frontend_protocols::{
     Annotated, ContentProvider, DataStream,
     codec::{Message, SseCodecError, create_message_stream},
     openai::{
@@ -1050,7 +1050,9 @@ async fn test_muse_unified_batch_native_fallback_zero_calls_still_strips_markup(
 
 #[tokio::test]
 async fn test_responses_tool_parsing_is_owned_by_the_aggregator() {
-    use dynamo_llm::protocols::openai::responses::{ResponseParams, chat_completion_to_response};
+    use dynamo_frontend_protocols::openai::responses::{
+        ResponseParams, chat_completion_to_response,
+    };
     use dynamo_protocols::types::responses::{OutputItem, OutputMessageContent};
 
     let raw = r#"<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>"#;

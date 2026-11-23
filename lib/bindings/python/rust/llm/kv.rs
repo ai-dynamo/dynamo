@@ -62,9 +62,9 @@ use dynamo_model_card::router_config::LoadThresholdConfig as RsLoadThresholdConf
 use llm_rs::kv_router::RoutingHost;
 type RsRoutingHost = RoutingHost;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
+use dynamo_frontend_protocols::common::timing::RequestTracker;
+use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
-use llm_rs::protocols::common::timing::RequestTracker;
-use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use llm_rs::session_affinity::{
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode as RsSessionAffinityMode,
 };
@@ -1988,9 +1988,9 @@ fn infer_metric_worker_type(
         || component.to_lowercase().contains("prefill")
         || endpoint.to_lowercase().contains("prefill");
     if endpoint_is_prefill || !track_active_blocks {
-        llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
+        dynamo_frontend_protocols::common::timing::WORKER_TYPE_PREFILL
     } else {
-        llm_rs::protocols::common::timing::WORKER_TYPE_DECODE
+        dynamo_frontend_protocols::common::timing::WORKER_TYPE_DECODE
     }
 }
 
@@ -2060,15 +2060,15 @@ mod metric_worker_type_tests {
     fn preserves_prefill_fallback_before_discovery() {
         assert_eq!(
             infer_metric_worker_type("prod", "prefill-workers", "generate", true),
-            llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
+            dynamo_frontend_protocols::common::timing::WORKER_TYPE_PREFILL
         );
         assert_eq!(
             infer_metric_worker_type("prod", "workers", "generate", false),
-            llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
+            dynamo_frontend_protocols::common::timing::WORKER_TYPE_PREFILL
         );
         assert_eq!(
             infer_metric_worker_type("prod", "decode-workers", "generate", true),
-            llm_rs::protocols::common::timing::WORKER_TYPE_DECODE
+            dynamo_frontend_protocols::common::timing::WORKER_TYPE_DECODE
         );
     }
 
@@ -2263,7 +2263,8 @@ async fn create_kv_router_from_endpoint(
                     false,
                     None,
                     None,
-                    if metric_worker_type == llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
+                    if metric_worker_type
+                        == dynamo_frontend_protocols::common::timing::WORKER_TYPE_PREFILL
                     {
                         llm_rs::kv_router::RouterLoadSource::Prefill
                     } else {
@@ -2337,7 +2338,7 @@ pub(crate) struct KvRouter {
 /// Attach worker_id info from the tracker to `routing_data` so it survives the
 /// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
 fn inject_worker_id_from_tracker(
-    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    data: &mut dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
 ) {
     let Some(worker_info) = tracker.get_worker_info() else {
@@ -2352,7 +2353,7 @@ fn inject_worker_id_from_tracker(
 /// Attach the request's timing to `routing_data` so it survives the
 /// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
 fn inject_timing_from_tracker(
-    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    data: &mut dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
 ) {
     data.routing_data
@@ -2366,7 +2367,7 @@ impl KvRouter {
     fn process_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
+        request: SingleIn<dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
         dispatch_span: tracing::Span,
@@ -2425,7 +2426,7 @@ impl KvRouter {
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
+        request: SingleIn<dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
         dispatch_span: tracing::Span,
@@ -2588,32 +2589,34 @@ impl KvRouter {
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
 
-        let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
-            if let Some(obj) = multi_modal_data {
-                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-            } else {
-                None
-            };
+        let multi_modal_data: Option<
+            dynamo_frontend_protocols::common::preprocessor::MultimodalDataMap,
+        > = if let Some(obj) = multi_modal_data {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+        } else {
+            None
+        };
 
-        let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
-            if let Some(obj) = mm_routing_info {
-                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-            } else {
-                block_mm_infos.map(
-                    |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
-                        routing_token_ids: token_ids.clone(),
-                        block_mm_infos: infos,
-                        expanded_prompt_len: token_ids.len(),
-                    },
-                )
-            };
+        let mm_routing_info: Option<
+            dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo,
+        > = if let Some(obj) = mm_routing_info {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+        } else {
+            block_mm_infos.map(|infos| {
+                dynamo_frontend_protocols::common::preprocessor::MmRoutingInfo {
+                    routing_token_ids: token_ids.clone(),
+                    block_mm_infos: infos,
+                    expanded_prompt_len: token_ids.len(),
+                }
+            })
+        };
 
         // Create tracker to capture worker routing info from KvRouter
         let tracker = Arc::new(RequestTracker::new());
 
         // Build the PreprocessedRequest
         let mut request_builder =
-            llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder();
+            dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest::builder();
         request_builder
             .model(model)
             .token_ids(token_ids)
@@ -2628,7 +2631,7 @@ impl KvRouter {
 
         // Set routing hints if worker_id or dp_rank is provided
         if worker_id.is_some() || dp_rank.is_some() || routing_constraints.is_some() {
-            let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
+            let routing = dynamo_frontend_protocols::common::preprocessor::RoutingHints {
                 backend_instance_id: worker_id,
                 dp_rank,
                 routing_constraints: routing_constraints.map(Into::into),
@@ -2662,7 +2665,7 @@ impl KvRouter {
     ) -> PyResult<Bound<'p, PyAny>> {
         let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
-        let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
+        let mut request: dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
 
         // The tracker captures worker routing info, and carries on from the age an upstream

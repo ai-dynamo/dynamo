@@ -16,6 +16,7 @@ dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 tracing = { workspace = true }
 dynamo-llm = { workspace = true }
+dynamo-frontend-protocols = { workspace = true }
 dynamo-model-card = { workspace = true }
 anyhow = { workspace = true }
 dynamo-http-server = { workspace = true }

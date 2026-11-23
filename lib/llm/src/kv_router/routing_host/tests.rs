@@ -42,11 +42,11 @@ use crate::{
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
-    protocols::common::{
-        extensions::{AgentContextBuilder, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-        preprocessor::{MmRoutingInfo, RoutingHints},
-        timing::RequestTracker,
-    },
+};
+use dynamo_frontend_protocols::common::{
+    extensions::{AgentContextBuilder, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    preprocessor::{MmRoutingInfo, RoutingHints},
+    timing::RequestTracker,
 };
 use dynamo_http_server::metrics::Metrics;
 use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
@@ -5758,7 +5758,7 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
     ];
     host.inner.client.override_instance_avail(vec![]);
     for (value, phase) in cases {
-        let _: crate::protocols::common::extensions::NvExt =
+        let _: dynamo_frontend_protocols::common::extensions::NvExt =
             serde_json::from_value(value.clone()).unwrap();
         let mut content = request();
         content.routing = Some(serde_json::from_value(value).unwrap());

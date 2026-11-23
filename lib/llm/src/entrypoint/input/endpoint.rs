@@ -8,14 +8,14 @@ use crate::{
     backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
-    protocols::common::preprocessor::PreprocessedRequest,
-    types::{
-        Annotated,
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        },
-    },
     worker_type::WorkerType,
+};
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::types::{
+    Annotated,
+    openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    },
 };
 use dynamo_model_card::model_type::{ModelInput, ModelType};
 
@@ -38,15 +38,17 @@ struct FirstTokenExecutionContext {
 impl
     AsyncEngine<
         SingleIn<PreprocessedRequest>,
-        ManyOut<Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        ManyOut<Annotated<dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput>>,
         Error,
     > for FirstTokenExecutionContext
 {
     async fn generate(
         &self,
         input: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>, Error>
-    {
+    ) -> Result<
+        ManyOut<Annotated<dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput>>,
+        Error,
+    > {
         let request_id = input.id().to_string();
         let dp_rank = input.routing.as_ref().and_then(|routing| routing.dp_rank);
         let notifier =
@@ -216,7 +218,7 @@ mod tests {
 
     use super::*;
     use crate::kv_router::sequence::ActiveSequenceEventPublisher;
-    use crate::protocols::common::llm_backend::LLMEngineOutput;
+    use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
 
     struct SyntheticExecutionContext;
 

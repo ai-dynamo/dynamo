@@ -13,15 +13,15 @@ use crate::{
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
-    protocols::common::preprocessor::PreprocessedRequest,
-    protocols::common::{
-        llm_backend::LLMEngineOutput,
-        preprocessor::MigrationState,
-        timing::{RequestPhase, RequestTracker},
-    },
     routing_policy::AttemptLease,
 };
 use dynamo_admission::host::AbortCause;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::{
+    llm_backend::LLMEngineOutput,
+    preprocessor::MigrationState,
+    timing::{RequestPhase, RequestTracker},
+};
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
@@ -976,7 +976,9 @@ impl RequestGuard {
     /// release the booking.
     pub(super) async fn abort(&mut self, cause: Option<&AbortCause>) {
         if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
-            lifecycle.abort(cause.map(crate::protocols::common::preprocessor::owned_abort_error));
+            lifecycle.abort(
+                cause.map(dynamo_frontend_protocols::common::preprocessor::owned_abort_error),
+            );
         }
         self.cleanup.finish().await;
     }

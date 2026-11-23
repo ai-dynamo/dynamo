@@ -410,9 +410,9 @@ fn start_approximate_lru_metrics(
 }
 
 pub(crate) fn to_worker_selection_session_context(
-    context: &crate::protocols::common::extensions::AgentContext,
+    context: &dynamo_frontend_protocols::common::extensions::AgentContext,
 ) -> dynamo_router_protocol::session::SessionContext {
-    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
+    use dynamo_frontend_protocols::common::extensions::{AgentContext, InputTrigger};
     use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 
     // Keep this exhaustive so a new wire-level field must be handled here.
@@ -2107,7 +2107,7 @@ mod tests {
 
     #[test]
     fn worker_selection_receives_complete_session_context() {
-        use crate::protocols::common::extensions::{AgentContext, InputTrigger};
+        use dynamo_frontend_protocols::common::extensions::{AgentContext, InputTrigger};
         use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
 
         let context = AgentContext {

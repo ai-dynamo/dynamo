@@ -42,7 +42,7 @@ use utoipa::openapi::{PathItem, Paths, RefOr};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::http::service::{OpenApiRouteKind, RouteDoc};
-use crate::protocols::openai::{
+use dynamo_frontend_protocols::openai::{
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -78,13 +78,13 @@ pub struct OpenApiOptions {
     ),
     components(
         schemas(
-            crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
-            crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse,
-            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
-            crate::protocols::openai::completions::NvCreateCompletionRequest,
-            crate::protocols::openai::completions::NvCreateCompletionResponse,
-            crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
-            crate::protocols::openai::responses::NvCreateResponse,
+            dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest,
+            dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionResponse,
+            dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+            dynamo_frontend_protocols::openai::completions::NvCreateCompletionRequest,
+            dynamo_frontend_protocols::openai::completions::NvCreateCompletionResponse,
+            dynamo_frontend_protocols::openai::embeddings::NvCreateEmbeddingRequest,
+            dynamo_frontend_protocols::openai::responses::NvCreateResponse,
             super::openai::ErrorMessage,
             super::openai::ToolCallDispatchPayload<'static>,
             super::openai::ReasoningDispatchPayload<'static>,

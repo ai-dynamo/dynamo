@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use crate::response_merge::{Assembler, RuleSet};
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::generate_format::{ClientRequest, Opened, SharedFormat};
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};

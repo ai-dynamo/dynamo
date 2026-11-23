@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_renderer::{OAIPromptFormatter, deepseek::v41::DeepSeekV41Formatter};
 use serde_json::{Value, json};
 

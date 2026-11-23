@@ -5,7 +5,7 @@
 """Generate the Python media protocol models from the Rust schemas.
 
 The Rust media types write their schemas to
-lib/llm/src/protocols/openai/media_schemas/ (see media_schemas.rs there). The
+lib/frontend-protocols/src/openai/media_schemas/ (see media_schemas.rs there). The
 generate-media-protocols pre-commit hook runs this script when a schema
 changes. To run it by hand:
 
@@ -28,7 +28,7 @@ builds a response, so its response model keeps the enum, and the worker
 fails where it sets a value the frontend rejects. For a type, a bound, a
 default, a response enum, and a delivery mode, a generated model accepts
 and rejects the same JSON as the Rust type; the shared cases in
-lib/llm/src/protocols/openai/media_fixtures/ hold both sides to that, and
+lib/frontend-protocols/src/openai/media_fixtures/ hold both sides to that, and
 mark what the frontend alone rejects. A field whose wire shape is not
 the type a worker reads, such as the image references, which arrive as a
 string or an array and are read as a list, is mapped to a hand-written type:
@@ -46,7 +46,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCHEMAS = REPO / "lib/llm/src/protocols/openai/media_schemas"
+SCHEMAS = REPO / "lib/frontend-protocols/src/openai/media_schemas"
 MODELS = REPO / "components/src/dynamo/common/protocols"
 MODULES = ("audio", "image", "video")
 
@@ -74,7 +74,7 @@ HEADER = """\
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Generated from lib/llm/src/protocols/openai/media_schemas/{module}.json by
+# Generated from lib/frontend-protocols/src/openai/media_schemas/{module}.json by
 # scripts/generate_media_protocols.py. Do not edit."""
 
 OPTIONS = (

@@ -20,10 +20,10 @@ use dynamo_renderer::{
     RenderedSegment, kimi_k3_formatter_for, native_formatter_for,
 };
 
-use crate::protocols::openai::{
+use dynamo_frontend_protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
-use crate::protocols::unified::UnifiedRequest;
+use dynamo_frontend_protocols::unified::UnifiedRequest;
 use dynamo_model_card::model_card::{
     ModelDeploymentCard, PromptFormatterArtifact, TekkenMetadata, TokenizerKind,
 };
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn chat_allowed_tools_renders_catalog_and_constrains_generation_to_subset() {
-        use crate::protocols::openai::{
+        use dynamo_frontend_protocols::openai::{
             chat_completions::allowed_tools::AllowedToolsRequest, tools::get_json_schema_from_tools,
         };
         use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn chat_tool_deferral_reaches_prompt_and_python_request() {
-        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
         use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
         use serde_json::json;
 

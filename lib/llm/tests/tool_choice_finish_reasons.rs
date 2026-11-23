@@ -3,10 +3,10 @@
 
 //! Tests for tool_choice finish_reason handling.
 
-use dynamo_llm::protocols::common;
-use dynamo_llm::protocols::common::llm_backend::BackendOutput;
-use dynamo_llm::protocols::openai::DeltaGeneratorExt;
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_frontend_protocols::common;
+use dynamo_frontend_protocols::common::llm_backend::BackendOutput;
+use dynamo_frontend_protocols::openai::DeltaGeneratorExt;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_protocols::types::{
     ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
@@ -65,10 +65,10 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
 }
 
 async fn apply_jail_transformation(
-    raw_response: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    raw_response: dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
-) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+) -> dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
     use dynamo_parsers::tool_calling::jail::{Annotated as JailAnnotated, JailedStream};
     use futures::StreamExt;
     use futures::stream;

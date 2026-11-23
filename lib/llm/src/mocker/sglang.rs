@@ -8,8 +8,8 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::protocols::common::FinishReason;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_frontend_protocols::common::FinishReason;
+use dynamo_frontend_protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_CANDIDATE_TOKEN_IDS: usize = 255;
@@ -137,7 +137,7 @@ fn invalid_argument(message: impl Into<String>) -> DynamoError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
     fn request(extra_args: Option<Value>) -> PreprocessedRequest {
         PreprocessedRequest::builder()

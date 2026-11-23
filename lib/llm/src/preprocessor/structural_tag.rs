@@ -9,9 +9,11 @@ mod v2;
 use std::borrow::Cow;
 
 use crate::preprocessor::OpenAIPreprocessor;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
-use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::openai::chat_completions::tool_parser_v2::is_beam_parser;
+use dynamo_frontend_protocols::openai::tools::{
+    ToolChoiceValidation, validate_tool_choice_against_names,
+};
 use dynamo_model_card::local_model::runtime_config::{
     ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
@@ -91,10 +93,11 @@ impl SelectedStructuralTagBuilder {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> Option<(&'static str, Self)> {
-        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            tool_call_parser,
-            reasoning_parser,
-        )?;
+        let family =
+            dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_family(
+                tool_call_parser,
+                reasoning_parser,
+            )?;
         v2::StructuralTagBuilder::for_parser(family).map(|builder| (family, Self::V2(builder)))
     }
 
@@ -479,7 +482,7 @@ pub(super) fn uses_gpt_oss_required_array(
     tool_choice: &ToolChoice,
     parallel_tool_calls: Option<bool>,
 ) -> bool {
-    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+    dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_family(
         parser_name,
         reasoning_parser,
     ) == Some("gpt_oss")
@@ -850,7 +853,7 @@ pub(super) fn validate_runtime_config(
     {
         // GPT-OSS's native reasoner is a Harmony stub, not a delayed grammar gate.
         Ok(_)
-            if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            if dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_family(
                 runtime_config.tool_call_parser.as_deref(),
                 runtime_config.reasoning_parser.as_deref(),
             ) == Some("gpt_oss") =>
@@ -925,7 +928,7 @@ pub(super) fn validate_runtime_config(
     };
 
     anyhow::ensure!(
-        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+        dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_family(
             runtime_config.tool_call_parser.as_deref(),
             runtime_config.reasoning_parser.as_deref(),
         )
@@ -947,7 +950,7 @@ pub(super) fn validate_runtime_config(
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_model_card::{
         local_model::runtime_config::StructuralTagConfig, model_card::ModelDeploymentCard,
     };
@@ -1167,7 +1170,7 @@ mod tests {
                 serde_json::json!("required"),
                 serde_json::json!({"type":"function","function":{"name":"get_weather"}}),
             ] {
-                let chat:crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest=serde_json::from_value(serde_json::json!({
+                let chat:dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest=serde_json::from_value(serde_json::json!({
                     "model":"m","messages":[{"role":"user","content":"Weather"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}}],"tool_choice":choice,"parallel_tool_calls":false
                 })).unwrap();
                 let mut request = preprocessed_request();
@@ -1177,7 +1180,7 @@ mod tests {
                 assert!(
                     matches!(
                         constraint,
-                        crate::protocols::openai::GuidedToolConstraint::StructuralTag
+                        dynamo_frontend_protocols::openai::GuidedToolConstraint::StructuralTag
                     ),
                     "{parser}: {constraint:?}"
                 );

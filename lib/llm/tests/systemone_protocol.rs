@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::systemone::{build_native_score_request, parse_candidate_scores};
+use dynamo_frontend_protocols::systemone::{build_native_score_request, parse_candidate_scores};
 use serde_json::json;
 
 #[test]

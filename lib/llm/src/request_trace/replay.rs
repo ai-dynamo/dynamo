@@ -10,7 +10,7 @@ use dynamo_kv_hashing::routing::{
 };
 use dynamo_tokens::compute_hash_v2;
 
-use crate::protocols::TokenIdType;
+use dynamo_frontend_protocols::TokenIdType;
 
 use super::RequestReplayMetrics;
 

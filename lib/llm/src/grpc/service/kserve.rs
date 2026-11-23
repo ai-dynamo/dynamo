@@ -11,9 +11,9 @@ use crate::http::service::service_v2 as http_service;
 use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
-use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_frontend_protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use dynamo_model_card::request_template::{RequestTemplate, resolve_request_model};
 use dynamo_model_card::tensor_model::TensorModelConfig;
 use dynamo_runtime::config::environment_names::llm::metrics as env_metrics;
@@ -74,7 +74,7 @@ use crate::grpc::service::tensor::{
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
 
-use crate::protocols::openai::completions::{
+use dynamo_frontend_protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
 
@@ -1064,7 +1064,7 @@ mod readiness_gate_tests {
 #[cfg(test)]
 mod infer_dispatch_tests {
     use super::*;
-    use crate::protocols::openai::completions::NvCreateCompletionRequest;
+    use dynamo_frontend_protocols::openai::completions::NvCreateCompletionRequest;
     use inference::ModelInferRequest;
     use inference::model_infer_request::InferInputTensor;
 

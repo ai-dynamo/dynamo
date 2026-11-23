@@ -274,7 +274,7 @@ fn completion_logprobs_match_typed_wire_shape() {
         token_ids: vec![100],
         log_probs: Some(vec![-1.0e30]),
         top_logprobs: Some(vec![vec![
-            dynamo_llm::protocols::common::llm_backend::TopLogprob {
+            dynamo_frontend_protocols::common::llm_backend::TopLogprob {
                 rank: 1,
                 token_id: 7,
                 token: None,
@@ -389,14 +389,14 @@ fn generate_response_accumulates_engine_deltas() {
             index: Some(0),
             log_probs: Some(vec![-0.25]),
             top_logprobs: Some(vec![vec![
-                dynamo_llm::protocols::common::llm_backend::TopLogprob {
+                dynamo_frontend_protocols::common::llm_backend::TopLogprob {
                     rank: 1,
                     token_id: 100,
                     token: None,
                     logprob: -0.25,
                     bytes: None,
                 },
-                dynamo_llm::protocols::common::llm_backend::TopLogprob {
+                dynamo_frontend_protocols::common::llm_backend::TopLogprob {
                     rank: 2,
                     token_id: 7,
                     token: None,
@@ -427,7 +427,7 @@ fn generate_response_accumulates_engine_deltas() {
             index: Some(0),
             log_probs: Some(vec![-0.5]),
             top_logprobs: Some(vec![vec![
-                dynamo_llm::protocols::common::llm_backend::TopLogprob {
+                dynamo_frontend_protocols::common::llm_backend::TopLogprob {
                     rank: 1,
                     token_id: 101,
                     token: None,
@@ -435,7 +435,7 @@ fn generate_response_accumulates_engine_deltas() {
                     bytes: None,
                 },
             ]]),
-            finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+            finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
             engine_data: Some(Box::new(json!({
                 "routed_experts": "encoded-experts",
                 "sampling_mask": [[7, 11], [13, 17, 19]],
@@ -512,14 +512,14 @@ fn generate_response_associates_routed_experts_with_choices() {
         LLMEngineOutput {
             token_ids: vec![201],
             index: Some(1),
-            finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+            finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
             engine_data: Some(Box::new(json!({"routed_experts": "experts-1"}))),
             ..Default::default()
         },
         LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
-            finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+            finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
             engine_data: Some(Box::new(json!({"routed_experts": "experts-0"}))),
             ..Default::default()
         },
@@ -555,7 +555,7 @@ fn generate_response_accepts_structured_routed_experts() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
         engine_data: Some(Box::new(json!({"routed_experts": payload}))),
         ..Default::default()
     }];
@@ -583,7 +583,7 @@ fn generate_response_rejects_structured_routed_expert_byte_mismatch() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
         engine_data: Some(Box::new(json!({
             "routed_experts": {
                 "data": "AQI=",
@@ -610,7 +610,7 @@ fn generate_response_rejects_malformed_routed_experts() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
         engine_data: Some(Box::new(
             json!({"routed_experts": {"unexpected": "object"}}),
         )),
@@ -636,7 +636,7 @@ fn generate_response_rejects_malformed_sampling_mask() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
         engine_data: Some(Box::new(json!({"sampling_mask": "invalid"}))),
         ..Default::default()
     }];
@@ -660,7 +660,7 @@ fn generate_response_rejects_sampling_mask_length_mismatch() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
         engine_data: Some(Box::new(json!({"sampling_mask": [[1], [2]]}))),
         ..Default::default()
     }];
@@ -680,7 +680,7 @@ fn generate_response_uses_terminal_kv_transfer_fallback() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
         disaggregated_params: Some(Box::new(json!({"source": "terminal-fallback"}))),
         ..Default::default()
     }];
@@ -711,7 +711,7 @@ fn generate_response_prefers_engine_kv_metadata_over_later_fallback() {
         },
         LLMEngineOutput {
             index: Some(0),
-            finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+            finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
             disaggregated_params: Some(Box::new(json!({"source": "terminal-fallback"}))),
             ..Default::default()
         },
@@ -756,8 +756,8 @@ fn incomplete_engine_streams_are_not_complete_unary_responses() {
 #[test]
 fn generate_response_rejects_error_and_cancelled_finish_reasons() {
     for finish_reason in [
-        dynamo_llm::protocols::common::FinishReason::Error("worker failed".to_string()),
-        dynamo_llm::protocols::common::FinishReason::Cancelled,
+        dynamo_frontend_protocols::common::FinishReason::Error("worker failed".to_string()),
+        dynamo_frontend_protocols::common::FinishReason::Cancelled,
     ] {
         let chunks = [LLMEngineOutput {
             index: Some(0),
@@ -780,7 +780,7 @@ fn generate_response_rejects_incomplete_completion_logprobs() {
         token_ids: vec![100, 101],
         log_probs: Some(vec![-0.25]),
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
         ..Default::default()
     }];
 
@@ -806,7 +806,7 @@ fn generate_response_rejects_malformed_prompt_logprobs() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
         engine_data: Some(Box::new(json!({"prompt_logprobs": "invalid"}))),
         ..Default::default()
     }];
@@ -847,7 +847,7 @@ fn generate_response_rejects_requested_but_missing_metadata() {
     let output = || LLMEngineOutput {
         token_ids: vec![100],
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
         ..Default::default()
     };
 
@@ -881,7 +881,7 @@ fn generate_response_does_not_leak_unrequested_metadata() {
         log_probs: Some(vec![-0.25, -0.5]),
         engine_data: Some(Box::new(json!({"prompt_logprobs": "invalid"}))),
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
         ..Default::default()
     }];
 
@@ -902,7 +902,7 @@ fn generate_response_clamps_logprobs_to_vllm_floor() {
         token_ids: vec![100],
         log_probs: Some(vec![-1.0e30]),
         top_logprobs: Some(vec![vec![
-            dynamo_llm::protocols::common::llm_backend::TopLogprob {
+            dynamo_frontend_protocols::common::llm_backend::TopLogprob {
                 rank: 1,
                 token_id: 100,
                 token: None,
@@ -923,7 +923,7 @@ fn generate_response_clamps_logprobs_to_vllm_floor() {
             ]
         }))),
         index: Some(0),
-        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
+        finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Length),
         ..Default::default()
     }];
 

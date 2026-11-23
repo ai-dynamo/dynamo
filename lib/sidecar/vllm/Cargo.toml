@@ -27,6 +27,7 @@ jemalloc = ["dynamo-sidecar-common/jemalloc"]
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { workspace = true }
+dynamo-frontend-protocols = { workspace = true }
 dynamo-model-card = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }

@@ -10,7 +10,7 @@ use dynamo_multimodal::models::glm5_next::Glm5NextProcessor;
 use dynamo_multimodal::processor::{MediaMetadata, MmFamilyProcessor};
 use dynamo_multimodal::registry::{ProcessorSpec, spec_from_model_dir};
 
-use crate::protocols::TokenIdType;
+use dynamo_frontend_protocols::TokenIdType;
 
 use super::image::{ImagePromptKind, ImageRoutingBackend};
 

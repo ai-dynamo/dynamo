@@ -34,10 +34,10 @@ use super::{RouteDoc, service_v2};
 use crate::generate_format::{
     Bound, ClientError, ClientRequest, ErrorPhase, GenerateExchange, Opened, SharedFormat, Worker,
 };
-use crate::protocols::Annotated;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
+use dynamo_frontend_protocols::Annotated;
+use dynamo_frontend_protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use dynamo_frontend_protocols::common::timing::RequestTracker;
+use dynamo_frontend_protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
 use dynamo_http_server::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector,
@@ -470,7 +470,7 @@ struct Dispatch {
 impl Dispatch {
     async fn run(
         self,
-        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        engine: dynamo_frontend_protocols::types::openai::generate::GenerateStreamingEngine,
         context: Context<PreprocessedRequest>,
     ) -> Response {
         let Self {

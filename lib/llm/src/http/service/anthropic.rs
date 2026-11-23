@@ -35,25 +35,25 @@ use super::{
     metrics::process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     service_v2::{self, BackendErrorCheck},
 };
-use crate::protocols::ValidateRequest;
-use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
-use crate::protocols::anthropic::types::{
+use dynamo_frontend_protocols::ValidateRequest;
+use dynamo_frontend_protocols::anthropic::stream_converter::AnthropicStreamConverter;
+use dynamo_frontend_protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
     AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
 };
-use crate::protocols::common::extensions::{
+use dynamo_frontend_protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
     apply_cache_salt_header_override, apply_header_routing_overrides,
     has_non_cache_salt_routing_headers, session_affinity_from_headers,
 };
-use crate::protocols::common::input_trigger::classify_anthropic_request;
-use crate::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::common::input_trigger::classify_anthropic_request;
+use dynamo_frontend_protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
-use crate::protocols::unified::UnifiedRequest;
-use crate::types::Annotated;
+use dynamo_frontend_protocols::types::Annotated;
+use dynamo_frontend_protocols::unified::UnifiedRequest;
 use dynamo_http_server::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{CancellationLabels, Endpoint, ErrorType, InflightGuard},
@@ -748,7 +748,9 @@ async fn anthropic_messages(
     // Clients get `tool_use_id`s, not backend IDs; request traces record them.
     request.insert(
         crate::request_trace::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY,
-        crate::request_trace::ClientToolCallIds(crate::protocols::anthropic::types::tool_use_id),
+        crate::request_trace::ClientToolCallIds(
+            dynamo_frontend_protocols::anthropic::types::tool_use_id,
+        ),
     );
 
     // Computed before `request` moves into `generate`. Only a stream that can
@@ -1631,7 +1633,7 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::parse_nvext;
+    use dynamo_frontend_protocols::common::extensions::parse_nvext;
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({

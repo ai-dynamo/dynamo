@@ -54,7 +54,7 @@ frontend:
           - lib/llm/src/http/**
           - lib/llm/src/grpc/**
           - lib/llm/src/preprocessor/**
-          - lib/llm/src/protocols/**
+          - lib/frontend-protocols/src/**
           - lib/llm/src/preprocessor.rs
           - lib/llm/src/tokenizers.rs
 

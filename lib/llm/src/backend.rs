@@ -37,7 +37,8 @@ use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-use crate::protocols::{
+use crate::tokenizers::{DecodeStream, Tokenizer};
+use dynamo_frontend_protocols::{
     TokenIdType,
     common::{
         StopConditions,
@@ -49,7 +50,6 @@ use crate::protocols::{
         timing::RequestTracker,
     },
 };
-use crate::tokenizers::{DecodeStream, Tokenizer};
 use dynamo_protocols::types::StopReason;
 
 /// Represents the output stream from the execution engine
@@ -1393,12 +1393,12 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::llm_backend::TopLogprob;
-    use crate::protocols::common::{OutputOptions, SamplingOptions};
-    use crate::protocols::openai::{
+    use crate::tokenizers::traits;
+    use dynamo_frontend_protocols::common::llm_backend::TopLogprob;
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions};
+    use dynamo_frontend_protocols::openai::{
         DeltaGeneratorExt, chat_completions::DeltaGenerator, delta_common::DeltaGeneratorOptions,
     };
-    use crate::tokenizers::traits;
     use dynamo_runtime::pipeline::{AsyncEngine, Error, ResponseStream};
     use futures::StreamExt;
     use std::sync::Arc;
@@ -1948,7 +1948,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sglang_local_stop_discards_all_suffix_tokens() {
-        use crate::protocols::common::extensions::NvExt;
+        use dynamo_frontend_protocols::common::extensions::NvExt;
 
         let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
         let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
@@ -2025,10 +2025,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_stop_trim_raw_completion_output() {
-        use crate::protocols::common::{
+        use dynamo_frontend_protocols::common::{
             OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
         };
-        use crate::protocols::openai::completions::NvCreateCompletionRequest;
+        use dynamo_frontend_protocols::openai::completions::NvCreateCompletionRequest;
 
         for no_stop_trim in [Some(false), Some(true)] {
             for user_stop in [false, true] {
@@ -2963,7 +2963,7 @@ mod tests {
             // `jailed_text` is only populated when migration is possible (see
             // `DecoderParams::migration_possible`); this test asserts on it.
             .migration_state(Some(
-                crate::protocols::common::preprocessor::MigrationState::default(),
+                dynamo_frontend_protocols::common::preprocessor::MigrationState::default(),
             ))
             .build()
             .expect("valid preprocessed request");

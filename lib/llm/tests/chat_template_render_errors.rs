@@ -17,14 +17,14 @@
 use std::sync::Arc;
 
 use anyhow::Error;
-use dynamo_llm::http::service::service_v2::HttpService;
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::Annotated;
-use dynamo_llm::protocols::common::llm_backend::BackendOutput;
-use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
-use dynamo_llm::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::Annotated;
+use dynamo_frontend_protocols::common::llm_backend::BackendOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
+use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_runtime::CancellationToken;
 use dynamo_runtime::pipeline::{
@@ -76,7 +76,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
-            finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+            finish_reason: Some(dynamo_frontend_protocols::common::FinishReason::Stop),
             stop_reason: None,
             index: Some(0),
             completion_usage: None,

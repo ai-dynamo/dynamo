@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::common::extensions::NvExt;
-use dynamo_llm::protocols::{
+use dynamo_frontend_protocols::common::extensions::NvExt;
+use dynamo_frontend_protocols::{
     common::StopConditionsProvider,
     openai::{
         chat_completions::NvCreateChatCompletionRequest,
@@ -58,7 +58,7 @@ fn test_completions_include_stop_str_in_output_from_common() {
 
 #[test]
 fn test_sampling_parameters_include_stop_str_in_output_extraction() {
-    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+    use dynamo_frontend_protocols::common::SamplingOptionsProvider;
 
     let request = NvCreateChatCompletionRequest {
         responses_tools: None,
@@ -95,7 +95,7 @@ fn chat_request_with_top_p(top_p: f32) -> NvCreateChatCompletionRequest {
 #[test]
 fn test_sampling_options_reject_zero_top_p() {
     // Test that top_p = 0 is rejected
-    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+    use dynamo_frontend_protocols::common::SamplingOptionsProvider;
 
     let error = chat_request_with_top_p(0.0)
         .extract_sampling_options()
@@ -110,7 +110,7 @@ fn test_sampling_options_reject_zero_top_p() {
 #[test]
 fn test_sampling_options_accept_valid_top_p() {
     // Test that valid top_p values are accepted
-    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+    use dynamo_frontend_protocols::common::SamplingOptionsProvider;
 
     for top_p in [0.0001, 0.5, 1.0] {
         let sampling = chat_request_with_top_p(top_p)
@@ -386,9 +386,9 @@ fn test_min_tokens_only_at_root_level() {
 
 #[test]
 fn test_sampling_parameters_extraction() {
-    use dynamo_llm::protocols::common::SamplingOptionsProvider;
-    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-    use dynamo_llm::protocols::openai::common_ext::CommonExt;
+    use dynamo_frontend_protocols::common::SamplingOptionsProvider;
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_frontend_protocols::openai::common_ext::CommonExt;
 
     // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
     let request = NvCreateChatCompletionRequest {

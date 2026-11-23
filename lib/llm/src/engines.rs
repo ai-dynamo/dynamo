@@ -16,13 +16,13 @@ use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
 
-use crate::protocols::ValidateRequest;
-use crate::protocols::openai::{
+use dynamo_frontend_protocols::ValidateRequest;
+use dynamo_frontend_protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
 };
-use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
-use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
+use dynamo_frontend_protocols::types::openai::embeddings::NvCreateEmbeddingRequest;
+use dynamo_frontend_protocols::types::openai::embeddings::NvCreateEmbeddingResponse;
 use dynamo_protocols::types::realtime::{
     DynamoRealtimeClientEvent, EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent,
     RealtimeResponse, RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,

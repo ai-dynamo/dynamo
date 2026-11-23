@@ -3463,7 +3463,7 @@ mod tests {
     }
 
     fn make_chat_engine()
-    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+    -> dynamo_frontend_protocols::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine{
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))

@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
-use dynamo_llm::protocols::common::preprocessor::RoutingHints;
+use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
 use dynamo_mocker::common::protocols::EngineType;
 use dynamo_model_card::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,

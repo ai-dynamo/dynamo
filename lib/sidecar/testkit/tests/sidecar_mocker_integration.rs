@@ -6,7 +6,7 @@ use dynamo_backend_common::{
     BackendError, DisaggregationMode, DynamoError, ErrorType, FinishReason, GenerateContext,
     LLMEngine, LLMEngineOutput, PreprocessedRequest,
 };
-use dynamo_llm::protocols::common::preprocessor::{PrefillResult, RoutingHints};
+use dynamo_frontend_protocols::common::preprocessor::{PrefillResult, RoutingHints};
 use dynamo_sidecar_testkit::assert::{failure, terminal};
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{

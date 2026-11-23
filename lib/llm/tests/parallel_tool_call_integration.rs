@@ -14,7 +14,7 @@
 //! - Testing error handling with malformed content
 //! - Ensuring tool call IDs are unique and properly formatted
 
-use dynamo_llm::protocols::openai::{
+use dynamo_frontend_protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
 };
 use dynamo_parsers::{ToolCallResponse, ToolCallType, detect_and_parse_tool_call};

@@ -11,8 +11,8 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use tonic::Status;
 
-use crate::types::Annotated;
 use dynamo_error::http::SanitizedError;
+use dynamo_frontend_protocols::types::Annotated;
 use dynamo_http_server::disconnect::ConnectionHandle;
 use dynamo_http_server::metrics::{InflightGuard, request_was_unavailable};
 
@@ -109,8 +109,8 @@ mod tests {
 #[cfg(test)]
 mod monitor_tests {
     use super::*;
-    use crate::protocols::openai::completions::NvCreateCompletionResponse;
-    use crate::protocols::tensor::NvCreateTensorResponse;
+    use dynamo_frontend_protocols::openai::completions::NvCreateCompletionResponse;
+    use dynamo_frontend_protocols::tensor::NvCreateTensorResponse;
     use dynamo_http_server::disconnect::create_connection_monitor;
     use dynamo_http_server::metrics::{
         CancellationLabels, Endpoint, ErrorType, Metrics, RequestType, Status as RequestStatus,

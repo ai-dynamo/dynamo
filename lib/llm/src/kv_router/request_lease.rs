@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::indexer::ApproximateRequestLease;
-use crate::protocols::common::preprocessor::PrefillBookingRelease;
+use dynamo_frontend_protocols::common::preprocessor::PrefillBookingRelease;
 
 const LEASE_QUIET: u8 = 0;
 const LEASE_TOUCHED: u8 = 1;

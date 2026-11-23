@@ -26,11 +26,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::endpoint;
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_model_card::local_model::LocalModelBuilder;
 use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::{

@@ -29,7 +29,7 @@ fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
 
 #[test]
 fn causal_scoring_request_survives_the_native_format_boundary() {
-    let native = dynamo_llm::protocols::systemone::causal_scoring_request(
+    let native = dynamo_frontend_protocols::systemone::causal_scoring_request(
         &[1, 2, 3],
         &[20, 10],
         "request-cache-scope",
@@ -209,8 +209,8 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
             .unwrap()
             .get("dynamo_mm_routing_hashes"),
         Some(&serde_json::json!([
-            dynamo_llm::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
-            dynamo_llm::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
+            dynamo_frontend_protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
+            dynamo_frontend_protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
         ]))
     );
 

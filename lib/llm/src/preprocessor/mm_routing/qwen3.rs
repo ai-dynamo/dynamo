@@ -12,7 +12,8 @@ use super::{
     VideoRoutingReplacement,
     config::{read_json, read_model_config, required_token_id, required_usize},
 };
-use crate::{protocols::TokenIdType, tokenizers::traits::Tokenizer};
+use crate::tokenizers::traits::Tokenizer;
+use dynamo_frontend_protocols::TokenIdType;
 
 const SUPPORTED_MODEL_TYPES: &[&str] = &["qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"];
 

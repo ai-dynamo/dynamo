@@ -4,11 +4,11 @@
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use crate::protocols::common::extensions::AgentContext;
-use crate::protocols::common::timing::RequestTracker;
 use crate::request_trace::RequestReplayMetrics;
 use crate::request_trace::RequestTraceEventSource;
 use crate::request_trace::RequestTracePayload;
+use dynamo_frontend_protocols::common::extensions::AgentContext;
+use dynamo_frontend_protocols::common::timing::RequestTracker;
 
 use super::RequestTraceEventType;
 use super::RequestTraceMetrics;

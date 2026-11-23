@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::perf::RecordedStream;
-use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
 /// The type of logprobs observed in the response.
 pub enum LogprobType {
@@ -569,9 +569,9 @@ mod tests {
     type TestTokenData = (&'static str, f32, Vec<TestTokenAlternative>);
     type TestTokenDataVec = Vec<TestTokenData>;
     use crate::perf::{RecordingMode, TimestampedResponse, record_stream_with_context};
-    use crate::protocols::codec::create_message_stream;
-    use crate::protocols::convert_sse_stream;
     use approx::assert_abs_diff_eq;
+    use dynamo_frontend_protocols::codec::create_message_stream;
+    use dynamo_frontend_protocols::convert_sse_stream;
     use dynamo_protocols::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
         ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,

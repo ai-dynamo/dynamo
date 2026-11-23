@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_model_card::local_model::model_card_instance;
 use dynamo_model_card::local_model::runtime_config::{
     DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY, DIRECT_KV_EVENTS_IDEMPOTENT_STORES_RUNTIME_KEY,
@@ -633,12 +633,12 @@ fn error(error_type: ErrorType, message: impl Into<String>) -> DynamoError {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use dynamo_http_server::metrics::Metrics;
-    use dynamo_llm::discovery::{ModelManager, ModelWatcher};
-    use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_llm::types::openai::chat_completions::{
+    use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_frontend_protocols::types::openai::chat_completions::{
         NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
     };
+    use dynamo_http_server::metrics::Metrics;
+    use dynamo_llm::discovery::{ModelManager, ModelWatcher};
     use dynamo_model_card::router_config::RouterConfig;
     use dynamo_runtime::Runtime;
     use dynamo_runtime::discovery::DiscoveryQuery;

@@ -59,23 +59,23 @@ use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
     decode_base64_to_floats,
 };
-use crate::protocols::ValidateRequest;
-use crate::protocols::common::extensions::{
+use dynamo_frontend_protocols::ValidateRequest;
+use dynamo_frontend_protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
     agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
     session_affinity_from_headers, upstream_elapsed_from_headers,
 };
-use crate::protocols::common::input_trigger::{
+use dynamo_frontend_protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
-use crate::protocols::common::metadata_upload::UniqueJsonValue;
-use crate::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::common::metadata_upload::UniqueJsonValue;
+use dynamo_frontend_protocols::openai::chat_completions::{
     aggregator::ChatCompletionAggregator,
     allowed_tools::{AllowedToolsRequest, ToolAllowlist},
     tool_call_merge::{ToolCallMergeOutcome, merge_tool_call_chunk},
 };
-use crate::protocols::openai::{
+use dynamo_frontend_protocols::openai::{
     MediaDelivery, ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
@@ -98,8 +98,8 @@ use crate::protocols::openai::{
     },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
-use crate::protocols::unified::UnifiedRequest;
-use crate::types::Annotated;
+use dynamo_frontend_protocols::types::Annotated;
+use dynamo_frontend_protocols::unified::UnifiedRequest;
 use dynamo_http_server::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{CancellationLabels, Endpoint, ErrorType},
@@ -1289,10 +1289,13 @@ pub(super) fn attach_upstream_elapsed<T: Send + Sync + 'static>(
 /// router's request classifier (e.g. ThunderAgent) reads the session only from the request field,
 /// so without this every native generate request is classified as session-less.
 pub(super) fn preprocessed_context_from_headers(
-    mut request: crate::protocols::common::preprocessor::PreprocessedRequest,
+    mut request: dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest,
     request_id: String,
     headers: &HeaderMap,
-) -> Result<Context<crate::protocols::common::preprocessor::PreprocessedRequest>, ErrorResponse> {
+) -> Result<
+    Context<dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest>,
+    ErrorResponse,
+> {
     let agent_context = agent_context_from_headers(headers);
     request.agent_context = agent_context.clone();
     context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
@@ -1425,7 +1428,7 @@ async fn completions(
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
-    use crate::protocols::openai::completions::get_prompt_batch_size;
+    use dynamo_frontend_protocols::openai::completions::get_prompt_batch_size;
 
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -4123,7 +4126,7 @@ fn finalize_choice_assemblies(
 /// re-aggregates the ordinary deltas, which continue through `EventConverter`
 /// untouched.
 fn streaming_tool_dispatch_events(
-    response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    response: &dynamo_frontend_protocols::types::Annotated<NvCreateChatCompletionStreamResponse>,
     assemblies: &mut ToolCallAssemblies,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
@@ -4150,7 +4153,7 @@ fn streaming_tool_dispatch_events(
 /// The buffer is maintained across chunks by the caller (captured in the flat_map closure).
 /// Flushing also occurs when `finish_reason` is set, to handle max_tokens during reasoning.
 fn accumulate_reasoning_dispatch(
-    response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    response: &dynamo_frontend_protocols::types::Annotated<NvCreateChatCompletionStreamResponse>,
     buffers: &mut HashMap<u32, String>,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
@@ -4291,7 +4294,7 @@ async fn chat_completions(
 
     // Retain API identity here while all engine/parser paths receive functions.
     let mut custom_tools =
-        crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
+        dynamo_frontend_protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
             &mut request,
         )
         .map_err(|error| {
@@ -4405,7 +4408,7 @@ async fn chat_completions(
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
     custom_tools.keep_parser_confirmed_calls(
-        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+        dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
         ) == Some(dynamo_model_card::parser_family::MISTRAL_UNIFIED_FAMILY),
@@ -5087,7 +5090,7 @@ async fn responses(
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let loaded_tools: Vec<_> =
-        crate::protocols::openai::responses::effective_response_tools(&request)
+        dynamo_frontend_protocols::openai::responses::effective_response_tools(&request)
             .map_err(|error| {
                 let response = responses_conversion_error_response(error);
                 inflight_guard.mark_error(extract_error_type_from_response(&response));
@@ -5097,10 +5100,12 @@ async fn responses(
             .map(|tool| tool.inner)
             .collect();
     let response_params = ResponseParams {
-        tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
-            &loaded_tools,
-            Some(&request.inner.input),
-        )),
+        tool_names: Some(
+            dynamo_frontend_protocols::openai::responses::ToolNameMap::new(
+                &loaded_tools,
+                Some(&request.inner.input),
+            ),
+        ),
         model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
@@ -5283,14 +5288,14 @@ async fn responses(
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
-        use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
+        use dynamo_frontend_protocols::openai::responses::stream_converter::ResponseStreamConverter;
 
         let mut converter = match responses_ctx {
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
         converter.keep_parser_confirmed_calls(
-            crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+            dynamo_frontend_protocols::openai::chat_completions::unified_parser::selected_batch_family(
                 parsing_options.tool_call_parser.as_deref(),
                 parsing_options.reasoning_parser.as_deref(),
             ) == Some(dynamo_model_card::parser_family::MISTRAL_UNIFIED_FAMILY),
@@ -5524,7 +5529,7 @@ pub fn validate_response_unsupported_fields(
 
 /// Validates sampling and output parameters on the Responses API request.
 pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
-    use crate::protocols::openai::validate;
+    use dynamo_frontend_protocols::openai::validate;
 
     /// Maps any validation diagnostic to a prefixed HTTP 400 invalid-request response.
     fn invalid_request(e: impl std::fmt::Display) -> ErrorResponse {
@@ -5542,7 +5547,7 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
     validate::validate_max_tokens(request.inner.max_output_tokens).map_err(invalid_request)?;
 
     if let Some(text) = &request.inner.text {
-        use crate::protocols::openai::responses::convert_text_format;
+        use dynamo_frontend_protocols::openai::responses::convert_text_format;
         if let Some(response_format) = convert_text_format(text) {
             validate::validate_response_format(&Some(response_format)).map_err(invalid_request)?;
         }
@@ -6932,13 +6937,13 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::extensions::NvExt;
-    use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
-    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-    use crate::protocols::openai::common_ext::CommonExt;
-    use crate::protocols::openai::completions::NvCreateCompletionRequest;
-    use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
-    use crate::protocols::openai::responses::NvCreateResponse;
+    use dynamo_frontend_protocols::common::extensions::NvExt;
+    use dynamo_frontend_protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
+    use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_frontend_protocols::openai::common_ext::CommonExt;
+    use dynamo_frontend_protocols::openai::completions::NvCreateCompletionRequest;
+    use dynamo_frontend_protocols::openai::pooling::{PoolingData, PoolingUsage};
+    use dynamo_frontend_protocols::openai::responses::NvCreateResponse;
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
@@ -7212,8 +7217,8 @@ mod tests {
             payload["prompt"] = serde_json::json!("hello");
             let completion: NvCreateCompletionRequest =
                 parse_json_request("completions", &serde_json::to_vec(&payload).unwrap()).unwrap();
-            crate::protocols::ValidateRequest::validate(&chat).unwrap();
-            crate::protocols::ValidateRequest::validate(&completion).unwrap();
+            dynamo_frontend_protocols::ValidateRequest::validate(&chat).unwrap();
+            dynamo_frontend_protocols::ValidateRequest::validate(&completion).unwrap();
             for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
                 assert_eq!(
                     parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
@@ -7668,7 +7673,7 @@ mod tests {
     #[test]
     fn test_preprocessed_context_from_headers_attaches_agent_context_to_request() {
         let request = || {
-            crate::protocols::common::preprocessor::PreprocessedRequest::builder()
+            dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest::builder()
                 .model("test-model".to_string())
                 .token_ids(vec![1])
                 .stop_conditions(Default::default())
@@ -8279,7 +8284,7 @@ mod tests {
         // A rank's refusal as the last failure recorded, as the routing host
         // records it, for a request migration has no untried worker left for:
         // the exhaustion error is an overload too.
-        let migration = crate::protocols::common::preprocessor::MigrationState::default();
+        let migration = dynamo_frontend_protocols::common::preprocessor::MigrationState::default();
         migration.record_failure(
             7,
             delivered_refusal(ErrorType::WorkerRankOverloaded(4))
@@ -10412,7 +10417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_error_event() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // Create an error event
@@ -10444,7 +10449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_typed_invalid_argument() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use futures::stream;
 
@@ -10500,7 +10505,7 @@ mod tests {
 
     #[tokio::test]
     async fn wire_roundtripped_transport_subtypes_keep_semantic_status() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorType};
         use futures::stream;
 
@@ -10562,7 +10567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_preserves_timeout_outcome() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
         use futures::stream;
 
@@ -10737,7 +10742,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_json_error_and_code() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // Create an error event with JSON payload containing error code in comment
@@ -10768,7 +10773,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_non_client_error_code() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // A backend asserting a non-4xx code (here 399) must not be able to
@@ -10799,7 +10804,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_503_preserves_status() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // Backend 5xx status codes must round-trip so clients can distinguish
@@ -10837,7 +10842,7 @@ mod tests {
     /// point: the two lists must not drift apart again.
     #[tokio::test]
     async fn test_check_for_backend_error_matches_unary_triage() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         for (code, expected) in [
@@ -10878,7 +10883,7 @@ mod tests {
     /// and reports as an overload rather than by its registered reason.
     #[tokio::test]
     async fn test_check_for_backend_error_preserves_overload_status() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         let overload = overload_status_code();
@@ -10929,7 +10934,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_499_sanitizes_cancellation() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // 499 falls inside is_client_error(); ensure cancellation text from
@@ -10959,7 +10964,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_skips_leading_annotation_frames() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // Streams prepend a request_id annotation before forwarding engine
@@ -10998,7 +11003,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_replays_leading_annotation_frames() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::CreateChatCompletionStreamResponse;
         use futures::stream::{self, StreamExt};
 
@@ -11052,7 +11057,7 @@ mod tests {
     /// looks healthy.
     #[tokio::test]
     async fn test_check_for_backend_error_bounded_replays_annotations_after_window() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream::StreamExt;
 
         let annotation = Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation(
@@ -11098,7 +11103,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_normal_event() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::CreateChatCompletionStreamResponse;
         use futures::stream::{self, StreamExt};
 
@@ -11144,7 +11149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_empty_stream() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream::{self, StreamExt};
 
         // Create an empty stream
@@ -11163,7 +11168,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_backend_error_with_comment_but_no_event_type() {
-        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_frontend_protocols::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
 
         // Create an event with comment but no event type and no data (error indicator)
@@ -12772,7 +12777,7 @@ mod tests {
     /// does not.
     #[test]
     fn test_chunk_has_generated_tokens() {
-        use crate::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_frontend_protocols::common::metrics::LLMMetricAnnotation;
 
         let with_chunk_tokens = |content: Option<&str>, chunk_tokens: usize| {
             let mut resp = make_delta(content, None, None, None, None, None, None, None);
@@ -12810,13 +12815,13 @@ mod tests {
     fn phase_only_chunks_are_filtered_before_chat_completions_sse() {
         let mut chunk = make_delta(None, None, None, None, None, None, None, None);
         chunk.message_boundary = Some(
-            crate::protocols::openai::chat_completions::MessageBoundary::Start(
+            dynamo_frontend_protocols::openai::chat_completions::MessageBoundary::Start(
                 dynamo_protocols::types::responses::MessagePhase::Commentary,
             ),
         );
         assert!(is_empty_stream_response(&chunk));
         chunk.message_boundary =
-            Some(crate::protocols::openai::chat_completions::MessageBoundary::End);
+            Some(dynamo_frontend_protocols::openai::chat_completions::MessageBoundary::End);
         assert!(is_empty_stream_response(&chunk));
         chunk.inner.choices[0].finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
         assert!(!is_empty_stream_response(&chunk));

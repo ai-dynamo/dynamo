@@ -15,12 +15,12 @@ use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::hosted_request,
     lora::{LoadEstimator, LoraFilter},
-    protocols::common::preprocessor::PreprocessedRequest,
     routing_policy::{
         CandidateSelection, ExecutionRequirements, ExecutionStage, HostedCandidatePolicy,
         KvAdmissionPolicy,
     },
 };
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_model_card::local_model::runtime_config::ModelRuntimeConfig;
 
 fn policy(request: &PreprocessedRequest) -> RequestPolicy {
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn kv_policy_rejects_runtime_requests_when_runtime_loading_is_disabled() {
-        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
 
         temp_env::with_vars(
             [
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn accounting_uses_typed_runtime_metadata_not_adapter_name() {
-        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
         use dynamo_scheduler::host::AccountingAttribution;
 
         let mut request = PreprocessedRequest::builder()
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn partial_runtime_metadata_is_rejected_and_never_replayed() {
-        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
         use dynamo_scheduler::host::AccountingAttribution;
 
         let mut request = PreprocessedRequest::builder()
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn selected_runtime_worker_remains_eligible_after_scale_up() {
-        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_frontend_protocols::common::preprocessor::RoutingHints;
 
         let mut config = ModelRuntimeConfig::default();
         config.taints.insert("dynamo.runtime-lora/v2".into());

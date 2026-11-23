@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use dynamo_frontend_protocols::common::llm_backend::LLMEngineOutput;
 use futures::Stream;
-use llm_rs::protocols::common::llm_backend::LLMEngineOutput;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::Mutex;
@@ -194,7 +194,7 @@ impl DemandDrivenResponseStream {
 pub(super) fn process_request_to_stream<'p>(
     py: Python<'p>,
     inner: Arc<RsRoutingHost>,
-    request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
+    request: SingleIn<dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest>,
     tracker: Option<Arc<RequestTracker>>,
     dispatch_span: tracing::Span,
 ) -> PyResult<Bound<'p, PyAny>> {

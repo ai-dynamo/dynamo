@@ -6,13 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::openai::ParsingOptions;
-use dynamo_llm::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use dynamo_llm::protocols::openai::chat_completions::{
+use dynamo_frontend_protocols::openai::ParsingOptions;
+use dynamo_frontend_protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use dynamo_frontend_protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse,
 };
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionTool,
@@ -5502,7 +5502,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_delta_shape() {
 /// metrics of its own.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flush_drops_llm_metrics() {
-    use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
+    use dynamo_frontend_protocols::common::metrics::LLMMetricAnnotation;
 
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 

@@ -20,7 +20,9 @@ use tokio::sync::Mutex;
 use crate::kv_router::{
     MULTIMODAL_EMBEDDING_CACHE_SUBJECT, publisher::MultimodalEmbeddingCacheEvent,
 };
-use crate::protocols::common::{llm_backend::PreprocessedRequest, preprocessor::MultimodalData};
+use dynamo_frontend_protocols::common::{
+    llm_backend::PreprocessedRequest, preprocessor::MultimodalData,
+};
 
 fn multimodal_cache_key_from_url(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()

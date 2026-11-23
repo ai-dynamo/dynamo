@@ -19,10 +19,10 @@ use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorT
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
-use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use dynamo_llm::protocols::openai::validate;
-use dynamo_llm::protocols::openai::{convert_backend_top_logprobs, token_to_utf8_bytes};
+use dynamo_frontend_protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
+use dynamo_frontend_protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use dynamo_frontend_protocols::openai::validate;
+use dynamo_frontend_protocols::openai::{convert_backend_top_logprobs, token_to_utf8_bytes};
 
 /// Token-in/token-out generation request.
 ///
@@ -374,7 +374,7 @@ pub(crate) struct GenerateResponseOptions {
 /// [`LLMEngineOutput`] deltas into a single [`GenerateResponse`].
 struct GenerateChoiceAcc {
     index: u32,
-    token_ids: Vec<dynamo_llm::protocols::TokenIdType>,
+    token_ids: Vec<dynamo_frontend_protocols::TokenIdType>,
     logprobs: Vec<ChatCompletionTokenLogprob>,
     finish_reason: Option<String>,
     routed_experts: Option<GenerateRoutedExperts>,
@@ -385,14 +385,14 @@ impl GenerateChoiceAcc {
     fn apply(&mut self, output: &LLMEngineOutput, options: GenerateResponseOptions) -> Result<()> {
         if let Some(finish_reason) = output.finish_reason.as_ref() {
             match finish_reason {
-                dynamo_llm::protocols::common::FinishReason::Error(message) => {
+                dynamo_frontend_protocols::common::FinishReason::Error(message) => {
                     return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::Backend(BackendError::Unknown))
                         .message(message)
                         .build()
                         .into());
                 }
-                dynamo_llm::protocols::common::FinishReason::Cancelled => {
+                dynamo_frontend_protocols::common::FinishReason::Cancelled => {
                     return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::Cancelled)
                         .message("backend cancelled generation")

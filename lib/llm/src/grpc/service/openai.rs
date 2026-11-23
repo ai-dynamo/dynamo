@@ -12,11 +12,11 @@ use crate::grpc::service::dispatch_error_status;
 // Re-exported so the old per-module path keeps resolving for outside users.
 pub use crate::grpc::service::grpc_monitor_for_disconnects;
 use crate::http::service::metadata::extract_metadata_from_grpc;
-use crate::protocols::openai::ParsingOptions;
-use crate::protocols::openai::completions::{
+use dynamo_frontend_protocols::openai::ParsingOptions;
+use dynamo_frontend_protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
-use crate::types::Annotated;
+use dynamo_frontend_protocols::types::Annotated;
 
 use super::kserve;
 use super::kserve::inference;

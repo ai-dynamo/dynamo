@@ -11,9 +11,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_frontend_protocols::Annotated;
+use dynamo_frontend_protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::http::service::service_v2::HttpService;
-use dynamo_llm::protocols::Annotated;
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_model_card::model_card::ModelDeploymentCard;
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionRequestMessage,

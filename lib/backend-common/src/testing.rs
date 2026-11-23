@@ -27,8 +27,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::protocols::common::preprocessor::{MultimodalData, PreprocessedRequest};
-use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
+use dynamo_frontend_protocols::common::preprocessor::{MultimodalData, PreprocessedRequest};
+use dynamo_frontend_protocols::common::{
+    FinishReason, OutputOptions, SamplingOptions, StopConditions,
+};
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;

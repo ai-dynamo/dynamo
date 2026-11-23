@@ -14,7 +14,7 @@ use crate::grpc::service::dispatch_error_status;
 // Re-exported so the old per-module path keeps resolving for outside users.
 pub use crate::grpc::service::grpc_monitor_for_disconnects;
 use crate::http::service::metadata::extract_metadata_from_grpc;
-use crate::types::Annotated;
+use dynamo_frontend_protocols::types::Annotated;
 
 use super::kserve;
 
@@ -27,8 +27,8 @@ use dynamo_http_server::{
     metrics::{CancellationLabels, Endpoint},
 };
 
-use crate::protocols::tensor;
-use crate::protocols::tensor::{
+use dynamo_frontend_protocols::tensor;
+use dynamo_frontend_protocols::tensor::{
     NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor,
 };
 use dynamo_model_card::tensor_model::{self, TensorMetadata};

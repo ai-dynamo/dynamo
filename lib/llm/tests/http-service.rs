@@ -5,9 +5,9 @@ use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
 use dynamo_error::http::HttpError;
-use dynamo_http_server::metrics::{Endpoint, ErrorType, Metrics, RequestType, Status};
-use dynamo_llm::http::service::service_v2::{BackendErrorCheck, HttpService};
-use dynamo_llm::protocols::{
+use dynamo_frontend_protocols::types::openai::audios::OpenAIAudiosStreamingEngine;
+use dynamo_frontend_protocols::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_frontend_protocols::{
     Annotated,
     codec::SseLineCodec,
     common::extensions::NvExt,
@@ -18,8 +18,8 @@ use dynamo_llm::protocols::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_llm::types::openai::audios::OpenAIAudiosStreamingEngine;
-use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_http_server::metrics::{Endpoint, ErrorType, Metrics, RequestType, Status};
+use dynamo_llm::http::service::service_v2::{BackendErrorCheck, HttpService};
 use dynamo_model_card::{endpoint_type::EndpointType, model_card::ModelDeploymentCard};
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
@@ -3167,23 +3167,23 @@ struct InvalidArgumentAudiosEngine {}
 #[async_trait]
 impl
     AsyncEngine<
-        SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
-        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        SingleIn<dynamo_frontend_protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::audios::NvAudioSpeechResponse>>,
         Error,
     > for InvalidArgumentAudiosEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        request: SingleIn<dynamo_frontend_protocols::openai::audios::NvCreateAudioSpeechRequest>,
     ) -> Result<
-        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::audios::NvAudioSpeechResponse>>,
         Error,
     > {
         use dynamo_runtime::error::{BackendError, ErrorType as DynErrorType};
         let (_request, context) = request.transfer(());
         let ctx = context.context();
         let stream = stream! {
-            yield Annotated::<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse> {
+            yield Annotated::<dynamo_frontend_protocols::openai::audios::NvAudioSpeechResponse> {
                 data: None,
                 id: None,
                 event: Some("error".to_string()),
@@ -3288,19 +3288,19 @@ struct FailedStatusAudiosEngine {}
 #[async_trait]
 impl
     AsyncEngine<
-        SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
-        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        SingleIn<dynamo_frontend_protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::audios::NvAudioSpeechResponse>>,
         Error,
     > for FailedStatusAudiosEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<dynamo_llm::protocols::openai::audios::NvCreateAudioSpeechRequest>,
+        request: SingleIn<dynamo_frontend_protocols::openai::audios::NvCreateAudioSpeechRequest>,
     ) -> Result<
-        ManyOut<Annotated<dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse>>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::audios::NvAudioSpeechResponse>>,
         Error,
     > {
-        use dynamo_llm::protocols::openai::audios::NvAudioSpeechResponse;
+        use dynamo_frontend_protocols::openai::audios::NvAudioSpeechResponse;
         let (_request, context) = request.transfer(());
         let ctx = context.context();
         let stream = stream! {
@@ -3384,16 +3384,16 @@ struct UncalledPoolingFamilyEngine {}
 #[async_trait]
 impl
     AsyncEngine<
-        SingleIn<dynamo_llm::protocols::openai::classify::NvCreateClassifyRequest>,
-        ManyOut<Annotated<dynamo_llm::protocols::openai::classify::NvCreateClassifyResponse>>,
+        SingleIn<dynamo_frontend_protocols::openai::classify::NvCreateClassifyRequest>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::classify::NvCreateClassifyResponse>>,
         Error,
     > for UncalledPoolingFamilyEngine
 {
     async fn generate(
         &self,
-        _request: SingleIn<dynamo_llm::protocols::openai::classify::NvCreateClassifyRequest>,
+        _request: SingleIn<dynamo_frontend_protocols::openai::classify::NvCreateClassifyRequest>,
     ) -> Result<
-        ManyOut<Annotated<dynamo_llm::protocols::openai::classify::NvCreateClassifyResponse>>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::classify::NvCreateClassifyResponse>>,
         Error,
     > {
         anyhow::bail!("engine must not be reached by a rejected request")
@@ -3403,16 +3403,16 @@ impl
 #[async_trait]
 impl
     AsyncEngine<
-        SingleIn<dynamo_llm::protocols::openai::pooling::NvCreatePoolingRequest>,
-        ManyOut<Annotated<dynamo_llm::protocols::openai::pooling::NvCreatePoolingResponse>>,
+        SingleIn<dynamo_frontend_protocols::openai::pooling::NvCreatePoolingRequest>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::pooling::NvCreatePoolingResponse>>,
         Error,
     > for UncalledPoolingFamilyEngine
 {
     async fn generate(
         &self,
-        _request: SingleIn<dynamo_llm::protocols::openai::pooling::NvCreatePoolingRequest>,
+        _request: SingleIn<dynamo_frontend_protocols::openai::pooling::NvCreatePoolingRequest>,
     ) -> Result<
-        ManyOut<Annotated<dynamo_llm::protocols::openai::pooling::NvCreatePoolingResponse>>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::pooling::NvCreatePoolingResponse>>,
         Error,
     > {
         anyhow::bail!("engine must not be reached by a rejected request")
@@ -3422,19 +3422,19 @@ impl
 #[async_trait]
 impl
     AsyncEngine<
-        SingleIn<dynamo_llm::protocols::openai::rerank::NvCreateRerankRequest>,
-        ManyOut<Annotated<dynamo_llm::protocols::openai::rerank::NvCreateRerankResponse>>,
+        SingleIn<dynamo_frontend_protocols::openai::rerank::NvCreateRerankRequest>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::rerank::NvCreateRerankResponse>>,
         Error,
     > for UncalledPoolingFamilyEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<dynamo_llm::protocols::openai::rerank::NvCreateRerankRequest>,
+        request: SingleIn<dynamo_frontend_protocols::openai::rerank::NvCreateRerankRequest>,
     ) -> Result<
-        ManyOut<Annotated<dynamo_llm::protocols::openai::rerank::NvCreateRerankResponse>>,
+        ManyOut<Annotated<dynamo_frontend_protocols::openai::rerank::NvCreateRerankResponse>>,
         Error,
     > {
-        use dynamo_llm::protocols::openai::rerank::{NvCreateRerankResponse, RerankResult};
+        use dynamo_frontend_protocols::openai::rerank::{NvCreateRerankResponse, RerankResult};
 
         let (_request, context) = request.transfer(());
         let response_ctx = context.context();
@@ -3617,9 +3617,9 @@ async fn test_pooling_family_validation_errors_are_metered() {
 // (back to a hardcoded generic 500) fails the 400 test below.
 // =============================================================================
 
-use dynamo_llm::protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
-use dynamo_llm::protocols::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
-use dynamo_llm::types::openai::images::OpenAIImagesStreamingEngine;
+use dynamo_frontend_protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+use dynamo_frontend_protocols::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
+use dynamo_frontend_protocols::types::openai::images::OpenAIImagesStreamingEngine;
 
 /// Images engine whose stream carries a single error annotation, emulating a
 /// worker that raised during generation (Annotated::from_err on the wire).
@@ -3878,7 +3878,7 @@ mod zero_top_logprobs {
 
     use std::time::Duration;
 
-    use dynamo_llm::protocols::{
+    use dynamo_frontend_protocols::{
         Annotated,
         common::{FinishReason, llm_backend::BackendOutput},
         openai::{DeltaGeneratorExt, chat_completions::NvCreateChatCompletionRequest},

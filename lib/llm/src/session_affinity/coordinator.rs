@@ -13,12 +13,10 @@ use std::{sync::Arc, time::Duration};
 #[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
 use super::{SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
-use crate::{
-    protocols::common::preprocessor::PreprocessedRequest,
-    protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-        timing::RequestPhase,
-    },
+use dynamo_frontend_protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_frontend_protocols::common::{
+    extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    timing::RequestPhase,
 };
 use dynamo_runtime::{
     engine::AsyncEngineContext,
