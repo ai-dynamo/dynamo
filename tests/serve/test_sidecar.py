@@ -443,9 +443,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            # TODO: revert to pytest.mark.post_merge after pre_merge validation
-            # on this PR (see .ai/ci-guidelines.md).
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
         ],
