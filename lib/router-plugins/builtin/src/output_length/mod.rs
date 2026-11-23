@@ -285,9 +285,10 @@ mod tests {
     }
 
     #[test]
-    fn it_registers_under_its_type_name_and_rejects_parameters() {
-        let mut registry = RouterPluginRegistry::default();
-        register(&mut registry).unwrap();
+    fn the_crate_registers_it_under_its_type_name_and_it_rejects_parameters() {
+        // Built as a host builds it, so the case fails if the crate stops registering it.
+        let mut registry = crate::default_registry();
+        crate::register(&mut registry).unwrap();
         let build = |parameters| {
             registered_classifier(
                 &registry,
