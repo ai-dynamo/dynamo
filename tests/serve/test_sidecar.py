@@ -202,42 +202,51 @@ class SidecarConfig(EngineConfig):
 
 
 # vLLM's FlashAttention-2 build ships only sm_80 code. On newer GPUs (sm_120
-# Blackwell CI runners) the CUDA driver JIT-compiles its split-KV decode module
-# the first time an engine decodes past 128 KV tokens, which blocks that engine
-# for about 70 s with a cold driver cache. Without this warm-up the first long
-# routed request hit that stall and outlived its 30 s read timeout (DYN-5754).
-# The compiled module is cached on disk, so one decode on any engine warms the
-# rest. The prompt shares no prefix with the KV-routing prompts.
+# Blackwell CI runners) the CUDA driver JIT-compiles its kernels the first time
+# an engine runs them, which blocks that engine for about 70 s with a cold driver
+# cache. Without this warm-up the first routed request, a prefill of several
+# hundred tokens followed by a decode past 128 KV tokens, hit that stall and
+# outlived its 30 s read timeout (DYN-5754). The warm-up runs the same shape: a
+# prompt of about 300 tokens and a 128-token decode. The compiled modules are
+# cached on disk, so a warm-up that completes on one engine warms the rest. The
+# prompt shares no prefix with the KV-routing prompts.
+SPLIT_KV_WARMUP_PROMPT = "Pale lanterns drift over harbor water at dusk. " * 32
 SPLIT_KV_WARMUP_TOKENS = 128
-SPLIT_KV_WARMUP_ATTEMPT_TIMEOUT_S = 30.0
 
 
 def _split_kv_warmup_check(port: int, model: str):
-    def _decode_past_128_kv_tokens(remaining_timeout: float = 30.0) -> bool:
-        # A timed-out attempt is retried by the readiness loop; the engine
-        # finishes the compile regardless, so a later attempt completes.
+    def _prefill_and_decode_past_128_kv_tokens(
+        remaining_timeout: float = 30.0,
+    ) -> bool:
+        # One attempt that waits out the rest of the readiness budget. A shorter
+        # attempt would time out mid-compile, and its retry could be routed to
+        # another engine and start a second cold compile there.
         response = requests.post(
             f"http://localhost:{port}/v1/chat/completions",
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": "Describe a lighthouse."}],
+                "messages": [{"role": "user", "content": SPLIT_KV_WARMUP_PROMPT}],
                 "max_tokens": SPLIT_KV_WARMUP_TOKENS,
                 "ignore_eos": True,
                 "temperature": 0,
                 "stream": False,
             },
-            timeout=min(max(1.0, remaining_timeout), SPLIT_KV_WARMUP_ATTEMPT_TIMEOUT_S),
+            timeout=max(1.0, remaining_timeout),
         )
         if not response.ok:
             raise RuntimeError(
                 f"split-KV warm-up got HTTP {response.status_code}: "
                 f"{response.text[:500]!r}"
             )
-        usage = response.json()["usage"]
-        assert usage["completion_tokens"] == SPLIT_KV_WARMUP_TOKENS, usage
+        usage = response.json().get("usage") or {}
+        if usage.get("completion_tokens") != SPLIT_KV_WARMUP_TOKENS:
+            raise RuntimeError(
+                f"split-KV warm-up expected {SPLIT_KV_WARMUP_TOKENS} completion "
+                f"tokens, got usage={usage!r}"
+            )
         return True
 
-    return _decode_past_128_kv_tokens
+    return _prefill_and_decode_past_128_kv_tokens
 
 
 def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
