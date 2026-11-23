@@ -23,9 +23,7 @@ CASES = tuple(run_cases.load_suite(SUITE))
 assert CASES, f"no comparison cases found in {SUITE}"
 
 
-def _write_cli_config(
-    case: run_cases.ComparisonCase, path: Path
-) -> tuple[dict, dict]:
+def _write_cli_config(case: run_cases.ComparisonCase, path: Path) -> tuple[dict, dict]:
     config = run_cases.recommendation_config(case)
     options = case.generation_options
     dgd = {
