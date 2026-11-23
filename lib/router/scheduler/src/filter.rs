@@ -172,7 +172,7 @@ impl<'a> RoutingEligibility<'a> {
         let taints = config.taints();
         if !self
             .routing_constraints
-            .is_compatible_with_pinned_worker_taints(taints)
+            .is_compatible_with_worker_taints(taints)
         {
             return false;
         }

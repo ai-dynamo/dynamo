@@ -562,6 +562,12 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
+    /// Whether this runtime discovers peers through the Kubernetes API rather than a
+    /// key-value store.
+    pub fn uses_kubernetes_discovery(&self) -> bool {
+        self.discovery_metadata.is_some()
+    }
+
     /// Register an endpoint until the last runtime-wide owner drops its lease.
     pub async fn register_endpoint_lease(
         &self,

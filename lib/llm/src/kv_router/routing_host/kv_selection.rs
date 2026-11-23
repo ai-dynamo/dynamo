@@ -114,6 +114,14 @@ struct BestMatchArgs<'a> {
 }
 
 impl RoutingHost {
+    fn worker_is_not_ready(&self, worker_id: u64) -> bool {
+        self.kv_router()
+            .workers_with_configs
+            .borrow()
+            .get(&worker_id)
+            .is_some_and(|config| config.taints.contains(dynamo_scheduler::NOT_READY_TAINT))
+    }
+
     pub(super) fn check_current_kv_candidate(
         &self,
         request: &PreprocessedRequest,
@@ -266,6 +274,7 @@ impl RoutingHost {
             eligible.retain(|worker_id| {
                 workers.get(worker_id).is_some_and(|config| {
                     routing_constraints.is_compatible_with_worker_taints(&config.taints)
+                        && !config.taints.contains(dynamo_scheduler::NOT_READY_TAINT)
                 }) && !migration_excluded_worker_ids.contains(worker_id)
             });
             if eligible.is_empty()
@@ -299,8 +308,10 @@ impl RoutingHost {
             }
         }
         let explicit_pin = match (explicit_pin, worker_only_affinity) {
+            // A not-ready worker is reachable only through the caller's pin, so keep it.
             (Some((worker_id, None)), Some(affinity_target))
-                if worker_id == affinity_target.worker_id =>
+                if worker_id == affinity_target.worker_id
+                    && !self.worker_is_not_ready(worker_id) =>
             {
                 // A worker-only session binding allows the KV scheduler to select this
                 // request's rank, so do not turn a matching worker-only request hint into an
@@ -574,6 +585,32 @@ mod tests {
         let eligible = constrain_runtime_lora_workers(true, None, &live, &workers, &constraints);
 
         assert_eq!(eligible, Some(HashSet::from([2])));
+    }
+
+    /// The runtime-LoRA pre-filter runs before the caller's pin is considered, so it must
+    /// keep a not-ready worker for the scheduler filter to judge.
+    #[test]
+    fn runtime_lora_keeps_a_not_ready_worker_for_a_caller_pin() {
+        let capability = "dynamo.runtime-lora/v2".to_string();
+        let mut held = runtime_config(&capability, "wandb-artifact");
+        held.taints
+            .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
+        let workers = HashMap::from([(2, held)]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability]),
+            ..Default::default()
+        };
+        let live = HashSet::from([2]);
+
+        let eligible = constrain_runtime_lora_workers(true, None, &live, &workers, &constraints);
+        assert_eq!(eligible, Some(HashSet::from([2])));
+
+        let pin = WorkerWithDpRank::new(2, 0);
+        let caller_pinned =
+            RoutingEligibility::new(eligible.as_ref(), None, Some(pin), &constraints);
+        assert!(caller_pinned.validate_worker_rank(&workers, pin).is_ok());
+        let automatic = RoutingEligibility::new(eligible.as_ref(), None, None, &constraints);
+        assert!(!automatic.allows_worker(2, &workers[&2]));
     }
 
     #[test]

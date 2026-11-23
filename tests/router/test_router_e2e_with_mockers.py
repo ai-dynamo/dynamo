@@ -2000,7 +2000,7 @@ def test_not_ready_worker_is_held_until_released(
         request_plane=request_plane,
         router_mode="kv",
         system_ports=system_ports,
-        worker_env=({"DYN_START_NOT_READY": "true"}, {}),
+        worker_env=({"DYN_ETCD_START_NOT_READY": "true"}, {}),
     ) as workers:
         with FrontendRouterProcess(
             request=request,

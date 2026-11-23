@@ -28,6 +28,10 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
+/// Makes a worker register its model with [`dynamo_scheduler::NOT_READY_TAINT`]. Honoured
+/// under etcd and the other key-value discovery backends, ignored under Kubernetes discovery.
+pub const START_NOT_READY_ENV: &str = "DYN_ETCD_START_NOT_READY";
+
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
@@ -883,20 +887,6 @@ impl ModelRuntimeConfig {
     ///
     /// See the doc on [`ModelRuntimeConfig::stable_routing_id`] for the recommended k8s
     /// downward-API recipe.
-    /// Publish this worker as not ready when `DYN_START_NOT_READY` is truthy.
-    ///
-    /// Adds [`dynamo_scheduler::NOT_READY_TAINT`] to the card, so frontends discover the worker
-    /// but route no ordinary request to it; only a request pinned to it lands. Whatever admits
-    /// the worker releases it by removing the taint from its discovery record.
-    pub fn add_not_ready_taint_from_env(&mut self) -> &mut Self {
-        if dynamo_runtime::config::env_is_truthy("DYN_START_NOT_READY") {
-            tracing::info!("publishing worker with the not-ready taint (DYN_START_NOT_READY)");
-            self.taints
-                .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
-        }
-        self
-    }
-
     pub fn populate_stable_routing_id_from_env(&mut self) -> &mut Self {
         if self.stable_routing_id.is_some() {
             return self;
@@ -908,6 +898,23 @@ impl ModelRuntimeConfig {
         if let Some(value) = candidate {
             tracing::info!(stable_routing_id = %value, "populated stable_routing_id from DYN_STABLE_ROUTING_ID");
             self.stable_routing_id = Some(value);
+        }
+        self
+    }
+
+    /// Hold this worker out of ordinary routing at startup when
+    /// [`START_NOT_READY_ENV`] is truthy.
+    ///
+    /// Adds [`dynamo_scheduler::NOT_READY_TAINT`], so frontends discover the worker but only
+    /// a caller pin reaches it until the taint is removed from its discovery record.
+    ///
+    /// Kubernetes discovery ignores the setting: Pod readiness already holds the worker
+    /// there, and nothing would remove the taint once the Pod is ready.
+    pub fn add_startup_not_ready_taint(&mut self, kubernetes_discovery: bool) -> &mut Self {
+        if !kubernetes_discovery && dynamo_runtime::config::env_is_truthy(START_NOT_READY_ENV) {
+            tracing::info!("publishing worker with the not-ready taint ({START_NOT_READY_ENV})");
+            self.taints
+                .insert(dynamo_scheduler::NOT_READY_TAINT.to_string());
         }
         self
     }
@@ -1391,21 +1398,29 @@ mod tests {
     }
 
     #[test]
-    fn not_ready_taint_is_published_only_when_the_env_asks_for_it() {
-        temp_env::with_var("DYN_START_NOT_READY", None::<&str>, || {
-            let mut config = ModelRuntimeConfig::default();
-            config.add_not_ready_taint_from_env();
-            assert!(!config.taints.contains(dynamo_scheduler::NOT_READY_TAINT));
-        });
-        temp_env::with_var("DYN_START_NOT_READY", Some("1"), || {
-            let mut config = ModelRuntimeConfig {
-                taints: HashSet::from(["caller/taint=value".to_string()]),
-                ..Default::default()
-            };
-            config.add_not_ready_taint_from_env();
-            assert!(config.taints.contains(dynamo_scheduler::NOT_READY_TAINT));
-            assert!(config.taints.contains("caller/taint=value"));
-        });
+    #[serial_test::serial]
+    fn startup_not_ready_taint_follows_the_setting_and_the_discovery_backend() {
+        let caller_taints = || ModelRuntimeConfig {
+            taints: HashSet::from(["caller/taint=value".to_string()]),
+            ..Default::default()
+        };
+        for (setting, kubernetes_discovery, held) in [
+            (Some("true"), false, true),
+            (Some("true"), true, false),
+            (Some("false"), false, false),
+            (None, false, false),
+        ] {
+            temp_env::with_var(START_NOT_READY_ENV, setting, || {
+                let mut config = caller_taints();
+                config.add_startup_not_ready_taint(kubernetes_discovery);
+                assert_eq!(
+                    config.taints.contains(dynamo_scheduler::NOT_READY_TAINT),
+                    held,
+                    "setting {setting:?}, kubernetes discovery {kubernetes_discovery}"
+                );
+                assert!(config.taints.contains("caller/taint=value"));
+            });
+        }
     }
 
     #[test]

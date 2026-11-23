@@ -24,7 +24,9 @@ These checks are centralized in the router's routing eligibility path so selecti
 
 A worker can publish itself to discovery while staying out of ordinary routing. This lets a check send requests through a frontend to that exact worker before it takes client traffic.
 
-Set `DYN_START_NOT_READY=true` on the worker. It then registers its model with the `dynamo.routing/not-ready` taint. The setting is off by default.
+Set `DYN_ETCD_START_NOT_READY=true` on the worker. It then registers its model with the `dynamo.routing/not-ready` taint. The setting is off by default.
+
+The setting applies to etcd and the other key-value discovery backends. Under Kubernetes discovery it does nothing: Pod readiness already keeps the worker out of routing there, and nothing would remove the taint once the Pod is ready.
 
 While the taint is present:
 
@@ -33,6 +35,8 @@ While the taint is present:
 - **A pinned request does not fall back.** If the pinned worker is ineligible, routing fails instead of choosing another worker.
 
 If every worker for a model is not ready, unpinned requests fail with no endpoint.
+
+Nothing releases a held worker automatically. It stays out of ordinary routing until its taint is removed.
 
 To release the worker, update its taints without `dynamo.routing/not-ready`. The worker's `POST /engine/update/model_taints` route replaces the caller-managed taint set, so send the taints the worker should keep:
 
@@ -46,7 +50,7 @@ Because the route replaces the whole set, any update that omits `dynamo.routing/
 
 A restarted worker registers a new instance and starts held again.
 
-This applies to the KV router. The round-robin, random, least-loaded, device-aware, and direct router modes do not read worker taints, so a worker started with `DYN_START_NOT_READY=true` receives traffic from frontends in those modes.
+This applies to the KV router. The round-robin, random, least-loaded, device-aware, and direct router modes do not read worker taints, so a worker started with `DYN_ETCD_START_NOT_READY=true` receives traffic from frontends in those modes.
 
 ## Busy Thresholds
 

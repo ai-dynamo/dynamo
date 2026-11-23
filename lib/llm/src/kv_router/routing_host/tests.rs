@@ -4325,6 +4325,19 @@ async fn not_ready_worker_is_reached_only_by_a_caller_pin_in_every_phase() {
             .unwrap();
         assert_eq!(selection.worker.worker_id, 8, "{phase:?}");
 
+        // The caller's pin still reaches it when the session is bound to the same worker.
+        let session = SessionAffinityId::new(format!("not-ready-{field}-pinned"));
+        bind_affinity_target(&router, &session, AffinityTarget::worker(8)).await;
+        let mut pinned = request();
+        pinned.routing = Some(serde_json::from_value(serde_json::json!({field: 8})).unwrap());
+        let mut pinned = Context::new(pinned);
+        pinned.insert(SESSION_AFFINITY_CONTEXT_KEY, session);
+        let (selection, _) = router
+            .select_with_affinity(&pinned, phase, false, &budget)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker.worker_id, 8, "{phase:?}");
+
         // A session bound to it is automatic selection, so it is refused, whether the
         // binding names the worker alone or an exact rank.
         for (label, target) in [
