@@ -47,6 +47,7 @@ type dgdSharedResourcesReconciler struct {
 
 func newDGDSharedResourcesReconciler(
 	kubeClient client.Client,
+	apiReader client.Reader,
 	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
@@ -63,7 +64,7 @@ func newDGDSharedResourcesReconciler(
 		checkpoints:   newDGDCheckpointsReconciler(syncer, config, runtimeConfig, dockerSecretRetriever),
 		epp:           newDGDEPPReconciler(syncer, config, runtimeConfig, restConfig),
 		waitForLeader: newDGDWaitForLeaderReconciler(syncer),
-		sshKeys:       newDGDSSHKeysReconciler(kubeClient, sshKeyManager),
+		sshKeys:       newDGDSSHKeysReconciler(kubeClient, apiReader, config.MPI.SSHSecretName, sshKeyManager),
 	}
 }
 

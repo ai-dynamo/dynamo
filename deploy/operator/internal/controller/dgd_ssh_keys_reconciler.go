@@ -28,39 +28,52 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;delete
-
 // dgdSSHKeysReconciler owns multinode MPI SSH key material: the shared namespace
 // replica and, for gated DGDs, the DGD's own key pair.
 type dgdSSHKeysReconciler struct {
-	client  client.Client
-	manager *secret.SSHKeyManager
+	client     client.Client
+	apiReader  client.Reader
+	sharedName string
+	manager    *secret.SSHKeyManager
 }
 
-func newDGDSSHKeysReconciler(kubeClient client.Client, manager *secret.SSHKeyManager) *dgdSSHKeysReconciler {
-	return &dgdSSHKeysReconciler{client: kubeClient, manager: manager}
+// A nil apiReader uses kubeClient for reconcilers without a manager cache.
+func newDGDSSHKeysReconciler(kubeClient client.Client, apiReader client.Reader, sharedName string, manager *secret.SSHKeyManager) *dgdSSHKeysReconciler {
+	if apiReader == nil {
+		apiReader = kubeClient
+	}
+	return &dgdSSHKeysReconciler{client: kubeClient, apiReader: apiReader, sharedName: sharedName, manager: manager}
 }
 
 func (r *dgdSSHKeysReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	if r.manager == nil || !dgd.HasAnyMultinodeComponent() {
+	if r.manager == nil {
 		return nil
 	}
 
-	// Authored volumes and DGDs created before the gate still reference the shared replica.
-	if err := r.manager.EnsureAndReplicate(ctx, dgd.Namespace); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to ensure MPI SSH key secret", "namespace", dgd.Namespace)
-		return fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
+	// Preserve the shared replica for legacy multinode workloads.
+	if dgd.HasAnyMultinodeComponent() {
+		if err := r.manager.EnsureAndReplicate(ctx, dgd.Namespace); err != nil {
+			return fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
+		}
 	}
 	if !compatibility.TRTLLMPerDGDMPISSHKey.Enabled(dgd.Annotations) {
+		return nil
+	}
+
+	// Only templates that use the MPI key need a graph-owned key pair.
+	needed, err := r.needsDGDSecret(dgd)
+	if err != nil {
+		return err
+	}
+	if !needed {
 		return nil
 	}
 	if err := r.ensureDGDSecret(ctx, dgd); err != nil {
@@ -70,23 +83,42 @@ func (r *dgdSSHKeysReconciler) Reconcile(
 	return nil
 }
 
-// ensureDGDSecret creates the DGD's immutable MPI SSH key pair Secret once. It replaces only
-// a Secret left by an earlier same-name DGD, so a recreated DGD gets new keys.
+// needsDGDSecret follows the injected TRT-LLM volume and authored Secret references.
+func (r *dgdSSHKeysReconciler) needsDGDSecret(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (bool, error) {
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.ManagedByExternalController() {
+			continue
+		}
+		backend, err := dynamo.BackendFrameworkForComponent(component, dgd)
+		if err != nil {
+			return false, err
+		}
+		if backend == dynamo.BackendFrameworkTRTLLM && component.GetNumberOfNodes() > 1 && dynamo.GetComponentDynamoSidecar(component) == nil {
+			return true, nil
+		}
+		for _, template := range dynamo.ComponentPodTemplates(component) {
+			pod := template.Spec.DeepCopy()
+			if dynamo.RepointMPISSHSecret(pod, dgd.UID, dgd.Annotations, r.sharedName) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// ensureDGDSecret creates the DGD's immutable key once and never adopts another owner's Secret.
 func (r *dgdSSHKeysReconciler) ensureDGDSecret(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
-	key := client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.MPISSHSecretName(dgd.Name)}
+	key := client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.MPISSHSecretName(dgd.UID)}
 	existing := &corev1.Secret{}
 	err := r.client.Get(ctx, key, existing)
-	switch {
-	case err == nil && metav1.IsControlledBy(existing, dgd):
-		return nil
-	case err == nil && controlledByEarlierDGD(existing, dgd):
-		uid := existing.UID
-		if err := r.client.Delete(ctx, existing, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("deleting Secret %s left by an earlier DGD: %w", key, err)
+	if err == nil {
+		if !metav1.IsControlledBy(existing, dgd) {
+			return fmt.Errorf("secret %s exists and is not controlled by this DGD", key)
 		}
-	case err == nil:
-		return fmt.Errorf("secret %s exists and is not controlled by this DGD", key)
-	case !apierrors.IsNotFound(err):
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
 		return err
 	}
 
@@ -118,23 +150,15 @@ func (r *dgdSSHKeysReconciler) ensureDGDSecret(ctx context.Context, dgd *nvidiac
 	if !apierrors.IsAlreadyExists(err) {
 		return err
 	}
+
+	// Ownership must be checked before publishing Pods that mount the key. No Secret watch
+	// can prove ownership while the cache is stale after a competing create.
 	created := &corev1.Secret{}
-	if err := r.client.Get(ctx, key, created); err != nil {
+	if err := r.apiReader.Get(ctx, key, created); err != nil {
 		return err
 	}
 	if !metav1.IsControlledBy(created, dgd) {
 		return fmt.Errorf("secret %s exists and is not controlled by this DGD", key)
 	}
 	return nil
-}
-
-// controlledByEarlierDGD reports whether a DGD with this DGD's name but another UID controls object.
-func controlledByEarlierDGD(object metav1.Object, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	owner := metav1.GetControllerOf(object)
-	if owner == nil {
-		return false
-	}
-	group, err := schema.ParseGroupVersion(owner.APIVersion)
-	return err == nil && group.Group == nvidiacomv1beta1.GroupVersion.Group &&
-		owner.Kind == "DynamoGraphDeployment" && owner.Name == dgd.Name && owner.UID != dgd.UID
 }

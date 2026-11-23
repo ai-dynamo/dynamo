@@ -9,20 +9,45 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type TRTLLMBackend struct {
-	MpiRunSecretName string
-	// ParentGraphDeploymentName selects the DGD whose own MPI SSH Secret gated multinode Pods mount.
-	ParentGraphDeploymentName string
-	roleLaunchOwnership       roleLaunchOwnership
+	MpiRunSecretName    string
+	roleLaunchOwnership roleLaunchOwnership
 }
 
-// MPISSHSecretName names the Secret holding a DGD's own MPI SSH key pair.
-func MPISSHSecretName(dgdName string) string {
-	return dgdName + "-mpi-ssh"
+// MPISSHSecretName names the Secret holding one DGD's MPI SSH key pair.
+func MPISSHSecretName(dgdUID types.UID) string {
+	return "mpi-ssh-" + string(dgdUID)
+}
+
+// RepointMPISSHSecret changes shared MPI Secret references in a rendered Pod.
+// The caller owns podSpec. Authored items, modes, mounts and unrelated Secrets stay intact.
+func RepointMPISSHSecret(podSpec *corev1.PodSpec, dgdUID types.UID, annotations map[string]string, sharedName string) bool {
+	if dgdUID == "" || !compatibility.TRTLLMPerDGDMPISSHKey.Enabled(annotations) {
+		return false
+	}
+	changed := false
+	for i := range podSpec.Volumes {
+		volume := &podSpec.Volumes[i]
+		if volume.Secret != nil && volume.Secret.SecretName == sharedName {
+			volume.Secret.SecretName = MPISSHSecretName(dgdUID)
+			changed = true
+		}
+		if volume.Projected != nil {
+			for j := range volume.Projected.Sources {
+				source := volume.Projected.Sources[j].Secret
+				if source != nil && source.Name == sharedName {
+					source.Name = MPISSHSecretName(dgdUID)
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
 }
 
 // UpdateContainer configures the container for TRT-LLM multinode deployments.
@@ -97,20 +122,11 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
-		// DGDs created before the gate keep the shared Secret, so an upgrade does not roll their Pods.
-		secretName, mode := b.MpiRunSecretName, int32(0644)
-		if b.ParentGraphDeploymentName != "" && compatibility.TRTLLMPerDGDMPISSHKey.Enabled(GetPodTemplateAnnotations(component)) {
-			// Non-root containers read the 0400 key via the pod fsGroup; a user-set securityContext gets
-			// no operator defaults. OpenShift sets fsGroup under restricted-v2 SCCs, not anyuid.
-			secretName, mode = MPISSHSecretName(b.ParentGraphDeploymentName), 0400
-		}
-
-		// The volume name is unchanged, so the /ssh-pk mount stays the same.
 		sshVolume := corev1.Volume{
 			Name: b.MpiRunSecretName,
 			Secret: &corev1.SecretVolumeSource{
-				SecretName:  secretName,
-				DefaultMode: &mode,
+				SecretName:  b.MpiRunSecretName,
+				DefaultMode: new(int32(0644)),
 			},
 		}
 		podSpec.Volumes = append(podSpec.Volumes, sshVolume)

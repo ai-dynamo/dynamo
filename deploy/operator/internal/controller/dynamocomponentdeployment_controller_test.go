@@ -3657,11 +3657,18 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		origin     string
 		owners     []metav1.OwnerReference
 		authored   *corev1.Volume
 		secretName string
 		mode       int32
 	}{
+		{
+			name:       "DGD created by operator 1.7 keeps the shared Secret",
+			origin:     "1.7.0",
+			owners:     []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
+			secretName: "mpi-run-ssh-secret", mode: 0644,
+		},
 		{name: "standalone DCD keeps the shared Secret", secretName: "mpi-run-ssh-secret", mode: 0o644},
 		{
 			name: "standalone native sidecar DCD keeps its authored Secret volume",
@@ -3672,17 +3679,28 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 			mode:       0o400,
 		},
 		{
-			name:       "DGD child mounts the DGD's own Secret owner-read-only",
+			name:       "native sidecar DGD child repoints its authored shared Secret",
 			owners:     []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
-			secretName: "graph-mpi-ssh",
-			mode:       0o400,
+			authored:   &corev1.Volume{Name: "mpi-run-ssh-secret", Secret: &corev1.SecretVolumeSource{SecretName: "mpi-run-ssh-secret", DefaultMode: new(int32(0o644))}},
+			secretName: "mpi-ssh-uid-graph",
+			mode:       0o644,
+		},
+		{
+			name:       "DGD child mounts the DGD's own Secret",
+			owners:     []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "graph", UID: "uid-graph", Controller: new(true)}},
+			secretName: "mpi-ssh-uid-graph",
+			mode:       0o644,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Create a two-node TRT-LLM DCD created by operator 1.7.0")
+			t.Log("Create a two-node TRT-LLM DCD with a recorded operator origin")
+			origin := tc.origin
+			if origin == "" {
+				origin = "1.8.0"
+			}
 			dcd := &v1beta1.DynamoComponentDeployment{
 				Name: "graph-worker", Namespace: "default", OwnerReferences: tc.owners,
-				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 				Spec: v1beta1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkTRTLLM),
 					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -3690,7 +3708,7 @@ func TestRenderMultinodePodTemplateSpecs_TRTLLMMPISSHSecret(t *testing.T) {
 						ComponentType: v1beta1.ComponentTypeWorker,
 						Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
 						PodTemplate: &corev1.PodTemplateSpec{
-							Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
+							Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 							Spec: corev1.PodSpec{Containers: []corev1.Container{{
 								Name:    commonconsts.MainContainerName,
 								Image:   "trtllm-test",

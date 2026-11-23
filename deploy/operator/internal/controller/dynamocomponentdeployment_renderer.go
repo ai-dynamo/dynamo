@@ -181,6 +181,8 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
 		}
+		// Repoint the rendered role using the parent graph's immutable identity.
+		dynamo.RepointMPISSHSecret(&template.Spec, dgd.UID, dgd.Annotations, r.config.MPI.SSHSecretName)
 		templates[role] = template
 	}
 	return templates[dynamo.RoleLeader], templates[dynamo.RoleWorker], nil
@@ -367,17 +369,13 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		checkpointInfo,
 		containerGPUs,
 	)
-	if err != nil || dcd.GetParentGraphDeploymentName() != "" || dynamo.GetComponentDynamoSidecar(componentForRendering) != nil {
-		return template, err
+	if err != nil {
+		return nil, err
 	}
 
-	// No DGD owns an MPI SSH Secret for a standalone DCD, so its Pods keep mounting the shared one.
-	// Native sidecar templates author their own volumes, which stay as written.
-	for i := range template.Spec.Volumes {
-		volume := &template.Spec.Volumes[i]
-		if source := volume.Secret; volume.Name == r.config.MPI.SSHSecretName && source != nil && source.SecretName == dynamo.MPISSHSecretName(dcd.Name) {
-			source.SecretName, source.DefaultMode = r.config.MPI.SSHSecretName, new(int32(0o644))
-		}
+	// Standalone DCDs have no parent UID and retain the shared Secret.
+	if owner := metav1.GetControllerOf(dcd); owner != nil && owner.Kind == "DynamoGraphDeployment" && schema.FromAPIVersionAndKind(owner.APIVersion, owner.Kind).Group == nvidiacomv1beta1.GroupVersion.Group {
+		dynamo.RepointMPISSHSecret(&template.Spec, owner.UID, dynamo.GetPodTemplateAnnotations(component), r.config.MPI.SSHSecretName)
 	}
 	return template, nil
 }

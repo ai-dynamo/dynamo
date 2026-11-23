@@ -563,8 +563,8 @@ spec:
         volumes:
         - name: upgrade-mpi-ssh
           secret:
-            defaultMode: 256
-            secretName: workers-mpi-ssh
+            defaultMode: 420
+            secretName: upgrade-mpi-ssh
         - emptyDir:
             medium: Memory
             sizeLimit: 8Gi
@@ -682,8 +682,8 @@ spec:
         volumes:
         - name: upgrade-mpi-ssh
           secret:
-            defaultMode: 256
-            secretName: workers-mpi-ssh
+            defaultMode: 420
+            secretName: upgrade-mpi-ssh
         - emptyDir:
             medium: Memory
             sizeLimit: 8Gi

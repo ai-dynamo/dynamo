@@ -304,25 +304,24 @@ whatever the certificate's validity period.
 
 ## TensorRT-LLM Multinode MPI SSH Key
 
-For every multinode DGD created by operator 1.7.0 or newer, the operator creates Secret
-`<DGD name>-mpi-ssh` in the DGD's namespace. The DGD owns it, it is immutable, and it
-holds the DGD's own `private.key` and `private.key.pub`. The TensorRT-LLM leader and
-worker Pods that the operator renders for the DGD mount it read-only at `/ssh-pk` with
-mode `0400`, so one DGD's key does not open another DGD's Pods.
+For DGDs created by operator 1.8.0 or newer, rendered Pods that reference the
+configured shared MPI SSH Secret instead use `mpi-ssh-<DGD UID>` in the DGD's
+namespace. This includes the TensorRT-LLM leader and worker volumes that the
+operator adds, and plain or projected Secret volumes authored in native sidecar
+templates. Other Secret references, volume mounts, file modes and selected keys
+stay as written.
 
-- In native sidecar mode the operator does not set up the SSH volume. The DGD's Pod
-  templates must mount Secret `<DGD name>-mpi-ssh` themselves; templates that still
-  name the shared `mpi-run-ssh-secret` keep using the shared key.
-- Kubelet makes the files readable by a non-root user only through the pod `fsGroup`.
-  When you set no pod `securityContext`, the operator's default `fsGroup` covers this.
-  When you set your own pod `securityContext` and the container runs as non-root, set
-  `fsGroup` in it, or let your platform assign one (OpenShift assigns one under SCCs
-  such as `restricted-v2`, but not under `anyuid`).
-  The operator does not add one, as for any user-set `securityContext`.
-- The key is not rotated during the DGD's life. To rotate it, delete and recreate the
-  DGD.
-- DGDs created by an earlier operator keep the shared MPI SSH Secret until they are
-  recreated, so an operator upgrade does not restart their Pods.
+The DGD owns the immutable Secret, which holds its own `private.key` and
+`private.key.pub`. The operator creates it only when a component uses MPI SSH.
+TensorRT-LLM's generated volumes keep mode `0644`; the launch script copies the
+keys into `$HOME/.ssh` and sets their permissions before SSH uses them.
+
+- The key is not rotated during the DGD's life. To rotate it, delete and recreate
+  the DGD. The new DGD has a new UID and Secret name; garbage collection removes
+  the old Secret through its owner reference.
+- DGDs created by an operator older than 1.8.0 keep their shared MPI SSH Secret,
+  so an operator upgrade does not restart their Pods. Standalone DCDs also keep
+  the shared Secret and their authored volumes.
 
 ## Reporting a Vulnerability
 

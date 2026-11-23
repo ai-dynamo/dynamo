@@ -44,6 +44,7 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 	return &componentProgram{
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
+			r.APIReader,
 			r.Recorder,
 			r.Config,
 			r.RuntimeConfig,

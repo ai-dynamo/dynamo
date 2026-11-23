@@ -11,12 +11,14 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -28,7 +30,7 @@ import (
 const (
 	mpiSSHTestSecretName      = "mpi-run-ssh-secret"
 	mpiSSHTestSecretNamespace = "dynamo-system"
-	mpiSSHTestOriginVersion   = "1.7.0"
+	mpiSSHTestOriginVersion   = "1.8.0"
 )
 
 // newMPISSHTestDGD describes an aggregated TRT-LLM graph whose worker spans two nodes on Grove.
@@ -166,8 +168,14 @@ func TestDGDReconcileGivesEachTRTLLMMultinodeDGDItsOwnMPISSHKey(t *testing.T) {
 		reconciler = newMPISSHTestReconciler(t, recreated, leftover)
 		reconcileMPISSHTestDGD(t, reconciler, recreated)
 
-		t.Log("The recreated DGD mounts a different key pair that it controls")
+		t.Log("The recreated DGD mounts a different Secret and key pair that it controls")
 		after := mountedMPISSHSecret(t, reconciler.Client, recreated)
+		require.NotEqual(t, before.Name, after.Name)
+		preserved := &corev1.Secret{}
+		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(leftover), preserved))
+		require.Equal(t, before.Data, preserved.Data)
+		reconcileMPISSHTestDGD(t, reconciler, recreated)
+		require.Equal(t, after.Data, mountedMPISSHSecret(t, reconciler.Client, recreated).Data)
 		require.True(t, metav1.IsControlledBy(after, recreated), "Secret %s is not controlled by the recreated DGD", after.Name)
 		require.False(t, bytes.Equal(before.Data["private.key"], after.Data["private.key"]), "the two Secrets hold the same private.key")
 		require.False(t, bytes.Equal(before.Data["private.key.pub"], after.Data["private.key.pub"]), "the two Secrets hold the same private.key.pub")
@@ -201,30 +209,66 @@ func TestDGDReconcileGivesEachTRTLLMMultinodeDGDItsOwnMPISSHKey(t *testing.T) {
 		require.False(t, bytes.Equal(firstSecret.Data["private.key"], secondSecret.Data["private.key"]), "the two Secrets hold the same private.key")
 	})
 
-	t.Run("ssh_volume_mode_has_no_group_or_other_bits", func(t *testing.T) {
-		t.Log("Reconcile one TRT-LLM multinode DGD")
-		dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", mpiSSHTestOriginVersion)
-		reconciler := newMPISSHTestReconciler(t, dgd)
-		reconcileMPISSHTestDGD(t, reconciler, dgd)
+	for _, origin := range []string{"", "1.7.0"} {
+		t.Run("older_dgd_keeps_the_shared_secret_"+origin, func(t *testing.T) {
+			t.Log("Reconcile a DGD created before the operator recorded origin versions")
+			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", origin)
+			reconciler := newMPISSHTestReconciler(t, dgd)
+			reconcileMPISSHTestDGD(t, reconciler, dgd)
 
-		t.Log("Every /ssh-pk volume grants no group or other permission bits")
-		for clique, volume := range mpiSSHVolumes(t, reconciler.Client, dgd) {
-			require.NotNil(t, volume.DefaultMode, "clique %s", clique)
-			require.Zero(t, *volume.DefaultMode&0o077, "clique %s has DefaultMode %#o", clique, *volume.DefaultMode)
-		}
-	})
+			t.Log("Its Pods keep the shared replica with the mode they were created with, so an upgrade does not roll them")
+			for clique, volume := range mpiSSHVolumes(t, reconciler.Client, dgd) {
+				require.Equal(t, mpiSSHTestSecretName, volume.SecretName, "clique %s", clique)
+				require.Equal(t, int32(0o644), *volume.DefaultMode, "clique %s", clique)
+			}
+			require.NoError(t, reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: mpiSSHTestSecretName}, &corev1.Secret{}))
+		})
+	}
 
-	t.Run("dgd_without_origin_version_keeps_the_shared_secret", func(t *testing.T) {
-		t.Log("Reconcile a DGD created before the operator recorded origin versions")
-		dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", "")
-		reconciler := newMPISSHTestReconciler(t, dgd)
-		reconcileMPISSHTestDGD(t, reconciler, dgd)
+	for _, backend := range []string{"vllm", "sglang"} {
+		t.Run(backend+"_does_not_create_an_unused_graph_key", func(t *testing.T) {
+			t.Log("Check a multinode backend with no MPI Secret reference")
+			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", mpiSSHTestOriginVersion)
+			dgd.Spec.BackendFramework = backend
+			reconciler := newMPISSHTestReconciler(t, dgd)
+			sshKeys := newDGDSSHKeysReconciler(reconciler.Client, reconciler.Client, mpiSSHTestSecretName, reconciler.SSHKeyManager)
+			require.NoError(t, sshKeys.Reconcile(t.Context(), dgd))
+			err := reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.MPISSHSecretName(dgd.UID)}, &corev1.Secret{})
+			require.True(t, apierrors.IsNotFound(err))
+		})
+	}
+}
 
-		t.Log("Its Pods keep the shared replica with the mode they were created with, so an upgrade does not roll them")
-		for clique, volume := range mpiSSHVolumes(t, reconciler.Client, dgd) {
-			require.Equal(t, mpiSSHTestSecretName, volume.SecretName, "clique %s", clique)
-			require.Equal(t, int32(0o644), *volume.DefaultMode, "clique %s", clique)
-		}
-		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: mpiSSHTestSecretName}, &corev1.Secret{}))
-	})
+func TestDGDMPISSHSecretForAuthoredVolume(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secretName string
+		wantSecret bool
+	}{
+		{name: "authored shared reference", secretName: mpiSSHTestSecretName, wantSecret: true},
+		{name: "authored custom reference", secretName: "custom-ssh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Create a single-node graph with an authored projected SSH volume")
+			dgd := newMPISSHTestDGD("team-a", "graph", "uid-a", mpiSSHTestOriginVersion)
+			component := &dgd.Spec.Components[0]
+			component.Multinode = nil
+			component.PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "ssh", Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: tc.secretName}}}}}}}
+			reconciler := newMPISSHTestReconciler(t, dgd)
+
+			t.Log("Create a graph key only for the shared reference, without changing the authored template")
+			before := component.DeepCopy()
+			sshKeys := newDGDSSHKeysReconciler(reconciler.Client, reconciler.Client, mpiSSHTestSecretName, reconciler.SSHKeyManager)
+			require.NoError(t, sshKeys.Reconcile(t.Context(), dgd))
+			require.Equal(t, before, component)
+			mounted := &corev1.Secret{}
+			err := reconciler.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.MPISSHSecretName(dgd.UID)}, mounted)
+			if tc.wantSecret {
+				require.NoError(t, err)
+				require.True(t, metav1.IsControlledBy(mounted, dgd))
+			} else {
+				require.True(t, apierrors.IsNotFound(err))
+			}
+		})
+	}
 }

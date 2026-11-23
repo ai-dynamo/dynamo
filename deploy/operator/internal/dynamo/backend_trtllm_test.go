@@ -9,6 +9,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -458,12 +459,8 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 		role                Role
 		multinodeDeployer   MultinodeDeployer
 		initialVolumes      []corev1.Volume
-		parentGraphName     string
-		originVersion       string
 		expectedVolumeCount int
 		shouldHaveSSHVolume bool
-		expectedSecretName  string
-		expectedDefaultMode int32
 	}{
 		{
 			name:                "Single node - no SSH volume added",
@@ -482,8 +479,6 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			initialVolumes:      []corev1.Volume{},
 			expectedVolumeCount: 1,
 			shouldHaveSSHVolume: true,
-			expectedSecretName:  mpiRunSecretName,
-			expectedDefaultMode: 0644,
 		},
 		{
 			name:                "Multinode worker - SSH volume added",
@@ -493,8 +488,6 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			initialVolumes:      []corev1.Volume{},
 			expectedVolumeCount: 1,
 			shouldHaveSSHVolume: true,
-			expectedSecretName:  mpiRunSecretName,
-			expectedDefaultMode: 0644,
 		},
 		{
 			name:              "Multinode with existing volumes",
@@ -506,42 +499,13 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectedVolumeCount: 2,
 			shouldHaveSSHVolume: true,
-			expectedSecretName:  mpiRunSecretName,
-			expectedDefaultMode: 0644,
-		},
-		{
-			name:                "Multinode DGD created before 1.7.0 keeps the shared Secret",
-			numberOfNodes:       2,
-			role:                RoleWorker,
-			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialVolumes:      []corev1.Volume{},
-			parentGraphName:     "graph",
-			originVersion:       "1.6.0",
-			expectedVolumeCount: 1,
-			shouldHaveSSHVolume: true,
-			expectedSecretName:  mpiRunSecretName,
-			expectedDefaultMode: 0644,
-		},
-		{
-			name:                "Multinode DGD created by operator 1.7.0 mounts its own Secret owner-read-only",
-			numberOfNodes:       2,
-			role:                RoleLeader,
-			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialVolumes:      []corev1.Volume{},
-			parentGraphName:     "graph",
-			originVersion:       "1.7.0",
-			expectedVolumeCount: 1,
-			shouldHaveSSHVolume: true,
-			expectedSecretName:  "graph-mpi-ssh",
-			expectedDefaultMode: 0400,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &TRTLLMBackend{
-				MpiRunSecretName:          mpiRunSecretName,
-				ParentGraphDeploymentName: tt.parentGraphName,
+				MpiRunSecretName: mpiRunSecretName,
 			}
 			podSpec := &corev1.PodSpec{
 				Volumes: tt.initialVolumes,
@@ -553,9 +517,6 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			}
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
-			if tt.originVersion != "" {
-				component.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.originVersion}
-			}
 
 			// Call UpdatePodSpec
 			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
@@ -574,11 +535,11 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 					if volume.VolumeSource.Secret == nil {
 						t.Errorf("UpdatePodSpec() SSH volume should use Secret volume source")
 					} else {
-						if volume.VolumeSource.Secret.SecretName != tt.expectedSecretName {
-							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.VolumeSource.Secret.SecretName, tt.expectedSecretName)
+						if volume.VolumeSource.Secret.SecretName != mpiRunSecretName {
+							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.VolumeSource.Secret.SecretName, mpiRunSecretName)
 						}
-						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != tt.expectedDefaultMode {
-							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode %#o", tt.expectedDefaultMode)
+						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != 0644 {
+							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode 0644")
 						}
 					}
 					break
@@ -1054,6 +1015,42 @@ func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
+		})
+	}
+}
+
+func TestRepointMPISSHSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		uid     types.UID
+		origin  string
+		changed bool
+	}{
+		{name: "new graph", uid: "graph-uid", origin: "1.8.0", changed: true},
+		{name: "operator 1.7 graph", uid: "graph-uid", origin: "1.7.0"},
+		{name: "unversioned graph", uid: "graph-uid"},
+		{name: "standalone component", origin: "1.8.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Render plain, projected and unrelated Secret sources with authored items and modes")
+			pod := &corev1.PodSpec{Volumes: []corev1.Volume{
+				{Name: "plain", Secret: &corev1.SecretVolumeSource{SecretName: "shared", DefaultMode: new(int32(0644)), Items: []corev1.KeyToPath{{Key: "private.key", Path: "key", Mode: new(int32(0600))}}}},
+				{Name: "projected", Projected: &corev1.ProjectedVolumeSource{DefaultMode: new(int32(0440)), Sources: []corev1.VolumeProjection{
+					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "shared"}, Items: []corev1.KeyToPath{{Key: "private.key.pub", Path: "public"}}}},
+					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "custom"}}},
+				}}},
+				{Name: "custom", Secret: &corev1.SecretVolumeSource{SecretName: "custom"}},
+			}}
+			expected := pod.DeepCopy()
+			if tc.changed {
+				expected.Volumes[0].Secret.SecretName = "mpi-ssh-graph-uid"
+				expected.Volumes[1].Projected.Sources[0].Secret.Name = "mpi-ssh-graph-uid"
+			}
+
+			t.Log("Only an eligible graph changes shared names; authored fields stay intact")
+			changed := RepointMPISSHSecret(pod, tc.uid, map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tc.origin}, "shared")
+			require.Equal(t, tc.changed, changed)
+			require.Equal(t, expected, pod)
 		})
 	}
 }

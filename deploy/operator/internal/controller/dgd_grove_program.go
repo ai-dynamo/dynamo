@@ -91,6 +91,7 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		reader: r.Client,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
+			r.APIReader,
 			r.Recorder,
 			r.Config,
 			r.RuntimeConfig,

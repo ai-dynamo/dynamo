@@ -1395,9 +1395,8 @@ func BackendFactory(
 		}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
-			MpiRunSecretName:          operatorConfig.MPI.SSHSecretName,
-			ParentGraphDeploymentName: parentGraphDeploymentName,
-			roleLaunchOwnership:       roleLaunchOwnership,
+			MpiRunSecretName:    operatorConfig.MPI.SSHSecretName,
+			roleLaunchOwnership: roleLaunchOwnership,
 		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
@@ -2837,6 +2836,8 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, err
 			}
+			// Select the graph's key after rendering both authored and operator-injected volumes.
+			RepointMPISSHSecret(&clique.Spec.PodSpec, dynamoDeployment.UID, dynamoDeployment.Annotations, operatorConfig.MPI.SSHSecretName)
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}

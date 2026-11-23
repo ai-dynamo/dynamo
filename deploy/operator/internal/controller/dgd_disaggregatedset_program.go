@@ -47,6 +47,7 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggre
 	return &disaggregatedSetProgram{
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
+			r.APIReader,
 			r.Recorder,
 			r.Config,
 			r.RuntimeConfig,
