@@ -80,7 +80,8 @@ use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
     PreprocessedRequestBuilder, RoutingHints,
 };
-use crate::{protocols::common::timing::RequestTracker, tokenizers::Encoding};
+use crate::protocols::common::timing::RequestTracker;
+use crate::tokenizers::Encoding;
 use dynamo_http_server::metrics::RequestMetrics;
 
 use dynamo_parsers::{

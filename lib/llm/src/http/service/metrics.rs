@@ -11,18 +11,19 @@ use prometheus::{
     proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use serde::Serialize;
-use std::sync::{Arc, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{Arc, LazyLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use crate::discovery::ModelManager;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
-use crate::{
-    discovery::ModelManager, local_model::runtime_config::ModelRuntimeConfig,
-    model_card::ModelDeploymentCard,
-};
 
 use super::RouteDoc;
 use dynamo_http_server::metrics::{
@@ -899,7 +900,8 @@ mod tests {
 
     #[test]
     fn test_metrics_annotation_event_handling() {
-        use crate::{preprocessor::LLMMetricAnnotation, types::Annotated};
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
 
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -1309,7 +1311,8 @@ mod tests {
 
     #[test]
     fn test_non_streaming_path_observes_cached_tokens() {
-        use crate::{preprocessor::LLMMetricAnnotation, types::Annotated};
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
 
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();

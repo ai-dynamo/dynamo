@@ -48,10 +48,11 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_runtime::component::Component;
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, kv_publisher, labels, name_prefix, router, router_request, routing_overhead,
 };
-use dynamo_runtime::{component::Component, metrics::MetricsHierarchy};
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
 fn router_metric(suffix: &str) -> String {

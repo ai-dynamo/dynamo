@@ -26,10 +26,8 @@ use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
-    kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext,
-        plugins::RouterPluginBuilder, role_routing,
-    },
+    kv_router::plugins::RouterPluginBuilder,
+    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, role_routing},
     local_model::runtime_config::{
         DISAGG_PREFILL_CANCEL_ANYTIME_V1, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,

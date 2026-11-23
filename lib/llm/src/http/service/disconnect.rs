@@ -641,10 +641,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_http_server::metrics::Endpoint;
-    use dynamo_http_server::metrics::ErrorType;
-    use dynamo_http_server::metrics::RequestType;
-    use dynamo_http_server::metrics::Status;
+    use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
     use dynamo_runtime::pipeline::context::Controller;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};

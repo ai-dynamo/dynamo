@@ -23,9 +23,10 @@ use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::metrics::process_response_and_observe_metrics;
-use dynamo_http_server::disconnect::create_connection_monitor;
-use dynamo_http_server::metrics::CancellationLabels;
-use dynamo_http_server::metrics::Endpoint;
+use dynamo_http_server::{
+    disconnect::create_connection_monitor,
+    metrics::{CancellationLabels, Endpoint},
+};
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::{Status, metadata::MetadataMap};

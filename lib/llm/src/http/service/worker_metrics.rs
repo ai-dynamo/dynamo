@@ -14,9 +14,10 @@ use prometheus::{
 use crate::discovery::ModelManager;
 use crate::discovery::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
-use dynamo_http_server::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE;
-use dynamo_http_server::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE;
-use dynamo_http_server::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE;
+use dynamo_http_server::metrics::{
+    WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
+    WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+};
 
 const GROUP_LABELS: &[&str] = &[
     "model",

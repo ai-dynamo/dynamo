@@ -66,8 +66,7 @@ use super::error::{
     Protocol, anthropic_context_length_message, invalid_argument, public_message_for,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
-use super::openai::get_or_create_request_id;
-use super::openai::warn_nvext_disabled;
+use super::openai::{get_or_create_request_id, warn_nvext_disabled};
 use dynamo_error::http::{
     ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
 };

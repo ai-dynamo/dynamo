@@ -3787,7 +3787,8 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
 
             assert_eq!(
                 parse_sse_keep_alive(Err(std::env::VarError::NotUnicode(OsString::from_vec(
