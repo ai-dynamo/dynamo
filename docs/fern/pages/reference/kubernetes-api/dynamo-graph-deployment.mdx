@@ -63,6 +63,8 @@ The operator sets these values after authored labels, so authored values cannot 
 
 Component/DCD, Grove, and LPX reconciliation uses server-side apply for rendered fields, including authored labels and annotations. Omitting a field that only the operator owns removes it from the child; fields outside rendered intent that independent actors own are preserved. On upgrade, the operator migrates its previous Update ownership while preserving lifecycle metadata values. It relinquishes ambiguous legacy ownership of finalizers and owner references, then applies only its own parent reference. It does not claim another controller's lifecycle fields, so that controller can remove them independently.
 
+During a DisaggregatedSet target handoff, the Service retains its current identity labels, including absent labels, while it retains the current selector. Once the target is ready, its selector and identity labels change together. Unrelated authored metadata continues to converge while the target is pending.
+
 These labels let consumers identify a component's Service without reading intermediate workload resources or following controller-reference chains. They identify the logical component across worker revisions, rather than a particular rollout revision. The auxiliary elastic-EP leader Service carries the same identity. Model Services shared by multiple components or graphs do not represent one component and are outside this contract.
 
 ## Grove update strategy

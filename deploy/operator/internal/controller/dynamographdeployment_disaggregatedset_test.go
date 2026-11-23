@@ -314,7 +314,7 @@ func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
 			service := &corev1.Service{}
 			existing := &corev1.Service{Spec: corev1.ServiceSpec{Selector: maps.Clone(tt.existing)}}
 
-			setDesiredDisaggregatedSetServiceSelector(
+			setDesiredDisaggregatedSetServiceTarget(
 				service,
 				existing,
 				tt.hasExisting,
@@ -326,6 +326,152 @@ func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
 			)
 
 			require.Equal(t, tt.want, service.Spec.Selector)
+		})
+	}
+}
+
+func TestDisaggregatedSetServiceIdentityFollowsSelectorCutover(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		selector            map[string]string
+		currentIdentity     map[string]string
+		wantDesiredIdentity bool
+	}{
+		{
+			name:     "DCD handoff",
+			selector: map[string]string{consts.KubeLabelDynamoSelector: "current-dcd"},
+			currentIdentity: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "graph",
+				consts.KubeLabelDynamoComponent:           "prefill",
+				consts.KubeLabelDynamoComponentType:       consts.ComponentTypePrefill,
+				consts.KubeLabelDynamoNamespace:           "current-base-namespace",
+			},
+		},
+		{
+			name: "DS revision handoff",
+			selector: map[string]string{
+				disaggregatedsetv1.SetNameLabelKey:  "graph",
+				disaggregatedsetv1.RoleLabelKey:     "prefill",
+				disaggregatedsetv1.RevisionLabelKey: "current-revision",
+				dcdWorkloadRoleLabel:                string(dynamo.RoleLeader),
+			},
+			currentIdentity: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "graph",
+				consts.KubeLabelDynamoComponent:           "prefill",
+				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+				consts.KubeLabelDynamoNamespace:           "current-base-namespace",
+			},
+		},
+		{
+			name:     "missing current identity",
+			selector: map[string]string{consts.KubeLabelDynamoSelector: "current-dcd"},
+		},
+		{
+			name: "pending current revision backfills identity",
+			selector: map[string]string{
+				disaggregatedsetv1.SetNameLabelKey:  "graph",
+				disaggregatedsetv1.RoleLabelKey:     "prefill",
+				disaggregatedsetv1.RevisionLabelKey: "target-revision",
+				dcdWorkloadRoleLabel:                string(dynamo.RoleLeader),
+			},
+			wantDesiredIdentity: true,
+		},
+		{
+			name: "pending current revision repairs identity",
+			selector: map[string]string{
+				disaggregatedsetv1.SetNameLabelKey:  "graph",
+				disaggregatedsetv1.RoleLabelKey:     "prefill",
+				disaggregatedsetv1.RevisionLabelKey: "target-revision",
+				dcdWorkloadRoleLabel:                string(dynamo.RoleLeader),
+			},
+			currentIdentity: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "wrong-graph",
+				consts.KubeLabelDynamoComponent:           "wrong-component",
+				consts.KubeLabelDynamoComponentType:       consts.ComponentTypePrefill,
+				consts.KubeLabelDynamoNamespace:           "wrong-base-namespace",
+			},
+			wantDesiredIdentity: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Build a desired DS leader with a different identity from the active Service")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				Name: "graph", Namespace: disaggregatedSetUnitTestNamespace, UID: "graph-uid",
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Labels: map[string]string{"example.com/managed": "after"},
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "prefill", ComponentType: nvidiacomv1beta1.ComponentTypePrefill,
+						Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+						Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+							{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{
+								Labels: map[string]string{consts.KubeLabelDynamoComponentType: consts.ComponentTypeDecode},
+							}},
+							{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{}},
+						},
+					}},
+				},
+			}
+			component := &dgd.Spec.Components[0]
+			selection := disaggregatedset.Selection{ComponentToRole: map[string]string{"prefill": "prefill"}}
+			rollingUpdateCtx := dynamo.RollingUpdateContext{NewWorkerHash: "generation"}
+			scheme := runtime.NewScheme()
+			require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd).Build()
+			renderer := newDCDWorkloadRenderer(kubeClient,
+				&configv1alpha1.OperatorConfiguration{Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes}},
+				&commoncontroller.RuntimeConfig{Gate: features.Gates{}}, nil,
+			)
+			reconciler := newDisaggregatedSetStableResourcesReconciler(kubeClient, renderer)
+			current := &corev1.Service{
+				Name: dynamo.GetDCDResourceName(dgd, "prefill", rollingUpdateCtx.NewWorkerHash), Namespace: dgd.Namespace,
+				Labels: map[string]string{"example.com/managed": "before"},
+				Spec:   corev1.ServiceSpec{Selector: maps.Clone(tc.selector)},
+			}
+			maps.Copy(current.Labels, tc.currentIdentity)
+			require.NoError(t, reconciler.syncDGDStableService(t.Context(), dgd, current))
+			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(current), current))
+			current.Labels["example.com/external"] = "keep"
+			require.NoError(t, kubeClient.Update(t.Context(), current))
+
+			t.Log("Keep identity aligned with the selected revision while the target is pending")
+			_, err := reconciler.Reconcile(t.Context(), dgd, nil, dynamo.ComponentsByName(dgd), selection, "target-revision", false, rollingUpdateCtx)
+			require.NoError(t, err)
+			stored := &corev1.Service{}
+			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(current), stored))
+			require.Equal(t, tc.selector, stored.Spec.Selector)
+			pendingLabels := map[string]string{
+				"example.com/managed":                  "after",
+				"example.com/external":                 "keep",
+				consts.KubeLabelDynamoDiscoveryBackend: consts.DiscoveryBackendKubernetes,
+				consts.KubeLabelDynamoDiscoveryEnabled: consts.KubeLabelValueTrue,
+			}
+			maps.Copy(pendingLabels, tc.currentIdentity)
+			if tc.wantDesiredIdentity {
+				pendingLabels[consts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
+				pendingLabels[consts.KubeLabelDynamoComponent] = component.ComponentName
+				pendingLabels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeDecode
+				pendingLabels[consts.KubeLabelDynamoNamespace] = dynamo.GetDynamoNamespace(dgd, component)
+			}
+			require.Equal(t, pendingLabels, stored.Labels)
+
+			t.Log("Publish the desired identity in the same update that switches to the ready DS revision")
+			_, err = reconciler.Reconcile(t.Context(), dgd, nil, dynamo.ComponentsByName(dgd), selection, "target-revision", true, rollingUpdateCtx)
+			require.NoError(t, err)
+			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(current), stored))
+			require.Equal(t, map[string]string{
+				disaggregatedsetv1.SetNameLabelKey:  disaggregatedset.Name(dgd),
+				disaggregatedsetv1.RoleLabelKey:     "prefill",
+				disaggregatedsetv1.RevisionLabelKey: "target-revision",
+				dcdWorkloadRoleLabel:                string(dynamo.RoleLeader),
+			}, stored.Spec.Selector)
+			require.Equal(t, consts.ComponentTypeDecode, stored.Labels[consts.KubeLabelDynamoComponentType])
+			require.Equal(t, dynamo.GetDynamoNamespace(dgd, component), stored.Labels[consts.KubeLabelDynamoNamespace])
+			require.Equal(t, dgd.Name, stored.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+			require.Equal(t, component.ComponentName, stored.Labels[consts.KubeLabelDynamoComponent])
+			require.Equal(t, "after", stored.Labels["example.com/managed"])
+			require.Equal(t, "keep", stored.Labels["example.com/external"])
 		})
 	}
 }
