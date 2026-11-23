@@ -19,7 +19,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"time"
@@ -28,7 +27,6 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,7 +129,6 @@ func (p *groveProgram) Reconcile(
 		IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 	}
 	programResult = newWorkloadProgramResult(req.DGD)
-	previousComponents := maps.Clone(programResult.Status.Components)
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -197,9 +194,8 @@ func (p *groveProgram) Reconcile(
 	)
 
 	result := groveResult.ReconcileResult
-	identityPending := errors.Is(err, serviceidentity.ErrCacheObservationPending)
 
-	if err != nil && !identityPending {
+	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
 		if programResult.Status.Components == nil {
 			programResult.Status.Components = result.ComponentStatus
@@ -209,7 +205,7 @@ func (p *groveProgram) Reconcile(
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 
-	// Publish scaling only after it was observed, including a later metadata cache wait.
+	// Publish scaling deferral without discarding observed component status or readiness.
 	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
 	if groveResult.ScalingDeferred {
 		condition.Status = metav1.ConditionTrue
@@ -221,16 +217,6 @@ func (p *groveProgram) Reconcile(
 	}
 	if groveResult.ScalingDeferred || meta.FindStatusCondition(programResult.Status.Conditions, "ScalingDeferred") != nil {
 		meta.SetStatusCondition(&programResult.Status.Conditions, condition)
-	}
-
-	// Identity waits precede workload observation, so retain the last observed facts.
-	if identityPending {
-		programResult.Status.Components = previousComponents
-		programResult.Status.State = nvidiacomv1beta1.DGDStatePending
-		meta.SetStatusCondition(&programResult.Status.Conditions, readyCondition(req.DGD.Generation, programResult.Status, ReconcileResult{
-			State: nvidiacomv1beta1.DGDStatePending, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation",
-		}))
-		return programResult, nil
 	}
 
 	if req.DGD.HasLPXComponent() && restartChanged {

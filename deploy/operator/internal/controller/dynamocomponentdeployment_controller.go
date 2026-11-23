@@ -44,7 +44,6 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -226,16 +225,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			dynamoComponentDeployment: dynamoComponentDeployment,
 		})
 		if err != nil {
-			if stderrors.Is(err, serviceidentity.ErrCacheObservationPending) {
-				_, err = r.setStatusConditions(ctx, req,
-					metav1.Condition{Type: nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable, Status: metav1.ConditionUnknown,
-						ObservedGeneration: dynamoComponentDeployment.Generation, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation"},
-					metav1.Condition{Type: nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeDynamoComponentReady, Status: metav1.ConditionUnknown,
-						ObservedGeneration: dynamoComponentDeployment.Generation, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation"},
-				)
-				return ctrl.Result{}, err
-			}
-
 			return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
 		}
 
@@ -824,20 +813,15 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 		return false, err
 	}
 
-	// Retain the desired metadata across the spec-only resource synchronization.
-	modified, observed, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
-		return desired, toDelete, nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if observed == nil || toDelete {
-		return modified, nil
+	if toDelete {
+		modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
+			return desired, true, nil
+		})
+		return modified, err
 	}
 
-	// Identity labels must converge independently of Service spec changes.
-	identityChanged, err := serviceidentity.Apply(ctx, r, desired, observed)
-	return modified || identityChanged, err
+	modified, _, err := commonController.SyncService(ctx, r.Client, opt.dynamoComponentDeployment, desired)
+	return modified, err
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {

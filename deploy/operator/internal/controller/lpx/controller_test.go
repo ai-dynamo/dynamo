@@ -1140,11 +1140,14 @@ func TestLPXServiceReconciliation(t *testing.T) {
 		require.Equal(t, expected.Spec, service.Spec)
 		require.Equal(t, expected.OwnerReferences, service.OwnerReferences)
 
-		t.Log("Reconcile the unchanged endpoint without another write")
-		version := service.ResourceVersion
+		t.Log("Reapply the unchanged endpoint while preserving its fields")
+		before := service.DeepCopy()
 		require.NoError(t, r.reconcileRuntimeResources(t.Context(), child, resources))
 		require.NoError(t, r.Get(t.Context(), key, service))
-		require.Equal(t, version, service.ResourceVersion)
+		require.Equal(t, before.Spec, service.Spec)
+		require.Equal(t, before.Labels, service.Labels)
+		require.Equal(t, before.Annotations, service.Annotations)
+		require.Equal(t, before.OwnerReferences, service.OwnerReferences)
 	}
 
 	t.Log("Service reconciliation leaves the ordinary DGD model Service unchanged")
@@ -3202,6 +3205,15 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 			for _, list := range before {
 				current := list.DeepCopyObject().(client.ObjectList)
 				require.NoError(t, r.List(ctx, current))
+
+				// The fake client increments Service resource versions even for unchanged Apply.
+				if services, ok := current.(*corev1.ServiceList); ok {
+					previous := list.(*corev1.ServiceList)
+					require.Len(t, services.Items, len(previous.Items))
+					for i := range services.Items {
+						services.Items[i].ResourceVersion = previous.Items[i].ResourceVersion
+					}
+				}
 				require.Equal(t, list, current)
 			}
 

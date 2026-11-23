@@ -448,6 +448,7 @@ metadata:
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: "workers"
     nvidia.com/dynamo-namespace: "upgrade-1-4-0-sglang-1-5-custom-workers"
+    nvidia.com/dynamo-worker-hash: "86105660"
   name: workers-sglangdecode
   namespace: upgrade-1-4-0-sglang-1-5-custom
   ownerReferences:
@@ -495,6 +496,7 @@ metadata:
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: "workers"
     nvidia.com/dynamo-namespace: "upgrade-1-4-0-sglang-1-5-custom-workers"
+    nvidia.com/dynamo-worker-hash: "86105660"
   name: workers-sglangprefill
   namespace: upgrade-1-4-0-sglang-1-5-custom
   ownerReferences:

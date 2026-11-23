@@ -21,12 +21,12 @@ import (
 	"context"
 	"testing"
 
-	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
 	grove "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/grove"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -139,7 +139,7 @@ func TestIsSinglePodElasticEPLeader(t *testing.T) {
 			component := tt.component()
 			container := dynamo.GetMainContainer(&component)
 			elasticRayLaunch := container != nil && dynamo.IsElasticEPRayLaunch(container)
-			got := grove.RenderElasticEPLeaderService(&component, componentdeployment.ServiceParams{}, elasticRayLaunch) != nil
+			got := grove.RenderElasticEPLeaderService(&component, shared.ServiceParams{}, elasticRayLaunch) != nil
 
 			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
 			if got != tt.want {

@@ -1060,8 +1060,6 @@ func TestGroveServiceRenderingCharacterization(t *testing.T) {
 		consts.KubeLabelDynamoComponentType:       consts.ComponentTypeFrontend,
 		consts.KubeLabelDynamoNamespace:           dynamoNamespace,
 	}, service.Labels)
-	require.Equal(t, "1", service.Annotations[commoncontroller.NvidiaAnnotationGenerationKey])
-	require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
 	require.Len(t, service.OwnerReferences, 1)
 	require.Equal(t, dgd.UID, service.OwnerReferences[0].UID)
 }

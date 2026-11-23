@@ -141,7 +141,7 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 		return !present, "waiting for the cache to observe the filtered-out label edit"
 	}, 10*time.Second, 100*time.Millisecond, "cache did not observe the Service edit")
 	require.NoError(t, env.Client().Get(ctx, serviceKey, service))
-	service.Annotations["example.com/identity-retry"] = "wake"
+	service.Annotations = map[string]string{"example.com/identity-retry": "wake"}
 	require.NoError(t, env.Client().Update(ctx, service))
 	dynamotesting.Eventually(t, func() (bool, string) {
 		observed := &corev1.Service{}

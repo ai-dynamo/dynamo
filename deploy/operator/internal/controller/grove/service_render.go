@@ -6,13 +6,11 @@ package grove
 import (
 	"fmt"
 	"hash/fnv"
-	"maps"
 	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/shared"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -53,52 +51,31 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 //
 // It returns nil unless the component is a single-pod elastic-EP Ray leader.
 // component must be non-nil. Inputs are not modified; elasticRayLaunch is the resolved launch mode.
-func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSharedSpec, params componentdeployment.ServiceParams, elasticRayLaunch bool) *corev1.Service {
+func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSharedSpec, params shared.ServiceParams, elasticRayLaunch bool) *corev1.Service {
 	if !elasticRayLaunch || component.GetNumberOfNodes() > 1 || (component.Replicas != nil && *component.Replicas != 1) {
 		return nil
 	}
 
-	// Copy the caller's metadata so the Service carries the component's labels and
-	// annotations without aliasing the caller's maps.
-	labels := serviceidentity.Labels(params.Labels, params.DGDName, params.ComponentName, params.ComponentType, params.DynamoNamespace)
-
-	annotations := make(map[string]string)
-	maps.Copy(annotations, params.Annotations)
-
-	// Select the elastic-EP component itself; the caller's single-pod gate is what makes
-	// this resolve to the one leader pod.
-	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
-		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
-	}
-
-	return &corev1.Service{
-		Name:        ElasticEPLeaderServiceName(params.ServiceName),
-		Namespace:   params.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-		Spec: corev1.ServiceSpec{
-			ClusterIP:                corev1.ClusterIPNone,
-			PublishNotReadyAddresses: true,
-			Selector:                 selector,
-			Ports: []corev1.ServicePort{
-				{
-					// Ray GCS head port (VLLMPort). Followers connect their raylet
-					// here via `ray start --address=<svc>:6379`.
-					Name:       "ray-gcs",
-					Port:       6379,
-					TargetPort: intstr.FromInt(6379),
-					Protocol:   corev1.ProtocolTCP,
-				},
-				{
-					// Leader system/health port; the follower's /live gate polls it.
-					Name:       commonconsts.DynamoSystemPortName,
-					Port:       commonconsts.DynamoSystemPort,
-					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+	service := shared.RenderService(params)
+	service.Name = ElasticEPLeaderServiceName(params.ServiceName)
+	service.Spec.ClusterIP = corev1.ClusterIPNone
+	service.Spec.PublishNotReadyAddresses = true
+	service.Spec.Ports = []corev1.ServicePort{
+		{
+			// Ray GCS head port (VLLMPort). Followers connect their raylet
+			// here via `ray start --address=<svc>:6379`.
+			Name:       "ray-gcs",
+			Port:       6379,
+			TargetPort: intstr.FromInt(6379),
+			Protocol:   corev1.ProtocolTCP,
+		},
+		{
+			// Leader system/health port; the follower's /live gate polls it.
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
 		},
 	}
+	return service
 }

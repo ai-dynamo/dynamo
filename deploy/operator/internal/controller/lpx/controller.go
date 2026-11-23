@@ -19,7 +19,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -321,15 +320,6 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Synchronize configuration before any scale-up, scale-down, or request retirement.
 	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
-		if errors.Is(err, serviceidentity.ErrCacheObservationPending) {
-			// Keep a current scheduler failure observed above while identity catches up.
-			ready := meta.FindStatusCondition(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
-			if pcs == nil || ready == nil || ready.ObservedGeneration != deployment.Generation || ready.Reason != v1alpha1.LPXReadyReasonFailed {
-				setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the runtime resource cache observation")
-			}
-			return ctrl.Result{}, nil
-		}
-
 		return ctrl.Result{}, err
 	}
 
@@ -560,18 +550,18 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 // reconcileRuntimeResources synchronizes additional resources for the LPX deployment.
 func (r *graphReconciler) reconcileRuntimeResources(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
 	for _, resource := range resources {
-		_, observed, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
+		if service, ok := resource.(*corev1.Service); ok {
+			if _, _, err := commoncontroller.SyncService(ctx, r.Client, deployment, service); err != nil {
+				return err
+			}
+			continue
+		}
+
+		_, _, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
 			return resource, false, nil
 		})
 		if err != nil {
 			return err
-		}
-
-		// Service metadata is public identity, independent of LPX resource ownership.
-		if desiredService, ok := resource.(*corev1.Service); ok && observed != nil {
-			if _, err := serviceidentity.Apply(ctx, r, desiredService, observed.(*corev1.Service)); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

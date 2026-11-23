@@ -12,10 +12,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -43,7 +41,10 @@ func TestServiceIdentityBackfillPreservesServiceContract(t *testing.T) {
 
 	t.Log("Simulate an existing pre-upgrade Service with external metadata and no identity labels")
 	service.Labels = map[string]string{"example.com/team": "external"}
-	service.Annotations["example.com/note"] = "external"
+	service.Annotations = map[string]string{
+		"example.com/note":                       "external",
+		commoncontroller.NvidiaAnnotationHashKey: "existing-service-bookkeeping",
+	}
 	require.NoError(t, kubeClient.Update(ctx, service, client.FieldOwner("external-service-manager")))
 	_, err = r.reconcileComponentService(ctx, dgd, component, nil, true)
 	require.NoError(t, err)
@@ -51,7 +52,7 @@ func TestServiceIdentityBackfillPreservesServiceContract(t *testing.T) {
 	require.Equal(t, original.UID, service.UID)
 	require.Equal(t, original.Spec, service.Spec)
 	require.Equal(t, original.OwnerReferences, service.OwnerReferences)
-	require.Equal(t, original.Annotations[commoncontroller.NvidiaAnnotationHashKey], service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
+	require.Equal(t, "existing-service-bookkeeping", service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
 	require.Equal(t, "external", service.Labels["example.com/team"])
 	require.Equal(t, "external", service.Annotations["example.com/note"])
 	require.Equal(t, dgd.Name, service.Labels[consts.KubeLabelDynamoGraphDeploymentName])
@@ -71,24 +72,4 @@ func TestServiceIdentityBackfillPreservesServiceContract(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, kubeClient.Get(ctx, key, service))
 	require.Equal(t, version, service.ResourceVersion)
-
-	t.Log("A stale observation cannot overwrite a concurrently changed Service")
-	desired := service.DeepCopy()
-	desired.Labels[consts.KubeLabelDynamoComponent] = "stale-write"
-	stale := service.DeepCopy()
-	service.Annotations["example.com/note"] = "concurrent edit"
-	require.NoError(t, kubeClient.Update(ctx, service))
-	changed, err := serviceidentity.Apply(ctx, kubeClient, desired, stale)
-	require.Error(t, err)
-	require.True(t, apierrors.IsConflict(err), "expected resourceVersion conflict, got %v", err)
-	require.False(t, changed)
-	require.NoError(t, kubeClient.Get(ctx, key, service))
-	require.Equal(t, component.ComponentName, service.Labels[consts.KubeLabelDynamoComponent])
-	require.Equal(t, "concurrent edit", service.Annotations["example.com/note"])
-
-	t.Log("A deleted Service is not recreated by the metadata-only apply")
-	require.NoError(t, kubeClient.Delete(ctx, service))
-	_, err = serviceidentity.Apply(ctx, kubeClient, desired, stale)
-	require.Error(t, err)
-	require.True(t, apierrors.IsNotFound(kubeClient.Get(ctx, key, &corev1.Service{})))
 }
