@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional
 
+from dynamo.common.ais_perf_model import ROUTER_WORKER_TYPE_ENV
 from dynamo.common.configuration.groups.kv_router_args import (
     _KV_ROUTER_FIELDS,
     KvRouterConfigBase,
@@ -65,6 +66,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterConfigBase,
     add_worker_router_arguments,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import ArgEnv
 from dynamo.frontend.frontend_args import build_frontend_parser
@@ -182,6 +184,9 @@ _TRANSPORT_ROUTER_ENV = frozenset(
         "DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB",
     }
 )
+# Router env that only chooses the entry of an AIS perf model. It cannot change
+# a result here: live retune already requires the load model 'none'.
+_IGNORED_ROUTER_ENV = frozenset({ROUTER_WORKER_TYPE_ENV})
 # The deprecated overlap_score_weight: KvRouterArgGroup reads the first name
 # when it is set and the second otherwise.
 _OVERLAP_WEIGHT_ENV = ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT")
@@ -418,7 +423,7 @@ def evaluate_premises(
         p4.extend(analysis.p4_violations)
         p4.extend(_startup_errors(startup, retune, mode))
     # A worker's advertised router configuration replaces the frontend's for
-    # its worker set (watcher.rs effective_router_config), whatever the
+    # its worker set (role_routing.rs serving_set_routing), whatever the
     # frontend's flags say.
     p4.extend(_worker_router_errors(dgd, components, warnings))
 
@@ -669,7 +674,9 @@ def _parse(
         if name in registered:
             return registered[name] in _RELEVANT_DESTS
         return name in _OVERLAP_WEIGHT_ENV or (
-            name.startswith(_ROUTER_ENV_PREFIX) and name not in _TRANSPORT_ROUTER_ENV
+            name.startswith(_ROUTER_ENV_PREFIX)
+            and name not in _TRANSPORT_ROUTER_ENV
+            and name not in _IGNORED_ROUTER_ENV
         )
 
     # Router env the planner cannot read makes the startup unknowable.
@@ -711,7 +718,9 @@ def _parse(
         )
 
     view = _RouterView.from_cli_args(namespace)
-    # FrontendConfig.validate: the load-aware preset implies KV routing.
+    # FrontendConfig.validate: an omitted --router-mode is round-robin, and the
+    # load-aware preset implies KV routing.
+    view.router_mode = resolve_router_mode(view.router_mode, None)
     if view.load_aware:
         view.router_mode = "kv"
     if view.router_policy_config is not None:
@@ -773,6 +782,7 @@ def _parse(
             not name.startswith(_ROUTER_ENV_PREFIX)
             or name in registered
             or name in _TRANSPORT_ROUTER_ENV
+            or name in _IGNORED_ROUTER_ENV
         ):
             continue
         if name == ENV_WORKER_SELECTION_POLICY:

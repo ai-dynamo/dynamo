@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_admission::host::{
-    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement,
+    BlockReason, LaneCheck, LaneKey, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueLane,
+    QueueMetadata, QueueSnapshot, RecheckScope,
 };
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
 use dynamo_kv_hashing::LocalBlockHash;
@@ -1146,16 +1147,6 @@ impl OfflineReplayRouter {
 
         if should_queue {
             let snapshot = self.snapshot_for(&mut pending);
-            let placement = pending
-                .affinity_hold
-                .as_ref()
-                .and_then(Hold::target)
-                .and_then(|target| {
-                    target
-                        .dp_rank
-                        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
-                })
-                .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
             let metadata = QueueMetadata {
                 class_index,
                 snapshot,
@@ -1165,9 +1156,26 @@ impl OfflineReplayRouter {
                 // from scheduler ingress, after any affinity wait.
                 class_due_at: class.slo_ttft_due_at(decay_now),
                 arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+                lane_key: None,
             };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
+            // As in the live router, a session's requests wait in their own lane, so a
+            // session bound to a busy rank holds only itself; a sessionless request bound to a
+            // rank by its affinity hold waits in that rank's lane.
+            let lane = match pending.session_id.as_deref() {
+                Some(session) => QueueLane::Keyed(LaneKey::new(session)),
+                None => pending
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .and_then(|target| {
+                        target
+                            .dp_rank
+                            .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
+                    })
+                    .map_or(QueueLane::Shared, QueueLane::Exact),
+            };
             self.pending
                 .enqueue_with_due_at(
                     metadata,
@@ -1176,7 +1184,7 @@ impl OfflineReplayRouter {
                         .saturating_mul(self.dp_size as usize),
                     priority_jump,
                     strict_priority,
-                    placement,
+                    lane,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
@@ -1654,17 +1662,42 @@ impl OfflineReplayRouter {
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         self.needs_drain = false;
         let mut admissions = Vec::new();
-        self.pending.recheck_all_workers();
+        // Replay has no dispatch gate: capacity is the only reason a lane blocks.
+        self.pending.recheck_blocked_lanes(RecheckScope::Capacity);
+        let mut class_room: Vec<Option<bool>> = vec![None; self.pending.class_count()];
         loop {
             // Most completions find an empty queue, which never consults the
             // predicate, so only snapshot worker loads once one is needed.
             let mut worker_loads = None;
             let slots = &self.slots;
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, request| {
+            // Every head without an affinity target asks the same question of the same loads,
+            // so each class answers it once per pass rather than once per session lane.
+            class_room.fill(None);
+            let Some(popped) = self.pending.pop_next(|class_index, class, request| {
+                let unconstrained = request
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .is_none();
+                let shared = |room: bool| {
+                    if room {
+                        LaneCheck::Dispatch
+                    } else {
+                        LaneCheck::Blocked(BlockReason::SharedCapacity)
+                    }
+                };
+                if unconstrained && let Some(room) = class_room[class_index] {
+                    return shared(room);
+                }
                 let worker_loads =
                     worker_loads.get_or_insert_with(|| slots.project_worker_loads(None, decay_now));
-                !Self::request_workers_busy(worker_loads, workers, class, request)
+                let room = !Self::request_workers_busy(worker_loads, workers, class, request);
+                if unconstrained {
+                    class_room[class_index] = Some(room);
+                    return shared(room);
+                }
+                LaneCheck::from(room)
             }) else {
                 break;
             };

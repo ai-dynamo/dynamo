@@ -26,16 +26,16 @@ mod queue;
 
 pub use classifier::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyFuture, ClassifyRequest, RequestClassifier, RequestClassifierContext,
-    RequestClassifierRuntime, RequestLifecycle, RequestProgress, RequestProgressUpdater,
-    WorkerCacheView, WorkerLoadView, WorkerView,
+    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
+    RequestProgress, RequestProgressUpdater, WorkerCacheView, WorkerLoadView, WorkerView,
 };
-pub use placement::WorkerPlacement;
+pub use placement::LaneKey;
 pub use profile::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,
 };
 pub use queue::{
-    DispatchCharge, PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLane, QueueLimitKind,
-    QueueMetadata, QueueReadiness, QueueRejection, QueueSnapshot,
+    BlockReason, DispatchCharge, LaneCheck, PolicyQueue, PolicyQueueEntry, PolicyQueueStats,
+    QueueLane, QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot, RecheckScope,
 };

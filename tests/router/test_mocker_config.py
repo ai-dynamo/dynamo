@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 import pytest
 
 from tests.router.mocker_config import MockerConfig
@@ -28,6 +30,26 @@ def test_mocker_config_renders_scalar_and_boolean_flags() -> None:
         "16",
         "--no-enable-prefix-caching",
         "--ais-perf-model",
+    ]
+
+
+@pytest.mark.parametrize(
+    "value, rendered",
+    [
+        (
+            {"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"},
+            '{"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"}',
+        ),
+        ("perf-model.yaml", "perf-model.yaml"),
+        (Path("configs/perf-model.yaml"), "configs/perf-model.yaml"),
+    ],
+    ids=["mapping", "text", "path"],
+)
+def test_mocker_config_renders_ais_perf_model_value(value, rendered: str) -> None:
+    # A config is written as inline JSON, a file path as it is.
+    assert MockerConfig(ais_perf_model=value).to_cli_args() == [
+        "--ais-perf-model",
+        rendered,
     ]
 
 

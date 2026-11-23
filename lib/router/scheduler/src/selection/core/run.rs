@@ -167,10 +167,11 @@ impl SelectionCore {
                 )));
             }
         };
-        // Wire admissions never book without an endpoint; see `Selected::endpoint`.
+        // Only `Lease` omits the endpoint; wire paths run Query, Advisory, or Book.
+        // See `Selected::endpoint`.
         let endpoint = selected.endpoint.take().ok_or_else(|| {
             SelectionError::Internal(format!(
-                "selected worker {} is no longer schedulable",
+                "selected worker {} carries no endpoint; only Lease selections omit it",
                 selected.response.best_worker.worker_id
             ))
         })?;
@@ -801,9 +802,12 @@ impl SelectionCore {
             };
             (tiered, started.elapsed())
         };
+        // Shared-cache lookups hash tokens alone, but an adapter's KV differs from
+        // the base model's, and SGLang keys adapter pages apart from base pages.
         let shared_cache = (allow_cache_credit && query_shared_cache)
             .then_some(self.host.cache.shared.as_deref())
             .flatten()
+            .filter(|_| prompt.lora_name.is_none_or(str::is_empty))
             .zip(prompt.token_ids);
         // `(hits, duration, failed)`; all `None`/`false` without a shared cache.
         let shared_cache_lookup = async {
