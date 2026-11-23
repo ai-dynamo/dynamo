@@ -191,7 +191,7 @@ def assert_dgd_outputs(
             worker_config = input_config["engine"]["workers"][
                 "aggregated" if role == "agg" else role
             ]
-            block_size = worker_config["kv_cache"].get("block_size")
+            block_size = worker_config.get("kv_cache", {}).get("block_size")
             assert config.get(f"{role}_block_size") == block_size
             args = container["args"]
             for flag, expected in {
