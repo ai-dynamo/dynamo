@@ -29,10 +29,6 @@ pub use registry::{
     RequestClassifierProviderError, RequestClassifierRegistryError,
 };
 
-// What both kinds share, so that this module is the one import a plugin needs.
-pub use super::{
-    BusyThresholds, DpRank, RequestInfo, RouterPluginRegistry, RouterPluginRegistryError,
-    RoutingPartitionId, RoutingPartitionRef, SessionContext, WorkerCacheInput, WorkerCandidate,
-    WorkerCandidates, WorkerCapacity, WorkerCopyInput, WorkerId, WorkerInfo, WorkerInputs,
-    WorkerLoadInput, WorkerSelectionInputTrigger, WorkerType, WorkerWithDpRank,
-};
+// What both kinds share, so that this module is the one import a plugin needs. The names are
+// listed once, in `plugins::shared`.
+pub use super::shared::*;
