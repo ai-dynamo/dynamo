@@ -289,8 +289,10 @@ spec:
       value: "grpc"
 ```
 
-`OTEL_EXPORT_ENABLED` is the master switch for distributed traces and exported logs. For
-HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL` to `http/protobuf`. Use signal-specific endpoints
+`OTEL_EXPORT_ENABLED` turns on export of distributed traces and logs. To export only one of them,
+set `OTEL_TRACES_EXPORTER` or `OTEL_LOGS_EXPORTER`; see
+[Environment Variables](../../reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs).
+For HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL` to `http/protobuf`. Use signal-specific endpoints
 only when traces and logs use different collectors.
 
 </Step>
@@ -561,7 +563,10 @@ families until the first relevant request or transfer occurs.
 
 ### Traces or Exported Logs Do Not Appear
 
-- Confirm `OTEL_EXPORT_ENABLED=true` is applied to every participating component.
+- Confirm `OTEL_EXPORT_ENABLED=true` is applied to every participating component, and that
+  `OTEL_TRACES_EXPORTER` or `OTEL_LOGS_EXPORTER` is not set to `none` for the missing signal.
+- Check the component's startup output for a `WARNING: OTLP trace export` or `WARNING: OTLP log export`
+  line, which means the exporter could not use the configured endpoint.
 - Confirm the collector service name, namespace, port, and protocol match the DGD configuration.
 - Confirm the collector can route the signal to the selected backend.
 - For exported logs, enable structured JSONL output and confirm that the log endpoint is configured;

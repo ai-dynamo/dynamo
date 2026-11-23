@@ -368,7 +368,7 @@ For response fields, status codes, custom paths, active-check defaults, and endp
 
 - **Prometheus target is down:** Open `http://localhost:9090/targets`, confirm the process uses the
   configured port, and confirm it is reachable through `host.docker.internal`.
-- **Tempo or Loki is empty:** Set `OTEL_EXPORT_ENABLED=true` on every process. For gRPC, use the Collector endpoint `http://localhost:4317`. For HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` and use the Collector HTTP endpoint. Logs do not fall back to the traces-only endpoint.
+- **Tempo or Loki is empty:** Set `OTEL_EXPORT_ENABLED=true` on every process, and check that `OTEL_TRACES_EXPORTER` or `OTEL_LOGS_EXPORTER` is not set to `none` for the missing signal. A `WARNING: OTLP trace export` or `WARNING: OTLP log export` line at startup means the exporter could not use the configured endpoint. For gRPC, use the Collector endpoint `http://localhost:4317`. For HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` and use the Collector HTTP endpoint. Logs do not fall back to the traces-only endpoint.
 - **Only some components appear:** Environment variables are process-local. Export the OTLP and
   logging variables before starting the frontend, router, and each worker.
 - **Stack service is unhealthy:** Run `docker compose -f dev/docker-observability.yml ps` and inspect

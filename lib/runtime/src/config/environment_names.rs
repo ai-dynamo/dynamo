@@ -47,7 +47,8 @@ pub mod logging {
 
     /// OTLP (OpenTelemetry Protocol) tracing and logging configuration
     pub mod otlp {
-        /// Enable OTLP export for traces and logs (set to "1" to enable).
+        /// Enable OTLP export for traces and logs (set to "1" to enable). Fallback for
+        /// each signal whose OTEL_TRACES_EXPORTER / OTEL_LOGS_EXPORTER is unset or blank.
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
 
         /// Set to "otlp" to export traces over OTLP. Any other non-blank value

@@ -39,26 +39,18 @@ const ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
-/// fast-path without touching `OTEL_EXPORT_ENABLED` (which would require
-/// `unsafe { set_var }` and race with concurrent `getenv`). Multiple guards
-/// stack; the default is restored when the last drops.
+/// fast-path without initializing logging with an OTLP trace exporter.
+/// Multiple guards stack; the default is restored when the last drops.
 #[cfg(test)]
 static OTLP_EXPORT_OVERRIDES: AtomicUsize = AtomicUsize::new(0);
 
-/// OTLP-export gate. When the runtime isn't exporting traces, the per-chunk ttft capture and
-/// terminal attribute writes are dead work — the span has nowhere to go but
-/// the local `tracing` event stream, which doesn't read these fields. The
-/// span itself still gets created so log events stay correlated with the
-/// request_id.
-///
-/// Read uncached (~tens of ns per request) — small cost, but it removes a
-/// class of test-ordering hazards that a cached version would introduce.
+/// Check if OTLP trace-export is enabled.
 fn is_otlp_export_enabled() -> bool {
     #[cfg(test)]
     if OTLP_EXPORT_OVERRIDES.load(Ordering::Relaxed) > 0 {
         return true;
     }
-    dynamo_runtime::logging::otlp_traces_export_enabled()
+    dynamo_runtime::logging::otlp_traces_export_installed()
 }
 
 /// On drop, marks the `engine.generate` span as cancelled unless

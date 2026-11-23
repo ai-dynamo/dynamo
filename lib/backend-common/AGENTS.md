@@ -466,7 +466,8 @@ Rust engines use the `tracing` crate directly for static-name spans —
 spans opened inside `generate()` nest under the framework's `handle_payload`
 parent automatically (set up by the runtime at
 `lib/runtime/src/pipeline/network/ingress/push_endpoint.rs`). When
-`OTEL_EXPORT_ENABLED=1` (see `lib/runtime/src/logging.rs`), these spans export
+trace export is on (`OTEL_TRACES_EXPORTER=otlp`, or `OTEL_EXPORT_ENABLED=1` when that
+is unset; see `lib/runtime/src/logging.rs`), these spans export
 as OTLP via the `tracing-opentelemetry` layer; otherwise they remain local.
 
 For **dynamic** span names — names computed at runtime, which `tracing::info_span!`

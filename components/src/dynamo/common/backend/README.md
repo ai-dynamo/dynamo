@@ -359,10 +359,10 @@ publish loop observe the shutdown signal before resources are released.
 > Engine telemetry requires the trace-context layer. It is enabled whenever
 > traces or logs are exported over OTLP, or by
 > `DYN_LOGGING_CONSOLE_FORMAT=jsonl` or the legacy `DYN_LOGGING_JSONL=1` switch.
-> Exporting the resulting spans additionally requires trace export, which is
-> off by default: set `OTEL_TRACES_EXPORTER=otlp`, or `OTEL_EXPORT_ENABLED=1`
-> when `OTEL_TRACES_EXPORTER` is unset or blank. Without the layer, calls
-> silently no-op and one process-level `WARN` fires on the first call.
+> Exporting the resulting spans also requires trace export; see the
+> [OpenTelemetry environment variables](../../../../../docs/fern/pages/reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs).
+> Without the layer, calls silently no-op and one process-level `WARN` fires on
+> the first call.
 
 The framework opens an `engine.generate` span around every `generate()` call
 (see the Rust backend-common README for the full attribute table). Engine
@@ -409,9 +409,8 @@ Two entry points, one `SpanProxy` returned by both:
 
 **Bridge dependency.** The recording surface needs the
 `tracing-opentelemetry` layer installed. It is installed whenever traces or
-logs are exported over OTLP (`OTEL_TRACES_EXPORTER=otlp`,
-`OTEL_LOGS_EXPORTER=otlp`, or the `OTEL_EXPORT_ENABLED=1` fallback), or by
-`DYN_LOGGING_CONSOLE_FORMAT=jsonl` or the legacy `DYN_LOGGING_JSONL=1` switch.
+logs are exported over OTLP, or by `DYN_LOGGING_CONSOLE_FORMAT=jsonl` or the
+legacy `DYN_LOGGING_JSONL=1` switch.
 Without the bridge:
 
 - `current_span(...)` returns a no-op `SpanProxy` (all method calls silent).

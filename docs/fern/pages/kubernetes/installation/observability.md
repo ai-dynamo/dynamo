@@ -18,7 +18,7 @@ Dynamo emits three signals — **metrics** (Prometheus), **logs** (structured te
 | Health status | `/live` and `/health` endpoints | Supervisors or Kubernetes probes |
 | Request traces | `DYN_REQUEST_TRACE=1` or `DYN_REQUEST_TRACE_RECORDS` | Files, NATS, stderr, or OTLP logs |
 
-`OTEL_EXPORT_ENABLED` is the master switch for both traces and logs — without it, neither leaves the process even when Tempo and Loki are healthy. Dynamo supports OTLP over `grpc` and `http/protobuf`. Use `OTEL_EXPORTER_OTLP_ENDPOINT` for a shared collector or signal-specific endpoint variables for separate destinations. For the full variable catalog — defaults, per-signal grouping, and the Kubernetes operator presets — see [Environment Variables](../../reference/observability/environment-variables.mdx).
+`OTEL_EXPORT_ENABLED` turns on export of both traces and logs — without it, neither leaves the process even when Tempo and Loki are healthy, unless `OTEL_TRACES_EXPORTER` or `OTEL_LOGS_EXPORTER` is set to `otlp`. Those per-signal variables override it, so one signal can be exported or suppressed on its own. Dynamo supports OTLP over `grpc` and `http/protobuf`. Use `OTEL_EXPORTER_OTLP_ENDPOINT` for a shared collector or signal-specific endpoint variables for separate destinations. For the full variable catalog — defaults, per-signal grouping, and the Kubernetes operator presets — see [Environment Variables](../../reference/observability/environment-variables.mdx).
 
 For scheduler telemetry, see [Observe a Local Deployment](../../cli/operations/observability.mdx#capture-forward-pass-metrics). For replay metadata or request payload capture, see [Observe a Local Deployment](../../cli/operations/observability.mdx#capture-and-replay-requests).
 
