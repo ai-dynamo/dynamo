@@ -425,9 +425,8 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let handoff = EncoderHandoff::for_request(&request);
-        let requires_prefill = request.encoder_result.is_some()
-            && !request.staged_kv_cleanup
-            && self.required.load(Ordering::Acquire);
+        let requires_prefill =
+            request.encoder_result.is_some() && self.required.load(Ordering::Acquire);
         let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
@@ -478,51 +477,42 @@ impl
                     if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
-                    if self.allows_encoder_bypass(decision.encoder_binding.as_ref()) {
-                        let worker = decision.plan.worker();
-                        tracing::info!(
-                            request_id = %request_id,
-                            worker_id = worker.worker_id,
-                            dp_rank = worker.dp_rank,
-                            net_new_tokens = decision.net_new_tokens,
-                            overlap_tokens = decision.overlap_tokens,
-                            "Conditional disagg routing to decode worker"
-                        );
+                    let worker = decision.plan.worker();
+                    tracing::info!(
+                        request_id = %request_id,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
+                        net_new_tokens = decision.net_new_tokens,
+                        overlap_tokens = decision.overlap_tokens,
+                        "Conditional disagg routing to decode worker"
+                    );
 
-                        conditional_request
-                            .annotations
-                            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+                    conditional_request
+                        .annotations
+                        .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
 
-                        let decode_host = self
-                            .decode_routing_host
-                            .get()
-                            .expect("conditional plan requires a decode RoutingHost");
-                        let tracker = conditional_request.tracker.clone();
-                        let encoder_binding = decision.encoder_binding;
-                        let response_stream = decode_host
-                            .dispatch_kv_plan_with_validation(
-                                conditional_request,
-                                decision.plan,
-                                || async {
-                                    if self.allows_encoder_bypass(encoder_binding.as_ref()) {
-                                        return Ok(());
-                                    }
-                                    if let Some(tracker) = &tracker {
-                                        let _permit =
-                                            tracker.set_phase(RequestPhase::Prefill).await;
-                                    }
-                                    Err(prefill_changed_error())
-                                },
-                            )
-                            .await?;
-                        return with_bypass_marker(response_stream, client_requested_bypass_marker);
-                    }
-                    if let Some(tracker) = &conditional_request.tracker {
-                        let _permit = tracker.set_phase(RequestPhase::Prefill).await;
-                    }
-                    let error = prefill_changed_error();
-                    decision.plan.abort(Some(&error)).await;
-                    return Err(error);
+                    let decode_host = self
+                        .decode_routing_host
+                        .get()
+                        .expect("conditional plan requires a decode RoutingHost");
+                    let tracker = conditional_request.tracker.clone();
+                    let encoder_binding = decision.encoder_binding;
+                    let response_stream = decode_host
+                        .dispatch_kv_plan_with_validation(
+                            conditional_request,
+                            decision.plan,
+                            || async {
+                                if self.allows_encoder_bypass(encoder_binding.as_ref()) {
+                                    return Ok(());
+                                }
+                                if let Some(tracker) = &tracker {
+                                    let _permit = tracker.set_phase(RequestPhase::Prefill).await;
+                                }
+                                Err(prefill_changed_error())
+                            },
+                        )
+                        .await?;
+                    return with_bypass_marker(response_stream, client_requested_bypass_marker);
                 }
                 Ok(None) => {
                     (req, context) = conditional_request.into_parts();
@@ -580,7 +570,6 @@ impl PrefillRouter {
     ) -> Result<()> {
         if encoder_result_requires_prefill
             && request.encoder_result.is_some()
-            && !request.staged_kv_cleanup
             && !self.is_query_only(request)
         {
             return Err(DynamoError::builder()
@@ -736,7 +725,7 @@ pub(super) enum EncoderHandoff {
 
 impl EncoderHandoff {
     pub(super) fn for_request(request: &SingleIn<PreprocessedRequest>) -> Self {
-        if request.encoder_result.is_none() || request.staged_kv_cleanup {
+        if request.encoder_result.is_none() {
             Self::None
         } else if request
             .get_optional::<EncoderResultReleaseSupported>(ENCODER_RESULT_RELEASE_SUPPORTED)

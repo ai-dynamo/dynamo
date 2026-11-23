@@ -3726,6 +3726,39 @@ mod handoff_and_lifecycle_tests {
         use futures::StreamExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        // The process-wide TCP listener must outlive every runtime that uses it.
+        const CHILD: &str = "DYNAMO_ENCODE_INGRESS_TEST";
+        let test_name = concat!(
+            module_path!(),
+            "::encode_ingress_releases_outputs_while_inference_admission_is_full"
+        )
+        .split_once("::")
+        .unwrap()
+        .1;
+        if std::env::var(CHILD).as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("Encode admission subprocess must finish")
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+                "Encode admission subprocess must run its test: {stdout}\n{stderr}"
+            );
+            return;
+        }
+
         struct Producer(Arc<AtomicUsize>);
 
         #[async_trait]

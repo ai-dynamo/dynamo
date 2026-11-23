@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use dynamo_runtime::pipeline::SingleIn;
 use dynamo_worker_selection::host::ConditionalDisaggDecisionInput;
 
 use super::PrefillRouter;
+use crate::kv_router::encoder_router::{INLINE_ENCODER_FALLBACK, InlineEncoderFallback};
 use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};
 use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
 
@@ -49,16 +51,21 @@ impl PrefillRouter {
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         let has_raw_media = request.encoder_result.is_none()
-            && !request.staged_kv_cleanup
             && request
                 .multi_modal_data
                 .as_ref()
                 .is_some_and(|media| media.values().any(|items| !items.is_empty()));
-        if has_raw_media {
-            // Raw-media fallback requires Prefill's inline multimodal support.
+        if has_raw_media
+            && (self.required.load(Ordering::Acquire)
+                || request
+                    .get_optional::<InlineEncoderFallback>(INLINE_ENCODER_FALLBACK)
+                    .map_err(anyhow::Error::msg)?
+                    .is_some())
+        {
+            // Keep raw media on Prefill after Encode failure or when Prefill is required.
             return Ok(None);
         }
-        let encoder_binding = if request.encoder_result.is_some() {
+        let encoder_binding = if request.encoder_result.is_some() || has_raw_media {
             let Some(binding) = self
                 .binding()
                 .filter(|binding| !binding.encoder_result_requires_prefill)

@@ -25,6 +25,7 @@ use std::{
 struct CaptureEngine {
     request: Mutex<Option<PreprocessedRequest>>,
     behavior: DownstreamBehavior,
+    inline_encoder_fallback: AtomicBool,
 }
 
 #[async_trait]
@@ -35,6 +36,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> std::result::Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        self.inline_encoder_fallback.store(
+            request
+                .get_optional::<InlineEncoderFallback>(INLINE_ENCODER_FALLBACK)
+                .map_err(anyhow::Error::msg)?
+                .is_some(),
+            Ordering::SeqCst,
+        );
         self.request
             .lock()
             .unwrap()
@@ -746,6 +754,8 @@ async fn encoder_errors_remain_typed_and_optional_requests_can_fall_inline() {
             .encoder_result
             .is_none()
     );
+
+    assert!(downstream.inline_encoder_fallback.load(Ordering::SeqCst));
 
     // A worker-unavailable stream quarantines its producer. Check it last so
     // the real transport's health tracking cannot poison subsequent fixtures.

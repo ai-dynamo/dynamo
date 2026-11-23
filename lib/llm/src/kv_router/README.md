@@ -146,12 +146,16 @@ inline fallback. Successful consumption adds no cleanup wait.
    annotation. Otherwise the request takes the remote prefill path.
 
 An encoder handoff to a prefill set declaring `requires_encoder_result` always takes
-remote prefill. Raw media left after optional Encode failure follows the same restriction:
-the Prefill handoff policy does not establish that Decode can encode inline. This conservatively
-disables bypass for those media requests; text and compatible releasable handoffs can still bypass.
+remote prefill. Raw media left after a failed optional Encode attempt follows the same restriction:
+the failed attempt does not establish that Decode can encode inline. A frontend-only context marker
+keeps this fallback on Prefill without changing ordinary P/D media bypass. Raw media also stays on
+Prefill when that stage requires an encoder result; text and compatible releasable handoffs can
+still bypass.
 When a Prefill pool is active, handoffs without producer release support always take remote
 Prefill, including cache-hot requests. Their independent consumption survives caller cancellation;
 paired KV cancellation support does not enable disposal of another producer's encoder allocation.
+In E/P/D, vLLM sidecar encoder outputs lack producer release support and use this consumption path.
+This routing change does not add a vLLM release protocol.
 If a binding change invalidates a conditional media plan, the router releases the decode
 booking, aborts its classifier lifecycle, and returns retryable `WorkerUnavailable`.
 A late untargeted fallback

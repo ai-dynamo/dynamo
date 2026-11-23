@@ -380,12 +380,11 @@ async fn retired_prefill_enforces_handoff_consumption_policy() {
             .unwrap(),
     );
     tokio::time::pause();
-    for (requires_prefill, handoff, staged, query) in [
-        (true, true, false, false),
-        (false, true, false, false),
-        (true, false, false, false),
-        (true, true, true, false),
-        (true, true, false, true),
+    for (requires_prefill, handoff, query) in [
+        (true, true, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
     ] {
         for (retire_after_entry, replacement_kind) in [(false, 0), (true, 0), (true, 1), (true, 2)]
         {
@@ -419,7 +418,6 @@ async fn retired_prefill_enforces_handoff_consumption_policy() {
                 inference_request()
             };
             request.encoder_result = handoff.then(|| serde_json::json!({"opaque": "handoff"}));
-            request.staged_kv_cleanup = staged;
             let host = Arc::new(CountingDecodeHost::default());
             let result = if retire_after_entry && !query {
                 let tracker = Arc::new(RequestTracker::new());
@@ -459,7 +457,7 @@ async fn retired_prefill_enforces_handoff_consumption_policy() {
                 router.generate(SingleIn::new(request), host.clone()).await
             };
             assert_eq!(router.binding().is_none(), replacement_kind != 0 && !query);
-            if requires_prefill && handoff && !staged && !query {
+            if requires_prefill && handoff && !query {
                 let error = result.unwrap_err();
                 assert!(crate::migration::is_migratable(error.as_ref()), "{error}");
                 assert!(match_error_chain(
@@ -604,7 +602,7 @@ async fn cancelled_encoder_handoff_never_starts_independent_prefill() {
 }
 
 #[tokio::test]
-async fn conditional_bypass_retains_text_releasable_and_staged_requests() {
+async fn conditional_bypass_retains_text_and_releasable_requests() {
     let fixture = ConditionalFixture::new("encoder-bypass-controls").await;
     fixture
         .router
@@ -613,11 +611,7 @@ async fn conditional_bypass_retains_text_releasable_and_staged_requests() {
         .router
         .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
     let downstream = Arc::new(QueryOnlyDecodeHost::default());
-    for (has_encoder, release_supported, staged_kv) in [
-        (false, false, false),
-        (true, true, false),
-        (true, false, true),
-    ] {
+    for (has_encoder, release_supported) in [(false, false), (true, true)] {
         let mut request = SingleIn::new(inference_request());
         request.encoder_result = has_encoder.then(|| serde_json::json!({"opaque":"handoff"}));
         if has_encoder {
@@ -628,7 +622,6 @@ async fn conditional_bypass_retains_text_releasable_and_staged_requests() {
                 )],
             )]));
         }
-        request.staged_kv_cleanup = staged_kv;
         request.insert(
             ENCODER_RESULT_RELEASE_SUPPORTED,
             EncoderResultReleaseSupported(release_supported),
@@ -747,49 +740,64 @@ async fn nonreleasable_handoff_survives_late_client_cancellation() {
 }
 
 #[tokio::test]
-async fn raw_media_encode_fallback_keeps_prefill_but_text_can_bypass() {
+async fn raw_media_bypass_preserves_plain_pd_and_encode_fallback_policy() {
+    use crate::kv_router::encoder_router::{INLINE_ENCODER_FALLBACK, InlineEncoderFallback};
+
     let fixture = ConditionalFixture::new("raw-media-prefill-fallback").await;
     fixture
         .router
-        .set_test_binding(Some(fixture.binding(false)));
-    fixture
-        .router
         .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
-    let mut raw_media = inference_request();
-    raw_media.multi_modal_data = Some(HashMap::from([(
-        "image".into(),
-        vec![MultimodalData::RawUrl(
-            "https://example.com/image.png".into(),
-        )],
-    )]));
-    assert!(raw_media.encoder_result.is_none());
-    let mut response = fixture
-        .router
-        .generate(SingleIn::new(raw_media.clone()), fixture.host.clone())
-        .await
-        .unwrap();
-    while response.next().await.is_some() {}
-    assert_eq!(*fixture.dispatch.phases.lock(), vec![RequestPhase::Prefill]);
-    assert!(
-        !fixture.dispatch.annotations.lock()[0]
-            .iter()
-            .any(|a| a == BYPASS_REMOTE_PREFILL_ANNOTATION)
-    );
-
+    for (required, encode_failed, phase) in [
+        (false, false, RequestPhase::Decode),
+        (true, false, RequestPhase::Prefill),
+        (false, true, RequestPhase::Prefill),
+    ] {
+        fixture
+            .router
+            .set_test_binding(Some(fixture.binding(required)));
+        let dispatches = fixture.dispatch.phases.lock().len();
+        let mut request = SingleIn::new(inference_request());
+        request.multi_modal_data = Some(HashMap::from([(
+            "image".into(),
+            vec![MultimodalData::RawUrl(
+                "https://example.com/image.png".into(),
+            )],
+        )]));
+        if encode_failed {
+            request.insert(INLINE_ENCODER_FALLBACK, InlineEncoderFallback);
+        }
+        let mut response = fixture
+            .router
+            .generate(request, fixture.host.clone())
+            .await
+            .unwrap();
+        assert!(response.next().await.is_some());
+        assert!(response.next().await.is_none());
+        assert_eq!(fixture.dispatch.phases.lock().len(), dispatches + 1);
+        assert_eq!(fixture.dispatch.annotations.lock().len(), dispatches + 1);
+        assert_eq!(fixture.dispatch.phases.lock().last(), Some(&phase));
+        assert_eq!(
+            fixture
+                .dispatch
+                .annotations
+                .lock()
+                .last()
+                .unwrap()
+                .iter()
+                .any(|a| a == BYPASS_REMOTE_PREFILL_ANNOTATION),
+            phase == RequestPhase::Decode,
+        );
+    }
     let mut response = fixture
         .router
         .generate(SingleIn::new(inference_request()), fixture.host.clone())
         .await
         .unwrap();
-    while response.next().await.is_some() {}
+    assert!(response.next().await.is_some());
+    assert!(response.next().await.is_none());
     assert_eq!(
-        *fixture.dispatch.phases.lock(),
-        vec![RequestPhase::Prefill, RequestPhase::Decode]
-    );
-    assert!(
-        fixture.dispatch.annotations.lock()[1]
-            .iter()
-            .any(|a| a == BYPASS_REMOTE_PREFILL_ANNOTATION)
+        fixture.dispatch.phases.lock().last(),
+        Some(&RequestPhase::Decode)
     );
     fixture.runtime.shutdown();
 }
@@ -881,81 +889,92 @@ pub(in crate::kv_router) async fn reject_stale_media_plan(
 
 #[tokio::test]
 async fn changed_prefill_binding_after_decode_tracking_aborts_before_dispatch() {
-    let fixture = ConditionalFixture::new("post-tracking-prefill-change").await;
-    fixture
-        .router
-        .set_test_binding(Some(fixture.binding(false)));
-    fixture
-        .router
-        .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
-    let mut request = SingleIn::new(inference_request());
-    request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
-    request.ensure_tracker();
-    let tracker = request.tracker.as_ref().unwrap().clone();
-    {
-        let _permit = tracker.set_phase(RequestPhase::Decode).await;
-    }
-    let decision = fixture
-        .router
-        .plan_conditional_disagg_decode(&request, request.id())
-        .await
-        .unwrap()
-        .expect("optional Prefill permits an encoder handoff bypass");
-    let worker = decision.plan.worker().worker_id;
-    request.routing_mut().decode_worker_id = Some(worker);
-    let expected_binding = decision.encoder_binding;
-    assert!(
+    for encoded in [false, true] {
+        let fixture = ConditionalFixture::new("post-tracking-prefill-change").await;
         fixture
             .router
-            .allows_encoder_bypass(expected_binding.as_ref())
-    );
-    assert!(tracker.decode_worker_id().is_none());
-    let error = fixture
-        .host
-        .dispatch_kv_plan_with_validation(request, decision.plan, || async {
-            assert_eq!(
-                tracker.decode_worker_id(),
-                Some(worker),
-                "binding validation must run after routing-decision tracking"
-            );
-            fixture.router.set_test_binding(Some(fixture.binding(true)));
-            if fixture
+            .set_test_binding(Some(fixture.binding(false)));
+        fixture
+            .router
+            .set_target(Some(WorkerSetTarget::Legacy(fixture.endpoint.clone())));
+        let mut request = SingleIn::new(inference_request());
+        if encoded {
+            request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
+        } else {
+            request.multi_modal_data = Some(HashMap::from([(
+                "image".into(),
+                vec![MultimodalData::RawUrl(
+                    "https://example.com/image.png".into(),
+                )],
+            )]));
+        }
+        request.ensure_tracker();
+        let tracker = request.tracker.as_ref().unwrap().clone();
+        {
+            let _permit = tracker.set_phase(RequestPhase::Decode).await;
+        }
+        let decision = fixture
+            .router
+            .plan_conditional_disagg_decode(&request, request.id())
+            .await
+            .unwrap()
+            .expect("optional Prefill permits a media bypass");
+        let worker = decision.plan.worker().worker_id;
+        request.routing_mut().decode_worker_id = Some(worker);
+        let expected_binding = decision.encoder_binding;
+        assert!(
+            fixture
                 .router
                 .allows_encoder_bypass(expected_binding.as_ref())
-            {
-                return Ok(());
+        );
+        assert!(tracker.decode_worker_id().is_none());
+        let error = fixture
+            .host
+            .dispatch_kv_plan_with_validation(request, decision.plan, || async {
+                assert_eq!(
+                    tracker.decode_worker_id(),
+                    Some(worker),
+                    "binding validation must run after routing-decision tracking"
+                );
+                fixture.router.set_test_binding(Some(fixture.binding(true)));
+                if fixture
+                    .router
+                    .allows_encoder_bypass(expected_binding.as_ref())
+                {
+                    return Ok(());
+                }
+                let _permit = tracker.set_phase(RequestPhase::Prefill).await;
+                Err(prefill_changed_error())
+            })
+            .await
+            .expect_err("a newly mandatory Prefill stage cannot be bypassed");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::WorkerUnavailable],
+            &[]
+        ));
+        assert_eq!(tracker.phase(), RequestPhase::Prefill);
+        assert!(fixture.dispatch.phases.lock().is_empty());
+        let loads = fixture
+            .host
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            loads.iter().map(|load| load.active_requests).sum::<usize>(),
+            0,
+            "a rejected tracked plan must return its booking"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while fixture.aborts.load(Ordering::Relaxed) != 1 {
+                tokio::task::yield_now().await;
             }
-            let _permit = tracker.set_phase(RequestPhase::Prefill).await;
-            Err(prefill_changed_error())
         })
         .await
-        .expect_err("a newly mandatory Prefill stage cannot be bypassed");
-    assert!(match_error_chain(
-        error.as_ref(),
-        &[ErrorType::WorkerUnavailable],
-        &[]
-    ));
-    assert_eq!(tracker.phase(), RequestPhase::Prefill);
-    assert!(fixture.dispatch.phases.lock().is_empty());
-    let loads = fixture
-        .host
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
         .unwrap();
-    assert_eq!(
-        loads.iter().map(|load| load.active_requests).sum::<usize>(),
-        0,
-        "a rejected tracked plan must return its booking"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while fixture.aborts.load(Ordering::Relaxed) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(fixture.classifications.load(Ordering::Relaxed), 1);
-    assert_eq!(fixture.completions.load(Ordering::Relaxed), 0);
-    fixture.runtime.shutdown();
+        assert_eq!(fixture.classifications.load(Ordering::Relaxed), 1);
+        assert_eq!(fixture.completions.load(Ordering::Relaxed), 0);
+        fixture.runtime.shutdown();
+    }
 }
